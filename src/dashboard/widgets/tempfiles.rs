@@ -285,8 +285,8 @@ impl Widget for TempfilesWidget {
                         let display_name = entry.alias.as_deref().unwrap_or(&entry.file_name);
                         ui.add(egui::Label::new(display_name).wrap(false))
                             .on_hover_text(entry.path.to_string_lossy());
-                        if let Some(alias) = &entry.alias {
-                            if alias != &entry.file_name {
+                        if let Some(alias) = &entry.alias
+                            && alias != &entry.file_name {
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!("({})", entry.file_name))
@@ -295,7 +295,6 @@ impl Widget for TempfilesWidget {
                                     .wrap(false),
                                 );
                             }
-                        }
                         if ui
                             .small_button("Open")
                             .on_hover_text("Open file (not folder)")

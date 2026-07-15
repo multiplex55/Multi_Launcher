@@ -31,9 +31,9 @@ pub fn migrate_legacy_links(metadata: &serde_json::Value) -> Vec<LinkRef> {
         .and_then(|v| v.as_array())
     {
         for entry in raw_refs.iter().filter_map(|v| v.as_str()) {
-            if let Some((kind, id)) = entry.trim_start_matches('@').split_once(':') {
-                if let Some(target_type) = LinkTarget::parse(kind) {
-                    if !id.trim().is_empty() {
+            if let Some((kind, id)) = entry.trim_start_matches('@').split_once(':')
+                && let Some(target_type) = LinkTarget::parse(kind)
+                    && !id.trim().is_empty() {
                         links.push(LinkRef {
                             target_type,
                             target_id: id.trim().to_string(),
@@ -41,8 +41,6 @@ pub fn migrate_legacy_links(metadata: &serde_json::Value) -> Vec<LinkRef> {
                             display_text: None,
                         });
                     }
-                }
-            }
         }
     }
     dedupe_links(links)

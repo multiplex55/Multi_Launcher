@@ -24,6 +24,7 @@ fn default_count() -> usize {
     5
 }
 
+#[derive(Default)]
 pub struct FrequentCommandsWidget {
     cfg: FrequentCommandsConfig,
 }
@@ -55,7 +56,7 @@ impl FrequentCommandsWidget {
         )
     }
 
-    fn resolve_action<'a>(&self, actions: &'a [Action], key: &str) -> Option<Action> {
+    fn resolve_action(&self, actions: &[Action], key: &str) -> Option<Action> {
         actions
             .iter()
             .find(|a| a.action == key)
@@ -71,13 +72,6 @@ impl FrequentCommandsWidget {
     }
 }
 
-impl Default for FrequentCommandsWidget {
-    fn default() -> Self {
-        Self {
-            cfg: FrequentCommandsConfig::default(),
-        }
-    }
-}
 
 impl Widget for FrequentCommandsWidget {
     fn render(
@@ -93,14 +87,13 @@ impl Widget for FrequentCommandsWidget {
             if idx >= self.cfg.count {
                 break;
             }
-            if let Some(action) = self.resolve_action(ctx.actions, action_id) {
-                if ui.button(&action.label).clicked() {
+            if let Some(action) = self.resolve_action(ctx.actions, action_id)
+                && ui.button(&action.label).clicked() {
                     return Some(WidgetAction {
                         query_override: Some(action.label.clone()),
                         action,
                     });
                 }
-            }
         }
         None
     }

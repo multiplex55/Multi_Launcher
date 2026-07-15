@@ -58,8 +58,8 @@ impl VolumeDialog {
                         ui.label(format!("{} (PID {})", proc.name, proc.pid));
                         let resp =
                             ui.add(egui::Slider::new(&mut proc.value, 0..=100).text("Level"));
-                        if resp.changed() {
-                            if let Some(action) = proc.slider_changed() {
+                        if resp.changed()
+                            && let Some(action) = proc.slider_changed() {
                                 let _ = launch_action(&Action {
                                     label: String::new(),
                                     desc: "Volume".into(),
@@ -67,7 +67,6 @@ impl VolumeDialog {
                                     args: None,
                                 });
                             }
-                        }
                         if ui.button("Set").clicked() {
                             let _ = launch_action(&Action {
                                 label: String::new(),

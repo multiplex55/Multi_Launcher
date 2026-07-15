@@ -304,8 +304,8 @@ pub fn build_note_graph(notes: &[Note], filter: &NoteGraphFilter) -> NoteGraphMo
         kept_nodes = scoped;
     }
 
-    if let Some(max_nodes) = filter.max_nodes {
-        if max_nodes > 0 && kept_nodes.len() > max_nodes {
+    if let Some(max_nodes) = filter.max_nodes
+        && max_nodes > 0 && kept_nodes.len() > max_nodes {
             let mut ranked: Vec<_> = kept_nodes.iter().cloned().collect();
             let degree_map = compute_degrees_for_nodes(&edges, &kept_nodes);
             ranked.sort_by(|a, b| {
@@ -318,7 +318,6 @@ pub fn build_note_graph(notes: &[Note], filter: &NoteGraphFilter) -> NoteGraphMo
             });
             kept_nodes = ranked.into_iter().take(max_nodes).collect();
         }
-    }
 
     edges.retain(|e| kept_nodes.contains(&e.from) && kept_nodes.contains(&e.to));
 

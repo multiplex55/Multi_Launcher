@@ -48,12 +48,12 @@ impl BookmarksPlugin {
                 let path = path.clone();
                 let cache_clone = cache.clone();
                 move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
+                    if let Ok(event) = res
+                        && matches!(
                             event.kind,
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            if let Ok(list) = load_bookmarks(&path) {
+                        )
+                            && let Ok(list) = load_bookmarks(&path) {
                                 if let Ok(mut lock) = data_clone.lock() {
                                     *lock = list;
                                 }
@@ -61,8 +61,6 @@ impl BookmarksPlugin {
                                     c.clear();
                                 }
                             }
-                        }
-                    }
                 }
             },
             Config::default(),
@@ -84,8 +82,8 @@ impl BookmarksPlugin {
     }
 
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm") {
-            if rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add") {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm")
+            && (rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add")) {
                 return vec![Action {
                     label: "bm: add bookmark".into(),
                     desc: "Bookmark".into(),
@@ -93,7 +91,6 @@ impl BookmarksPlugin {
                     args: None,
                 }];
             }
-        }
 
         const ADD_PREFIX: &str = "bm add ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
@@ -298,11 +295,10 @@ impl Plugin for BookmarksPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         let key = trimmed.to_string();
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(res) = cache.get(&key).cloned() {
+        if let Ok(mut cache) = self.cache.lock()
+            && let Some(res) = cache.get(&key).cloned() {
                 return res;
             }
-        }
 
         let result = self.search_internal(trimmed);
 

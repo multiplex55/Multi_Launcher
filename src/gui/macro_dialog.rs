@@ -236,16 +236,14 @@ impl MacroDialog {
                         }
                     });
                 }
-                if let Some(i) = move_up {
-                    if i > 0 {
+                if let Some(i) = move_up
+                    && i > 0 {
                         self.steps.swap(i, i - 1);
                     }
-                }
-                if let Some(i) = move_down {
-                    if i + 1 < self.steps.len() {
+                if let Some(i) = move_down
+                    && i + 1 < self.steps.len() {
                         self.steps.swap(i, i + 1);
                     }
-                }
                 if let Some(i) = remove_step {
                     self.steps.remove(i);
                 }
@@ -384,11 +382,10 @@ impl MacroDialog {
                             app.report_error_message("ui operation", "Label required");
                         } else {
                             for step in &mut self.steps {
-                                if let Some(a) = &step.args {
-                                    if a.trim().is_empty() {
+                                if let Some(a) = &step.args
+                                    && a.trim().is_empty() {
                                         step.args = None;
                                     }
-                                }
                             }
                             if idx == self.entries.len() {
                                 self.entries.push(MacroEntry {

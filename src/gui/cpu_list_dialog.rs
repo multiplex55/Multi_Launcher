@@ -20,8 +20,8 @@ impl CpuListDialog {
     }
 
     fn refresh(&mut self) {
-        if let Some(last) = self.last_refresh {
-            if last.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL {
+        if let Some(last) = self.last_refresh
+            && last.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL {
                 self.system.refresh_processes_specifics(
                     ProcessesToUpdate::All,
                     true,
@@ -30,7 +30,6 @@ impl CpuListDialog {
                 self.system.refresh_cpu_usage();
                 self.last_refresh = Some(Instant::now());
             }
-        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, _app: &mut LauncherApp) {

@@ -114,24 +114,22 @@ fn find_window_index(workspace: &MmWorkspace, snapshot: &WindowBindingSnapshot) 
     if snapshot.window_id < workspace.windows.len() {
         return Some(snapshot.window_id);
     }
-    if let Some(alias) = snapshot.alias.as_deref().filter(|alias| !alias.is_empty()) {
-        if let Some(index) = workspace
+    if let Some(alias) = snapshot.alias.as_deref().filter(|alias| !alias.is_empty())
+        && let Some(index) = workspace
             .windows
             .iter()
             .position(|window| window.alias == alias)
         {
             return Some(index);
         }
-    }
-    if !snapshot.title.is_empty() {
-        if let Some(index) = workspace
+    if !snapshot.title.is_empty()
+        && let Some(index) = workspace
             .windows
             .iter()
             .position(|window| window.title == snapshot.title)
         {
             return Some(index);
         }
-    }
     (snapshot.window_index < workspace.windows.len()).then_some(snapshot.window_index)
 }
 
@@ -180,14 +178,12 @@ pub fn refresh_titles_with(
     let mut changed = false;
     for workspace in workspaces {
         for window in &mut workspace.windows {
-            if window.hwnd != 0 && is_valid(window.hwnd) {
-                if let Some(new_title) = title(window.hwnd) {
-                    if window.title != new_title {
+            if window.hwnd != 0 && is_valid(window.hwnd)
+                && let Some(new_title) = title(window.hwnd)
+                    && window.title != new_title {
                         window.title = new_title;
                         changed = true;
                     }
-                }
-            }
         }
     }
     changed

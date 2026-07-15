@@ -318,8 +318,7 @@ impl LauncherApp {
             workspace_id,
             window_index,
         } = action
-        {
-            if self
+            && self
                 .multi_manager
                 .recapture_queue
                 .front()
@@ -329,7 +328,6 @@ impl LauncherApp {
             {
                 self.multi_manager.recapture_queue.pop_front();
             }
-        }
     }
 
     fn multi_manager_capture_target_exists(
@@ -894,14 +892,10 @@ pub(crate) fn build_recapture_queue(
                 .windows
                 .iter()
                 .enumerate()
-                .filter_map(|(window_index, window)| {
-                    (window.hwnd == 0 || !win::is_valid_window(window.hwnd)).then(|| {
-                        RecaptureQueueItem {
+                .filter(|&(_window_index, window)| window.hwnd == 0 || !win::is_valid_window(window.hwnd) ).map(|(window_index, _window)| RecaptureQueueItem {
                             workspace_id: workspace.id.clone(),
                             window_index,
-                        }
-                    })
-                })
+                        })
                 .collect::<Vec<_>>()
         })
         .collect()

@@ -49,6 +49,7 @@ pub struct LayoutRestoreSummary {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct LayoutRestorePlan {
     pub summary: LayoutRestoreSummary,
     pub missing_windows: usize,
@@ -56,16 +57,6 @@ pub struct LayoutRestorePlan {
     actions: Vec<LayoutRestoreAction>,
 }
 
-impl Default for LayoutRestorePlan {
-    fn default() -> Self {
-        Self {
-            summary: LayoutRestoreSummary::default(),
-            missing_windows: 0,
-            #[cfg(windows)]
-            actions: Vec::new(),
-        }
-    }
-}
 
 #[cfg(windows)]
 struct EnumeratedWindow {
@@ -205,11 +196,10 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
             Some(info) => info,
             None => return BOOL(1),
         };
-        if let Some(active) = ctx.active_monitor {
-            if active != monitor {
+        if let Some(active) = ctx.active_monitor
+            && active != monitor {
                 return BOOL(1);
             }
-        }
 
         let mut placement = WINDOWPLACEMENT::default();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
@@ -440,26 +430,22 @@ fn match_score(saved: &LayoutMatch, candidate: &LayoutMatch) -> Option<u8> {
     {
         return None;
     }
-    if let (Some(saved), Some(candidate)) = (&saved.app_id, &candidate.app_id) {
-        if saved.eq_ignore_ascii_case(candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.app_id, &candidate.app_id)
+        && saved.eq_ignore_ascii_case(candidate) {
             return Some(4);
         }
-    }
-    if let (Some(saved), Some(candidate)) = (&saved.process, &candidate.process) {
-        if saved.eq_ignore_ascii_case(candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.process, &candidate.process)
+        && saved.eq_ignore_ascii_case(candidate) {
             return Some(3);
         }
-    }
-    if let (Some(saved), Some(candidate)) = (&saved.class, &candidate.class) {
-        if saved.eq_ignore_ascii_case(candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.class, &candidate.class)
+        && saved.eq_ignore_ascii_case(candidate) {
             return Some(2);
         }
-    }
-    if let (Some(saved), Some(candidate)) = (&saved.title, &candidate.title) {
-        if matches_title_regex(saved, candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.title, &candidate.title)
+        && matches_title_regex(saved, candidate) {
             return Some(1);
         }
-    }
     None
 }
 
@@ -538,12 +524,11 @@ pub fn plan_layout_restore(
             if used[idx] {
                 continue;
             }
-            if let Some(score) = match_score(&saved.matcher, &candidate.matcher) {
-                if score > best_score {
+            if let Some(score) = match_score(&saved.matcher, &candidate.matcher)
+                && score > best_score {
                     best_score = score;
                     best_idx = Some(idx);
                 }
-            }
         }
 
         if let Some(idx) = best_idx {

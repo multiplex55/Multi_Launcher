@@ -28,16 +28,13 @@ fn default_refresh_interval() -> f32 {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ClickBehavior {
+    #[default]
     RunAction,
     FillQuery,
 }
 
-impl Default for ClickBehavior {
-    fn default() -> Self {
-        ClickBehavior::RunAction
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PinnedQueryResultsConfig {
@@ -294,8 +291,8 @@ impl PinnedQueryResultsWidget {
         }
 
         let engine_name = self.cfg.engine.trim();
-        if let Some(enabled) = ctx.enabled_plugins {
-            if !enabled.contains(engine_name) {
+        if let Some(enabled) = ctx.enabled_plugins
+            && !enabled.contains(engine_name) {
                 return (
                     Vec::new(),
                     Some(format!(
@@ -303,7 +300,6 @@ impl PinnedQueryResultsWidget {
                     )),
                 );
             }
-        }
         let Some(plugin) = find_plugin(ctx, engine_name) else {
             return (
                 Vec::new(),

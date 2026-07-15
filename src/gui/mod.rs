@@ -223,11 +223,10 @@ pub fn set_execute_action_hook(
 }
 
 fn execute_action(action: &Action) -> anyhow::Result<()> {
-    if let Ok(guard) = EXECUTE_ACTION_HOOK.lock() {
-        if let Some(ref hook) = *guard {
+    if let Ok(guard) = EXECUTE_ACTION_HOOK.lock()
+        && let Some(ref hook) = *guard {
             return hook(action);
         }
-    }
     launch_action(action)
 }
 
@@ -626,14 +625,13 @@ impl LauncherApp {
             return;
         }
         self.file_search_dialog.save_dirty_ui_preferences();
-        if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
-            if let Ok(value) = serde_json::to_value(&self.file_search_dialog.settings) {
+        if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path)
+            && let Ok(value) = serde_json::to_value(&self.file_search_dialog.settings) {
                 settings
                     .plugin_settings
                     .insert("file_search".to_owned(), value);
                 let _ = settings.save(&self.settings_path);
             }
-        }
     }
 
     pub(crate) fn merge_file_search_ui_preferences_into_settings(
@@ -1328,16 +1326,14 @@ impl LauncherApp {
 
         {
             use crate::global_hotkey::Hotkey as WinHotkey;
-            if let Some(ref seq) = settings.hotkey {
-                if let Ok(mut hk) = WinHotkey::new(seq) {
+            if let Some(ref seq) = settings.hotkey
+                && let Ok(mut hk) = WinHotkey::new(seq) {
                     hk.register(&app, 1);
                 }
-            }
-            if let Some(ref seq) = settings.quit_hotkey {
-                if let Ok(mut hk) = WinHotkey::new(seq) {
+            if let Some(ref seq) = settings.quit_hotkey
+                && let Ok(mut hk) = WinHotkey::new(seq) {
                     hk.register(&app, 2);
                 }
-            }
         }
 
         app.update_action_cache();
@@ -1386,8 +1382,8 @@ impl LauncherApp {
         } else {
             self.suggestions.first().cloned()
         };
-        if let Some(s) = suggestion {
-            if s != self.query.to_lowercase() {
+        if let Some(s) = suggestion
+            && s != self.query.to_lowercase() {
                 let old_suggestions = self.suggestions.clone();
                 let old_index = self.autocomplete_index;
                 self.query = s;
@@ -1399,7 +1395,6 @@ impl LauncherApp {
                 }
                 return true;
             }
-        }
         false
     }
 
@@ -1426,11 +1421,10 @@ impl LauncherApp {
 
         let mut prefixed_matches = Vec::new();
         for plugin in self.plugins.iter() {
-            if let Some(enabled) = self.enabled_plugins.as_ref() {
-                if !enabled.contains(plugin.name()) {
+            if let Some(enabled) = self.enabled_plugins.as_ref()
+                && !enabled.contains(plugin.name()) {
                     continue;
                 }
-            }
 
             let prefixes = plugin.query_prefixes();
             if prefixes.is_empty() {
@@ -1606,8 +1600,8 @@ impl LauncherApp {
             });
         }
 
-        if let Some(slug) = pin.action_id.strip_prefix("note:open:") {
-            if let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
+        if let Some(slug) = pin.action_id.strip_prefix("note:open:")
+            && let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
                 return Some(Action {
                     label: note.alias.as_ref().unwrap_or(&note.title).clone(),
                     desc: "Note".into(),
@@ -1615,14 +1609,12 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("clipboard:copy:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(entry) = snapshot.clipboard_history.get(idx) {
+            && let Some(entry) = snapshot.clipboard_history.get(idx) {
                 return Some(Action {
                     label: entry.clone(),
                     desc: "Clipboard".into(),
@@ -1630,14 +1622,12 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("todo:done:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(todo) = snapshot.todos.get(idx) {
+            && let Some(todo) = snapshot.todos.get(idx) {
                 return Some(Action {
                     label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
                     desc: "Todo".into(),
@@ -1645,14 +1635,12 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("todo:edit:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(todo) = snapshot.todos.get(idx) {
+            && let Some(todo) = snapshot.todos.get(idx) {
                 return Some(Action {
                     label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
                     desc: "Todo".into(),
@@ -1660,14 +1648,12 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("todo:remove:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(todo) = snapshot.todos.get(idx) {
+            && let Some(todo) = snapshot.todos.get(idx) {
                 return Some(Action {
                     label: format!("Remove todo {}", todo.text),
                     desc: "Todo".into(),
@@ -1675,7 +1661,6 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
         for snippet in snapshot.snippets.iter() {
             if pin.action_id == format!("clipboard:{}", snippet.text) {
@@ -1688,8 +1673,8 @@ impl LauncherApp {
             }
         }
 
-        if let Some(alias) = pin.action_id.strip_prefix("snippet:edit:") {
-            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+        if let Some(alias) = pin.action_id.strip_prefix("snippet:edit:")
+            && snapshot.snippets.iter().any(|s| s.alias == alias) {
                 return Some(Action {
                     label: format!("Edit snippet {alias}"),
                     desc: "Snippet".into(),
@@ -1697,10 +1682,9 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
-        if let Some(alias) = pin.action_id.strip_prefix("snippet:remove:") {
-            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+        if let Some(alias) = pin.action_id.strip_prefix("snippet:remove:")
+            && snapshot.snippets.iter().any(|s| s.alias == alias) {
                 return Some(Action {
                     label: format!("Remove snippet {alias}"),
                     desc: "Snippet".into(),
@@ -1708,7 +1692,6 @@ impl LauncherApp {
                     args: None,
                 });
             }
-        }
 
         None
     }
@@ -1996,11 +1979,10 @@ impl LauncherApp {
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
-                if let Some(mut panel) = self.note_panels.pop() {
-                    if self.note_save_on_close {
+                if let Some(mut panel) = self.note_panels.pop()
+                    && self.note_save_on_close {
                         panel.save(self);
                     }
-                }
                 self.panel_states.note_panel = false;
             }
             Panel::ImagePanel => {
@@ -2162,11 +2144,10 @@ impl LauncherApp {
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
-                if let Some(mut panel) = self.note_panels.pop() {
-                    if self.note_save_on_close {
+                if let Some(mut panel) = self.note_panels.pop()
+                    && self.note_save_on_close {
                         panel.save(self);
                     }
-                }
                 self.panel_states.note_panel = false;
             }
             Panel::ImagePanel => {

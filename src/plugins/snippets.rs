@@ -86,19 +86,17 @@ impl SnippetsPlugin {
             {
                 let path = path.clone();
                 move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
+                    if let Ok(event) = res
+                        && matches!(
                             event.kind,
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            if let Ok(list) = load_snippets(&path) {
+                        )
+                            && let Ok(list) = load_snippets(&path) {
                                 if let Ok(mut lock) = data_clone.lock() {
                                     *lock = list;
                                 }
                                 bump_snippets_version();
                             }
-                        }
-                    }
                 }
             },
             Config::default(),
@@ -128,8 +126,8 @@ impl Default for SnippetsPlugin {
 impl Plugin for SnippetsPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "cs: edit snippets".into(),
                     desc: "Snippet".into(),
@@ -137,7 +135,6 @@ impl Plugin for SnippetsPlugin {
                     args: None,
                 }];
             }
-        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
             let guard = match self.data.lock() {

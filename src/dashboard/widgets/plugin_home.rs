@@ -42,6 +42,7 @@ fn default_limit() -> usize {
     5
 }
 
+#[derive(Default)]
 pub struct PluginHomeWidget {
     cfg: PluginHomeConfig,
 }
@@ -140,13 +141,6 @@ impl PluginHomeWidget {
     }
 }
 
-impl Default for PluginHomeWidget {
-    fn default() -> Self {
-        Self {
-            cfg: PluginHomeConfig::default(),
-        }
-    }
-}
 
 impl Widget for PluginHomeWidget {
     fn render(

@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TodoSort {
+    #[default]
     Priority,
     Created,
     Alphabetical,
@@ -18,23 +20,15 @@ pub enum TodoSort {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TodoStatusFilter {
     All,
+    #[default]
     Open,
     Done,
 }
 
-impl Default for TodoStatusFilter {
-    fn default() -> Self {
-        TodoStatusFilter::Open
-    }
-}
 
-impl Default for TodoSort {
-    fn default() -> Self {
-        TodoSort::Priority
-    }
-}
 
 fn default_count() -> usize {
     5
@@ -79,6 +73,7 @@ impl Default for TodoWidgetConfig {
     }
 }
 
+#[derive(Default)]
 pub struct TodoWidget {
     cfg: TodoWidgetConfig,
 }
@@ -152,12 +147,11 @@ impl TodoWidget {
             ui.separator();
             ui.heading("Open action");
             let suggestions = query_suggestions(ctx, &["todo"], &["todo", "todo list", "todo add"]);
-            if cfg.query.is_none() {
-                if let Some(s) = suggestions.first() {
+            if cfg.query.is_none()
+                && let Some(s) = suggestions.first() {
                     cfg.query = Some(s.clone());
                     changed = true;
                 }
-            }
             ui.horizontal(|ui| {
                 ui.label("Query override");
                 let mut query = cfg.query.clone().unwrap_or_default();
@@ -455,13 +449,6 @@ fn migrate_config(mut cfg: TodoWidgetConfig) -> TodoWidgetConfig {
     cfg
 }
 
-impl Default for TodoWidget {
-    fn default() -> Self {
-        Self {
-            cfg: TodoWidgetConfig::default(),
-        }
-    }
-}
 
 impl Widget for TodoWidget {
     fn render(

@@ -155,11 +155,10 @@ impl CalendarEventEditor {
         }
         self.errors.clear();
         self.split_from = split_scope;
-        if let Some(split) = &self.split_from {
-            if matches!(split.scope, RecurrenceScope::This) {
+        if let Some(split) = &self.split_from
+            && matches!(split.scope, RecurrenceScope::This) {
                 self.repeat_enabled = false;
             }
-        }
         if self.split_from.is_some() {
             self.current_event_id = None;
         } else {
@@ -417,16 +416,14 @@ impl CalendarEventEditor {
         if title.is_empty() {
             self.errors.insert("title", "Title is required".into());
         }
-        let start_date = parse_date(&self.start_date).map_err(|err| {
+        let start_date = parse_date(&self.start_date).inspect_err(|err| {
             self.errors.insert("start_date", err.clone());
-            err
         })?;
         let start_time = if self.all_day {
             NaiveTime::from_hms_opt(0, 0, 0).unwrap()
         } else {
-            parse_time(&self.start_time).map_err(|err| {
+            parse_time(&self.start_time).inspect_err(|err| {
                 self.errors.insert("start_time", err.clone());
-                err
             })?
         };
         let start = NaiveDateTime::new(start_date, start_time);
@@ -434,17 +431,15 @@ impl CalendarEventEditor {
         let end_date = if self.end_date.trim().is_empty() {
             None
         } else {
-            Some(parse_date(&self.end_date).map_err(|err| {
+            Some(parse_date(&self.end_date).inspect_err(|err| {
                 self.errors.insert("end_date", err.clone());
-                err
             })?)
         };
         let end_time = if self.end_time.trim().is_empty() {
             None
         } else {
-            Some(parse_time(&self.end_time).map_err(|err| {
+            Some(parse_time(&self.end_time).inspect_err(|err| {
                 self.errors.insert("end_time", err.clone());
-                err
             })?)
         };
         let end = match (end_date, end_time) {
@@ -473,25 +468,22 @@ impl CalendarEventEditor {
             }
         };
 
-        if let Some(end) = end {
-            if end < start {
+        if let Some(end) = end
+            && end < start {
                 self.errors
                     .insert("end_date", "End must be after start".into());
             }
-        }
 
-        let reminders = parse_reminders(&self.reminders).map_err(|err| {
+        let reminders = parse_reminders(&self.reminders).inspect_err(|err| {
             self.errors.insert("reminders", err.clone());
-            err
         })?;
 
         let recurrence = if self.repeat_enabled {
             let end = match self.repeat_end_mode {
                 RecurrenceEndMode::Never => RecurrenceEnd::Never,
                 RecurrenceEndMode::OnDate => {
-                    let date = parse_date(&self.repeat_end_date).map_err(|err| {
+                    let date = parse_date(&self.repeat_end_date).inspect_err(|err| {
                         self.errors.insert("repeat_end_date", err.clone());
-                        err
                     })?;
                     RecurrenceEnd::OnDate { date }
                 }

@@ -334,14 +334,13 @@ impl MouseGestureSettingsDialog {
                                         for title in self.window_picker_titles.clone() {
                                             ui.horizontal(|ui| {
                                                 ui.label(&title);
-                                                if ui.button("Add").clicked() {
-                                                    if add_ignore_window_title(
+                                                if ui.button("Add").clicked()
+                                                    && add_ignore_window_title(
                                                         &mut self.settings.ignore_window_titles,
                                                         &title,
                                                     ) {
                                                         changed = true;
                                                     }
-                                                }
                                             });
                                         }
                                     });

@@ -25,17 +25,14 @@ fn default_overflow_mode() -> OverflowMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum OverflowMode {
+    #[default]
     Scroll,
     Clip,
     Auto,
 }
 
-impl Default for OverflowMode {
-    fn default() -> Self {
-        Self::Scroll
-    }
-}
 
 impl OverflowMode {
     pub fn as_str(&self) -> &'static str {

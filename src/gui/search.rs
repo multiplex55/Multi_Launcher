@@ -283,7 +283,7 @@ impl LauncherApp {
             if trimmed_lc == APP_PREFIX {
                 "".to_string()
             } else {
-                trimmed.splitn(2, ' ').nth(1).unwrap_or("").to_string()
+                trimmed.split_once(' ').map(|x| x.1).unwrap_or("").to_string()
             }
         } else {
             String::new()
@@ -364,7 +364,7 @@ impl LauncherApp {
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
             );
-            let query_term = trimmed_lc.splitn(2, ' ').nth(1).unwrap_or("");
+            let query_term = trimmed_lc.split_once(' ').map(|x| x.1).unwrap_or("");
             for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
                 if self.is_exact_match_mode() {
@@ -434,8 +434,8 @@ impl LauncherApp {
                 }
             }
         } else {
-            let tail = trimmed_lc.splitn(2, " ").nth(1).unwrap_or("");
-            let mut query_term = tail.splitn(3, " ").nth(1).unwrap_or("").to_string();
+            let tail = trimmed_lc.split_once(" ").map(|x| x.1).unwrap_or("");
+            let mut query_term = tail.split(" ").nth(1).unwrap_or("").to_string();
             if query_term.is_empty() {
                 let parts: Vec<&str> = tail.split_whitespace().collect();
                 if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {

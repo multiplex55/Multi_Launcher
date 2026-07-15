@@ -26,18 +26,15 @@ pub struct AddActionDialog {
 }
 
 /// Mode of the action dialog.
+#[derive(Default)]
 enum DialogMode {
     /// Add a new command when confirmed.
+    #[default]
     Add,
     /// Edit the command at the given index when confirmed.
     Edit(usize),
 }
 
-impl Default for DialogMode {
-    fn default() -> Self {
-        DialogMode::Add
-    }
-}
 
 impl Default for AddActionDialog {
     fn default() -> Self {
@@ -111,15 +108,14 @@ impl AddActionDialog {
                     ui.horizontal(|ui| {
                         ui.label("Path");
                         ui.text_edit_singleline(&mut self.path);
-                        if ui.button("Browse").clicked() {
-                            if let Some(file) = FileDialog::new().pick_file() {
+                        if ui.button("Browse").clicked()
+                            && let Some(file) = FileDialog::new().pick_file() {
                                 if let Some(p) = file.to_str() {
                                     self.path = p.to_owned();
                                 } else {
                                     self.path = file.display().to_string();
                                 }
                             }
-                        }
                     });
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.show_args, "Add arguments");

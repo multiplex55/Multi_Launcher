@@ -29,6 +29,7 @@ impl Default for ActiveTimersConfig {
     }
 }
 
+#[derive(Default)]
 pub struct ActiveTimersWidget {
     cfg: ActiveTimersConfig,
 }
@@ -72,13 +73,6 @@ impl ActiveTimersWidget {
     }
 }
 
-impl Default for ActiveTimersWidget {
-    fn default() -> Self {
-        Self {
-            cfg: ActiveTimersConfig::default(),
-        }
-    }
-}
 
 impl Widget for ActiveTimersWidget {
     fn render(
@@ -128,17 +122,15 @@ impl Widget for ActiveTimersWidget {
             });
         }
 
-        if self.cfg.show_completed_recently {
-            if let Some(list) = timer::FINISHED_MESSAGES.lock().ok() {
-                if !list.is_empty() {
+        if self.cfg.show_completed_recently
+            && let Ok(list) = timer::FINISHED_MESSAGES.lock()
+                && !list.is_empty() {
                     ui.separator();
                     ui.label("Recently completed");
                     for msg in list.iter().rev().take(self.cfg.count) {
                         ui.label(egui::RichText::new(msg).small());
                     }
                 }
-            }
-        }
 
         clicked
     }

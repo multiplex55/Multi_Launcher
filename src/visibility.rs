@@ -75,8 +75,8 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
         }
     } else if let Some(next) = *queued_visibility {
         tracing::debug!("Processing previously queued visibility: {}", next);
-        if let Ok(guard) = ctx_handle.lock() {
-            if let Some(c) = &*guard {
+        if let Ok(guard) = ctx_handle.lock()
+            && let Some(c) = &*guard {
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(next, Ordering::SeqCst);
                 changed = old != next;
@@ -97,7 +97,6 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
                 *queued_visibility = None;
                 tracing::debug!("Applied queued visibility: {}", next);
             }
-        }
     }
     changed
 }
@@ -121,15 +120,14 @@ pub fn apply_visibility<C: ViewportCtx>(
             if let Some((w, h)) = static_size {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
             }
-        } else if follow_mouse {
-            if let Some((x, y)) = crate::window_manager::current_mouse_position() {
+        } else if follow_mouse
+            && let Some((x, y)) = crate::window_manager::current_mouse_position() {
                 let pos_x = x - window_size.0 / 2.0;
                 let pos_y = y - window_size.1 / 2.0;
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
                     pos_x, pos_y,
                 )));
             }
-        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);

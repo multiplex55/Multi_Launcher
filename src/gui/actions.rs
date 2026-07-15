@@ -60,8 +60,8 @@ impl LauncherApp {
             self.search();
         }
         let mut focus_after_launcher = false;
-        if a.action == "launcher:show" {
-            if let Some(query) = a.args.as_ref() {
+        if a.action == "launcher:show"
+            && let Some(query) = a.args.as_ref() {
                 self.query = query.to_string();
                 self.last_timer_query =
                     query.starts_with("timer list") || query.starts_with("alarm list");
@@ -69,7 +69,6 @@ impl LauncherApp {
                 self.move_cursor_end = true;
                 focus_after_launcher = true;
             }
-        }
         if self.handle_launcher_action(&a.action) {
             if focus_after_launcher {
                 self.focus_input();
@@ -664,8 +663,8 @@ impl LauncherApp {
                 command_changed_query = true;
                 refresh = true;
                 set_focus = true;
-                if self.enable_toasts {
-                    if let Some(text) = a
+                if self.enable_toasts
+                    && let Some(text) = a
                         .action
                         .strip_prefix("todo:add:")
                         .and_then(|r| r.split('|').next())
@@ -680,7 +679,6 @@ impl LauncherApp {
                             },
                         );
                     }
-                }
             } else if a.action.starts_with("todo:remove:") {
                 refresh = true;
                 set_focus = true;

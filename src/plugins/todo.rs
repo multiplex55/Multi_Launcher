@@ -234,13 +234,11 @@ fn invalidate_todo_links_index_cache() {
 fn get_todo_links_index(notes_todos: &[TodoEntry]) -> (Vec<Note>, LinkIndex) {
     let todo_ver = todo_version();
     let note_ver = note_version();
-    if let Ok(cache) = TODO_LINKS_INDEX_CACHE.read() {
-        if let Some(entry) = cache.as_ref() {
-            if entry.todo_version == todo_ver && entry.note_version == note_ver {
+    if let Ok(cache) = TODO_LINKS_INDEX_CACHE.read()
+        && let Some(entry) = cache.as_ref()
+            && entry.todo_version == todo_ver && entry.note_version == note_ver {
                 return (entry.notes.clone(), entry.index.clone());
             }
-        }
-    }
 
     let notes = load_notes().unwrap_or_default();
     let todos = notes_todos.to_vec();
@@ -679,7 +677,7 @@ impl TodoPlugin {
             let rest = rest.trim();
             let args: Vec<&str> = rest.split_whitespace().collect();
             match parse_args(&args, TODO_PSET_USAGE, |args| {
-                let (idx_str, priority_str) = (args.get(0)?, args.get(1)?);
+                let (idx_str, priority_str) = (args.first()?, args.get(1)?);
                 let idx = idx_str.parse::<usize>().ok()?;
                 let priority = priority_str.parse::<u8>().ok()?;
                 Some((idx, priority))
@@ -767,7 +765,6 @@ impl TodoPlugin {
 
             let mut tags: Vec<(String, usize)> = counts
                 .into_values()
-                .map(|(display, count)| (display, count))
                 .collect();
 
             if let Some(filter) = filter {
@@ -998,11 +995,10 @@ impl Plugin for TodoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim_start();
         let key = trimmed.to_string();
-        if let Ok(mut cache) = self.cache.write() {
-            if let Some(res) = cache.get(&key).cloned() {
+        if let Ok(mut cache) = self.cache.write()
+            && let Some(res) = cache.get(&key).cloned() {
                 return res;
             }
-        }
 
         let result = self.search_internal(trimmed);
 

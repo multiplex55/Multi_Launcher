@@ -341,7 +341,7 @@ fn parse_query(query: &str) -> Option<(f64, String, String)> {
     if !parts.get(2)?.eq_ignore_ascii_case("to") {
         return None;
     }
-    let val: f64 = parts.get(0)?.parse().ok()?;
+    let val: f64 = parts.first()?.parse().ok()?;
     let from = normalize_unit(parts.get(1)?)?.to_string();
     let to = normalize_unit(parts.get(3)?)?.to_string();
     Some((val, from, to))
@@ -360,8 +360,8 @@ impl Plugin for UnitConvertPlugin {
             return Vec::new();
         };
 
-        if let Some((value, from, to)) = parse_query(rest) {
-            if let Some(result) = convert(value, &from, &to) {
+        if let Some((value, from, to)) = parse_query(rest)
+            && let Some(result) = convert(value, &from, &to) {
                 let label = format!("{} {} = {:.4} {}", value, from, result, to);
                 let action = format!("clipboard:{:.4}", result);
                 return vec![Action {
@@ -371,7 +371,6 @@ impl Plugin for UnitConvertPlugin {
                     args: None,
                 }];
             }
-        }
         Vec::new()
     }
 

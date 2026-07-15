@@ -24,7 +24,7 @@ fn parse_query(query: &str) -> Option<(String, String, String)> {
     if !tokens.get(to_idx)?.eq_ignore_ascii_case("to") {
         return None;
     }
-    let value = tokens.get(0)?.to_string();
+    let value = tokens.first()?.to_string();
     let from = normalize(tokens.get(1)?)?.to_string();
     let to = normalize(tokens.last()?)?.to_string();
     Some((value, from, to))
@@ -79,7 +79,7 @@ fn text_to_bin(s: &str) -> Option<String> {
 
 fn bin_to_text(s: &str) -> Option<String> {
     let clean = s.replace(' ', "");
-    if clean.len() % 8 != 0 {
+    if !clean.len().is_multiple_of(8) {
         return None;
     }
     let bytes: Option<Vec<u8>> = (0..clean.len())
@@ -123,8 +123,8 @@ impl Plugin for BaseConvertPlugin {
         } else {
             return Vec::new();
         };
-        if let Some((value, from, to)) = parse_query(rest) {
-            if let Some(res) = convert(&value, &from, &to) {
+        if let Some((value, from, to)) = parse_query(rest)
+            && let Some(res) = convert(&value, &from, &to) {
                 let label = format!("{value} {from} = {res} {to}");
                 return vec![Action {
                     label,
@@ -133,7 +133,6 @@ impl Plugin for BaseConvertPlugin {
                     args: None,
                 }];
             }
-        }
         Vec::new()
     }
 

@@ -66,28 +66,24 @@ pub fn start_stopwatch_named(name: Option<String>) -> u64 {
 }
 
 pub fn pause_stopwatch(id: u64) {
-    if let Ok(mut guard) = STOPWATCHES.lock() {
-        if let Some(sw) = guard.get_mut(&id) {
-            if !sw.paused {
+    if let Ok(mut guard) = STOPWATCHES.lock()
+        && let Some(sw) = guard.get_mut(&id)
+            && !sw.paused {
                 let now = Instant::now();
                 sw.elapsed += now.saturating_duration_since(sw.start);
                 sw.paused = true;
                 sw.generation += 1;
             }
-        }
-    }
 }
 
 pub fn resume_stopwatch(id: u64) {
-    if let Ok(mut guard) = STOPWATCHES.lock() {
-        if let Some(sw) = guard.get_mut(&id) {
-            if sw.paused {
+    if let Ok(mut guard) = STOPWATCHES.lock()
+        && let Some(sw) = guard.get_mut(&id)
+            && sw.paused {
                 sw.start = Instant::now();
                 sw.paused = false;
                 sw.generation += 1;
             }
-        }
-    }
 }
 
 pub fn stop_stopwatch(id: u64) {
@@ -328,8 +324,8 @@ impl Plugin for StopwatchPlugin {
                         }
                     })
                     .collect();
-            } else if let Ok(id) = tail.parse::<u64>() {
-                if let Some(time) = format_elapsed(id) {
+            } else if let Ok(id) = tail.parse::<u64>()
+                && let Some(time) = format_elapsed(id) {
                     return vec![Action {
                         label: format!("Stopwatch {id}: {time}"),
                         desc: "Stopwatch".into(),
@@ -337,7 +333,6 @@ impl Plugin for StopwatchPlugin {
                         args: None,
                     }];
                 }
-            }
         }
         Vec::new()
     }

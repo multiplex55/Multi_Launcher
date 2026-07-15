@@ -89,8 +89,8 @@ fn run_action(action: &str) -> bool {
     );
     flag.store(true, Ordering::SeqCst);
     let a = app.results[0].clone();
-    if multi_launcher::launcher::launch_action(&a).is_ok() {
-        if app.hide_after_run
+    if multi_launcher::launcher::launch_action(&a).is_ok()
+        && app.hide_after_run
             && !a.action.starts_with("bookmark:add:")
             && !a.action.starts_with("bookmark:remove:")
             && !a.action.starts_with("folder:add:")
@@ -100,7 +100,6 @@ fn run_action(action: &str) -> bool {
         {
             flag.store(false, Ordering::SeqCst);
         }
-    }
     !flag.load(Ordering::SeqCst)
 }
 

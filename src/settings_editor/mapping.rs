@@ -156,37 +156,33 @@ impl SettingsEditor {
     }
 
     pub(crate) fn sync_from_plugin_settings(&mut self) {
-        if let Some(val) = self.plugin_settings.get("clipboard") {
-            if let Ok(cfg) = serde_json::from_value::<
+        if let Some(val) = self.plugin_settings.get("clipboard")
+            && let Ok(cfg) = serde_json::from_value::<
                 crate::plugins::clipboard::ClipboardPluginSettings,
             >(val.clone())
             {
                 self.clipboard_limit = cfg.max_entries;
             }
-        }
-        if let Some(val) = self.plugin_settings.get("network") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(
+        if let Some(val) = self.plugin_settings.get("network")
+            && let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(
                 val.clone(),
             ) {
                 self.net_refresh = cfg.refresh_rate;
                 self.net_unit = cfg.unit;
             }
-        }
-        if let Some(val) = self.plugin_settings.get("history") {
-            if let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(
+        if let Some(val) = self.plugin_settings.get("history")
+            && let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(
                 val.clone(),
             ) {
                 self.history_limit = cfg.max_entries;
             }
-        }
-        if let Some(val) = self.plugin_settings.get("screenshot") {
-            if let Ok(cfg) = serde_json::from_value::<ScreenshotPluginSettings>(val.clone()) {
+        if let Some(val) = self.plugin_settings.get("screenshot")
+            && let Ok(cfg) = serde_json::from_value::<ScreenshotPluginSettings>(val.clone()) {
                 self.screenshot_dir = cfg.screenshot_dir;
                 self.screenshot_save_file = cfg.screenshot_save_file;
                 self.screenshot_auto_save = cfg.screenshot_auto_save;
                 self.screenshot_use_editor = cfg.screenshot_use_editor;
             }
-        }
     }
 
     pub fn get_plugin_setting_value(&self, name: &str) -> Option<&serde_json::Value> {

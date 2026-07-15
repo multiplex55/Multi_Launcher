@@ -21,8 +21,8 @@ pub fn init(debug: bool, log_file: Option<PathBuf>) {
 
     let console_layer = fmt::layer().with_writer(std::io::stderr);
 
-    if let Some(path) = log_file {
-        if let (Some(dir), Some(file)) = (path.parent(), path.file_name()) {
+    if let Some(path) = log_file
+        && let (Some(dir), Some(file)) = (path.parent(), path.file_name()) {
             let file_appender = tracing_appender::rolling::never(dir, file);
             let (nb, guard) = tracing_appender::non_blocking(file_appender);
             let _ = LOG_GUARD.set(guard);
@@ -34,7 +34,6 @@ pub fn init(debug: bool, log_file: Option<PathBuf>) {
                 .try_init();
             return;
         }
-    }
 
     let _ = tracing_subscriber::registry()
         .with(filter)

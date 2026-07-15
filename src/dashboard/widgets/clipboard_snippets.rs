@@ -34,6 +34,7 @@ impl Default for ClipboardSnippetsConfig {
     }
 }
 
+#[derive(Default)]
 pub struct ClipboardSnippetsWidget {
     cfg: ClipboardSnippetsConfig,
 }
@@ -96,13 +97,6 @@ impl ClipboardSnippetsWidget {
     }
 }
 
-impl Default for ClipboardSnippetsWidget {
-    fn default() -> Self {
-        Self {
-            cfg: ClipboardSnippetsConfig::default(),
-        }
-    }
-}
 
 impl Widget for ClipboardSnippetsWidget {
     fn render(

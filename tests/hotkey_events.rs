@@ -67,7 +67,7 @@ fn zero_key_events_toggle_visibility() {
         (400.0, 220.0),
     );
     assert!(changed);
-    assert_eq!(visibility.load(Ordering::SeqCst), true);
+    assert!(visibility.load(Ordering::SeqCst));
 
     process_test_events(&triggers, &events);
     let changed = handle_visibility_trigger(
@@ -84,7 +84,7 @@ fn zero_key_events_toggle_visibility() {
         (400.0, 220.0),
     );
     assert!(changed);
-    assert_eq!(visibility.load(Ordering::SeqCst), false);
+    assert!(!visibility.load(Ordering::SeqCst));
 }
 
 #[test]

@@ -122,8 +122,8 @@ pub fn discover_ripgrep(
     }
 
     for name in ["rg.exe", "rg"] {
-        if let Some(path) = find_on_path(Path::new(name), context.path_directories.clone()) {
-            if let CandidateValidation::Valid { version } = validate_ripgrep_candidate(&path) {
+        if let Some(path) = find_on_path(Path::new(name), context.path_directories.clone())
+            && let CandidateValidation::Valid { version } = validate_ripgrep_candidate(&path) {
                 return Some(RipgrepResolution {
                     path,
                     source: ExecutableResolutionSource::ProcessPath,
@@ -131,7 +131,6 @@ pub fn discover_ripgrep(
                     warnings,
                 });
             }
-        }
     }
 
     if warnings.is_empty() {

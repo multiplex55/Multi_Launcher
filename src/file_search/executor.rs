@@ -132,13 +132,11 @@ impl FileSearchExecutor {
         mut request: SearchRequest,
         backend: SearchBackend,
     ) -> SearchRequest {
-        if backend == SearchBackend::WalkDir {
-            if let SearchScope::Roots { roots } = &mut request.scope {
-                if roots.is_empty() {
+        if backend == SearchBackend::WalkDir
+            && let SearchScope::Roots { roots } = &mut request.scope
+                && roots.is_empty() {
                     *roots = self.settings.global_search_roots.clone();
                 }
-            }
-        }
         request
     }
 }

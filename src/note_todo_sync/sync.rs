@@ -167,8 +167,8 @@ pub fn sync_note_todos(
                 }
             },
             SyncMode::TodoSourceOfTruth => {
-                if let Some(id) = mapped_id {
-                    if let Some(todo) = todo_map.get(&id) {
+                if let Some(id) = mapped_id
+                    && let Some(todo) = todo_map.get(&id) {
                         preview.push(PreviewAction::UpdateNote {
                             todo_id: id.clone(),
                             line_index: item.line_index,
@@ -185,7 +185,6 @@ pub fn sync_note_todos(
                             );
                         }
                     }
-                }
             }
         }
     }

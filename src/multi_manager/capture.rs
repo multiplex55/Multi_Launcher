@@ -76,14 +76,13 @@ impl Drop for CaptureSession {
                 debug!("capture hook thread id unavailable during shutdown");
             }
         }
-        if let Some(join) = self.join.take() {
-            if join.join().is_err() {
+        if let Some(join) = self.join.take()
+            && join.join().is_err() {
                 #[cfg(windows)]
                 warn!("capture session thread panicked during shutdown");
                 #[cfg(not(windows))]
                 debug!("capture session thread panicked during shutdown");
             }
-        }
     }
 }
 
@@ -442,26 +441,22 @@ mod windows_backend {
     }
 
     fn mark_installed() {
-        if let Some(state_lock) = HOOK_STATE.get() {
-            if let Ok(mut state) = state_lock.lock() {
-                if let Some(state) = state.as_mut() {
+        if let Some(state_lock) = HOOK_STATE.get()
+            && let Ok(mut state) = state_lock.lock()
+                && let Some(state) = state.as_mut() {
                     state.lifecycle.mark_installed();
                 }
-            }
-        }
     }
 
     fn clear_state() {
-        if let Some(state_lock) = HOOK_STATE.get() {
-            if let Ok(mut state) = state_lock.lock() {
-                if let Some(state) = state.as_mut() {
-                    if state.lifecycle.clear() {
+        if let Some(state_lock) = HOOK_STATE.get()
+            && let Ok(mut state) = state_lock.lock() {
+                if let Some(state) = state.as_mut()
+                    && state.lifecycle.clear() {
                         warn!("cleaning up stale Windows capture hook state");
                     }
-                }
                 *state = None;
             }
-        }
     }
 }
 

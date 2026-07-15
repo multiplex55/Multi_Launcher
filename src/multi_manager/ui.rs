@@ -188,13 +188,12 @@ impl MultiManagerDialog {
                 ui.push_id(("multi_manager_workspace", id), |ui| {
                     ui.horizontal(|ui| {
                         if self.rename.workspace_id == id {
-                            if ui
+                            ui
                                 .add(
                                     egui::TextEdit::singleline(&mut self.rename.value)
                                         .id_source(("mm_workspace_rename", id)),
                                 )
-                                .changed()
-                            {}
+                                .changed();
                             if ui.button("Apply").clicked() {
                                 let val = self.rename.value.clone();
                                 app.multi_manager.with_workspace_mut(id, |w| w.name = val);
@@ -679,12 +678,11 @@ fn delete_workspace(app: &mut LauncherApp, id: &str) {
     app.multi_manager.mark_dirty();
 }
 fn reorder_workspace(app: &mut LauncherApp, id: &str, delta: isize) {
-    if let Ok(mut w) = app.multi_manager.workspaces.lock() {
-        if let Some(i) = w.iter().position(|x| x.id == id) {
+    if let Ok(mut w) = app.multi_manager.workspaces.lock()
+        && let Some(i) = w.iter().position(|x| x.id == id) {
             let j = (i as isize + delta).clamp(0, w.len().saturating_sub(1) as isize) as usize;
             w.swap(i, j);
         }
-    }
     app.multi_manager.mark_dirty();
 }
 fn reorder_window(app: &mut LauncherApp, id: &str, index: usize, delta: isize) {
@@ -826,11 +824,10 @@ fn set_window_rect(
     Ok(())
 }
 fn move_window(app: &mut LauncherApp, w: &MmWindow, home: bool) {
-    if let Some(r) = if home { w.home_rect } else { w.target_rect } {
-        if let Err(err) = win::move_window_to_rect(w.hwnd, r) {
+    if let Some(r) = if home { w.home_rect } else { w.target_rect }
+        && let Err(err) = win::move_window_to_rect(w.hwnd, r) {
             app.report_error_message("multi_manager.move_window", format!("{err}"));
         }
-    }
 }
 
 fn begin_hotkey_edit(

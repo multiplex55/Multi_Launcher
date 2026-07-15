@@ -467,13 +467,11 @@ fn worker_loop(
                             dx * dx + dy * dy >= config.threshold_px * config.threshold_px;
 
                         let mut tokens = tracker.tokens_string();
-                        if tokens.is_empty() {
-                            if moved_enough {
-                                if let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
+                        if tokens.is_empty()
+                            && moved_enough
+                                && let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
                                     tokens = token.to_string();
                                 }
-                            }
-                        }
                         if config.debug_logging {
                             tracing::debug!(tokens = %tokens, "mouse gesture tokens");
                         }
@@ -623,8 +621,8 @@ fn worker_loop(
                             selected_binding_idx = idx.min(binding_len.saturating_sub(1));
                             pending_selection_idx = None;
 
-                            if let Some(key) = exact_selection_key.as_ref() {
-                                if exact_binding_count > 0 {
+                            if let Some(key) = exact_selection_key.as_ref()
+                                && exact_binding_count > 0 {
                                     let stored_idx = selected_binding_idx % exact_binding_count;
                                     if selection_state
                                         .selections
@@ -637,10 +635,9 @@ fn worker_loop(
                                         save_selection_state(GESTURES_STATE_FILE, &selection_state);
                                     }
                                 }
-                            }
 
-                            if let Some(pos) = cursor_provider.cursor_position() {
-                                if let Some(text) = format_hint_text(
+                            if let Some(pos) = cursor_provider.cursor_position()
+                                && let Some(text) = format_hint_text(
                                     &cached_tokens,
                                     &cached_candidates,
                                     selected_binding_idx,
@@ -649,7 +646,6 @@ fn worker_loop(
                                 ) {
                                     hint_overlay.update(&text, pos);
                                 }
-                            }
                         }
                     }
                 }
@@ -668,8 +664,8 @@ fn worker_loop(
                             _ => {}
                         }
 
-                        if let Some(key) = exact_selection_key.as_ref() {
-                            if exact_binding_count > 0 {
+                        if let Some(key) = exact_selection_key.as_ref()
+                            && exact_binding_count > 0 {
                                 let stored_idx = selected_binding_idx % exact_binding_count;
                                 if selection_state
                                     .selections
@@ -682,10 +678,9 @@ fn worker_loop(
                                     save_selection_state(GESTURES_STATE_FILE, &selection_state);
                                 }
                             }
-                        }
 
-                        if let Some(pos) = cursor_provider.cursor_position() {
-                            if let Some(text) = format_hint_text(
+                        if let Some(pos) = cursor_provider.cursor_position()
+                            && let Some(text) = format_hint_text(
                                 &cached_tokens,
                                 &cached_candidates,
                                 selected_binding_idx,
@@ -694,7 +689,6 @@ fn worker_loop(
                             ) {
                                 hint_overlay.update(&text, pos);
                             }
-                        }
                     }
                 }
 
@@ -750,12 +744,10 @@ fn worker_loop(
                     && cached_tokens.is_empty()
                     && !cheat_sheet_visible
                     && start_time.elapsed() >= CHEATSHEET_DELAY
-                {
-                    if let Some(text) = format_cheatsheet_text(&db, CHEATSHEET_MAX_GESTURES) {
+                    && let Some(text) = format_cheatsheet_text(&db, CHEATSHEET_MAX_GESTURES) {
                         hint_overlay.update(&text, pos);
                         cheat_sheet_visible = true;
                     }
-                }
 
                 if last_recognition.elapsed() >= recognition_interval {
                     let ms = start_time.elapsed().as_millis() as u64;
@@ -764,11 +756,10 @@ fn worker_loop(
                     if tokens.is_empty() {
                         let dx = pos.0 - start_pos.0;
                         let dy = pos.1 - start_pos.1;
-                        if dx * dx + dy * dy >= config.threshold_px * config.threshold_px {
-                            if let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
+                        if dx * dx + dy * dy >= config.threshold_px * config.threshold_px
+                            && let Some(token) = token_from_delta(dx, dy, config.dir_mode) {
                                 tokens = token.to_string();
                             }
-                        }
                     }
                     if should_recompute_candidates(&tokens, &cached_tokens) {
                         cached_tokens = tokens.to_string();
@@ -827,12 +818,12 @@ fn worker_loop(
                         exact_binding_count = 0;
                     }
 
-                    if let Some(pending_idx) = pending_selection_idx.take() {
-                        if !cached_actions.is_empty() {
+                    if let Some(pending_idx) = pending_selection_idx.take()
+                        && !cached_actions.is_empty() {
                             let len = cached_actions.len();
                             selected_binding_idx = pending_idx.min(len.saturating_sub(1));
-                            if let Some(key) = exact_selection_key.as_ref() {
-                                if exact_binding_count > 0 {
+                            if let Some(key) = exact_selection_key.as_ref()
+                                && exact_binding_count > 0 {
                                     let stored_idx = selected_binding_idx % exact_binding_count;
                                     if selection_state
                                         .selections
@@ -845,9 +836,7 @@ fn worker_loop(
                                         save_selection_state(GESTURES_STATE_FILE, &selection_state);
                                     }
                                 }
-                            }
                         }
-                    }
 
                     if let Some(text) = format_hint_text(
                         &tokens,
@@ -1074,15 +1063,14 @@ fn format_hint_text(
         lines.push(tokens.to_string());
     }
 
-    if exact_candidate.is_none() {
-        if let Some(candidate) = candidates.first() {
+    if exact_candidate.is_none()
+        && let Some(candidate) = candidates.first() {
             lines.push(format!(
                 "Closest: {} [{}]",
                 candidate.gesture_label,
                 match_type_label(candidate.match_type)
             ));
         }
-    }
 
     let cycle_hint = match wheel_cycle_gate {
         WheelCycleGate::Deadzone => "Wheel: cycle",
@@ -1706,8 +1694,8 @@ unsafe extern "system" fn mouse_hook_proc(
                     };
                 }
 
-                if let Some(title) = get_foreground_window_title() {
-                    if dispatch.should_ignore_window_title(&title) {
+                if let Some(title) = get_foreground_window_title()
+                    && dispatch.should_ignore_window_title(&title) {
                         return unsafe {
                             CallNextHookEx(
                                 windows::Win32::UI::WindowsAndMessaging::HHOOK(std::ptr::null_mut()),
@@ -1717,7 +1705,6 @@ unsafe extern "system" fn mouse_hook_proc(
                             )
                         };
                     }
-                }
 
                 // Only consume wheel events while a gesture is actively being tracked.
                 if msg == WM_MOUSEWHEEL {
@@ -1745,8 +1732,8 @@ unsafe extern "system" fn mouse_hook_proc(
                     }
                 }
 
-                if let Ok(guard) = dispatch.sender.try_lock() {
-                    if let Some(sender) = guard.as_ref() {
+                if let Ok(guard) = dispatch.sender.try_lock()
+                    && let Some(sender) = guard.as_ref() {
                         if msg == WM_RBUTTONDOWN {
                             // Wheel-cycling is only enabled after worker exceeds deadzone.
                             dispatch.set_tracking(false);
@@ -1764,7 +1751,6 @@ unsafe extern "system" fn mouse_hook_proc(
                             }
                         }
                     }
-                }
 
                 // Consume while MG is enabled (RMB always, wheel only when tracking).
                 return windows::Win32::Foundation::LRESULT(1);
@@ -1803,9 +1789,9 @@ unsafe extern "system" fn keyboard_hook_proc(
             let injected = (info.flags & KBDLLHOOKSTRUCT_FLAGS(0x10)) != KBDLLHOOKSTRUCT_FLAGS(0);
             if !injected {
                 let dispatch = hook_dispatch();
-                if dispatch.enabled.load(Ordering::Acquire) && dispatch.is_active() {
-                    if let Ok(guard) = dispatch.sender.try_lock() {
-                        if let Some(sender) = guard.as_ref() {
+                if dispatch.enabled.load(Ordering::Acquire) && dispatch.is_active()
+                    && let Ok(guard) = dispatch.sender.try_lock()
+                        && let Some(sender) = guard.as_ref() {
                             if info.vkCode == VK_ESCAPE.0 as u32 {
                                 let _ = sender.send(HookEvent::Cancel);
                                 return windows::Win32::Foundation::LRESULT(1);
@@ -1827,8 +1813,6 @@ unsafe extern "system" fn keyboard_hook_proc(
                                 return windows::Win32::Foundation::LRESULT(1);
                             }
                         }
-                    }
-                }
             }
         }
     }

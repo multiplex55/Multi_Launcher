@@ -7,8 +7,8 @@ impl Plugin for SettingsPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let q = query.trim();
         let mut actions = Vec::new();
-        if let Some(rest) = crate::common::strip_prefix_ci(q, "settings") {
-            if rest.is_empty() || rest.starts_with(' ') {
+        if let Some(rest) = crate::common::strip_prefix_ci(q, "settings")
+            && (rest.is_empty() || rest.starts_with(' ')) {
                 actions.push(Action {
                     label: "Open settings".into(),
                     desc: "Show settings panel".into(),
@@ -16,9 +16,8 @@ impl Plugin for SettingsPlugin {
                     args: None,
                 });
             }
-        }
-        if let Some(rest) = crate::common::strip_prefix_ci(q, "dashboard") {
-            if rest.is_empty() || rest.starts_with(' ') {
+        if let Some(rest) = crate::common::strip_prefix_ci(q, "dashboard")
+            && (rest.is_empty() || rest.starts_with(' ')) {
                 actions.push(Action {
                     label: "Dashboard Settings".into(),
                     desc: "Configure dashboard layout and widgets".into(),
@@ -26,9 +25,8 @@ impl Plugin for SettingsPlugin {
                     args: None,
                 });
             }
-        }
-        if let Some(rest) = crate::common::strip_prefix_ci(q, "theme") {
-            if rest.is_empty() || rest.starts_with(' ') {
+        if let Some(rest) = crate::common::strip_prefix_ci(q, "theme")
+            && (rest.is_empty() || rest.starts_with(' ')) {
                 actions.push(Action {
                     label: "Theme settings".into(),
                     desc: "Configure launcher theme colors".into(),
@@ -36,7 +34,6 @@ impl Plugin for SettingsPlugin {
                     args: None,
                 });
             }
-        }
         actions
     }
 

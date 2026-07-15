@@ -40,6 +40,12 @@ pub struct DashboardDiagnostics {
     last_frame_sample: Instant,
 }
 
+impl Default for DashboardDiagnostics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DashboardDiagnostics {
     pub fn new() -> Self {
         Self::new_with_config(DIAGNOSTICS_REFRESH_INTERVAL, REFRESH_WARNING_THRESHOLD)

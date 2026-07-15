@@ -500,11 +500,10 @@ fn passes_post_filters(
     request: &SearchRequest,
     settings: &FileSearchSettings,
 ) -> bool {
-    if let SearchScope::Roots { roots } = &request.scope {
-        if !roots.is_empty() && !roots.iter().any(|root| result.path.starts_with(root)) {
+    if let SearchScope::Roots { roots } = &request.scope
+        && !roots.is_empty() && !roots.iter().any(|root| result.path.starts_with(root)) {
             return false;
         }
-    }
     if !request.include_hidden_files
         && result
             .path

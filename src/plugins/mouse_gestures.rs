@@ -174,7 +174,7 @@ pub fn collect_visible_window_titles() -> anyhow::Result<Vec<String>> {
                 titles.push(trimmed.to_string());
             }
         }
-        titles.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        titles.sort_by_key(|a| a.to_lowercase());
         Ok(titles)
     }
     #[cfg(not(windows))]
@@ -198,11 +198,10 @@ impl Default for MouseGestureRuntime {
         let db_for_watcher = Arc::clone(&db);
 
         let watcher = watch_json(GESTURES_FILE, move || {
-            if let Ok(new_db) = load_gestures(GESTURES_FILE) {
-                if let Ok(mut guard) = db_for_watcher.lock() {
+            if let Ok(new_db) = load_gestures(GESTURES_FILE)
+                && let Ok(mut guard) = db_for_watcher.lock() {
                     *guard = new_db;
                 }
-            }
         })
         .ok();
 
@@ -272,6 +271,7 @@ pub fn sync_enabled_plugins(enabled_plugins: Option<&HashSet<String>>) {
     with_service(|svc| svc.set_plugin_enabled(enabled));
 }
 
+#[derive(Default)]
 pub struct MouseGesturesPlugin {
     settings: MouseGestureSettings,
     ignore_input: String,
@@ -280,17 +280,6 @@ pub struct MouseGesturesPlugin {
     window_picker_error: Option<String>,
 }
 
-impl Default for MouseGesturesPlugin {
-    fn default() -> Self {
-        Self {
-            settings: MouseGestureSettings::default(),
-            ignore_input: String::new(),
-            window_picker_open: false,
-            window_picker_titles: Vec::new(),
-            window_picker_error: None,
-        }
-    }
-}
 
 impl MouseGesturesPlugin {
     fn command_actions() -> Vec<Action> {
@@ -467,10 +456,9 @@ impl Plugin for MouseGesturesPlugin {
                         .bindings
                         .iter()
                         .filter(|binding| binding.enabled)
-                        .cloned()
                     {
                         actions.push(Action {
-                            label: format_search_result_label(&gesture, &binding),
+                            label: format_search_result_label(&gesture, binding),
                             desc: conflict_desc.into(),
                             action: "mg:dialog".into(),
                             args: None,
@@ -712,14 +700,13 @@ impl Plugin for MouseGesturesPlugin {
                                 for title in self.window_picker_titles.clone() {
                                     ui.horizontal(|ui| {
                                         ui.label(&title);
-                                        if ui.button("Add").clicked() {
-                                            if add_ignore_window_title(
+                                        if ui.button("Add").clicked()
+                                            && add_ignore_window_title(
                                                 &mut cfg.ignore_window_titles,
                                                 &title,
                                             ) {
                                                 changed = true;
                                             }
-                                        }
                                     });
                                 }
                             });

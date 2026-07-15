@@ -51,7 +51,9 @@ pub struct NthWeekday {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub enum RecurrenceEnd {
+    #[default]
     Never,
     OnDate {
         #[serde(with = "naive_date_serde")]
@@ -62,11 +64,6 @@ pub enum RecurrenceEnd {
     },
 }
 
-impl Default for RecurrenceEnd {
-    fn default() -> Self {
-        RecurrenceEnd::Never
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum RecurrenceFrequency {
@@ -272,11 +269,10 @@ pub fn save_state(path: &str, state: &CalendarState) -> anyhow::Result<()> {
 }
 
 fn ensure_parent_dir(path: &str) -> anyhow::Result<()> {
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
     Ok(())
 }
 
@@ -414,7 +410,7 @@ fn expand_event_instances(
                 match rule.frequency {
                     RecurrenceFrequency::Daily => {
                         starts.push(cursor);
-                        cursor = cursor + Duration::days(rule.interval_days());
+                        cursor += Duration::days(rule.interval_days());
                     }
                     RecurrenceFrequency::Weekly => {
                         starts.extend(generate_weekly_occurrences(
@@ -443,7 +439,7 @@ fn expand_event_instances(
                     RecurrenceFrequency::Custom => match rule.effective_custom_unit() {
                         CustomRecurrenceUnit::Days => {
                             starts.push(cursor);
-                            cursor = cursor + Duration::days(rule.interval_days());
+                            cursor += Duration::days(rule.interval_days());
                         }
                         CustomRecurrenceUnit::Weeks => {
                             starts.extend(generate_weekly_occurrences(
@@ -850,11 +846,10 @@ pub fn parse_date_reference(input: &str, now: NaiveDate) -> Option<NaiveDate> {
     if lower == "tomorrow" {
         return Some(now + Duration::days(1));
     }
-    if let Some(rest) = lower.strip_prefix("next ") {
-        if let Some(target) = parse_weekday(rest) {
+    if let Some(rest) = lower.strip_prefix("next ")
+        && let Some(target) = parse_weekday(rest) {
             return Some(next_weekday(now, target));
         }
-    }
     NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()
 }
 
@@ -876,8 +871,8 @@ pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAdd
     let mut refs = Vec::new();
     let mut tokens = Vec::new();
     for token in raw_tokens {
-        if let Some(stripped) = token.strip_prefix('@') {
-            if let Some((kind, id)) = stripped.split_once(':') {
+        if let Some(stripped) = token.strip_prefix('@')
+            && let Some((kind, id)) = stripped.split_once(':') {
                 let kind = match kind.to_ascii_lowercase().as_str() {
                     "todo" => Some(EntityKind::Todo),
                     "note" => Some(EntityKind::Note),
@@ -888,7 +883,6 @@ pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAdd
                     continue;
                 }
             }
-        }
         tokens.push(token);
     }
     let (date, consumed) = parse_date_tokens(&tokens, now.date())
@@ -987,11 +981,10 @@ pub fn search_events(request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
     let mut results: Vec<CalendarEvent> = data
         .into_iter()
         .filter(|event| {
-            if let Some(after) = request.after {
-                if event.start.date() < after {
+            if let Some(after) = request.after
+                && event.start.date() < after {
                     return false;
                 }
-            }
             if !request.tags.is_empty() || !request.exclude_tags.is_empty() {
                 let tags = event
                     .tags
@@ -1021,13 +1014,11 @@ fn parse_date_tokens(tokens: &[&str], now: NaiveDate) -> Option<(NaiveDate, usiz
     if tokens.is_empty() {
         return None;
     }
-    if tokens[0].eq_ignore_ascii_case("next") {
-        if let Some(next) = tokens.get(1) {
-            if let Some(day) = parse_weekday(next) {
+    if tokens[0].eq_ignore_ascii_case("next")
+        && let Some(next) = tokens.get(1)
+            && let Some(day) = parse_weekday(next) {
                 return Some((next_weekday(now, day), 2));
             }
-        }
-    }
     parse_date_reference(tokens[0], now).map(|date| (date, 1))
 }
 

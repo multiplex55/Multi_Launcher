@@ -20,17 +20,11 @@ pub struct ShellCmdEntry {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[derive(Default)]
 pub struct ShellPluginSettings {
     pub open_in_wezterm: bool,
 }
 
-impl Default for ShellPluginSettings {
-    fn default() -> Self {
-        Self {
-            open_in_wezterm: false,
-        }
-    }
-}
 
 static USE_WEZTERM: AtomicBool = AtomicBool::new(false);
 
@@ -89,8 +83,8 @@ pub struct ShellPlugin;
 impl Plugin for ShellPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "sh") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "sh")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "sh: edit saved commands".into(),
                     desc: "Shell".into(),
@@ -98,7 +92,6 @@ impl Plugin for ShellPlugin {
                     args: None,
                 }];
             }
-        }
 
         const ADD_PREFIX: &str = "sh add ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
@@ -171,11 +164,10 @@ impl Plugin for ShellPlugin {
                 let matcher = SkimMatcherV2::default();
                 let mut best: Option<(ShellCmdEntry, i64)> = None;
                 for entry in list.into_iter().filter(|e| e.autocomplete) {
-                    if let Some(score) = matcher.fuzzy_match(&entry.name, arg) {
-                        if best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
+                    if let Some(score) = matcher.fuzzy_match(&entry.name, arg)
+                        && best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
                             best = Some((entry, score));
                         }
-                    }
                 }
                 if let Some((entry, _)) = best {
                     let prefix = if entry.keep_open {

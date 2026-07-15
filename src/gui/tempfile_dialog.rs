@@ -3,21 +3,13 @@ use crate::plugins::tempfile::create_named_file;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
+#[derive(Default)]
 pub struct TempfileDialog {
     pub open: bool,
     alias: String,
     text: String,
 }
 
-impl Default for TempfileDialog {
-    fn default() -> Self {
-        Self {
-            open: false,
-            alias: String::new(),
-            text: String::new(),
-        }
-    }
-}
 
 impl TempfileDialog {
     pub fn open(&mut self) {

@@ -286,15 +286,13 @@ impl TodoViewDialog {
                                                 e.tags = tags;
                                                 for token in self.editing_text.split_whitespace() {
                                                     if let Some(slug) = token.strip_prefix("@note:")
-                                                    {
-                                                        if !slug.trim().is_empty() {
+                                                        && !slug.trim().is_empty() {
                                                             Self::link_note_to_todo(
                                                                 e,
                                                                 slug.trim(),
                                                                 slug.trim(),
                                                             );
                                                         }
-                                                    }
                                                 }
                                             }
                                             self.editing_idx = None;
@@ -412,16 +410,14 @@ impl TodoViewDialog {
                                                         .clicked()
                                                     {
                                                         app.open_note_panel(&slug, None);
-                                                        if let Some(anchor) = anchor.as_deref() {
-                                                            if let Some(n) = note.as_ref() {
-                                                                if !note_has_anchor(&n.content, anchor) {
+                                                        if let Some(anchor) = anchor.as_deref()
+                                                            && let Some(n) = note.as_ref()
+                                                                && !note_has_anchor(&n.content, anchor) {
                                                                     app.report_error_message("ui operation", format!(
                                                                         "Anchor '{}' not found in note '{}'; opened note top.",
                                                                         anchor, title
                                                                     ));
                                                                 }
-                                                            }
-                                                        }
                                                     }
                                                 });
                                             }

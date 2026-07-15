@@ -40,7 +40,7 @@ fn queued_visibility_applies_when_context_available() {
     );
     assert!(changed);
 
-    assert_eq!(visibility.load(Ordering::SeqCst), true);
+    assert!(visibility.load(Ordering::SeqCst));
     assert_eq!(queued_visibility, Some(true));
 
     // now context becomes available

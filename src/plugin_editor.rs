@@ -54,7 +54,7 @@ impl PluginEditor {
             Arc::new(Vec::new()),
         );
         let mut infos = pm.plugin_infos();
-        infos.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        infos.sort_by_key(|a| a.0.to_lowercase());
         infos
     }
 

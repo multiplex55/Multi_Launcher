@@ -13,16 +13,13 @@ fn default_layout() -> PinnedLayout {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PinnedLayout {
     Grid,
+    #[default]
     List,
 }
 
-impl Default for PinnedLayout {
-    fn default() -> Self {
-        PinnedLayout::List
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PinnedCommandsConfig {
@@ -120,8 +117,8 @@ impl PinnedCommandsWidget {
         favorites: &'a [FavEntry],
         id: &str,
     ) -> Option<Action> {
-        if let Some(label) = id.strip_prefix("fav:") {
-            if let Some(f) = favorites
+        if let Some(label) = id.strip_prefix("fav:")
+            && let Some(f) = favorites
                 .iter()
                 .find(|f| f.label.eq_ignore_ascii_case(label))
             {
@@ -132,7 +129,6 @@ impl PinnedCommandsWidget {
                     args: f.args.clone(),
                 });
             }
-        }
 
         actions_by_id.get(id).cloned().or_else(|| {
             favorites.iter().find(|f| f.action == id).map(|fav| Action {

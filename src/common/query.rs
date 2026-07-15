@@ -12,11 +12,10 @@ impl ActionFilterMetadata {
         if !action.desc.trim().is_empty() {
             normalized_kind_candidates.push(action.desc.trim().to_lowercase());
         }
-        if let Some(prefix) = action.action.split(':').next() {
-            if !prefix.trim().is_empty() {
+        if let Some(prefix) = action.action.split(':').next()
+            && !prefix.trim().is_empty() {
                 normalized_kind_candidates.push(prefix.trim().to_lowercase());
             }
-        }
         normalized_kind_candidates.sort();
         normalized_kind_candidates.dedup();
 

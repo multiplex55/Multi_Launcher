@@ -171,8 +171,8 @@ impl Plugin for ClipboardPlugin {
         }
 
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "cb: edit clipboard".into(),
                     desc: "Clipboard".into(),
@@ -180,10 +180,9 @@ impl Plugin for ClipboardPlugin {
                     args: None,
                 }];
             }
-        }
 
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb clear") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb clear")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "Clear clipboard history".into(),
                     desc: "Clipboard".into(),
@@ -191,10 +190,9 @@ impl Plugin for ClipboardPlugin {
                     args: None,
                 }];
             }
-        }
 
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb list") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb list")
+            && rest.is_empty() {
                 let history = self.update_history();
                 return history
                     .iter()
@@ -207,7 +205,6 @@ impl Plugin for ClipboardPlugin {
                     })
                     .collect();
             }
-        }
 
         let filter = trimmed[PREFIX.len()..].trim().to_lowercase();
         let history = self.update_history();

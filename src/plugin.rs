@@ -111,6 +111,12 @@ pub struct PluginManager {
     libs: Vec<libloading::Library>,
 }
 
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginManager {
     pub fn new() -> Self {
         Self {
@@ -169,7 +175,7 @@ impl PluginManager {
         self.register_with_settings(CalendarPlugin, plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
-        self.register_with_settings(KeysPlugin::default(), plugin_settings);
+        self.register_with_settings(KeysPlugin, plugin_settings);
         self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings);
         self.register_with_settings(MultiManagerPlugin, plugin_settings);
         self.register_with_settings(FavPlugin::default(), plugin_settings);
@@ -249,11 +255,10 @@ impl PluginManager {
     pub fn commands_filtered(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
         let mut out = Vec::new();
         for p in &self.plugins {
-            if let Some(set) = enabled_plugins {
-                if !set.contains(p.name()) {
+            if let Some(set) = enabled_plugins
+                && !set.contains(p.name()) {
                     continue;
                 }
-            }
             out.extend(p.commands());
         }
         out
@@ -323,18 +328,15 @@ impl PluginManager {
         let mut actions = Vec::new();
         for p in &self.plugins {
             let name = p.name();
-            if let Some(list) = enabled_plugins {
-                if !list.contains(name) {
+            if let Some(list) = enabled_plugins
+                && !list.contains(name) {
                     continue;
                 }
-            }
-            if let Some(map) = enabled_caps {
-                if let Some(caps) = map.get(name) {
-                    if !caps.iter().any(|c| c == "search") {
+            if let Some(map) = enabled_caps
+                && let Some(caps) = map.get(name)
+                    && !caps.iter().any(|c| c == "search") {
                         continue;
                     }
-                }
-            }
 
             if !p.always_search() {
                 let prefixes = p.query_prefixes();

@@ -2,7 +2,7 @@ use crate::file_search::model::{
     ContentFileResult, ContentMatch, FilenameResult, PathIdentity, SearchResult,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const FILENAME_SORT_LABEL: &str = "Filename";
 pub const CONTENT_SORT_LABEL: &str = "Content";
@@ -204,6 +204,8 @@ pub fn sort_and_dedup_results(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::file_search::model::{FileKind, FilenameRank};
     fn result(path: &str, rank: FilenameRank) -> FilenameResult {

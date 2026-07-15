@@ -215,11 +215,10 @@ pub fn search_content_with_ripgrep(
     let stderr = stderr_handle.join().unwrap_or_default();
     summary.cancelled = process.cancelled;
     summary.stderr = stderr.clone();
-    if !process.cancelled {
-        if let Some(status) = process.status {
+    if !process.cancelled
+        && let Some(status) = process.status {
             handle_exit_status(status, &executable, &stderr)?;
         }
-    }
     Ok(summary)
 }
 
@@ -376,11 +375,10 @@ pub fn search_filenames_with_ripgrep(
     let stderr = stderr_handle.join().unwrap_or_default();
     summary.cancelled |= process.cancelled;
     summary.stderr = stderr.clone();
-    if !summary.cancelled {
-        if let Some(status) = process.status {
+    if !summary.cancelled
+        && let Some(status) = process.status {
             handle_exit_status(status, &executable, &stderr)?;
         }
-    }
     while let Ok(line) = line_rx.try_recv() {
         if results.len() >= request.max_results {
             break;

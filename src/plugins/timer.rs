@@ -125,11 +125,10 @@ impl TimerHeap {
         }
         let removed = self.entries.pop().unwrap();
         self.positions.remove(&removed.id);
-        if idx < self.entries.len() {
-            if !self.sift_down(idx) {
+        if idx < self.entries.len()
+            && !self.sift_down(idx) {
                 self.sift_up(idx);
             }
-        }
     }
 
     fn sift_up(&mut self, mut idx: usize) {
@@ -234,9 +233,9 @@ impl TimerManager {
             Some(l) => l,
             None => return,
         };
-        if let Some(entry) = list.get(&id) {
-            if entry.generation == generation && !entry.paused {
-                if let Some(entry) = list.remove(&id) {
+        if let Some(entry) = list.get(&id)
+            && entry.generation == generation && !entry.paused
+                && let Some(entry) = list.remove(&id) {
                     if entry.persist {
                         save_persistent_alarms_locked(&list);
                     }
@@ -248,16 +247,14 @@ impl TimerManager {
                     };
                     crate::sound::play_sound(&entry.sound);
                     notify(&msg);
-                    if let Some(mut msgs) = FINISHED_MESSAGES.lock().ok() {
+                    if let Ok(mut msgs) = FINISHED_MESSAGES.lock() {
                         msgs.push(msg);
                     }
                 }
-            }
-        }
     }
 
     fn register(&self, deadline: Instant, id: u64, generation: u64) {
-        if let Some(mut heap) = self.inner.heap.lock().ok() {
+        if let Ok(mut heap) = self.inner.heap.lock() {
             heap.remove(id);
             heap.push(HeapEntry {
                 deadline,
@@ -273,14 +270,14 @@ impl TimerManager {
     }
 
     fn remove(&self, id: u64) {
-        if let Some(mut heap) = self.inner.heap.lock().ok() {
+        if let Ok(mut heap) = self.inner.heap.lock() {
             heap.remove(id);
             self.inner.condvar.notify_one();
         }
     }
 }
 
-static TIMER_MANAGER: Lazy<TimerManager> = Lazy::new(|| TimerManager::new());
+static TIMER_MANAGER: Lazy<TimerManager> = Lazy::new(TimerManager::new);
 
 pub fn heap_len() -> usize {
     TIMER_MANAGER
@@ -298,7 +295,7 @@ pub fn reset_alarms_loaded() {
 
 /// Retrieve and clear finished timer/alarm notifications.
 pub fn take_finished_messages() -> Vec<String> {
-    if let Some(mut list) = FINISHED_MESSAGES.lock().ok() {
+    if let Ok(mut list) = FINISHED_MESSAGES.lock() {
         let out = list.clone();
         list.clear();
         out
@@ -402,10 +399,10 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32, Option<chrono::NaiveDate>)> 
     }
 
     let trimmed = input.trim();
-    if let Some((first, rest)) = trimmed.split_once(' ') {
-        if let Some((h, m)) = parse_time(rest.trim()) {
-            if let Some(days_str) = first.strip_suffix(['d', 'D']) {
-                if let Ok(offset) = days_str.parse::<i64>() {
+    if let Some((first, rest)) = trimmed.split_once(' ')
+        && let Some((h, m)) = parse_time(rest.trim()) {
+            if let Some(days_str) = first.strip_suffix(['d', 'D'])
+                && let Ok(offset) = days_str.parse::<i64>() {
                     let today = Local::now().date_naive();
                     let max_off = chrono::NaiveDate::MAX
                         .signed_duration_since(today)
@@ -419,12 +416,10 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32, Option<chrono::NaiveDate>)> 
                     let date = today + ChronoDuration::days(offset);
                     return Some((h, m, Some(date)));
                 }
-            }
             if let Ok(date) = NaiveDate::parse_from_str(first, "%Y-%m-%d") {
                 return Some((h, m, Some(date)));
             }
         }
-    }
 
     parse_time(trimmed).map(|(h, m)| (h, m, None))
 }
@@ -490,21 +485,20 @@ pub fn timer_start_ts(id: u64) -> Option<u64> {
 
 /// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
-    if let Some(mut timers) = ACTIVE_TIMERS.lock().ok() {
-        if let Some(entry) = timers.remove(&id) {
+    if let Ok(mut timers) = ACTIVE_TIMERS.lock()
+        && let Some(entry) = timers.remove(&id) {
             if entry.persist {
                 save_persistent_alarms_locked(&timers);
             }
             TIMER_MANAGER.remove(id);
         }
-    }
 }
 
 /// Pause the timer with the given `id` if it exists.
 pub fn pause_timer(id: u64) {
-    if let Some(mut timers) = ACTIVE_TIMERS.lock().ok() {
-        if let Some(t) = timers.get_mut(&id) {
-            if !t.paused {
+    if let Ok(mut timers) = ACTIVE_TIMERS.lock()
+        && let Some(t) = timers.get_mut(&id)
+            && !t.paused {
                 t.remaining = t.deadline.saturating_duration_since(Instant::now());
                 t.paused = true;
                 t.generation = t.generation.wrapping_add(1);
@@ -514,15 +508,13 @@ pub fn pause_timer(id: u64) {
                 TIMER_MANAGER.remove(id);
                 TIMER_MANAGER.wakeup();
             }
-        }
-    }
 }
 
 /// Resume the timer with the given `id` if it is paused.
 pub fn resume_timer(id: u64) {
-    if let Some(mut timers) = ACTIVE_TIMERS.lock().ok() {
-        if let Some(t) = timers.get_mut(&id) {
-            if t.paused {
+    if let Ok(mut timers) = ACTIVE_TIMERS.lock()
+        && let Some(t) = timers.get_mut(&id)
+            && t.paused {
                 t.paused = false;
                 t.deadline = Instant::now() + t.remaining;
                 t.generation = t.generation.wrapping_add(1);
@@ -532,8 +524,6 @@ pub fn resume_timer(id: u64) {
                 }
                 TIMER_MANAGER.wakeup();
             }
-        }
-    }
 }
 
 fn notify(_msg: &str) {}
@@ -575,7 +565,7 @@ fn start_entry(
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let deadline = Instant::now() + duration;
     {
-        if let Some(mut list) = ACTIVE_TIMERS.lock().ok() {
+        if let Ok(mut list) = ACTIVE_TIMERS.lock() {
             list.insert(
                 id,
                 TimerEntry {
@@ -661,8 +651,8 @@ pub struct TimerPlugin;
 impl Plugin for TimerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "timer") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "timer")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "Open timer dialog".into(),
                     desc: "Timer".into(),
@@ -670,9 +660,8 @@ impl Plugin for TimerPlugin {
                     args: None,
                 }];
             }
-        }
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "alarm") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "alarm")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "Open alarm dialog".into(),
                     desc: "Timer".into(),
@@ -680,7 +669,6 @@ impl Plugin for TimerPlugin {
                     args: None,
                 }];
             }
-        }
         if crate::common::strip_prefix_ci(trimmed, "timer list").is_some()
             || crate::common::strip_prefix_ci(trimmed, "alarm list").is_some()
         {

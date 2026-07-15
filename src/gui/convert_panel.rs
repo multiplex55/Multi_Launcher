@@ -236,41 +236,36 @@ impl ConvertPanel {
         }
         match self.category.as_str() {
             "Distance" => {
-                if let Ok(v) = self.input.trim().parse::<f64>() {
-                    if let (Some(ff), Some(tf)) =
+                if let Ok(v) = self.input.trim().parse::<f64>()
+                    && let (Some(ff), Some(tf)) =
                         (distance_factor(&self.from), distance_factor(&self.to))
                     {
                         let res = v * ff / tf;
                         self.result = res.to_string();
                     }
-                }
             }
             "Mass" => {
-                if let Ok(v) = self.input.trim().parse::<f64>() {
-                    if let (Some(ff), Some(tf)) = (mass_factor(&self.from), mass_factor(&self.to)) {
+                if let Ok(v) = self.input.trim().parse::<f64>()
+                    && let (Some(ff), Some(tf)) = (mass_factor(&self.from), mass_factor(&self.to)) {
                         let res = v * ff / tf;
                         self.result = res.to_string();
                     }
-                }
             }
             "Volume" => {
-                if let Ok(v) = self.input.trim().parse::<f64>() {
-                    if let (Some(ff), Some(tf)) =
+                if let Ok(v) = self.input.trim().parse::<f64>()
+                    && let (Some(ff), Some(tf)) =
                         (volume_factor(&self.from), volume_factor(&self.to))
                     {
                         let res = v * ff / tf;
                         self.result = res.to_string();
                     }
-                }
             }
             "Temperature" => {
-                if let Ok(v) = self.input.trim().parse::<f64>() {
-                    if let Some(c) = to_celsius(v, &self.from) {
-                        if let Some(res) = from_celsius(c, &self.to) {
+                if let Ok(v) = self.input.trim().parse::<f64>()
+                    && let Some(c) = to_celsius(v, &self.from)
+                        && let Some(res) = from_celsius(c, &self.to) {
                             self.result = res.to_string();
                         }
-                    }
-                }
             }
             "Base" => {
                 if let Some(res) = convert_base(&self.input, &self.from, &self.to) {

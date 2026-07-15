@@ -144,11 +144,10 @@ pub(crate) enum ActionKind<'a> {
 
 pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     let s = action.action.as_str();
-    if let Some(rest) = s.strip_prefix("shell:add:") {
-        if let Some((name, args)) = rest.split_once('|') {
+    if let Some(rest) = s.strip_prefix("shell:add:")
+        && let Some((name, args)) = rest.split_once('|') {
             return ActionKind::ShellAdd { name, args };
         }
-    }
     if let Some(name) = s.strip_prefix("shell:remove:") {
         return ActionKind::ShellRemove(name);
     }
@@ -168,21 +167,19 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         if rest == "clear" {
             return ActionKind::ClipboardClear;
         }
-        if let Some(idx) = rest.strip_prefix("copy:") {
-            if let Ok(i) = idx.parse::<usize>() {
+        if let Some(idx) = rest.strip_prefix("copy:")
+            && let Ok(i) = idx.parse::<usize>() {
                 return ActionKind::ClipboardCopy(i);
             }
-        }
         return ActionKind::ClipboardText(rest);
     }
     if let Some(spec) = s.strip_prefix("keys:") {
         return ActionKind::Keys(spec);
     }
-    if let Some(idx) = s.strip_prefix("calc:history:") {
-        if let Ok(i) = idx.parse::<usize>() {
+    if let Some(idx) = s.strip_prefix("calc:history:")
+        && let Ok(i) = idx.parse::<usize>() {
             return ActionKind::CalcHistory(i);
         }
-    }
     if let Some(val) = s.strip_prefix("calc:") {
         return ActionKind::Calc {
             result: val,
@@ -204,34 +201,29 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "history:clear" {
         return ActionKind::HistoryClear;
     }
-    if let Some(idx) = s.strip_prefix("history:") {
-        if let Ok(i) = idx.parse::<usize>() {
+    if let Some(idx) = s.strip_prefix("history:")
+        && let Ok(i) = idx.parse::<usize>() {
             return ActionKind::HistoryIndex(i);
         }
-    }
     if let Some(cmd) = s.strip_prefix("system:") {
         return ActionKind::System(cmd);
     }
-    if let Some(pid) = s.strip_prefix("process:kill:") {
-        if let Ok(p) = pid.parse::<u32>() {
+    if let Some(pid) = s.strip_prefix("process:kill:")
+        && let Ok(p) = pid.parse::<u32>() {
             return ActionKind::ProcessKill(p);
         }
-    }
-    if let Some(pid) = s.strip_prefix("process:switch:") {
-        if let Ok(p) = pid.parse::<u32>() {
+    if let Some(pid) = s.strip_prefix("process:switch:")
+        && let Ok(p) = pid.parse::<u32>() {
             return ActionKind::ProcessSwitch(p);
         }
-    }
-    if let Some(hwnd) = s.strip_prefix("window:switch:") {
-        if let Ok(h) = hwnd.parse::<isize>() {
+    if let Some(hwnd) = s.strip_prefix("window:switch:")
+        && let Ok(h) = hwnd.parse::<isize>() {
             return ActionKind::WindowSwitch(h);
         }
-    }
-    if let Some(hwnd) = s.strip_prefix("window:close:") {
-        if let Ok(h) = hwnd.parse::<isize>() {
+    if let Some(hwnd) = s.strip_prefix("window:close:")
+        && let Ok(h) = hwnd.parse::<isize>() {
             return ActionKind::WindowClose(h);
         }
-    }
     if let Some(ids) = s.strip_prefix("tab:switch:") {
         let parts: Vec<i32> = ids
             .split('_')
@@ -247,21 +239,18 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if s == "tab:clear" {
         return ActionKind::BrowserTabClear;
     }
-    if let Some(id) = s.strip_prefix("timer:cancel:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("timer:cancel:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::TimerCancel(i);
         }
-    }
-    if let Some(id) = s.strip_prefix("timer:pause:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("timer:pause:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::TimerPause(i);
         }
-    }
-    if let Some(id) = s.strip_prefix("timer:resume:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("timer:resume:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::TimerResume(i);
         }
-    }
     if let Some(arg) = s.strip_prefix("timer:start:") {
         let (dur, name) = arg.split_once('|').unwrap_or((arg, ""));
         return ActionKind::TimerStart { dur, name };
@@ -270,29 +259,25 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         let (time, name) = arg.split_once('|').unwrap_or((arg, ""));
         return ActionKind::AlarmSet { time, name };
     }
-    if let Some(id) = s.strip_prefix("stopwatch:pause:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("stopwatch:pause:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::StopwatchPause(i);
         }
-    }
-    if let Some(id) = s.strip_prefix("stopwatch:resume:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("stopwatch:resume:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::StopwatchResume(i);
         }
-    }
-    if let Some(id) = s.strip_prefix("stopwatch:stop:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("stopwatch:stop:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::StopwatchStop(i);
         }
-    }
     if let Some(name) = s.strip_prefix("stopwatch:start:") {
         return ActionKind::StopwatchStart { name };
     }
-    if let Some(id) = s.strip_prefix("stopwatch:show:") {
-        if let Ok(i) = id.parse::<u64>() {
+    if let Some(id) = s.strip_prefix("stopwatch:show:")
+        && let Ok(i) = id.parse::<u64>() {
             return ActionKind::StopwatchShow(i);
         }
-    }
     if let Some(rest) = s.strip_prefix("todo:add:") {
         if let Some(payload) = crate::plugins::todo::decode_todo_add_action_payload(rest) {
             return ActionKind::TodoAdd {
@@ -306,8 +291,7 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
         let mut parts = rest.splitn(3, '|');
         if let (Some(text), Some(priority_raw), Some(tags_raw)) =
             (parts.next(), parts.next(), parts.next())
-        {
-            if let Ok(priority) = priority_raw.parse::<u8>() {
+            && let Ok(priority) = priority_raw.parse::<u8>() {
                 let tags = tags_raw
                     .split(',')
                     .map(str::trim)
@@ -321,36 +305,30 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
                     refs: Vec::new(),
                 };
             }
-        }
     }
-    if let Some(rest) = s.strip_prefix("todo:pset:") {
-        if let Some((idx, p)) = rest.split_once('|') {
-            if let (Ok(i), Ok(pr)) = (idx.parse::<usize>(), p.parse::<u8>()) {
+    if let Some(rest) = s.strip_prefix("todo:pset:")
+        && let Some((idx, p)) = rest.split_once('|')
+            && let (Ok(i), Ok(pr)) = (idx.parse::<usize>(), p.parse::<u8>()) {
                 return ActionKind::TodoSetPriority {
                     idx: i,
                     priority: pr,
                 };
             }
-        }
-    }
-    if let Some(rest) = s.strip_prefix("todo:tag:") {
-        if let Some(payload) = crate::plugins::todo::decode_todo_tag_action_payload(rest) {
+    if let Some(rest) = s.strip_prefix("todo:tag:")
+        && let Some(payload) = crate::plugins::todo::decode_todo_tag_action_payload(rest) {
             return ActionKind::TodoSetTags {
                 idx: payload.idx,
                 tags: payload.tags,
             };
         }
-    }
-    if let Some(idx) = s.strip_prefix("todo:remove:") {
-        if let Ok(i) = idx.parse::<usize>() {
+    if let Some(idx) = s.strip_prefix("todo:remove:")
+        && let Ok(i) = idx.parse::<usize>() {
             return ActionKind::TodoRemove(i);
         }
-    }
-    if let Some(idx) = s.strip_prefix("todo:done:") {
-        if let Ok(i) = idx.parse::<usize>() {
+    if let Some(idx) = s.strip_prefix("todo:done:")
+        && let Ok(i) = idx.parse::<usize>() {
             return ActionKind::TodoDone(i);
         }
-    }
     if s == "todo:clear" {
         return ActionKind::TodoClear;
     }
@@ -363,11 +341,10 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(alias) = s.strip_prefix("snippet:edit:") {
         return ActionKind::SnippetEdit(alias);
     }
-    if let Some(rest) = s.strip_prefix("snippet:add:") {
-        if let Some((alias, text)) = rest.split_once('|') {
+    if let Some(rest) = s.strip_prefix("snippet:add:")
+        && let Some((alias, text)) = rest.split_once('|') {
             return ActionKind::SnippetAdd { alias, text };
         }
-    }
     if let Some(rest) = s.strip_prefix("fav:add:") {
         let mut parts = rest.splitn(3, '|');
         let label = parts.next().unwrap_or("");
@@ -382,28 +359,23 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(label) = s.strip_prefix("fav:remove:") {
         return ActionKind::FavRemove(label);
     }
-    if let Some(val) = s.strip_prefix("brightness:set:") {
-        if let Ok(v) = val.parse::<u32>() {
+    if let Some(val) = s.strip_prefix("brightness:set:")
+        && let Ok(v) = val.parse::<u32>() {
             return ActionKind::BrightnessSet(v);
         }
-    }
-    if let Some(val) = s.strip_prefix("volume:set:") {
-        if let Ok(v) = val.parse::<u32>() {
+    if let Some(val) = s.strip_prefix("volume:set:")
+        && let Ok(v) = val.parse::<u32>() {
             return ActionKind::VolumeSet(v);
         }
-    }
-    if let Some(rest) = s.strip_prefix("volume:pid:") {
-        if let Some((pid_str, level_str)) = rest.split_once(':') {
-            if let (Ok(pid), Ok(level)) = (pid_str.parse::<u32>(), level_str.parse::<u32>()) {
+    if let Some(rest) = s.strip_prefix("volume:pid:")
+        && let Some((pid_str, level_str)) = rest.split_once(':')
+            && let (Ok(pid), Ok(level)) = (pid_str.parse::<u32>(), level_str.parse::<u32>()) {
                 return ActionKind::VolumeSetProcess { pid, level };
             }
-        }
-    }
-    if let Some(pid) = s.strip_prefix("volume:pid_toggle_mute:") {
-        if let Ok(pid) = pid.parse::<u32>() {
+    if let Some(pid) = s.strip_prefix("volume:pid_toggle_mute:")
+        && let Ok(pid) = pid.parse::<u32>() {
             return ActionKind::VolumeToggleMuteProcess { pid };
         }
-    }
     if s == "volume:mute_active" {
         return ActionKind::VolumeMuteActive;
     }
@@ -482,11 +454,10 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     if let Some(p) = s.strip_prefix("tempfile:remove:") {
         return ActionKind::TempfileRemove(p);
     }
-    if let Some(rest) = s.strip_prefix("tempfile:alias:") {
-        if let Some((path, alias)) = rest.split_once('|') {
+    if let Some(rest) = s.strip_prefix("tempfile:alias:")
+        && let Some((path, alias)) = rest.split_once('|') {
             return ActionKind::TempfileAlias { path, alias };
         }
-    }
     if let Some(rest) = s.strip_prefix("layout:save:") {
         let (name, flags) = rest.split_once('|').unwrap_or((rest, ""));
         return ActionKind::LayoutSave {

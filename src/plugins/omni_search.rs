@@ -322,11 +322,10 @@ impl OmniSearchPlugin {
                 let mut stream = index.search(automaton).into_stream();
                 let mut seen = HashSet::new();
                 while let Some((_, idx)) = stream.next() {
-                    if seen.insert(idx) {
-                        if let Some(a) = self.actions.get(idx as usize) {
+                    if seen.insert(idx)
+                        && let Some(a) = self.actions.get(idx as usize) {
                             out.push(a.clone());
                         }
-                    }
                 }
             } else {
                 for action in self.actions.iter() {

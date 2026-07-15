@@ -269,14 +269,14 @@ impl HintOverlaySurface {
             return None;
         }
 
-        let mut info = BITMAPINFO {
+        let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: width,
                 biHeight: -height,
                 biPlanes: 1,
                 biBitCount: 32,
-                biCompression: BI_RGB.0 as u32,
+                biCompression: BI_RGB.0,
                 ..Default::default()
             },
             bmiColors: [Default::default()],
@@ -284,7 +284,7 @@ impl HintOverlaySurface {
 
         let mut bits: *mut core::ffi::c_void = ptr::null_mut();
         let dib =
-            unsafe { CreateDIBSection(mem_dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) }
+            unsafe { CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
                 .ok()?;
         if bits.is_null() {
             unsafe {
@@ -519,21 +519,21 @@ impl TrailOverlaySurface {
             return None;
         }
 
-        let mut info = BITMAPINFO {
+        let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: width,
                 biHeight: -height,
                 biPlanes: 1,
                 biBitCount: 32,
-                biCompression: BI_RGB.0 as u32,
+                biCompression: BI_RGB.0,
                 ..Default::default()
             },
             bmiColors: [Default::default()],
         };
         let mut bits: *mut core::ffi::c_void = ptr::null_mut();
         let dib =
-            unsafe { CreateDIBSection(mem_dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) }
+            unsafe { CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
                 .ok()?;
         if bits.is_null() {
             unsafe {

@@ -3,21 +3,13 @@ use crate::plugins::tempfile::set_alias;
 use eframe::egui;
 use std::path::Path;
 
+#[derive(Default)]
 pub struct TempfileAliasDialog {
     pub open: bool,
     path: String,
     alias: String,
 }
 
-impl Default for TempfileAliasDialog {
-    fn default() -> Self {
-        Self {
-            open: false,
-            path: String::new(),
-            alias: String::new(),
-        }
-    }
-}
 
 impl TempfileAliasDialog {
     pub fn open(&mut self, path: &str) {

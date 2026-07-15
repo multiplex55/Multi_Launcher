@@ -759,20 +759,18 @@ pub fn image_files() -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(assets_dir()) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+            if path.is_file()
+                && let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     let ext = ext.to_ascii_lowercase();
                     // Only allow formats supported by `egui`/`image` for rendering.
                     if matches!(
                         ext.as_str(),
                         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
-                    ) {
-                        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    )
+                        && let Some(name) = path.file_name().and_then(|s| s.to_str()) {
                             files.push(name.to_string());
                         }
-                    }
                 }
-            }
         }
     }
     files.sort();
@@ -792,14 +790,13 @@ pub fn unused_assets() -> Vec<String> {
                 let target = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                 // Remove optional width specifier like `path|300`
                 let (path, _) = target.split_once('|').unwrap_or((target, ""));
-                if let Some(stripped) = path.strip_prefix("assets/") {
-                    if let Some(name) = std::path::Path::new(stripped)
+                if let Some(stripped) = path.strip_prefix("assets/")
+                    && let Some(name) = std::path::Path::new(stripped)
                         .file_name()
                         .and_then(|s| s.to_str())
                     {
                         referenced.insert(name.to_string());
                     }
-                }
             }
         }
     }
@@ -949,20 +946,18 @@ pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
     } else {
         format!("# {}\n\n{}", note.title, note.content)
     };
-    if let Some(a) = &note.alias {
-        if !content.lines().any(|l| l.starts_with("Alias:")) {
+    if let Some(a) = &note.alias
+        && !content.lines().any(|l| l.starts_with("Alias:")) {
             let mut lines = content.lines();
             let first = lines.next().unwrap_or("");
             let rest = lines.collect::<Vec<_>>().join("\n");
             content = format!("{first}\nAlias: {a}\n{rest}");
         }
-    }
     note.aliases = extract_aliases(&content);
-    if let Some(alias) = &note.alias {
-        if !note.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
+    if let Some(alias) = &note.alias
+        && !note.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
             note.aliases.insert(0, alias.clone());
         }
-    }
     note.aliases = dedup_aliases(note.aliases.clone());
     note.alias = note.aliases.first().cloned();
     note.tags = extract_tags(&content);
@@ -1000,14 +995,13 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
         } else {
             format!("# {}\n\n{}", note.title, note.content)
         };
-        if let Some(a) = &note.alias {
-            if !content.lines().any(|l| l.starts_with("Alias:")) {
+        if let Some(a) = &note.alias
+            && !content.lines().any(|l| l.starts_with("Alias:")) {
                 let mut lines = content.lines();
                 let first = lines.next().unwrap_or("");
                 let rest = lines.collect::<Vec<_>>().join("\n");
                 content = format!("{first}\nAlias: {a}\n{rest}");
             }
-        }
         std::fs::write(path, content)?;
     }
     for entry in std::fs::read_dir(&dir)? {
@@ -1066,8 +1060,8 @@ impl NotePlugin {
         let _ = std::fs::create_dir_all(&dir);
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res {
-                    if matches!(
+                if let Ok(event) = res
+                    && matches!(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                     ) {
@@ -1081,7 +1075,6 @@ impl NotePlugin {
                             let _ = refresh_cache();
                         }
                     }
-                }
             },
             Config::default(),
         )
@@ -1538,8 +1531,8 @@ impl Plugin for NotePlugin {
             };
 
             match cmd.as_str() {
-                "reload" => {
-                    if args.is_empty() {
+                "reload"
+                    if args.is_empty() => {
                         return vec![Action {
                             label: "Reload notes".into(),
                             desc: "Note".into(),
@@ -1547,9 +1540,8 @@ impl Plugin for NotePlugin {
                             args: None,
                         }];
                     }
-                }
-                "new" | "add" | "create" => {
-                    if !args.is_empty() {
+                "new" | "add" | "create"
+                    if !args.is_empty() => {
                         let mut title = args;
                         let mut template = None;
                         if let Some(idx) = args.to_ascii_lowercase().find("--template") {
@@ -1573,7 +1565,6 @@ impl Plugin for NotePlugin {
                             }];
                         }
                     }
-                }
                 "open" => {
                     let filter = args;
                     return guard
@@ -1676,7 +1667,6 @@ impl Plugin for NotePlugin {
 
                     let mut tags: Vec<(String, usize)> = counts
                         .into_values()
-                        .map(|(display, count)| (display, count))
                         .collect();
 
                     if !filter.is_empty() {
@@ -1718,7 +1708,7 @@ impl Plugin for NotePlugin {
                     let slug = Local::now().format("%Y-%m-%d").to_string();
                     let tmpl = self
                         .templates_enabled
-                        .then(|| ())
+                        .then_some(())
                         .and_then(|_| self.templates.lock().ok())
                         .and_then(|t| {
                             if t.contains_key("today") {
@@ -1786,8 +1776,8 @@ impl Plugin for NotePlugin {
                         })
                         .collect();
                 }
-                "unused" => {
-                    if args.is_empty() {
+                "unused"
+                    if args.is_empty() => {
                         return vec![Action {
                             label: "notes unused".into(),
                             desc: "Note".into(),
@@ -1795,7 +1785,6 @@ impl Plugin for NotePlugin {
                             args: None,
                         }];
                     }
-                }
                 "templates" => {
                     if !self.templates_enabled {
                         return Vec::new();

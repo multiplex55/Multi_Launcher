@@ -349,7 +349,7 @@ pub fn reveal_path(path: &Path) -> anyhow::Result<()> {
 }
 
 pub fn open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {
-    return open_configured_terminal_in_directory(&FileSearchSettings::default(), dir);
+    open_configured_terminal_in_directory(&FileSearchSettings::default(), dir)
 }
 
 pub fn legacy_open_terminal_in_directory(dir: &Path) -> anyhow::Result<()> {

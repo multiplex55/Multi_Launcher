@@ -162,19 +162,17 @@ impl Widget for ProcessesWidget {
             .show_rows(ui, row_height, grouped.len(), |ui, range| {
                 for (desc, switch, kill) in &grouped[range] {
                     ui.horizontal(|ui| {
-                        if let Some(action) = switch {
-                            if ui
+                        if let Some(action) = switch
+                            && ui
                                 .add(egui::Button::new(&action.label).wrap(false))
                                 .clicked()
                             {
                                 clicked = Some(action.clone());
                             }
-                        }
-                        if let Some(action) = kill {
-                            if ui.small_button("Kill").clicked() {
+                        if let Some(action) = kill
+                            && ui.small_button("Kill").clicked() {
                                 clicked = Some(action.clone());
                             }
-                        }
                         ui.add(egui::Label::new(egui::RichText::new(desc).small()).wrap(false));
                     });
                 }

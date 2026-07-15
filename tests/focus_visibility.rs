@@ -42,7 +42,7 @@ fn focus_when_becoming_visible() {
     );
     assert!(changed);
 
-    assert_eq!(visibility.load(Ordering::SeqCst), true);
+    assert!(visibility.load(Ordering::SeqCst));
     assert!(queued_visibility.is_none());
     clear_mock_mouse_position();
 

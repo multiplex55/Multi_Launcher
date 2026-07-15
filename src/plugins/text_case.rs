@@ -548,11 +548,10 @@ impl Plugin for TextCasePlugin {
                     ),
                 ];
 
-                if let Some(case) = specific_case {
-                    if let Some((_, act)) = actions.iter().find(|(name, _)| *name == case) {
+                if let Some(case) = specific_case
+                    && let Some((_, act)) = actions.iter().find(|(name, _)| *name == case) {
                         return vec![act.clone()];
                     }
-                }
 
                 return actions.into_iter().map(|(_, a)| a).collect();
             }

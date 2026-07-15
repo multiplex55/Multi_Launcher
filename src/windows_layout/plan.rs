@@ -39,32 +39,28 @@ pub fn match_score(saved: &LayoutMatch, candidate: &LayoutMatch) -> Option<u8> {
     {
         return None;
     }
-    if let (Some(saved), Some(candidate)) = (&saved.app_id, &candidate.app_id) {
-        if saved.eq_ignore_ascii_case(candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.app_id, &candidate.app_id)
+        && saved.eq_ignore_ascii_case(candidate) {
             return Some(4);
         }
-    }
-    if let (Some(saved), Some(candidate)) = (&saved.process, &candidate.process) {
-        if saved.eq_ignore_ascii_case(candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.process, &candidate.process)
+        && saved.eq_ignore_ascii_case(candidate) {
             return Some(3);
         }
-    }
-    if let (Some(saved), Some(candidate)) = (&saved.class, &candidate.class) {
-        if saved.eq_ignore_ascii_case(candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.class, &candidate.class)
+        && saved.eq_ignore_ascii_case(candidate) {
             return Some(2);
         }
-    }
-    if let (Some(saved), Some(candidate)) = (&saved.title, &candidate.title) {
-        if title_matches(saved, candidate) {
+    if let (Some(saved), Some(candidate)) = (&saved.title, &candidate.title)
+        && title_matches(saved, candidate) {
             return Some(1);
         }
-    }
     None
 }
 
-pub fn restore_plan_select_best<'a>(
+pub fn restore_plan_select_best(
     saved: &LayoutMatch,
-    candidates: &'a [LayoutMatch],
+    candidates: &[LayoutMatch],
 ) -> Option<(usize, u8)> {
     candidates
         .iter()

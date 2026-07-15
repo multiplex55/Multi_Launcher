@@ -309,15 +309,11 @@ pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(vdm) =
             CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
-        {
-            if let Ok(on_current) = vdm.IsWindowOnCurrentVirtualDesktop(hwnd) {
-                if !on_current.as_bool() {
-                    if let Ok(desktop) = vdm.GetWindowDesktopId(GetForegroundWindow()) {
+            && let Ok(on_current) = vdm.IsWindowOnCurrentVirtualDesktop(hwnd)
+                && !on_current.as_bool()
+                    && let Ok(desktop) = vdm.GetWindowDesktopId(GetForegroundWindow()) {
                         let _ = vdm.MoveWindowToDesktop(hwnd, &desktop);
                     }
-                }
-            }
-        }
         CoUninitialize();
     }
 }

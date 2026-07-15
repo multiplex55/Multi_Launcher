@@ -1,6 +1,6 @@
 //! Keyboard handling helpers for the file-search dialog.
 use super::{
-    FileSearchDialogState, FileSearchEscapeAction, FileSearchResultRow, FileSearchRowPayload,
+    FileSearchDialogState, FileSearchEscapeAction, FileSearchRowPayload,
     SelectedFileSearchResultPayload,
 };
 use crate::file_search::actions::{containing_directory, open_path};
@@ -64,27 +64,23 @@ impl FileSearchDialogState {
             ui.ctx().request_repaint();
         }
 
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
                 ui.ctx().request_repaint();
             }
-        }
 
-        if command && !modifiers.shift && ui.input(|i| i.key_pressed(egui::Key::C)) {
-            if let Some(payload) = self.copy_selected_path_payload() {
+        if command && !modifiers.shift && ui.input(|i| i.key_pressed(egui::Key::C))
+            && let Some(payload) = self.copy_selected_path_payload() {
                 self.copy_text_payload("copy selected path", payload);
             }
-        }
-        if command && modifiers.shift && ui.input(|i| i.key_pressed(egui::Key::C)) {
-            if let Some(payload) = self.copy_all_visible_results_payload() {
+        if command && modifiers.shift && ui.input(|i| i.key_pressed(egui::Key::C))
+            && let Some(payload) = self.copy_all_visible_results_payload() {
                 self.copy_text_payload("copy visible results", payload);
             }
-        }
-        if command && ui.input(|i| i.key_pressed(egui::Key::L)) {
-            if let Some(payload) = self.copy_selected_match_line_payload() {
+        if command && ui.input(|i| i.key_pressed(egui::Key::L))
+            && let Some(payload) = self.copy_selected_match_line_payload() {
                 self.copy_text_payload("copy matching line", payload);
             }
-        }
         if command && ui.input(|i| i.key_pressed(egui::Key::F)) {
             self.refine_from_selection(coordinator);
             ui.ctx().request_repaint();

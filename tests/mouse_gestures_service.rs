@@ -156,11 +156,10 @@ impl CursorPositionProvider for TestCursorProvider {
 fn wait_for_hint(state: &HintRecordingState, timeout: Duration) -> Option<String> {
     let start = Instant::now();
     loop {
-        if let Ok(guard) = state.hints.lock() {
-            if let Some(last) = guard.last() {
+        if let Ok(guard) = state.hints.lock()
+            && let Some(last) = guard.last() {
                 return Some(last.clone());
             }
-        }
         if start.elapsed() >= timeout {
             return None;
         }

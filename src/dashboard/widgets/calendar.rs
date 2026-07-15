@@ -15,17 +15,14 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CalendarWidgetMode {
     Day,
+    #[default]
     Week,
     Month,
 }
 
-impl Default for CalendarWidgetMode {
-    fn default() -> Self {
-        CalendarWidgetMode::Week
-    }
-}
 
 fn default_range_days() -> u32 {
     7
@@ -170,12 +167,11 @@ impl CalendarWidget {
         if self.selected_date.is_none() {
             self.selected_date = Some(self.resolve_default_date(now));
         }
-        if self.view_month.is_none() {
-            if let Some(date) = self.selected_date {
+        if self.view_month.is_none()
+            && let Some(date) = self.selected_date {
                 self.view_month =
                     Some(NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date));
             }
-        }
     }
 
     fn is_completed(&self, now: NaiveDateTime, instance: &EventInstance) -> bool {
@@ -380,14 +376,12 @@ impl CalendarWidget {
                     query_override: None,
                 });
             }
-            if self.cfg.show_tags {
-                if let Some(tags) = calendar.event_tags.get(&instance.source_event_id) {
-                    if !tags.is_empty() {
+            if self.cfg.show_tags
+                && let Some(tags) = calendar.event_tags.get(&instance.source_event_id)
+                    && !tags.is_empty() {
                         let tag_label = format!("#{}", tags.join(" #"));
                         ui.label(egui::RichText::new(tag_label).text_style(egui::TextStyle::Small));
                     }
-                }
-            }
             ui.add_space(if self.cfg.compact { 2.0 } else { 6.0 });
         }
         action
@@ -420,16 +414,13 @@ impl Widget for CalendarWidget {
         }
 
         ui.separator();
-        match self.cfg.mode {
-            CalendarWidgetMode::Month => {
-                self.render_month_grid(ui, calendar, selected_date);
-                ui.separator();
-            }
-            _ => {}
+        if self.cfg.mode == CalendarWidgetMode::Month {
+            self.render_month_grid(ui, calendar, selected_date);
+            ui.separator();
         }
 
-        let list_action = self.render_event_list(ui, calendar, selected_date, now, today);
-        list_action
+        
+        self.render_event_list(ui, calendar, selected_date, now, today)
     }
 
     fn on_config_updated(&mut self, settings: &serde_json::Value) {

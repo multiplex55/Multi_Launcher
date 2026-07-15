@@ -10,17 +10,14 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NoteOpenMode {
+    #[default]
     Panel,
     Dialog,
     Query,
 }
 
-impl Default for NoteOpenMode {
-    fn default() -> Self {
-        NoteOpenMode::Panel
-    }
-}
 
 fn default_count() -> usize {
     5

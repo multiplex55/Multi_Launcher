@@ -8,6 +8,7 @@ use std::sync::Arc;
 ///
 /// It tracks the current search filter and manages the nested
 /// [`AddActionDialog`] used when creating new apps.
+#[derive(Default)]
 pub struct ActionsEditor {
     /// Search text used to filter the displayed actions.
     search: String,
@@ -15,14 +16,6 @@ pub struct ActionsEditor {
     dialog: AddActionDialog,
 }
 
-impl Default for ActionsEditor {
-    fn default() -> Self {
-        Self {
-            search: String::new(),
-            dialog: AddActionDialog::default(),
-        }
-    }
-}
 
 impl ActionsEditor {
     /// Open the dialog for editing an existing app.

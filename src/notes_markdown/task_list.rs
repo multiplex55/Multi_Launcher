@@ -95,11 +95,10 @@ fn fenced_code_line_mask(lines: &[LineSpan<'_>]) -> Vec<bool> {
         let fence = fence_info(trimmed);
         if in_fence {
             mask[idx] = true;
-            if let Some((marker, len)) = fence {
-                if marker == fence_marker && len >= fence_len {
+            if let Some((marker, len)) = fence
+                && marker == fence_marker && len >= fence_len {
                     in_fence = false;
                 }
-            }
             continue;
         }
 

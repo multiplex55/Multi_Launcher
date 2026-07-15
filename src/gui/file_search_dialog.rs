@@ -469,8 +469,8 @@ impl FileSearchDialogState {
                     false
                 }
                 SearchEvent::Result { result, .. } => {
-                    if let SearchResult::ContentFile(content) = &result {
-                        if content.truncated {
+                    if let SearchResult::ContentFile(content) = &result
+                        && content.truncated {
                             self.diagnostics
                                 .record(SearchDiagnostic::PerFileContentTruncated {
                                     path: content.path.clone(),
@@ -478,7 +478,6 @@ impl FileSearchDialogState {
                                     displayed_matches: content.matches.len(),
                                 });
                         }
-                    }
                     self.push_result(result);
                     false
                 }
@@ -889,11 +888,10 @@ impl FileSearchDialogState {
             }
             FileSearchScopeMode::Directory => {
                 ui.vertical(|ui| {
-                    if ui.button("Add folder…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    if ui.button("Add folder…").clicked()
+                        && let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.custom_roots.push(path.display().to_string());
                         }
-                    }
                     let mut remove = None;
                     let mut submit_search = false;
                     for (idx, root) in self.custom_roots.iter_mut().enumerate() {
@@ -945,11 +943,9 @@ impl FileSearchDialogState {
             if ui
                 .add_enabled(search_enabled, egui::Button::new("Search"))
                 .clicked()
-            {
-                if self.start_search(coordinator).is_some() {
+                && self.start_search(coordinator).is_some() {
                     ui.ctx().request_repaint();
                 }
-            }
             if ui.button("Cancel").clicked() {
                 self.cancel_search(coordinator);
                 ui.ctx().request_repaint();
@@ -967,22 +963,18 @@ impl FileSearchDialogState {
                     egui::Button::new("Copy selected"),
                 )
                 .clicked()
-            {
-                if let Some(payload) = self.copy_selected_payload() {
+                && let Some(payload) = self.copy_selected_payload() {
                     self.copy_text_payload("copy selected", payload);
                 }
-            }
             if ui
                 .add_enabled(
                     !self.result_rows.is_empty(),
                     egui::Button::new("Copy all visible"),
                 )
                 .clicked()
-            {
-                if let Some(payload) = self.copy_all_visible_results_payload() {
+                && let Some(payload) = self.copy_all_visible_results_payload() {
                     self.copy_text_payload("copy visible results", payload);
                 }
-            }
             if ui
                 .add_enabled(
                     !self.result_rows.is_empty(),
@@ -1033,8 +1025,8 @@ impl FileSearchDialogState {
         }
         ui.horizontal(|ui| {
             ui.colored_label(egui::Color32::YELLOW, "ripgrep (rg) was not found. Native content search will continue; configure rg for faster future searches.");
-            if ui.button("Locate rg.exe").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Executable", &["exe", ""]).pick_file() {
+            if ui.button("Locate rg.exe").clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Executable", &["exe", ""]).pick_file() {
                     match validate_ripgrep_selection(&path) {
                         Ok(abs) => {
                             self.settings.ripgrep_executable_path = abs;
@@ -1046,7 +1038,6 @@ impl FileSearchDialogState {
                         Err(err) => self.warning_error_message = Some(err),
                     }
                 }
-            }
             if ui.button("Dismiss").clicked() {
                 self.dismiss_ripgrep_missing_prompt();
             }
@@ -1613,8 +1604,8 @@ impl FileSearchDialogState {
             });
             ui.close_menu();
         }
-        if let Some(content_match) = first_match.as_ref() {
-            if ui.button("Copy matching line").clicked() {
+        if let Some(content_match) = first_match.as_ref()
+            && ui.button("Copy matching line").clicked() {
                 let line = content_match.line.clone();
                 self.run_result_action("copy matching line", || {
                     clipboard::set_text(&line)?;
@@ -1622,7 +1613,6 @@ impl FileSearchDialogState {
                 });
                 ui.close_menu();
             }
-        }
         if ui.button("Open terminal in containing directory").clicked() {
             let settings = self.settings.clone();
             self.run_result_action("open terminal", || {

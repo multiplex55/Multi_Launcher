@@ -10,7 +10,9 @@ const LEGACY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BindingKind {
+    #[default]
     Execute,
     SetQuery,
     SetQueryAndShow,
@@ -18,11 +20,6 @@ pub enum BindingKind {
     ToggleLauncher,
 }
 
-impl Default for BindingKind {
-    fn default() -> Self {
-        BindingKind::Execute
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BindingEntry {

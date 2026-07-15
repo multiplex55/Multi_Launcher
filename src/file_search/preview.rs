@@ -352,11 +352,10 @@ fn clear_match_ranges(preview: &mut FilePreview) {
 fn apply_match_ranges(preview: &mut FilePreview, selected: Option<&PreviewMatchSelection>) {
     for line in &mut preview.lines {
         line.match_ranges.clear();
-        if let Some(selected) = selected {
-            if selected.line == line.line_number {
+        if let Some(selected) = selected
+            && selected.line == line.line_number {
                 line.match_ranges = match_ranges_for_text(&line.text, selected);
             }
-        }
     }
 }
 

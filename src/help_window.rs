@@ -81,12 +81,10 @@ impl HelpWindow {
                 if ui
                     .checkbox(&mut self.show_examples, "Show examples")
                     .changed()
-                {
-                    if let Ok(mut s) = crate::settings::Settings::load(&app.settings_path) {
+                    && let Ok(mut s) = crate::settings::Settings::load(&app.settings_path) {
                         s.show_examples = self.show_examples;
                         let _ = s.save(&app.settings_path);
                     }
-                }
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
                     ui.text_edit_singleline(&mut self.filter);

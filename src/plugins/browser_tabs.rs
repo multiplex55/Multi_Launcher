@@ -21,17 +21,11 @@ use crate::plugin::Plugin;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+#[derive(Default)]
 pub struct BrowserTabsPlugin {
     recalc_each_query: bool,
 }
 
-impl Default for BrowserTabsPlugin {
-    fn default() -> Self {
-        Self {
-            recalc_each_query: false,
-        }
-    }
-}
 
 mod imp {
     use super::*;
@@ -508,18 +502,12 @@ impl Plugin for BrowserTabsPlugin {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[derive(Default)]
 pub struct BrowserTabsPluginSettings {
     #[serde(default)]
     pub recalc_each_query: bool,
 }
 
-impl Default for BrowserTabsPluginSettings {
-    fn default() -> Self {
-        Self {
-            recalc_each_query: false,
-        }
-    }
-}
 
 pub fn take_cache_messages() -> Vec<String> {
     imp::take_messages()

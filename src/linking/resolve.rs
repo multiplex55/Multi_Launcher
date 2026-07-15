@@ -80,14 +80,13 @@ pub fn resolve_link(
         telemetry.on_resolve_failure(link_id, &err);
         return Err(err);
     }
-    if let Some(anchor) = &parsed.anchor {
-        if !catalog.has_anchor(&key, anchor) {
+    if let Some(anchor) = &parsed.anchor
+        && !catalog.has_anchor(&key, anchor) {
             telemetry.on_broken_anchor(&parsed, anchor);
             let err = ResolveLinkError::InvalidAnchor;
             telemetry.on_resolve_failure(link_id, &err);
             return Err(err);
         }
-    }
     Ok(ResolvedLink {
         canonical: parsed.clone(),
         location: format_link_id(&parsed),

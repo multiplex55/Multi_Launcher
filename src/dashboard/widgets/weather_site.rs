@@ -12,6 +12,7 @@ pub struct WeatherSiteConfig {
     pub url: Option<String>,
 }
 
+#[derive(Default)]
 pub struct WeatherSiteWidget {
     cfg: WeatherSiteConfig,
 }
@@ -29,18 +30,16 @@ impl WeatherSiteWidget {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut WeatherSiteConfig, ctx| {
             let mut changed = false;
             let default_location = ctx.default_location.map(str::to_string);
-            if cfg.location.is_none() {
-                if let Some(loc) = &default_location {
+            if cfg.location.is_none()
+                && let Some(loc) = &default_location {
                     cfg.location = Some(loc.clone());
                     changed = true;
                 }
-            }
-            if cfg.url.is_none() {
-                if let Some(loc) = cfg.location.clone().or_else(|| default_location.clone()) {
+            if cfg.url.is_none()
+                && let Some(loc) = cfg.location.clone().or_else(|| default_location.clone()) {
                     cfg.url = Some(format!("https://www.google.com/search?q=weather+{loc}"));
                     changed = true;
                 }
-            }
             ui.horizontal(|ui| {
                 ui.label("Location");
                 let mut text = cfg.location.clone().unwrap_or_default();
@@ -83,17 +82,10 @@ impl WeatherSiteWidget {
         self.cfg
             .location
             .as_deref()
-            .or_else(|| ctx.default_location)
+            .or(ctx.default_location)
     }
 }
 
-impl Default for WeatherSiteWidget {
-    fn default() -> Self {
-        Self {
-            cfg: WeatherSiteConfig::default(),
-        }
-    }
-}
 
 impl Widget for WeatherSiteWidget {
     fn render(

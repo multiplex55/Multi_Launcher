@@ -235,11 +235,10 @@ fn should_descend(entry: &DirEntry, request: &SearchRequest) -> bool {
     if !request.include_hidden_files && is_hidden(entry.path()) {
         return false;
     }
-    if entry.file_type().is_dir() {
-        if let Some(name) = entry.file_name().to_str() {
+    if entry.file_type().is_dir()
+        && let Some(name) = entry.file_name().to_str() {
             return !request.excluded_directory_names.iter().any(|d| d == name);
         }
-    }
     true
 }
 

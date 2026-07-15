@@ -1239,11 +1239,10 @@ impl NotePanel {
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
         // about focused nodes missing from the accessibility tree.
-        if !open {
-            if let Some(id) = self.last_textedit_id {
+        if !open
+            && let Some(id) = self.last_textedit_id {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
-        }
 
         if self.link_dialog_open {
             let mut open_link = true;
@@ -1948,7 +1947,7 @@ impl NotePanel {
             }
         });
         let rows = self.backlink_rows_for_active_tab();
-        let total_pages = (rows.len() + BACKLINK_PAGE_SIZE - 1) / BACKLINK_PAGE_SIZE;
+        let total_pages = rows.len().div_ceil(BACKLINK_PAGE_SIZE);
         let page_start = self.backlink_page * BACKLINK_PAGE_SIZE;
         let page_end = (page_start + BACKLINK_PAGE_SIZE).min(rows.len());
         if rows.is_empty() {
@@ -1972,11 +1971,10 @@ impl NotePanel {
                             }
                         }
                     }
-                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if let Some(slug) = &row.note_slug {
+                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && let Some(slug) = &row.note_slug {
                             app.open_note_panel(slug, None);
                         }
-                    }
                     ui.horizontal_wrapped(|ui| {
                         ui.small(format!("[{}]", row.type_badge));
                         ui.small(format!("updated {}", row.updated));
@@ -2088,8 +2086,8 @@ impl NotePanel {
         } else {
             self.collapsed_sections.clear();
         }
-        if let Some(target) = self.pending_scroll_target.clone() {
-            if let Some(heading) = self
+        if let Some(target) = self.pending_scroll_target.clone()
+            && let Some(heading) = self
                 .markdown_analysis()
                 .headings
                 .iter()
@@ -2115,7 +2113,6 @@ impl NotePanel {
                 }
                 return;
             }
-        }
         self.render_preview_range(ui, app, ctx, 0..self.note.content.len());
     }
 
@@ -2648,11 +2645,10 @@ impl NotePanel {
             .collect();
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
-        if let Some(first) = self.note.content.lines().next() {
-            if let Some(t) = first.strip_prefix("# ") {
+        if let Some(first) = self.note.content.lines().next()
+            && let Some(t) = first.strip_prefix("# ") {
                 self.note.title = t.to_string();
             }
-        }
         match save_note(&mut self.note, app.note_always_overwrite) {
             Ok(true) => {
                 self.refresh_fast_derived();
@@ -2791,8 +2787,8 @@ impl NotePanel {
                 continue;
             }
 
-            if let Some(rest) = text[cursor..].strip_prefix("[[") {
-                if let Some(end) = rest.find("]]") {
+            if let Some(rest) = text[cursor..].strip_prefix("[[")
+                && let Some(end) = rest.find("]]") {
                     let link_text = &rest[..end];
                     let (target, label) = link_text
                         .split_once('|')
@@ -2818,7 +2814,6 @@ impl NotePanel {
                     cursor += 2 + end + 2;
                     continue;
                 }
-            }
 
             if text[cursor..].starts_with('[')
                 && let Some(label_end) = text[cursor + 1..].find("](")
@@ -3056,12 +3051,11 @@ impl NotePanel {
 
         ui.menu_button("Insert image", |ui| {
             ui.set_min_width(200.0);
-            if ui.button("Upload...").clicked() {
-                if let Some(path) = FileDialog::new()
+            if ui.button("Upload...").clicked()
+                && let Some(path) = FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
                     .pick_file()
-                {
-                    if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                    && let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
                         let dest = assets_dir().join(fname);
                         if let Err(e) = std::fs::copy(&path, &dest) {
                             app.report_error("ui operation", format!("Failed to copy image: {e}"));
@@ -3087,8 +3081,6 @@ impl NotePanel {
                             ui.close_menu();
                         }
                     }
-                }
-            }
             if ui.button("Screenshot...").clicked() {
                 match capture(ScreenshotMode::Region, true) {
                     Ok(path) => {
@@ -3800,8 +3792,8 @@ fn backlink_rows_for_note(
                 )
             })
         });
-        if let Some((needle, reason)) = matched {
-            if matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions) {
+        if let Some((needle, reason)) = matched
+            && matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions) {
                 rows.push(BacklinkRow {
                     title: todo.text.clone(),
                     type_badge: "Todo".to_string(),
@@ -3812,7 +3804,6 @@ fn backlink_rows_for_note(
                     todo_id: Some(todo.id.clone()),
                 });
             }
-        }
     }
 
     for note in notes {

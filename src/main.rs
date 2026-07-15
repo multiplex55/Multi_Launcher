@@ -57,11 +57,10 @@ pub fn request_hotkey_restart(settings: Settings) {
             tracing::error!("failed to lock RESTART_TX: {e}");
         }
     }
-    if let Ok(guard) = EVENT_TX.lock() {
-        if let Some(tx) = guard.as_ref() {
+    if let Ok(guard) = EVENT_TX.lock()
+        && let Some(tx) = guard.as_ref() {
             let _ = tx.send(());
         }
-    }
 }
 
 /// Spawn the GUI on a separate thread.
@@ -184,14 +183,13 @@ fn main() -> anyhow::Result<()> {
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
         settings.enabled_plugins.as_ref(),
     );
-    if let Some(value) = settings.plugin_settings.get("mouse_gestures") {
-        if let Ok(cfg) = serde_json::from_value::<
+    if let Some(value) = settings.plugin_settings.get("mouse_gestures")
+        && let Ok(cfg) = serde_json::from_value::<
             multi_launcher::plugins::mouse_gestures::MouseGestureSettings,
         >(value.clone())
         {
             multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
         }
-    }
     let mut actions_vec = load_actions("actions.json").unwrap_or_default();
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
@@ -262,32 +260,28 @@ fn main() -> anyhow::Result<()> {
             break Ok(());
         }
 
-        if let Some(qt) = &quit_trigger {
-            if qt.take() {
+        if let Some(qt) = &quit_trigger
+            && qt.take() {
                 listener.stop();
 
-                if let Ok(guard) = ctx.lock() {
-                    if let Some(c) = &*guard {
+                if let Ok(guard) = ctx.lock()
+                    && let Some(c) = &*guard {
                         c.send_viewport_cmd(egui::ViewportCommand::Close);
                         c.request_repaint();
                     }
-                }
 
                 let _ = handle.join();
                 break Ok(());
             }
-        }
 
-        if let Some(ht) = &help_trigger {
-            if ht.take() && visibility.load(Ordering::SeqCst) {
+        if let Some(ht) = &help_trigger
+            && ht.take() && visibility.load(Ordering::SeqCst) {
                 help_flag.store(true, Ordering::SeqCst);
-                if let Ok(guard) = ctx.lock() {
-                    if let Some(c) = &*guard {
+                if let Ok(guard) = ctx.lock()
+                    && let Some(c) = &*guard {
                         c.request_repaint();
                     }
-                }
             }
-        }
 
         if let Ok(new_settings) = restart_rx.try_recv() {
             listener.stop();

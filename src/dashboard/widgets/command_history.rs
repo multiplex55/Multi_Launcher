@@ -156,8 +156,8 @@ impl CommandHistoryWidget {
             });
         }
 
-        if let Some(slug) = action_id.strip_prefix("note:open:") {
-            if let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
+        if let Some(slug) = action_id.strip_prefix("note:open:")
+            && let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
                 return Some(Action {
                     label: note.alias.as_ref().unwrap_or(&note.title).clone(),
                     desc: "Note".into(),
@@ -165,13 +165,11 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = action_id
             .strip_prefix("clipboard:copy:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(entry) = snapshot.clipboard_history.get(idx) {
+            && let Some(entry) = snapshot.clipboard_history.get(idx) {
                 return Some(Action {
                     label: entry.clone(),
                     desc: "Clipboard".into(),
@@ -179,13 +177,11 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = action_id
             .strip_prefix("todo:done:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(todo) = snapshot.todos.get(idx) {
+            && let Some(todo) = snapshot.todos.get(idx) {
                 return Some(Action {
                     label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
                     desc: "Todo".into(),
@@ -193,13 +189,11 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = action_id
             .strip_prefix("todo:edit:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(todo) = snapshot.todos.get(idx) {
+            && let Some(todo) = snapshot.todos.get(idx) {
                 return Some(Action {
                     label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
                     desc: "Todo".into(),
@@ -207,13 +201,11 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
         if let Some(idx) = action_id
             .strip_prefix("todo:remove:")
             .and_then(|s| s.parse::<usize>().ok())
-        {
-            if let Some(todo) = snapshot.todos.get(idx) {
+            && let Some(todo) = snapshot.todos.get(idx) {
                 return Some(Action {
                     label: format!("Remove todo {}", todo.text),
                     desc: "Todo".into(),
@@ -221,7 +213,6 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
         for snippet in snapshot.snippets.iter() {
             if action_id == format!("clipboard:{}", snippet.text) {
@@ -234,8 +225,8 @@ impl CommandHistoryWidget {
             }
         }
 
-        if let Some(alias) = action_id.strip_prefix("snippet:edit:") {
-            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+        if let Some(alias) = action_id.strip_prefix("snippet:edit:")
+            && snapshot.snippets.iter().any(|s| s.alias == alias) {
                 return Some(Action {
                     label: format!("Edit snippet {alias}"),
                     desc: "Snippet".into(),
@@ -243,10 +234,9 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
-        if let Some(alias) = action_id.strip_prefix("snippet:remove:") {
-            if snapshot.snippets.iter().any(|s| s.alias == alias) {
+        if let Some(alias) = action_id.strip_prefix("snippet:remove:")
+            && snapshot.snippets.iter().any(|s| s.alias == alias) {
                 return Some(Action {
                     label: format!("Remove snippet {alias}"),
                     desc: "Snippet".into(),
@@ -254,7 +244,6 @@ impl CommandHistoryWidget {
                     args: None,
                 });
             }
-        }
 
         None
     }

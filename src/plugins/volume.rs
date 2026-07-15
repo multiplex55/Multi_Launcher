@@ -13,8 +13,8 @@ impl Plugin for VolumePlugin {
             Lazy::new(|| Mutex::new((System::new_all(), Instant::now())));
         const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
         let trimmed = query.trim();
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol") {
-            if rest.is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol")
+            && rest.is_empty() {
                 return vec![Action {
                     label: "vol: edit volume".into(),
                     desc: "Volume".into(),
@@ -22,9 +22,8 @@ impl Plugin for VolumePlugin {
                     args: None,
                 }];
             }
-        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol ") {
-            let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+            let parts: Vec<&str> = rest.split_whitespace().collect();
             match parts.as_slice() {
                 ["ma"] => {
                     return vec![Action {
@@ -35,8 +34,8 @@ impl Plugin for VolumePlugin {
                     }];
                 }
                 [level] => {
-                    if let Ok(val) = level.parse::<u8>() {
-                        if val <= 100 {
+                    if let Ok(val) = level.parse::<u8>()
+                        && val <= 100 {
                             return vec![Action {
                                 label: format!("Set volume to {val}%"),
                                 desc: "Volume".into(),
@@ -44,12 +43,10 @@ impl Plugin for VolumePlugin {
                                 args: None,
                             }];
                         }
-                    }
                 }
                 ["pid", pid_str, level_str] => {
                     if let (Ok(pid), Ok(level)) = (pid_str.parse::<u32>(), level_str.parse::<u32>())
-                    {
-                        if level <= 100 {
+                        && level <= 100 {
                             return vec![Action {
                                 label: format!("Set PID {pid} volume to {level}%"),
                                 desc: "Volume".into(),
@@ -57,11 +54,10 @@ impl Plugin for VolumePlugin {
                                 args: None,
                             }];
                         }
-                    }
                 }
                 ["name", exe, level_str] => {
-                    if let Ok(level) = level_str.parse::<u32>() {
-                        if level <= 100 {
+                    if let Ok(level) = level_str.parse::<u32>()
+                        && level <= 100 {
                             let pid_opt = {
                                 let mut guard = match SYSTEM_CACHE.lock() {
                                     Ok(guard) => guard,
@@ -90,7 +86,6 @@ impl Plugin for VolumePlugin {
                                 }];
                             }
                         }
-                    }
                 }
                 _ => {}
             }

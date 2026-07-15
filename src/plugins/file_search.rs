@@ -14,17 +14,11 @@ use eframe::egui;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct FileSearchPlugin {
     settings: FileSearchSettings,
 }
 
-impl Default for FileSearchPlugin {
-    fn default() -> Self {
-        Self {
-            settings: FileSearchSettings::default(),
-        }
-    }
-}
 
 impl Plugin for FileSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
@@ -250,11 +244,10 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
         .and_then(|resolution| resolution.version.as_ref().map(|_| resolution.path.clone()))
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
     ui.add_enabled_ui(open_folder_path.is_some(), |ui| {
-        if ui.button("Open folder").clicked() {
-            if let Some(folder) = open_folder_path.as_ref() {
+        if ui.button("Open folder").clicked()
+            && let Some(folder) = open_folder_path.as_ref() {
                 let _ = open::that(folder);
             }
-        }
     });
 
     if let Some(resolution) = display_resolution {

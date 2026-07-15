@@ -124,12 +124,10 @@ impl MultiManagerState {
         if self
             .dirty_since
             .is_some_and(|dirty_since| dirty_since.elapsed() >= self.save_debounce)
-        {
-            if let Err(err) = self.save() {
+            && let Err(err) = self.save() {
                 tracing::error!(error = %err, "failed to auto-save MultiManager workspaces");
                 self.last_save_attempt = Some(Instant::now());
             }
-        }
     }
 
     pub fn validate_capture_state_debug(&self) {
@@ -205,12 +203,11 @@ pub(crate) fn capture_state_invariant_violations(
         violations.push("pending_capture requires an active capture session or queued capture");
     }
 
-    if let (Some(pending), Some(queued)) = (pending_capture, queued_capture) {
-        if capture_action_target(pending) != capture_action_target(queued) {
+    if let (Some(pending), Some(queued)) = (pending_capture, queued_capture)
+        && capture_action_target(pending) != capture_action_target(queued) {
             violations
                 .push("queued_capture must not coexist with unrelated active pending_capture");
         }
-    }
 
     violations
 }

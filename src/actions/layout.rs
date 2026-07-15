@@ -533,7 +533,7 @@ fn filter_layout_by_groups(layout: &Layout, only_groups: &[String]) -> Layout {
         .windows
         .iter()
         .filter(|window| {
-            window.group.as_deref().map_or(false, |group| {
+            window.group.as_deref().is_some_and(|group| {
                 let group_lower = group.to_lowercase();
                 only_groups
                     .iter()

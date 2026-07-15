@@ -121,10 +121,7 @@ impl GestureTracker {
             return None;
         }
 
-        let dir = match direction_from_delta(dx, dy, self.dir_mode) {
-            Some(dir) => dir,
-            None => return None,
-        };
+        let dir = direction_from_delta(dx, dy, self.dir_mode)?;
 
         match self.last_dir {
             Some(last_dir) if last_dir == dir => {

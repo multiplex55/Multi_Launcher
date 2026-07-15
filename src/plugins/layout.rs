@@ -258,8 +258,8 @@ impl Plugin for LayoutPlugin {
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "show") {
             let (name, flags) = parse_name_and_flags(rest.trim());
             if let Ok(store) = load_layouts(layouts_config_path()) {
-                if !name.is_empty() {
-                    if let Some(layout) = get_layout(&store, &name) {
+                if !name.is_empty()
+                    && let Some(layout) = get_layout(&store, &name) {
                         let action = build_action(format!("layout:show:{}", layout.name), &flags);
                         let layout_name = layout.name.as_str();
                         return layout
@@ -296,7 +296,6 @@ impl Plugin for LayoutPlugin {
                             })
                             .collect();
                     }
-                }
 
                 let filter = name.to_lowercase();
                 return store
@@ -316,8 +315,8 @@ impl Plugin for LayoutPlugin {
             return Vec::new();
         }
 
-        if let Some(rest) = crate::common::strip_prefix_ci(rest, "edit") {
-            if rest.trim().is_empty() {
+        if let Some(rest) = crate::common::strip_prefix_ci(rest, "edit")
+            && rest.trim().is_empty() {
                 return vec![Action {
                     label: format!("{config_label} ({config_desc})"),
                     desc: "Layout config".into(),
@@ -325,7 +324,6 @@ impl Plugin for LayoutPlugin {
                     args: None,
                 }];
             }
-        }
 
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "rm") {
             let (name, flags) = parse_name_and_flags(rest.trim());

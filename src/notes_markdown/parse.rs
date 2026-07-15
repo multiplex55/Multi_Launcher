@@ -51,15 +51,14 @@ pub(crate) fn line_spans(content: &str) -> Vec<LineSpan<'_>> {
         spans.push(LineSpan { text, start, end });
         start = end;
     }
-    if start < content.len() || content.is_empty() {
-        if !content.is_empty() {
+    if (start < content.len() || content.is_empty())
+        && !content.is_empty() {
             spans.push(LineSpan {
                 text: &content[start..],
                 start,
                 end: content.len(),
             });
         }
-    }
     spans
 }
 
@@ -79,11 +78,10 @@ fn code_line_mask(lines: &[LineSpan<'_>]) -> Vec<bool> {
         let fence = fence_info(trimmed);
         if in_fence {
             mask[idx] = true;
-            if let Some((marker, len)) = fence {
-                if marker == fence_marker && len >= fence_len {
+            if let Some((marker, len)) = fence
+                && marker == fence_marker && len >= fence_len {
                     in_fence = false;
                 }
-            }
             continue;
         }
 

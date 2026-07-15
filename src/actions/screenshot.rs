@@ -68,11 +68,10 @@ where
 {
     let start = Instant::now();
     loop {
-        if let Some(cur) = get_image() {
-            if old.as_ref() != Some(&cur) {
+        if let Some(cur) = get_image()
+            && old.as_ref() != Some(&cur) {
                 return Ok(cur);
             }
-        }
         if start.elapsed() > timeout {
             anyhow::bail!(ScreenshotCaptureError::RegionSelectionCancelled);
         }

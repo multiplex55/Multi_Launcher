@@ -68,7 +68,7 @@ pub fn save_macros(path: &str, macros: &[MacroEntry]) -> anyhow::Result<()> {
 }
 
 pub fn take_step_messages() -> Vec<String> {
-    if let Some(mut list) = STEP_MESSAGES.lock().ok() {
+    if let Ok(mut list) = STEP_MESSAGES.lock() {
         let out = list.clone();
         list.clear();
         out
@@ -78,7 +78,7 @@ pub fn take_step_messages() -> Vec<String> {
 }
 
 pub fn take_error_messages() -> Vec<String> {
-    if let Some(mut list) = ERROR_MESSAGES.lock().ok() {
+    if let Ok(mut list) = ERROR_MESSAGES.lock() {
         let out = list.clone();
         list.clear();
         out
@@ -124,8 +124,8 @@ pub fn search_first_action(query: &str) -> Option<Action> {
     let pm_cell = PLUGIN_MANAGER.get_or_init(|| Mutex::new(PluginManager::new()));
     let mut pm = pm_cell.lock().ok()?;
     let hash_cell = SETTINGS_HASH.get_or_init(|| Mutex::new(0));
-    if let Ok(mut cached_hash) = hash_cell.lock() {
-        if *cached_hash != settings_hash {
+    if let Ok(mut cached_hash) = hash_cell.lock()
+        && *cached_hash != settings_hash {
             pm.reload_from_dirs(
                 &dirs,
                 settings.clipboard_limit,
@@ -136,7 +136,6 @@ pub fn search_first_action(query: &str) -> Option<Action> {
             );
             *cached_hash = settings_hash;
         }
-    }
 
     pm.search_filtered(
         query,
@@ -153,11 +152,10 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
         for (i, step) in entry.steps.iter().enumerate() {
             let mut command = step.command.trim().to_string();
             let mut args = step.args.clone();
-            if let Some(ref s) = args {
-                if s.trim().is_empty() {
+            if let Some(ref s) = args
+                && s.trim().is_empty() {
                     args = None;
                 }
-            }
 
             let mut query = if let Some(q) = command.strip_prefix("query:") {
                 q.to_string()
@@ -193,11 +191,11 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
             };
             if let Err(e) = launch_action(&act) {
                 tracing::error!(?e, "failed to run macro step");
-                if let Some(mut errs) = ERROR_MESSAGES.lock().ok() {
+                if let Ok(mut errs) = ERROR_MESSAGES.lock() {
                     errs.push(format!("Step {} error: {e}", i + 1));
                 }
             }
-            if let Some(mut msgs) = STEP_MESSAGES.lock().ok() {
+            if let Ok(mut msgs) = STEP_MESSAGES.lock() {
                 msgs.push(format!("Step {}: {}", i + 1, step.label));
             }
             let delay = match entry.auto_delay_ms {
@@ -228,11 +226,10 @@ impl MacrosPlugin {
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
             move || {
-                if let Ok(list) = load_macros(&watch_path) {
-                    if let Ok(mut lock) = data_clone.lock() {
+                if let Ok(list) = load_macros(&watch_path)
+                    && let Ok(mut lock) = data_clone.lock() {
                         *lock = list;
                     }
-                }
             }
         })
         .ok();

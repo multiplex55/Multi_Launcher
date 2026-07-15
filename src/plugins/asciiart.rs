@@ -31,9 +31,9 @@ impl Plugin for AsciiArtPlugin {
         const PREFIX: &str = "ascii ";
         if let Some(rest) = crate::common::strip_prefix_ci(query, PREFIX) {
             let text = rest.trim();
-            if !text.is_empty() {
-                if let Some(font) = &self.font {
-                    if let Some(fig) = font.convert(text) {
+            if !text.is_empty()
+                && let Some(font) = &self.font
+                    && let Some(fig) = font.convert(text) {
                         let art = fig.to_string();
                         return vec![Action {
                             label: art.clone(),
@@ -42,8 +42,6 @@ impl Plugin for AsciiArtPlugin {
                             args: None,
                         }];
                     }
-                }
-            }
         }
         Vec::new()
     }

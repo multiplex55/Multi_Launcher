@@ -79,15 +79,11 @@ pub fn get_system_volume() -> Option<u8> {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if let Ok(enm) =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            {
-                if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                    if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                        if let Ok(val) = vol.GetMasterVolumeLevelScalar() {
+                && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                    && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                        && let Ok(val) = vol.GetMasterVolumeLevelScalar() {
                             percent = Some((val * 100.0).round() as u8);
                         }
-                    }
-                }
-            }
             CoUninitialize();
             percent
         }
@@ -115,15 +111,11 @@ pub fn get_system_mute() -> Option<bool> {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if let Ok(enm) =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            {
-                if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                    if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                        if let Ok(val) = vol.GetMute() {
+                && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                    && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                        && let Ok(val) = vol.GetMute() {
                             muted = Some(val.as_bool());
                         }
-                    }
-                }
-            }
             CoUninitialize();
             muted
         }
@@ -232,7 +224,7 @@ pub fn set_power_plan(guid: &str) -> anyhow::Result<()> {
         use std::process::Command;
 
         Command::new("powercfg").arg("/S").arg(guid).status()?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -341,11 +333,11 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
             let psa = SafeArrayCreateVector(VT_I4, 0, runtime_id.len() as u32);
             if !psa.is_null() {
                 for (i, v) in runtime_id.iter().enumerate() {
-                    let mut idx = i as i32;
+                    let idx = i as i32;
                     let val = *v;
                     let _ = SafeArrayPutElement(
                         psa,
-                        &mut idx,
+                        &idx,
                         &val as *const _ as *const core::ffi::c_void,
                     );
                 }
@@ -354,19 +346,19 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                 if let Ok(cond) = automation.CreatePropertyCondition(
                     UIA_ControlTypePropertyId,
                     &VARIANT::from(UIA_TabItemControlTypeId.0),
-                ) {
-                    if let Ok(root) = automation.GetRootElement() {
-                        if let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond) {
-                            if let Ok(count) = tabs.Length() {
+                )
+                    && let Ok(root) = automation.GetRootElement()
+                        && let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond)
+                            && let Ok(count) = tabs.Length() {
                                 'outer: for i in 0..count {
-                                    if let Ok(elem) = tabs.GetElement(i) {
-                                        if let Ok(elem_id) = elem.GetRuntimeId() {
-                                            if !elem_id.is_null() {
+                                    if let Ok(elem) = tabs.GetElement(i)
+                                        && let Ok(elem_id) = elem.GetRuntimeId()
+                                            && !elem_id.is_null() {
                                                 if let Ok(same) = automation.CompareRuntimeIds(
                                                     elem_id as *const _,
                                                     psa as *const _,
-                                                ) {
-                                                    if same.as_bool() {
+                                                )
+                                                    && same.as_bool() {
                                                         let mut activated = false;
                                                         if let Ok(sel) = elem
                                                                 .GetCurrentPatternAs::<
@@ -413,8 +405,8 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                             }
                                                         }
 
-                                                        if !activated {
-                                                            if let Ok(rect) =
+                                                        if !activated
+                                                            && let Ok(rect) =
                                                                 elem.CurrentBoundingRectangle()
                                                             {
                                                                 let x =
@@ -427,20 +419,18 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                                     .unwrap_or(HWND(
                                                                         std::ptr::null_mut(),
                                                                     ));
-                                                                if hwnd.0.is_null() {
-                                                                    if let Ok(walker) =
+                                                                if hwnd.0.is_null()
+                                                                    && let Ok(walker) =
                                                                         automation.RawViewWalker()
                                                                     {
                                                                         let mut cur = elem.clone();
                                                                         loop {
                                                                             if let Ok(h) = cur
                                                                                     .CurrentNativeWindowHandle()
-                                                                                {
-                                                                                    if !h.0.is_null() {
+                                                                                    && !h.0.is_null() {
                                                                                         hwnd = h;
                                                                                         break;
                                                                                     }
-                                                                                }
                                                                             if let Ok(p) = walker
                                                                                 .GetParentElement(
                                                                                     &cur,
@@ -452,7 +442,6 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                                             }
                                                                         }
                                                                     }
-                                                                }
                                                                 if !hwnd.0.is_null() {
                                                                     super::super::window_manager::force_restore_and_foreground(hwnd);
                                                                 }
@@ -500,23 +489,16 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                                                                     "simulated click for browser tab"
                                                                 );
                                                             }
-                                                        }
 
                                                         let _ = elem.SetFocus();
                                                         let _ =
                                                             SafeArrayDestroy(elem_id as *const _);
                                                         break 'outer;
                                                     }
-                                                }
                                                 let _ = SafeArrayDestroy(elem_id as *const _);
                                             }
-                                        }
-                                    }
                                 }
                             }
-                        }
-                    }
-                }
                 let _ = SafeArrayDestroy(psa as *const _);
             }
         }

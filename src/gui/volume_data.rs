@@ -35,15 +35,11 @@ pub fn get_system_volume() -> Option<u8> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                    if let Ok(val) = vol.GetMasterVolumeLevelScalar() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                    && let Ok(val) = vol.GetMasterVolumeLevelScalar() {
                         percent = Some((val * 100.0).round() as u8);
                     }
-                }
-            }
-        }
         CoUninitialize();
         percent
     }
@@ -64,21 +60,20 @@ pub fn get_process_volumes() -> Vec<ProcessVolume> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                    if let Ok(list) = manager.GetSessionEnumerator() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+                    && let Ok(list) = manager.GetSessionEnumerator() {
                         let count = list.GetCount().unwrap_or(0);
                         let sys = System::new_all();
                         for i in 0..count {
-                            if let Ok(ctrl) = list.GetSession(i) {
-                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
-                                    if let Ok(pid) = c2.GetProcessId() {
+                            if let Ok(ctrl) = list.GetSession(i)
+                                && let Ok(c2) = ctrl.cast::<IAudioSessionControl2>()
+                                    && let Ok(pid) = c2.GetProcessId() {
                                         if pid == 0 {
                                             continue;
                                         }
-                                        if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() {
-                                            if let Ok(val) = vol.GetMasterVolume() {
+                                        if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>()
+                                            && let Ok(val) = vol.GetMasterVolume() {
                                                 let name = sys
                                                     .process(sysinfo::Pid::from_u32(pid))
                                                     .map(|p| p.name().to_string_lossy().to_string())
@@ -94,15 +89,9 @@ pub fn get_process_volumes() -> Vec<ProcessVolume> {
                                                     muted,
                                                 });
                                             }
-                                        }
                                     }
-                                }
-                            }
                         }
                     }
-                }
-            }
-        }
         CoUninitialize();
     }
     entries

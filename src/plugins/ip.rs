@@ -22,8 +22,8 @@ impl Plugin for IpPlugin {
                 }
             }
         }
-        if let Ok(resp) = reqwest::blocking::get("https://api.ipify.org") {
-            if let Ok(text) = resp.text() {
+        if let Ok(resp) = reqwest::blocking::get("https://api.ipify.org")
+            && let Ok(text) = resp.text() {
                 let ip = text.trim();
                 if !ip.is_empty() {
                     out.push(Action {
@@ -34,7 +34,6 @@ impl Plugin for IpPlugin {
                     });
                 }
             }
-        }
         out
     }
 

@@ -11,14 +11,11 @@ pub(crate) fn set_system_volume(percent: u32) {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
                     let _ =
                         vol.SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null());
                 }
-            }
-        }
         CoUninitialize();
     }
 }
@@ -36,15 +33,11 @@ pub(crate) fn toggle_system_mute() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                    if let Ok(val) = vol.GetMute() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                    && let Ok(val) = vol.GetMute() {
                         let _ = vol.SetMute(!val.as_bool(), std::ptr::null());
                     }
-                }
-            }
-        }
         CoUninitialize();
     }
 }
@@ -164,29 +157,22 @@ pub(crate) fn mute_active_window() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                    if let Ok(list) = manager.GetSessionEnumerator() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+                    && let Ok(list) = manager.GetSessionEnumerator() {
                         let count = list.GetCount().unwrap_or(0);
                         for i in 0..count {
-                            if let Ok(ctrl) = list.GetSession(i) {
-                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
-                                    if let Ok(session_pid) = c2.GetProcessId() {
-                                        if session_pid == pid {
+                            if let Ok(ctrl) = list.GetSession(i)
+                                && let Ok(c2) = ctrl.cast::<IAudioSessionControl2>()
+                                    && let Ok(session_pid) = c2.GetProcessId()
+                                        && session_pid == pid {
                                             if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() {
                                                 let _ = vol.SetMute(true, std::ptr::null());
                                             }
                                             break;
                                         }
-                                    }
-                                }
-                            }
                         }
                     }
-                }
-            }
-        }
         CoUninitialize();
     }
 }
@@ -206,16 +192,15 @@ pub(crate) fn set_process_volume(pid: u32, level: u32) {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                    if let Ok(list) = manager.GetSessionEnumerator() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+                    && let Ok(list) = manager.GetSessionEnumerator() {
                         let count = list.GetCount().unwrap_or(0);
                         for i in 0..count {
-                            if let Ok(ctrl) = list.GetSession(i) {
-                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
-                                    if let Ok(session_pid) = c2.GetProcessId() {
-                                        if session_pid == pid {
+                            if let Ok(ctrl) = list.GetSession(i)
+                                && let Ok(c2) = ctrl.cast::<IAudioSessionControl2>()
+                                    && let Ok(session_pid) = c2.GetProcessId()
+                                        && session_pid == pid {
                                             if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() {
                                                 let _ = vol.SetMasterVolume(
                                                     level as f32 / 100.0,
@@ -224,14 +209,8 @@ pub(crate) fn set_process_volume(pid: u32, level: u32) {
                                             }
                                             break;
                                         }
-                                    }
-                                }
-                            }
                         }
                     }
-                }
-            }
-        }
         CoUninitialize();
     }
 }
@@ -250,31 +229,23 @@ pub(crate) fn toggle_process_mute(pid: u32) {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                    if let Ok(list) = manager.GetSessionEnumerator() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+                    && let Ok(list) = manager.GetSessionEnumerator() {
                         let count = list.GetCount().unwrap_or(0);
                         for i in 0..count {
-                            if let Ok(ctrl) = list.GetSession(i) {
-                                if let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() {
-                                    if let Ok(session_pid) = c2.GetProcessId() {
-                                        if session_pid == pid {
-                                            if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() {
-                                                if let Ok(m) = vol.GetMute() {
+                            if let Ok(ctrl) = list.GetSession(i)
+                                && let Ok(c2) = ctrl.cast::<IAudioSessionControl2>()
+                                    && let Ok(session_pid) = c2.GetProcessId()
+                                        && session_pid == pid {
+                                            if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>()
+                                                && let Ok(m) = vol.GetMute() {
                                                     let _ = vol.SetMute(!m, std::ptr::null());
                                                 }
-                                            }
                                             break;
                                         }
-                                    }
-                                }
-                            }
                         }
                     }
-                }
-            }
-        }
         CoUninitialize();
     }
 }

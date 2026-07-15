@@ -467,8 +467,8 @@ impl ScreenshotEditor {
     }
 
     fn commit_active_text(&mut self) {
-        if let Some(active) = self.active_text.take() {
-            if !active.text.is_empty() {
+        if let Some(active) = self.active_text.take()
+            && !active.text.is_empty() {
                 self.push_layer(MarkupLayer::Text(MarkupText {
                     position: active.position,
                     text: active.text,
@@ -476,7 +476,6 @@ impl ScreenshotEditor {
                     size: active.size,
                 }));
             }
-        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -506,8 +505,8 @@ impl ScreenshotEditor {
                         };
                         match res {
                             Ok(()) => {
-                                if let Some(path) = saved_to {
-                                    if app.enable_toasts {
+                                if let Some(path) = saved_to
+                                    && app.enable_toasts {
                                         app.add_toast(Toast {
                                             text: format!("Saved screenshot {}", path.display())
                                                 .into(),
@@ -516,7 +515,6 @@ impl ScreenshotEditor {
                                                 .duration_in_seconds(app.toast_duration as f64),
                                         });
                                     }
-                                }
                             }
                             Err(e) => {
                                 app.report_error(
@@ -690,25 +688,22 @@ impl ScreenshotEditor {
                     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
-                if response.drag_started_by(PointerButton::Secondary) {
-                    if let Some(pos) = response.interact_pointer_pos() {
+                if response.drag_started_by(PointerButton::Secondary)
+                    && let Some(pos) = response.interact_pointer_pos() {
                         self.crop_start = Some(to_img(pos));
                         self.crop_rect = None;
                     }
-                }
-                if response.dragged_by(PointerButton::Secondary) {
-                    if let Some(start) = self.crop_start {
-                        if let Some(pos) = response.interact_pointer_pos() {
+                if response.dragged_by(PointerButton::Secondary)
+                    && let Some(start) = self.crop_start
+                        && let Some(pos) = response.interact_pointer_pos() {
                             self.crop_rect = Some(Rect::from_two_pos(start, to_img(pos)));
                         }
-                    }
-                }
                 if response.drag_stopped_by(PointerButton::Secondary) {
                     self.crop_start = None;
                 }
 
-                if response.drag_started_by(PointerButton::Primary) {
-                    if let Some(pos) = response.interact_pointer_pos() {
+                if response.drag_started_by(PointerButton::Primary)
+                    && let Some(pos) = response.interact_pointer_pos() {
                         let start = to_img(pos);
                         match self.tool {
                             MarkupTool::Pen => {
@@ -736,9 +731,8 @@ impl ScreenshotEditor {
                             }
                         }
                     }
-                }
-                if response.dragged_by(PointerButton::Primary) {
-                    if let Some(pos) = response.interact_pointer_pos() {
+                if response.dragged_by(PointerButton::Primary)
+                    && let Some(pos) = response.interact_pointer_pos() {
                         let current = to_img(pos);
                         match self.tool {
                             MarkupTool::Pen => {
@@ -752,15 +746,13 @@ impl ScreenshotEditor {
                             MarkupTool::Text => {}
                         }
                     }
-                }
                 if response.drag_stopped_by(PointerButton::Primary) {
                     match self.tool {
                         MarkupTool::Pen => {
-                            if let Some(stroke) = self.active_stroke.take() {
-                                if stroke.points.len() > 1 {
+                            if let Some(stroke) = self.active_stroke.take()
+                                && stroke.points.len() > 1 {
                                     self.push_layer(MarkupLayer::Stroke(stroke));
                                 }
-                            }
                         }
                         MarkupTool::Arrow => {
                             if let (Some(start), Some(end)) =
@@ -896,8 +888,8 @@ impl ScreenshotEditor {
                         );
                     }
                 }
-                if let Some(active) = &self.active_text {
-                    if !active.text.is_empty() {
+                if let Some(active) = &self.active_text
+                    && !active.text.is_empty() {
                         painter.text(
                             to_screen(active.position),
                             egui::Align2::LEFT_TOP,
@@ -906,7 +898,6 @@ impl ScreenshotEditor {
                             active.color,
                         );
                     }
-                }
             });
         self.open = open;
     }

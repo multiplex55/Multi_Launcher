@@ -215,13 +215,11 @@ fn parse_vk(token: &str) -> anyhow::Result<VIRTUAL_KEY> {
     }
 
     // function keys: F1..F24
-    if (t.len() == 2 || t.len() == 3) && (t.starts_with('F') || t.starts_with('f')) {
-        if let Ok(n) = t[1..].parse::<u8>() {
-            if (1..=24).contains(&n) {
+    if (t.len() == 2 || t.len() == 3) && (t.starts_with('F') || t.starts_with('f'))
+        && let Ok(n) = t[1..].parse::<u8>()
+            && (1..=24).contains(&n) {
                 return Ok(VIRTUAL_KEY(0x6F + n as u16)); // VK_F1=0x70
             }
-        }
-    }
 
     // single ASCII letter/digit
     if t.len() == 1 {

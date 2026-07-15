@@ -3,21 +3,13 @@ use crate::plugins::bookmarks::{append_bookmark, set_alias, BOOKMARKS_FILE};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
+#[derive(Default)]
 pub struct AddBookmarkDialog {
     pub open: bool,
     url: String,
     alias: String,
 }
 
-impl Default for AddBookmarkDialog {
-    fn default() -> Self {
-        Self {
-            open: false,
-            url: String::new(),
-            alias: String::new(),
-        }
-    }
-}
 
 impl AddBookmarkDialog {
     pub fn open(&mut self) {

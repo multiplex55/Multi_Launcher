@@ -23,6 +23,7 @@ fn default_count() -> usize {
     5
 }
 
+#[derive(Default)]
 pub struct RecentCommandsWidget {
     cfg: RecentCommandsConfig,
 }
@@ -55,13 +56,6 @@ impl RecentCommandsWidget {
     }
 }
 
-impl Default for RecentCommandsWidget {
-    fn default() -> Self {
-        Self {
-            cfg: RecentCommandsConfig::default(),
-        }
-    }
-}
 
 impl Widget for RecentCommandsWidget {
     fn render(

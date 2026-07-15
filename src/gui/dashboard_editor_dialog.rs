@@ -154,18 +154,15 @@ impl DashboardEditorDialog {
                         ui.checkbox(&mut self.snap_on_edit, "Snap to free space on edit");
                         ui.checkbox(&mut self.show_swap_buttons, "Show swap");
                         ui.checkbox(&mut self.show_remove_buttons, "Show remove");
-                        if ui.button("Auto-place nearest").clicked() {
-                            if let Some(idx) = self.selected_slot {
-                                if let Err(err) = self.auto_place(idx, registry) {
+                        if ui.button("Auto-place nearest").clicked()
+                            && let Some(idx) = self.selected_slot
+                                && let Err(err) = self.auto_place(idx, registry) {
                                     self.blocked_warning = Some(err);
                                 }
-                            }
-                        }
-                        if ui.button("Compact layout").clicked() {
-                            if let Err(err) = self.compact_layout(registry) {
+                        if ui.button("Compact layout").clicked()
+                            && let Err(err) = self.compact_layout(registry) {
                                 self.blocked_warning = Some(err);
                             }
-                        }
                     });
                     let (_, mut warnings) =
                         crate::dashboard::layout::normalize_slots(&self.config, registry);
@@ -178,13 +175,11 @@ impl DashboardEditorDialog {
                         for warn in warnings {
                             ui.colored_label(egui::Color32::YELLOW, warn);
                         }
-                        if let Some(idx) = self.selected_slot {
-                            if ui.button("Auto-place nearest free slot").clicked() {
-                                if let Err(err) = self.auto_place(idx, registry) {
+                        if let Some(idx) = self.selected_slot
+                            && ui.button("Auto-place nearest free slot").clicked()
+                                && let Err(err) = self.auto_place(idx, registry) {
                                     self.blocked_warning = Some(err);
                                 }
-                            }
-                        }
                     }
                     let rows = self.config.grid.rows.max(1) as usize;
                     let cols = self.config.grid.cols.max(1) as usize;
@@ -231,20 +226,18 @@ impl DashboardEditorDialog {
                             self.slot_collapse_all = true;
                             self.slot_expand_all = false;
                         }
-                        if ui.button("Split H").clicked() {
-                            if let Err(err) =
+                        if ui.button("Split H").clicked()
+                            && let Err(err) =
                                 self.split_selected_slot(registry, SplitDirection::Horizontal)
                             {
                                 self.blocked_warning = Some(err);
                             }
-                        }
-                        if ui.button("Split V").clicked() {
-                            if let Err(err) =
+                        if ui.button("Split V").clicked()
+                            && let Err(err) =
                                 self.split_selected_slot(registry, SplitDirection::Vertical)
                             {
                                 self.blocked_warning = Some(err);
                             }
-                        }
                     });
 
                     ui.separator();
@@ -320,8 +313,8 @@ impl DashboardEditorDialog {
                                                 self.selected_slot = Some(idx);
                                             }
                                             if self.show_swap_buttons {
-                                                if let Some(selected_idx) = self.selected_slot {
-                                                    if selected_idx != idx
+                                                if let Some(selected_idx) = self.selected_slot
+                                                    && selected_idx != idx
                                                         && ui.button("Swap with selected").clicked()
                                                     {
                                                         if let Err(err) = self.swap_slots(
@@ -334,7 +327,6 @@ impl DashboardEditorDialog {
                                                         self.swap_anchor = None;
                                                         swapped = true;
                                                     }
-                                                }
                                                 let is_swap_source = self.swap_anchor == Some(idx);
                                                 let swap_label = if is_swap_source {
                                                     "Swap source"
@@ -492,11 +484,10 @@ impl DashboardEditorDialog {
                         } else if swapped {
                             idx += 1;
                         } else if edited && slot != original_slot {
-                            if let Err(err) = self.commit_slot(idx, slot, registry) {
-                                if self.blocked_warning.is_none() {
+                            if let Err(err) = self.commit_slot(idx, slot, registry)
+                                && self.blocked_warning.is_none() {
                                     self.blocked_warning = Some(err);
                                 }
-                            }
                             idx += 1;
                         } else {
                             idx += 1;
@@ -556,11 +547,10 @@ impl DashboardEditorDialog {
             self.selected_slot = None;
             return;
         }
-        if let Some(idx) = self.selected_slot {
-            if idx >= self.config.slots.len() {
+        if let Some(idx) = self.selected_slot
+            && idx >= self.config.slots.len() {
                 self.selected_slot = Some(self.config.slots.len().saturating_sub(1));
             }
-        }
         self.ensure_swap_anchor();
     }
 
@@ -569,11 +559,10 @@ impl DashboardEditorDialog {
             self.swap_anchor = None;
             return;
         }
-        if let Some(idx) = self.swap_anchor {
-            if idx >= self.config.slots.len() {
+        if let Some(idx) = self.swap_anchor
+            && idx >= self.config.slots.len() {
                 self.swap_anchor = None;
             }
-        }
     }
 
     fn render_selected_settings(
@@ -646,12 +635,11 @@ impl DashboardEditorDialog {
 
         match self.confirm_modal.ui(ui.ctx()) {
             ConfirmationResult::Confirmed => {
-                if let Some((idx, settings)) = self.pending_reset.take() {
-                    if let Some(slot) = self.config.slots.get_mut(idx) {
+                if let Some((idx, settings)) = self.pending_reset.take()
+                    && let Some(slot) = self.config.slots.get_mut(idx) {
                         slot.settings = settings;
                         settings_changed = true;
                     }
-                }
             }
             ConfirmationResult::Cancelled => {
                 self.pending_reset = None;
@@ -922,7 +910,7 @@ impl DashboardEditorDialog {
                     row_h * display_slot.row_span as f32,
                 ),
             );
-            let is_selected = selected_slot_cfg.as_ref().map_or(false, |selected| {
+            let is_selected = selected_slot_cfg.as_ref().is_some_and(|selected| {
                 let selected_row = selected.row.max(0);
                 let selected_col = selected.col.max(0);
                 (display_slot.id.is_some() && display_slot.id == selected.id)
@@ -968,12 +956,11 @@ impl DashboardEditorDialog {
         }
 
         let mut drag_preview: Option<(usize, usize, usize, usize, bool)> = None;
-        if response.drag_started() {
-            if let Some(pos) = response.interact_pointer_pos() {
+        if response.drag_started()
+            && let Some(pos) = response.interact_pointer_pos() {
                 let cell = self.point_to_cell(pos, rect, rows, cols);
                 self.drag_anchor = Some(cell);
             }
-        }
         if let (Some(start), Some(pos)) = (self.drag_anchor, response.interact_pointer_pos()) {
             let end = self.point_to_cell(pos, rect, rows, cols);
             let top_row = start.0.min(end.0);
@@ -1022,15 +1009,14 @@ impl DashboardEditorDialog {
                         ),
                         registry,
                     );
-                    if let Err(err) = res {
-                        if self.blocked_warning.is_none() {
+                    if let Err(err) = res
+                        && self.blocked_warning.is_none() {
                             self.blocked_warning = Some(err);
                         }
-                    }
                 }
             }
-        } else if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
+        } else if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos() {
                 let (row, col) = self.point_to_cell(pos, rect, rows, cols);
                 self.drag_anchor = None;
                 if let Some(idx) = self.selected_slot {
@@ -1050,14 +1036,12 @@ impl DashboardEditorDialog {
                         ),
                         registry,
                     );
-                    if let Err(err) = res {
-                        if self.blocked_warning.is_none() {
+                    if let Err(err) = res
+                        && self.blocked_warning.is_none() {
                             self.blocked_warning = Some(err);
                         }
-                    }
                 }
             }
-        }
 
         if let Some((row, col, row_span, col_span, conflict)) = drag_preview {
             let preview_rect = egui::Rect::from_min_size(
@@ -1168,11 +1152,10 @@ impl DashboardEditorDialog {
                 continue;
             }
             let coverage = Self::coverage_for_slot(slot, rows, cols);
-            if coverage.out_of_bounds {
-                if let Some(flag) = map.slot_conflicts.get_mut(idx) {
+            if coverage.out_of_bounds
+                && let Some(flag) = map.slot_conflicts.get_mut(idx) {
                     *flag = true;
                 }
-            }
             for (r, c) in coverage.cells {
                 for owner in &map.owners[r][c] {
                     if let Some(flag) = map.slot_conflicts.get_mut(*owner) {
@@ -1213,8 +1196,8 @@ impl DashboardEditorDialog {
             }
             for (r, c) in coverage.cells {
                 let owners = occupancy.owners.get(r).and_then(|row| row.get(c));
-                if let Some(owners) = owners {
-                    if owners.len() > 1 {
+                if let Some(owners) = owners
+                    && owners.len() > 1 {
                         for other_idx in owners {
                             if *other_idx == idx {
                                 continue;
@@ -1234,7 +1217,6 @@ impl DashboardEditorDialog {
                             }
                         }
                     }
-                }
             }
         }
         messages
@@ -1300,7 +1282,7 @@ impl DashboardEditorDialog {
                     let dist = (preferred_row.max(r) - preferred_row.min(r))
                         + (preferred_col.max(c) - preferred_col.min(c));
                     let candidate = (dist, r, c);
-                    if best.map_or(true, |current| candidate < current) {
+                    if best.is_none_or(|current| candidate < current) {
                         best = Some(candidate);
                     }
                 }

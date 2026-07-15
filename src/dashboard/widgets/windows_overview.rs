@@ -199,18 +199,15 @@ impl Widget for WindowsOverviewWidget {
         let mut clicked = None;
         for (title, switch, close) in self.grouped_actions() {
             ui.horizontal(|ui| {
-                if let Some(action) = &switch {
-                    if ui.button(&action.label).clicked() {
+                if let Some(action) = &switch
+                    && ui.button(&action.label).clicked() {
                         clicked = Some(action.clone());
                     }
-                }
-                if self.cfg.show_close {
-                    if let Some(action) = &close {
-                        if ui.small_button("Close").clicked() {
+                if self.cfg.show_close
+                    && let Some(action) = &close
+                        && ui.small_button("Close").clicked() {
                             clicked = Some(action.clone());
                         }
-                    }
-                }
                 ui.label(egui::RichText::new(title).small());
             });
         }

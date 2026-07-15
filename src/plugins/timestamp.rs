@@ -102,8 +102,8 @@ impl Plugin for TimestampPlugin {
             } else {
                 let parsed = NaiveDateTime::parse_from_str(arg, "%Y-%m-%d %H:%M:%S")
                     .or_else(|_| NaiveDateTime::parse_from_str(arg, "%Y-%m-%d %H:%M"));
-                if let Ok(naive) = parsed {
-                    if let Some(dt) = Local.from_local_datetime(&naive).single() {
+                if let Ok(naive) = parsed
+                    && let Some(dt) = Local.from_local_datetime(&naive).single() {
                         let ts = dt.timestamp().to_string();
                         return vec![Action {
                             label: ts.clone(),
@@ -112,7 +112,6 @@ impl Plugin for TimestampPlugin {
                             args: None,
                         }];
                     }
-                }
             }
         }
         Vec::new()

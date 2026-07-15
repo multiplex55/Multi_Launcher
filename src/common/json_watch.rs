@@ -27,8 +27,8 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
 impl Drop for JsonWatcher {
     fn drop(&mut self) {
-        if let Ok(mut map) = WATCHERS.lock() {
-            if let Some(entry) = map.get_mut(&self.path) {
+        if let Ok(mut map) = WATCHERS.lock()
+            && let Some(entry) = map.get_mut(&self.path) {
                 let mut cbs = entry.callbacks.lock().unwrap();
                 cbs.remove(&self.id);
                 let empty = cbs.is_empty();
@@ -37,7 +37,6 @@ impl Drop for JsonWatcher {
                     map.remove(&self.path);
                 }
             }
-        }
     }
 }
 

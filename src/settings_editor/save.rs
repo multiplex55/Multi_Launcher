@@ -148,19 +148,17 @@ impl SettingsEditor {
             &plugin_settings,
             actions_arc,
         );
-        if let Some(val) = new_settings.plugin_settings.get("file_search") {
-            if let Ok(cfg) = serde_json::from_value::<
+        if let Some(val) = new_settings.plugin_settings.get("file_search")
+            && let Ok(cfg) = serde_json::from_value::<
                 crate::file_search::settings::FileSearchSettings,
             >(val.clone())
             {
                 app.apply_file_search_settings(cfg);
             }
-        }
-        if let Some(val) = new_settings.plugin_settings.get("note") {
-            if let Ok(cfg) = serde_json::from_value::<NotePluginSettings>(val.clone()) {
+        if let Some(val) = new_settings.plugin_settings.get("note")
+            && let Ok(cfg) = serde_json::from_value::<NotePluginSettings>(val.clone()) {
                 app.note_external_open = cfg.external_open;
             }
-        }
         crate::request_hotkey_restart(new_settings);
         if app.enable_toasts {
             app.add_toast(Toast {

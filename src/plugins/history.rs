@@ -25,8 +25,8 @@ impl Plugin for HistoryPlugin {
             Some(r) => r,
             None => return Vec::new(),
         };
-        if let Some(clear_rest) = crate::common::strip_prefix_ci(query.trim(), "hi clear") {
-            if clear_rest.is_empty() {
+        if let Some(clear_rest) = crate::common::strip_prefix_ci(query.trim(), "hi clear")
+            && clear_rest.is_empty() {
                 return vec![Action {
                     label: "Clear history".into(),
                     desc: "History".into(),
@@ -34,7 +34,6 @@ impl Plugin for HistoryPlugin {
                     args: None,
                 }];
             }
-        }
         let filter = rest.trim().to_lowercase();
         with_history(|h| {
             h.iter()

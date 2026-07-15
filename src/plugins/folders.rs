@@ -134,8 +134,8 @@ impl FoldersPlugin {
             {
                 let path = path.clone();
                 move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res {
-                        if matches!(
+                    if let Ok(event) = res
+                        && matches!(
                             event.kind,
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                         ) {
@@ -144,7 +144,6 @@ impl FoldersPlugin {
                                 *lock = list;
                             }
                         }
-                    }
                 }
             },
             Config::default(),

@@ -481,7 +481,7 @@ impl DashboardDataCache {
     }
 
     pub fn refresh_recycle_bin(&self) {
-        let snapshot = launcher::query_recycle_bin().map(|data| RecycleBinSnapshot::from(data));
+        let snapshot = launcher::query_recycle_bin().map(RecycleBinSnapshot::from);
         if let Ok(mut state) = self.state.lock() {
             state.snapshot = Arc::new(state.snapshot.with_recycle_bin(snapshot));
             state.last_recycle_refresh = Instant::now();
@@ -542,15 +542,11 @@ fn get_system_volume() -> Option<u8> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia) {
-                if let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-                    if let Ok(val) = vol.GetMasterVolumeLevelScalar() {
+            && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
+                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                    && let Ok(val) = vol.GetMasterVolumeLevelScalar() {
                         percent = Some((val * 100.0).round() as u8);
                     }
-                }
-            }
-        }
         CoUninitialize();
         percent
     }
