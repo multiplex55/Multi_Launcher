@@ -1,6 +1,8 @@
 use crate::file_search::model::{
     ContentFileResult, ContentMatch, FilenameResult, PathIdentity, SearchResult,
+    path_identity as model_path_identity,
 };
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -30,16 +32,7 @@ pub enum ContentSort {
 }
 
 pub fn path_identity(path: &Path) -> PathIdentity {
-    if let Ok(canonical) = path.canonicalize() {
-        return PathIdentity::from_path(&canonical);
-    }
-    if path.is_absolute() {
-        return PathIdentity::from_path(path);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        return PathIdentity::from_path(&cwd.join(path));
-    }
-    PathIdentity::from_path(path)
+    model_path_identity(path)
 }
 
 fn normalized_path(path: &Path) -> String {
@@ -49,6 +42,25 @@ fn normalized_path(path: &Path) -> String {
 fn lower(s: &str) -> String {
     s.to_lowercase()
 }
+
+fn cmp_option_asc_none_last<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn cmp_option_desc_none_last<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => b.cmp(&a),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 fn file_tie(a: &FilenameResult, b: &FilenameResult) -> std::cmp::Ordering {
     lower(&a.file_name)
         .cmp(&lower(&b.file_name))
@@ -65,14 +77,25 @@ pub fn sort_filename_results_by(results: &mut [FilenameResult], sort: FilenameSo
     results.sort_by(|a, b| match sort {
         FilenameSort::Relevance => a.rank.cmp(&b.rank).then_with(|| file_tie(a, b)),
         FilenameSort::FilenameAscending => file_tie(a, b),
-        FilenameSort::FilenameDescending => file_tie(b, a),
+        FilenameSort::FilenameDescending => lower(&b.file_name)
+            .cmp(&lower(&a.file_name))
+            .then_with(|| normalized_path(&a.path).cmp(&normalized_path(&b.path)))
+            .then_with(|| a.arrival_index.cmp(&b.arrival_index)),
         FilenameSort::FullPathAscending => normalized_path(&a.path)
             .cmp(&normalized_path(&b.path))
-            .then_with(|| a.arrival_index.cmp(&b.arrival_index)),
-        FilenameSort::ModifiedNewest => b.modified.cmp(&a.modified).then_with(|| file_tie(a, b)),
-        FilenameSort::ModifiedOldest => a.modified.cmp(&b.modified).then_with(|| file_tie(a, b)),
-        FilenameSort::SizeLargest => b.size.cmp(&a.size).then_with(|| file_tie(a, b)),
-        FilenameSort::SizeSmallest => a.size.cmp(&b.size).then_with(|| file_tie(a, b)),
+            .then_with(|| file_tie(a, b)),
+        FilenameSort::ModifiedNewest => {
+            cmp_option_desc_none_last(a.modified, b.modified).then_with(|| file_tie(a, b))
+        }
+        FilenameSort::ModifiedOldest => {
+            cmp_option_asc_none_last(a.modified, b.modified).then_with(|| file_tie(a, b))
+        }
+        FilenameSort::SizeLargest => {
+            cmp_option_desc_none_last(a.size, b.size).then_with(|| file_tie(a, b))
+        }
+        FilenameSort::SizeSmallest => {
+            cmp_option_asc_none_last(a.size, b.size).then_with(|| file_tie(a, b))
+        }
     });
 }
 
@@ -90,15 +113,10 @@ fn match_key(m: &ContentMatch, occurrence: usize) -> (usize, usize, usize, usize
 }
 
 pub fn sort_content_matches(matches: &mut [ContentMatch]) {
-    let mut seen: HashMap<(usize, usize, usize), usize> = HashMap::new();
     let keys: Vec<_> = matches
         .iter()
-        .map(|m| {
-            let base = (m.line_number, m.byte_start, m.byte_end);
-            let occ = *seen.entry(base).or_insert(0);
-            *seen.get_mut(&base).unwrap() += 1;
-            match_key(m, occ)
-        })
+        .enumerate()
+        .map(|(occurrence, m)| match_key(m, occurrence))
         .collect();
     let mut indexed: Vec<_> = matches.iter().cloned().zip(keys).collect();
     indexed.sort_by_key(|(_, k)| *k);
@@ -121,10 +139,9 @@ pub fn sort_content_results_by(results: &mut [ContentFileResult], sort: ContentS
             .total_matches
             .cmp(&a.total_matches)
             .then_with(|| content_file_tie(a, b)),
-        ContentSort::ModifiedNewest => b
-            .modified
-            .cmp(&a.modified)
-            .then_with(|| content_file_tie(a, b)),
+        ContentSort::ModifiedNewest => {
+            cmp_option_desc_none_last(a.modified, b.modified).then_with(|| content_file_tie(a, b))
+        }
         ContentSort::FilenameRelevance => a
             .filename_relevance
             .cmp(&b.filename_relevance)
@@ -287,6 +304,154 @@ mod tests {
         sort_filename_results_by(&mut rs, FilenameSort::ModifiedNewest);
         assert_eq!(rs[0].path, PathBuf::from("a"));
     }
+
+    #[test]
+    fn filename_dedup_preserves_first_arrival_for_same_identity() {
+        let mut first = result("same.txt", FilenameRank::FilenameContains);
+        first.arrival_index = 1;
+        let mut second = result("same.txt", FilenameRank::ExactFilename);
+        second.arrival_index = 0;
+        let out = dedup_filename_results(vec![first.clone(), second]);
+        assert_eq!(out, vec![first]);
+    }
+
+    #[test]
+    fn all_filename_sorts_have_expected_primary_order() {
+        let mut rs = vec![
+            result("c/mid.txt", FilenameRank::FilenameContains),
+            result("b/zeta.txt", FilenameRank::FullPathContains),
+            result("a/alpha.txt", FilenameRank::ExactFilename),
+        ];
+        rs[0].size = Some(10);
+        rs[1].size = Some(20);
+        rs[2].size = Some(5);
+        let now = std::time::SystemTime::UNIX_EPOCH;
+        rs[0].modified = Some(now + std::time::Duration::from_secs(10));
+        rs[1].modified = Some(now + std::time::Duration::from_secs(20));
+        rs[2].modified = Some(now + std::time::Duration::from_secs(5));
+
+        for (sort, expected) in [
+            (
+                FilenameSort::Relevance,
+                vec!["a/alpha.txt", "c/mid.txt", "b/zeta.txt"],
+            ),
+            (
+                FilenameSort::FilenameAscending,
+                vec!["a/alpha.txt", "c/mid.txt", "b/zeta.txt"],
+            ),
+            (
+                FilenameSort::FilenameDescending,
+                vec!["b/zeta.txt", "c/mid.txt", "a/alpha.txt"],
+            ),
+            (
+                FilenameSort::FullPathAscending,
+                vec!["a/alpha.txt", "b/zeta.txt", "c/mid.txt"],
+            ),
+            (
+                FilenameSort::ModifiedNewest,
+                vec!["b/zeta.txt", "c/mid.txt", "a/alpha.txt"],
+            ),
+            (
+                FilenameSort::ModifiedOldest,
+                vec!["a/alpha.txt", "c/mid.txt", "b/zeta.txt"],
+            ),
+            (
+                FilenameSort::SizeLargest,
+                vec!["b/zeta.txt", "c/mid.txt", "a/alpha.txt"],
+            ),
+            (
+                FilenameSort::SizeSmallest,
+                vec!["a/alpha.txt", "c/mid.txt", "b/zeta.txt"],
+            ),
+        ] {
+            let mut sorted = rs.clone();
+            sort_filename_results_by(&mut sorted, sort);
+            assert_eq!(
+                sorted
+                    .iter()
+                    .map(|r| r.path.to_string_lossy().to_string())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn content_matches_sort_by_line_column_end_then_original_occurrence() {
+        let mut matches = vec![
+            ContentMatch {
+                line_number: 2,
+                column: Some(0),
+                line: "d".into(),
+                byte_start: 0,
+                byte_end: 2,
+                ranges: vec![],
+            },
+            ContentMatch {
+                line_number: 1,
+                column: Some(4),
+                line: "c".into(),
+                byte_start: 4,
+                byte_end: 9,
+                ranges: vec![],
+            },
+            ContentMatch {
+                line_number: 1,
+                column: Some(4),
+                line: "b".into(),
+                byte_start: 4,
+                byte_end: 8,
+                ranges: vec![],
+            },
+            ContentMatch {
+                line_number: 1,
+                column: Some(1),
+                line: "a".into(),
+                byte_start: 1,
+                byte_end: 2,
+                ranges: vec![],
+            },
+        ];
+        sort_content_matches(&mut matches);
+        assert_eq!(
+            matches.iter().map(|m| m.line.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn all_content_sorts_have_expected_primary_order() {
+        let mut rs = vec![cf("c", 2, 2), cf("a", 1, 5), cf("b", 0, 1)];
+        rs[0].filename_relevance = Some(FilenameRank::FilenameContains);
+        rs[1].filename_relevance = Some(FilenameRank::ExactFilename);
+        rs[2].filename_relevance = Some(FilenameRank::FullPathContains);
+        let now = std::time::SystemTime::UNIX_EPOCH;
+        rs[0].modified = Some(now + std::time::Duration::from_secs(3));
+        rs[1].modified = Some(now + std::time::Duration::from_secs(1));
+        rs[2].modified = Some(now + std::time::Duration::from_secs(2));
+        rs[0].matches[0].line_number = 30;
+        rs[1].matches[0].line_number = 10;
+        rs[2].matches[0].line_number = 20;
+        for (sort, expected) in [
+            (ContentSort::DiscoveryOrder, vec!["b", "a", "c"]),
+            (ContentSort::PathThenLine, vec!["a", "b", "c"]),
+            (ContentSort::MatchCountDescending, vec!["a", "c", "b"]),
+            (ContentSort::ModifiedNewest, vec!["c", "b", "a"]),
+            (ContentSort::FilenameRelevance, vec!["a", "c", "b"]),
+            (ContentSort::LineNumber, vec!["a", "b", "c"]),
+        ] {
+            let mut sorted = rs.clone();
+            sort_content_results_by(&mut sorted, sort);
+            assert_eq!(
+                sorted
+                    .iter()
+                    .map(|r| r.path.to_string_lossy().to_string())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn duplicate_content_matches_merge_to_one() {
         let mut a = cf("same", 0, 1);
