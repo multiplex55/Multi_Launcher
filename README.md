@@ -21,6 +21,7 @@ It’s designed to be “one hotkey away” from:
 - [Core workflow](#core-workflow)
 - [Command prefixes cheat sheet](#command-prefixes-cheat-sheet)
 - [Cookbook examples](#cookbook-examples)
+- [File-search plugin](#file-search-plugin)
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
 - [Layouts](#layouts)
@@ -118,6 +119,7 @@ Multi Launcher is centered around a **single query box**:
 | `recycle` | Recycle bin tools | `recycle` |
 | `rs` / `osrs` | RuneScape helpers | `osrs wiki karamja gloves` |
 | `cal` | Calendar/reminders | `cal` / `cal add today 5pm Pay rent` |
+| `fs` | File-search plugin | `fs` / `fs file main` / `fs content TODO` |
 
 ---
 
@@ -235,6 +237,75 @@ Good favorites to create:
   - `tmp list`
 - Remove:
   - `tmp rm scratch`
+
+---
+
+## File-search plugin
+
+Open the dedicated file-search UI from the launcher with the file-search action, then choose **Filename** or **Content** mode and **Global** or **Directory** scope. File search is intentionally explicit: edit the query and filters, then press **Search** or **Enter** in the search/root field to run it. It does not automatically search while typing, rerun when filters change, or persist typed search text.
+
+### Search roots
+
+- **Global search roots** come from `settings.json` under `plugin_settings.file_search.global_search_roots`. These are the default roots used when the UI is in **Global** scope. Invalid or duplicate roots are ignored at request time, and the UI warns when no valid global roots remain.
+- **Custom multiple roots** are available in **Directory** scope. Use **Add folder…** to add one or more temporary roots, or type roots directly. These custom roots apply to the current search session; they are not saved as history.
+- The search text, selected result rows, custom directory-root selections, and file-search query history are not persisted. Only explicit UI preferences such as sort/filter defaults are saved.
+
+### Filename search
+
+Filename mode searches file and directory names under the selected roots.
+
+- **Ranked substring matching** is the default. Matches are ranked so exact filenames come before names that start with the query, followed by filenames containing the query, and then paths containing the query.
+- **Fuzzy filename matching** is available from the filename match-mode preference for typo-tolerant name matching.
+- Use the **Files / directories** filter to search files only, directories only, or both.
+
+### Content search
+
+Content mode searches text inside files under the selected roots.
+
+- **Exact phrase** mode treats the search text as a fixed string phrase.
+- **Match any term** mode splits the query on whitespace and returns files containing any non-empty term.
+- **Whole word** can be enabled to require word-boundary content matches.
+- Content search uses ripgrep when available and automatically falls back to the native content-search backend when ripgrep is missing or unavailable.
+
+### Filters
+
+- **Include extension filters** limit results to matching extensions, such as `rs` or `.md`.
+- **Exclude extension filters** remove matching extensions from results.
+- **File/directory filters** control whether filename searches include files, directories, or both.
+- **Temporary directory-exclusion overrides** let the UI preference list replace the default excluded directory names for a search request. This is useful for temporarily including or excluding directories such as `.git`, `target`, `node_modules`, `bin`, or `obj` without changing the built-in defaults permanently.
+
+### ripgrep discovery and fallback
+
+For content search, Multi Launcher looks for ripgrep in this order:
+
+1. A configured absolute `plugin_settings.file_search.ripgrep_executable_path`.
+2. `rg.exe` next to the launcher executable.
+3. `tools/ripgrep/rg.exe` next to the launcher executable.
+4. `rg.exe` or `rg` on the process `PATH`.
+5. Native content-search fallback when ripgrep cannot be found or validated.
+
+A configured bare command such as `rg` is allowed so PATH/sidecar discovery can run, but arbitrary relative configured paths with directory components, such as `tools/rg.exe` or `..\rg.exe`, are rejected. Use an absolute path for a custom executable location, or leave the setting empty/defaulted for auto-discovery.
+
+If ripgrep is missing, content search starts with the native backend automatically and shows a non-blocking prompt offering **Locate rg.exe** for faster future searches. Dismissing or ignoring that prompt does not stop the active search.
+
+### Clipboard, TSV export, and shortcuts
+
+- **Copy selected** copies a TSV payload for the selected result.
+- **Copy all visible** copies TSV for the currently visible result rows.
+- **Export visible results…** writes the same TSV-style data to a file. Filename exports include path, file name, directory, size, modified time, and match quality. Content exports include path, file name, directory, line number, line preview, modified time, and match quality.
+- Result context menus can copy the full path, filename, and (for content results) the matching line.
+- Keyboard shortcuts: **Enter** in the search field or a custom root field starts a search; **Escape** cancels an active search or closes the dialog when idle; double-clicking a result opens it; selecting a row makes it the target for **Open** and **Copy selected**.
+
+### Deferred features
+
+The improved file-search plugin does **not** include these deferred features yet:
+
+- Regex search.
+- Search history.
+- Replace across results.
+- Automatic search while typing.
+- Automatic reruns when filters change.
+- Performance benchmark infrastructure.
 
 ---
 
@@ -465,6 +536,7 @@ Notable settings (high impact):
 * note settings (`note.*`)
 * dashboard settings (`dashboard.*`)
 * MultiManager settings (`multi_manager.*`)
+* file-search plugin settings (`plugin_settings.file_search.*`)
 
 Note behavior can be customized under the nested `note` settings object:
 
@@ -483,6 +555,36 @@ Legacy top-level note settings are still accepted for compatibility. Turning off
 note features only hides or disables their UI/actions; it does not delete note
 markdown content, aliases, backlinks, templates, or other metadata already on
 disk.
+
+File search can be customized under the nested `plugin_settings.file_search` settings object:
+
+```json
+{
+  "plugin_settings": {
+    "file_search": {
+      "global_search_roots": ["C:\\Workspaces", "C:\\Users\\You\\Documents"],
+      "ripgrep_executable_path": "rg",
+      "excluded_directory_names": [".git", "target", "node_modules"],
+      "max_search_results": 500,
+      "max_matches_per_content_file": 25,
+      "max_content_search_file_size_bytes": 2097152,
+      "include_hidden_files": false,
+      "case_sensitive": false,
+      "ui_preferences": {
+        "filename_match_mode": "ranked_substring",
+        "content_match_mode": "exact_phrase",
+        "whole_word": false,
+        "file_type_filter": "files_and_directories",
+        "included_extensions": [],
+        "excluded_extensions": [],
+        "excluded_directory_names": []
+      }
+    }
+  }
+}
+```
+
+`global_content_search_roots` is still accepted as a compatibility alias for `global_search_roots`. UI preferences store durable filter defaults only; search text, selections, custom directory-root entries, and search history are intentionally not written to `settings.json`.
 
 MultiManager paths can be customized under the `multi_manager` settings object:
 
