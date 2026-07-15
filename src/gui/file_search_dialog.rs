@@ -29,6 +29,8 @@ const ACTIVE_SEARCH_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 pub const FILE_SEARCH_SEARCH_FIELD_ID_SOURCE: &str = "file_search_search_text";
 pub const FILE_SEARCH_ROOT_FIELD_ID_SOURCE: &str = "file_search_root_directory";
+pub const FILE_SEARCH_RESULT_LIST_ID_SOURCE: &str = "file_search_result_list";
+pub const FILE_SEARCH_CONTEXT_MENU_ID_SOURCE: &str = "file_search_context_menu";
 
 impl From<FileSearchFilenameSort> for crate::file_search::sorting::FilenameSort {
     fn from(value: FileSearchFilenameSort) -> Self {
@@ -278,6 +280,7 @@ pub struct FileSearchDialogState {
     pub ui_preferences: FileSearchUiPreferences,
     pub ui_preferences_dirty: bool,
     pub request_search_focus: bool,
+    pub request_root_focus: bool,
     pub request_immediate_repaint: bool,
     pub show_ripgrep_missing_prompt: bool,
     pub ripgrep_missing_prompt_dismissed: bool,
@@ -311,6 +314,7 @@ impl Default for FileSearchDialogState {
             ui_preferences: FileSearchUiPreferences::default(),
             ui_preferences_dirty: false,
             request_search_focus: false,
+            request_root_focus: false,
             request_immediate_repaint: false,
             show_ripgrep_missing_prompt: false,
             ripgrep_missing_prompt_dismissed: false,
@@ -337,6 +341,18 @@ impl FileSearchDialogState {
 
     pub fn root_field_id() -> egui::Id {
         egui::Id::new(FILE_SEARCH_ROOT_FIELD_ID_SOURCE)
+    }
+
+    pub fn root_text_field_id(index: usize) -> egui::Id {
+        egui::Id::new((Self::root_field_id(), index))
+    }
+
+    pub fn result_list_id() -> egui::Id {
+        egui::Id::new(FILE_SEARCH_RESULT_LIST_ID_SOURCE)
+    }
+
+    pub fn context_menu_id() -> egui::Id {
+        egui::Id::new(FILE_SEARCH_CONTEXT_MENU_ID_SOURCE)
     }
 
     pub fn open(&mut self) {
@@ -376,6 +392,26 @@ impl FileSearchDialogState {
             true
         } else {
             false
+        }
+    }
+
+    pub fn consume_root_focus_request(&mut self) -> bool {
+        if self.request_root_focus {
+            self.request_root_focus = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn focus_search_field(&mut self) {
+        self.request_search_focus = true;
+    }
+
+    pub fn focus_root_field(&mut self) {
+        self.request_root_focus = true;
+        if self.selected_scope == FileSearchScopeMode::Directory && self.custom_roots.is_empty() {
+            self.custom_roots.push(String::new());
         }
     }
 
@@ -945,6 +981,7 @@ impl FileSearchDialogState {
                     }
                     let mut remove = None;
                     let mut submit_search = false;
+                    let focus_root_idx = self.consume_root_focus_request().then_some(0usize);
                     for (idx, root) in self.custom_roots.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label("Root");
@@ -952,6 +989,9 @@ impl FileSearchDialogState {
                                 egui::TextEdit::singleline(root)
                                     .id_source((Self::root_field_id(), idx)),
                             );
+                            if focus_root_idx == Some(idx) {
+                                root_response.request_focus();
+                            }
                             if root_response.has_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
                             {
@@ -1059,13 +1099,15 @@ impl FileSearchDialogState {
         self.ripgrep_missing_prompt_ui(ui, coordinator);
         let results_region_size = ui.available_size();
         ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
-            egui::ScrollArea::both()
-                .id_source(results_scroll_id_source(self.selected_mode))
-                .auto_shrink([false, false])
-                .show(ui, |ui| match self.selected_mode {
-                    FileSearchMode::Filename => self.filename_results(ui, coordinator),
-                    FileSearchMode::Content => self.content_results(ui, coordinator),
-                });
+            ui.push_id(Self::result_list_id(), |ui| {
+                egui::ScrollArea::both()
+                    .id_source(results_scroll_id_source(self.selected_mode))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.selected_mode {
+                        FileSearchMode::Filename => self.filename_results(ui, coordinator),
+                        FileSearchMode::Content => self.content_results(ui, coordinator),
+                    });
+            });
         });
     }
 

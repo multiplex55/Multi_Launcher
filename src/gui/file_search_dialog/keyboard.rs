@@ -3,7 +3,10 @@ use super::{
     FileSearchDialogState, FileSearchEscapeAction, FileSearchRowPayload,
     SelectedFileSearchResultPayload,
 };
-use crate::file_search::actions::{containing_directory, open_path};
+use crate::file_search::actions::{
+    InvocationTarget, containing_directory, execute_explorer_action, open_in_configured_editor,
+    open_path, resolve_explorer_action,
+};
 use crate::file_search::coordinator::SearchCoordinator;
 use crate::file_search::export;
 use crate::file_search::model::SearchResult;
@@ -25,74 +28,65 @@ impl FileSearchDialogState {
         ui: &mut egui::Ui,
         coordinator: &mut SearchCoordinator,
     ) {
-        if ui.ctx().wants_keyboard_input() {
+        let ctx = ui.ctx();
+        let modifiers = ctx.input(|i| i.modifiers);
+        let text_field_focused = ctx.memory(|m| {
+            m.focused().is_some_and(|id| {
+                id == Self::search_field_id()
+                    || (0..self.custom_roots.len()).any(|idx| id == Self::root_text_field_id(idx))
+            })
+        });
+        let menu_or_combo_active = ctx.wants_keyboard_input() && !text_field_focused;
+
+        if modifiers.ctrl && ctx.input(|i| i.key_pressed(egui::Key::F)) {
+            self.focus_search_field();
+            ctx.request_repaint();
+            return;
+        }
+        if modifiers.ctrl && ctx.input(|i| i.key_pressed(egui::Key::L)) {
+            self.focus_root_field();
+            ctx.request_repaint();
             return;
         }
 
-        let modifiers = ui.input(|i| i.modifiers);
-        let command = modifiers.command;
-        let activate_containing = command || modifiers.ctrl;
-
-        let movement = ui.input(|i| {
-            if i.key_pressed(egui::Key::ArrowDown) {
-                Some(SelectionMove::Next)
-            } else if i.key_pressed(egui::Key::ArrowUp) {
-                Some(SelectionMove::Previous)
-            } else if i.key_pressed(egui::Key::PageDown) {
-                Some(SelectionMove::PageNext)
-            } else if i.key_pressed(egui::Key::PageUp) {
-                Some(SelectionMove::PagePrevious)
-            } else if i.key_pressed(egui::Key::Home) {
-                Some(SelectionMove::First)
-            } else if i.key_pressed(egui::Key::End) {
-                Some(SelectionMove::Last)
-            } else {
-                None
+        if !menu_or_combo_active {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                self.select_next_visible_result();
+                ctx.request_repaint();
+            } else if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                self.select_previous_visible_result();
+                ctx.request_repaint();
             }
-        });
-        if let Some(movement) = movement {
-            self.move_selection(movement);
-            ui.ctx().request_repaint();
         }
 
-        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if activate_containing {
-                self.open_selected_containing_directory();
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !menu_or_combo_active {
+            if text_field_focused {
+                self.start_search(coordinator);
+            } else if modifiers.ctrl {
+                self.open_selected_in_editor();
+            } else if modifiers.alt {
+                self.reveal_selected_in_explorer();
             } else {
                 self.open_selected_result();
             }
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
 
-        if ui.input(|i| i.key_pressed(egui::Key::Escape))
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel
         {
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
 
-        if command
-            && !modifiers.shift
-            && ui.input(|i| i.key_pressed(egui::Key::C))
-            && let Some(payload) = self.copy_selected_path_payload()
+        if modifiers.ctrl
+            && ctx.input(|i| i.key_pressed(egui::Key::C))
+            && !(text_field_focused && ctx.wants_keyboard_input())
         {
-            self.copy_text_payload("copy selected path", payload);
-        }
-        if command
-            && modifiers.shift
-            && ui.input(|i| i.key_pressed(egui::Key::C))
-            && let Some(payload) = self.copy_all_visible_results_payload()
-        {
-            self.copy_text_payload("copy visible results", payload);
-        }
-        if command
-            && ui.input(|i| i.key_pressed(egui::Key::L))
-            && let Some(payload) = self.copy_selected_match_line_payload()
-        {
-            self.copy_text_payload("copy matching line", payload);
-        }
-        if command && ui.input(|i| i.key_pressed(egui::Key::F)) {
-            self.refine_from_selection(coordinator);
-            ui.ctx().request_repaint();
+            if modifiers.shift {
+                self.copy_selected_matching_line();
+            } else {
+                self.copy_selected_path();
+            }
         }
     }
 
@@ -122,6 +116,63 @@ impl FileSearchDialogState {
         };
         let row = selectable_rows[next_idx].clone();
         self.select_result(&row);
+    }
+
+    pub(super) fn select_next_visible_result(&mut self) {
+        self.move_selection(SelectionMove::Next);
+    }
+
+    pub(super) fn select_previous_visible_result(&mut self) {
+        self.move_selection(SelectionMove::Previous);
+    }
+
+    pub(super) fn open_selected_in_editor(&mut self) {
+        let Some(selected) = self.selected_result.clone() else {
+            return;
+        };
+        let (path, line, column) = match selected.payload {
+            SelectedFileSearchResultPayload::Filename { path, .. } => (path, None, None),
+            SelectedFileSearchResultPayload::Content {
+                path,
+                content_match,
+            } => (
+                path,
+                Some(content_match.line_number),
+                content_match.column.map(|c| c.saturating_add(1)),
+            ),
+        };
+        let settings = self.settings.clone();
+        self.run_result_action("open in configured editor", || {
+            open_in_configured_editor(
+                &settings,
+                InvocationTarget {
+                    file: &path,
+                    line,
+                    column,
+                },
+            )
+        });
+    }
+
+    pub(super) fn reveal_selected_in_explorer(&mut self) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        self.run_result_action("reveal", || {
+            execute_explorer_action(resolve_explorer_action(&path)?)
+        });
+    }
+
+    pub(super) fn copy_selected_path(&mut self) {
+        if let Some(payload) = self.copy_selected_path_payload() {
+            self.copy_text_payload("copy selected path", payload);
+        }
+    }
+
+    pub(super) fn copy_selected_matching_line(&mut self) {
+        if let Some(payload) = self.copy_selected_match_line_payload() {
+            self.copy_text_payload("copy matching line", payload);
+        }
     }
 
     pub(super) fn open_selected_containing_directory(&mut self) {
