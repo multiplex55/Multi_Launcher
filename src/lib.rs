@@ -1,3 +1,20 @@
+#![allow(dead_code)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::misnamed_getters)]
+#![allow(clippy::suspicious_open_options)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::from_str_radix_10)]
+#![allow(clippy::unnecessary_sort_by)]
+#![allow(clippy::question_mark)]
+#![allow(clippy::manual_clamp)]
+#![allow(unused_imports)]
+
 pub mod actions;
 pub mod actions_editor;
 
