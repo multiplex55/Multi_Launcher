@@ -177,6 +177,19 @@ pub enum FileSearchResultKey {
     },
 }
 
+pub fn path_identity(path: &std::path::Path) -> PathIdentity {
+    if let Ok(canonical) = path.canonicalize() {
+        return PathIdentity::from_path(&canonical);
+    }
+    if path.is_absolute() {
+        return PathIdentity::from_path(path);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return PathIdentity::from_path(&cwd.join(path));
+    }
+    PathIdentity::from_path(path)
+}
+
 pub fn normalize_path_for_identity(path: &std::path::Path) -> String {
     let rendered = path.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]

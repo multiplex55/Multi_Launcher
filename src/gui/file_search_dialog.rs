@@ -4,11 +4,11 @@ mod keyboard;
 mod results;
 use crate::actions::clipboard;
 use crate::file_search::actions::{
-    containing_directory, copied_filename, execute_explorer_action, nested_search_root,
-    open_configured_terminal_in_directory, open_in_configured_editor, open_path,
-    resolve_explorer_action, ExplorerAction, InvocationTarget,
+    ExplorerAction, InvocationTarget, containing_directory, copied_filename,
+    execute_explorer_action, nested_search_root, open_configured_terminal_in_directory,
+    open_in_configured_editor, open_path, resolve_explorer_action,
 };
-use crate::file_search::coordinator::{event_id, SearchCoordinator};
+use crate::file_search::coordinator::{SearchCoordinator, event_id};
 use crate::file_search::model::{
     ContentMatch, FileKind, FileSearchResultKey, PathIdentity, SearchBackend, SearchDiagnostic,
     SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -180,9 +180,7 @@ pub fn dedup_search_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
     let mut seen = std::collections::HashSet::new();
     let mut deduped = Vec::new();
     for path in paths {
-        if seen.insert(crate::file_search::model::normalize_path_for_identity(
-            &path,
-        )) {
+        if seen.insert(crate::file_search::sorting::path_identity(&path)) {
             deduped.push(path);
         }
     }
@@ -277,6 +275,7 @@ pub struct FileSearchDialogState {
     pub ripgrep_missing_prompt_dismissed: bool,
     pub excluded_directory_names_overridden: bool,
     pub last_submitted_request: Option<SearchRequest>,
+    pub pending_sort_change: bool,
 }
 
 impl Default for FileSearchDialogState {
@@ -309,6 +308,7 @@ impl Default for FileSearchDialogState {
             ripgrep_missing_prompt_dismissed: false,
             excluded_directory_names_overridden: false,
             last_submitted_request: None,
+            pending_sort_change: false,
         }
     }
 }
@@ -405,6 +405,7 @@ impl FileSearchDialogState {
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
         self.last_submitted_request = Some(submitted_request);
+        self.pending_sort_change = false;
         self.request_immediate_repaint = true;
         Some(id)
     }
@@ -470,14 +471,15 @@ impl FileSearchDialogState {
                 }
                 SearchEvent::Result { result, .. } => {
                     if let SearchResult::ContentFile(content) = &result
-                        && content.truncated {
-                            self.diagnostics
-                                .record(SearchDiagnostic::PerFileContentTruncated {
-                                    path: content.path.clone(),
-                                    total_matches: content.total_matches,
-                                    displayed_matches: content.matches.len(),
-                                });
-                        }
+                        && content.truncated
+                    {
+                        self.diagnostics
+                            .record(SearchDiagnostic::PerFileContentTruncated {
+                                path: content.path.clone(),
+                                total_matches: content.total_matches,
+                                displayed_matches: content.matches.len(),
+                            });
+                    }
                     self.push_result(result);
                     false
                 }
@@ -514,6 +516,7 @@ impl FileSearchDialogState {
                 SearchEvent::Completed { .. } => {
                     self.current_status = SearchStatus::Completed;
                     self.finalize_completed_results();
+                    self.pending_sort_change = false;
                     self.request_immediate_repaint = true;
                     true
                 }
@@ -557,7 +560,9 @@ impl FileSearchDialogState {
 
     pub fn handle_sort_changed(&mut self) {
         self.mark_ui_preferences_dirty();
-        if self.current_status == SearchStatus::Completed {
+        if self.current_status == SearchStatus::Running {
+            self.pending_sort_change = true;
+        } else if self.current_status == SearchStatus::Completed {
             self.finalize_completed_results();
             self.request_immediate_repaint = true;
         }
@@ -644,7 +649,7 @@ impl FileSearchDialogState {
                     id: FileSearchResultRowId {
                         search_id,
                         result_key: FileSearchResultKey::Filename {
-                            path: PathIdentity::from_path(&item.path),
+                            path: crate::file_search::sorting::path_identity(&item.path),
                         },
                         match_index: None,
                         path: item.path.clone(),
@@ -685,7 +690,7 @@ impl FileSearchDialogState {
                         id: FileSearchResultRowId {
                             search_id,
                             result_key: FileSearchResultKey::Content {
-                                path: PathIdentity::from_path(&content.path),
+                                path: crate::file_search::sorting::path_identity(&content.path),
                                 line_number: content_match.line_number,
                                 byte_start: content_match.byte_start,
                                 byte_end: content_match.byte_end,
@@ -889,9 +894,10 @@ impl FileSearchDialogState {
             FileSearchScopeMode::Directory => {
                 ui.vertical(|ui| {
                     if ui.button("Add folder…").clicked()
-                        && let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.custom_roots.push(path.display().to_string());
-                        }
+                        && let Some(path) = rfd::FileDialog::new().pick_folder()
+                    {
+                        self.custom_roots.push(path.display().to_string());
+                    }
                     let mut remove = None;
                     let mut submit_search = false;
                     for (idx, root) in self.custom_roots.iter_mut().enumerate() {
@@ -943,9 +949,10 @@ impl FileSearchDialogState {
             if ui
                 .add_enabled(search_enabled, egui::Button::new("Search"))
                 .clicked()
-                && self.start_search(coordinator).is_some() {
-                    ui.ctx().request_repaint();
-                }
+                && self.start_search(coordinator).is_some()
+            {
+                ui.ctx().request_repaint();
+            }
             if ui.button("Cancel").clicked() {
                 self.cancel_search(coordinator);
                 ui.ctx().request_repaint();
@@ -963,18 +970,20 @@ impl FileSearchDialogState {
                     egui::Button::new("Copy selected"),
                 )
                 .clicked()
-                && let Some(payload) = self.copy_selected_payload() {
-                    self.copy_text_payload("copy selected", payload);
-                }
+                && let Some(payload) = self.copy_selected_payload()
+            {
+                self.copy_text_payload("copy selected", payload);
+            }
             if ui
                 .add_enabled(
                     !self.result_rows.is_empty(),
                     egui::Button::new("Copy all visible"),
                 )
                 .clicked()
-                && let Some(payload) = self.copy_all_visible_results_payload() {
-                    self.copy_text_payload("copy visible results", payload);
-                }
+                && let Some(payload) = self.copy_all_visible_results_payload()
+            {
+                self.copy_text_payload("copy visible results", payload);
+            }
             if ui
                 .add_enabled(
                     !self.result_rows.is_empty(),
@@ -1536,6 +1545,7 @@ impl FileSearchDialogState {
         let id = coordinator.start_search(request);
         self.active_search_id = Some(id);
         self.last_submitted_request = Some(submitted_request);
+        self.pending_sort_change = false;
         self.request_immediate_repaint = true;
     }
 
@@ -1605,14 +1615,15 @@ impl FileSearchDialogState {
             ui.close_menu();
         }
         if let Some(content_match) = first_match.as_ref()
-            && ui.button("Copy matching line").clicked() {
-                let line = content_match.line.clone();
-                self.run_result_action("copy matching line", || {
-                    clipboard::set_text(&line)?;
-                    Ok(())
-                });
-                ui.close_menu();
-            }
+            && ui.button("Copy matching line").clicked()
+        {
+            let line = content_match.line.clone();
+            self.run_result_action("copy matching line", || {
+                clipboard::set_text(&line)?;
+                Ok(())
+            });
+            ui.close_menu();
+        }
         if ui.button("Open terminal in containing directory").clicked() {
             let settings = self.settings.clone();
             self.run_result_action("open terminal", || {
@@ -1678,7 +1689,7 @@ mod tests {
     use crate::file_search::model::{
         ContentFileResult, ContentMatch, FileKind, FilenameRank, FilenameResult, SearchProgress,
     };
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
 
     struct RecordingExecutor {
         requests: Mutex<Vec<SearchRequest>>,
@@ -2911,10 +2922,12 @@ mod tests {
         });
         state.ui_preferences.filename_sort = FileSearchFilenameSort::FilenameAscending;
         state.handle_sort_changed();
+        assert!(state.pending_sort_change);
         assert_eq!(state.result_rows[0].id.path, PathBuf::from("/tmp/b.txt"));
 
         state.apply_event(SearchEvent::Completed { id: SearchId(1) });
 
+        assert!(!state.pending_sort_change);
         assert_eq!(state.result_rows[0].id.path, PathBuf::from("/tmp/a.txt"));
     }
 
@@ -2983,6 +2996,27 @@ mod tests {
         assert_eq!(state.content_matched_file_count(), 1);
         assert_eq!(state.content_displayed_match_row_count(), 1);
         assert_eq!(state.content_truncated_displayed_match_count(), 1);
+    }
+
+    #[test]
+    fn repeated_completed_sorting_is_deterministic() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(5)),
+            current_status: SearchStatus::Running,
+            ..Default::default()
+        };
+        for path in ["/tmp/c.txt", "/tmp/a.txt", "/tmp/b.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(5),
+                result: filename_search_result(path),
+            });
+        }
+        state.ui_preferences.filename_sort = FileSearchFilenameSort::FilenameAscending;
+        state.apply_event(SearchEvent::Completed { id: SearchId(5) });
+        let first = state.result_rows.clone();
+        state.handle_sort_changed();
+        state.handle_sort_changed();
+        assert_eq!(state.result_rows, first);
     }
 
     #[test]
@@ -3161,11 +3195,13 @@ mod tests {
         );
         let action = state.resolve_open_selected_result_action();
         assert!(action.is_none());
-        assert!(state
-            .warning_error_message
-            .as_deref()
-            .unwrap()
-            .contains("/tmp/b.txt"));
+        assert!(
+            state
+                .warning_error_message
+                .as_deref()
+                .unwrap()
+                .contains("/tmp/b.txt")
+        );
     }
 
     #[test]
@@ -3262,10 +3298,12 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(state.selected_result().cloned(), selected_before);
-        assert!(state
-            .warning_error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("missing or inaccessible")));
+        assert!(
+            state
+                .warning_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("missing or inaccessible"))
+        );
     }
 
     #[test]
@@ -3401,10 +3439,12 @@ mod tests {
 
         assert_eq!(state.selected_result().cloned(), selected_before);
         assert_eq!(coordinator.diagnostics().started, 0);
-        assert!(state
-            .warning_error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("/tmp/a.txt")));
+        assert!(
+            state
+                .warning_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("/tmp/a.txt"))
+        );
     }
 
     #[test]
@@ -3421,10 +3461,12 @@ mod tests {
         });
         state.apply_event(SearchEvent::Completed { id: SearchId(99) });
         assert_eq!(state.current_status, SearchStatus::Completed);
-        assert!(state
-            .warning_error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Native content search is being used")));
+        assert!(
+            state
+                .warning_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Native content search is being used"))
+        );
     }
 
     #[test]
