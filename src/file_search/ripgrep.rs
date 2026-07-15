@@ -1,14 +1,14 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
 pub use crate::file_search::discovery::{
-    detect_ripgrep_executable, resolve_ripgrep_executable, resolve_ripgrep_with_context,
-    ExecutableSearchContext,
+    ExecutableSearchContext, detect_ripgrep_executable, resolve_ripgrep_executable,
+    resolve_ripgrep_with_context,
 };
 use crate::file_search::error::FileSearchError;
-use crate::file_search::matching::rank_filename_match;
+use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
     ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FileTypeFilter,
     FilenameResult, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchProgress,
-    SearchRequest, SearchResult, SearchScope, SearchStatus, TextMatchRange,
+    SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
 use serde_json::Value;
@@ -216,9 +216,10 @@ pub fn search_content_with_ripgrep(
     summary.cancelled = process.cancelled;
     summary.stderr = stderr.clone();
     if !process.cancelled
-        && let Some(status) = process.status {
-            handle_exit_status(status, &executable, &stderr)?;
-        }
+        && let Some(status) = process.status
+    {
+        handle_exit_status(status, &executable, &stderr)?;
+    }
     Ok(summary)
 }
 
@@ -376,9 +377,10 @@ pub fn search_filenames_with_ripgrep(
     summary.cancelled |= process.cancelled;
     summary.stderr = stderr.clone();
     if !summary.cancelled
-        && let Some(status) = process.status {
-            handle_exit_status(status, &executable, &stderr)?;
-        }
+        && let Some(status) = process.status
+    {
+        handle_exit_status(status, &executable, &stderr)?;
+    }
     while let Ok(line) = line_rx.try_recv() {
         if results.len() >= request.max_results {
             break;
@@ -532,7 +534,14 @@ fn filename_result_from_path(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| line.to_owned());
-    let rank = rank_filename_match(&file_name, &path, needle, request.case_sensitive)?;
+    let highlight = filename_highlight_match(
+        &file_name,
+        &path,
+        needle,
+        request.case_sensitive,
+        request.filename_match_mode,
+    )?;
+    let rank = highlight.rank;
     Some(FilenameResult {
         path: path.clone(),
         file_name: file_name.clone(),
@@ -542,12 +551,8 @@ fn filename_result_from_path(
         modified: metadata.and_then(|m| m.modified().ok()),
         rank,
         match_quality: rank,
-        filename_match_ranges: highlight_ranges(&file_name, needle, request.case_sensitive),
-        path_match_ranges: highlight_ranges(
-            &path.to_string_lossy(),
-            needle,
-            request.case_sensitive,
-        ),
+        filename_match_ranges: highlight.filename_match_ranges,
+        path_match_ranges: highlight.path_match_ranges,
         arrival_index,
     })
 }
@@ -558,34 +563,6 @@ fn matches_file_type_filter(metadata: Option<&std::fs::Metadata>, filter: FileTy
         FileTypeFilter::DirectoriesOnly => metadata.is_some_and(|m| m.is_dir()),
         FileTypeFilter::FilesAndDirectories => true,
     }
-}
-
-fn highlight_ranges(haystack: &str, needle: &str, case_sensitive: bool) -> Vec<TextMatchRange> {
-    let source = if case_sensitive {
-        haystack.to_owned()
-    } else {
-        haystack.to_lowercase()
-    };
-    let query = if case_sensitive {
-        needle.to_owned()
-    } else {
-        needle.to_lowercase()
-    };
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-    while let Some(found) = source[offset..].find(&query) {
-        let start = offset + found;
-        let end = start + query.len();
-        ranges.push(TextMatchRange {
-            byte_start: start,
-            byte_end: end,
-        });
-        offset = end;
-    }
-    ranges
 }
 
 fn search_roots(
@@ -847,62 +824,74 @@ mod tests {
     fn commands_include_no_ignore() {
         let temp = tempfile::tempdir().unwrap();
         let request = req(temp.path().to_path_buf());
-        assert!(args(&build_ripgrep_command(
-            Path::new("rg"),
-            &request,
-            &FileSearchSettings::default(),
-            &[temp.path().to_path_buf()]
-        ))
-        .contains(&"--no-ignore".to_owned()));
-        assert!(args(&build_ripgrep_files_command(
-            Path::new("rg"),
-            &request,
-            &FileSearchSettings::default(),
-            &[temp.path().to_path_buf()]
-        ))
-        .contains(&"--no-ignore".to_owned()));
+        assert!(
+            args(&build_ripgrep_command(
+                Path::new("rg"),
+                &request,
+                &FileSearchSettings::default(),
+                &[temp.path().to_path_buf()]
+            ))
+            .contains(&"--no-ignore".to_owned())
+        );
+        assert!(
+            args(&build_ripgrep_files_command(
+                Path::new("rg"),
+                &request,
+                &FileSearchSettings::default(),
+                &[temp.path().to_path_buf()]
+            ))
+            .contains(&"--no-ignore".to_owned())
+        );
     }
 
     #[test]
     fn hidden_flag_only_when_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let mut request = req(temp.path().to_path_buf());
-        assert!(!args(&build_ripgrep_command(
-            Path::new("rg"),
-            &request,
-            &FileSearchSettings::default(),
-            &[temp.path().to_path_buf()]
-        ))
-        .contains(&"--hidden".to_owned()));
+        assert!(
+            !args(&build_ripgrep_command(
+                Path::new("rg"),
+                &request,
+                &FileSearchSettings::default(),
+                &[temp.path().to_path_buf()]
+            ))
+            .contains(&"--hidden".to_owned())
+        );
         request.include_hidden_files = true;
-        assert!(args(&build_ripgrep_command(
-            Path::new("rg"),
-            &request,
-            &FileSearchSettings::default(),
-            &[temp.path().to_path_buf()]
-        ))
-        .contains(&"--hidden".to_owned()));
+        assert!(
+            args(&build_ripgrep_command(
+                Path::new("rg"),
+                &request,
+                &FileSearchSettings::default(),
+                &[temp.path().to_path_buf()]
+            ))
+            .contains(&"--hidden".to_owned())
+        );
     }
 
     #[test]
     fn whole_word_flag_only_when_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let mut request = req(temp.path().to_path_buf());
-        assert!(!args(&build_ripgrep_command(
-            Path::new("rg"),
-            &request,
-            &FileSearchSettings::default(),
-            &[temp.path().to_path_buf()]
-        ))
-        .contains(&"--word-regexp".to_owned()));
+        assert!(
+            !args(&build_ripgrep_command(
+                Path::new("rg"),
+                &request,
+                &FileSearchSettings::default(),
+                &[temp.path().to_path_buf()]
+            ))
+            .contains(&"--word-regexp".to_owned())
+        );
         request.whole_word = true;
-        assert!(args(&build_ripgrep_command(
-            Path::new("rg"),
-            &request,
-            &FileSearchSettings::default(),
-            &[temp.path().to_path_buf()]
-        ))
-        .contains(&"--word-regexp".to_owned()));
+        assert!(
+            args(&build_ripgrep_command(
+                Path::new("rg"),
+                &request,
+                &FileSearchSettings::default(),
+                &[temp.path().to_path_buf()]
+            ))
+            .contains(&"--word-regexp".to_owned())
+        );
     }
 
     #[test]
@@ -1094,14 +1083,18 @@ mod tests {
         );
         let summary = parse_ripgrep_json(json, 25).unwrap();
         assert_eq!(summary.results.len(), 2);
-        assert!(summary
-            .results
-            .iter()
-            .any(|r| r.path == PathBuf::from("one/a.txt")));
-        assert!(summary
-            .results
-            .iter()
-            .any(|r| r.path == PathBuf::from("two/a.txt")));
+        assert!(
+            summary
+                .results
+                .iter()
+                .any(|r| r.path == PathBuf::from("one/a.txt"))
+        );
+        assert!(
+            summary
+                .results
+                .iter()
+                .any(|r| r.path == PathBuf::from("two/a.txt"))
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
-use crate::file_search::matching::rank_filename_match;
+use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
     FileKind, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest,
     SearchResult, SearchScope, SearchStatus,
@@ -150,9 +150,14 @@ pub fn search_filenames_in_directory(
                 summary.files_scanned += 1;
             }
             let file_name = entry.file_name().to_string_lossy().to_string();
-            if let Some(rank) =
-                rank_filename_match(&file_name, entry.path(), &needle, request.case_sensitive)
-            {
+            if let Some(highlight) = filename_highlight_match(
+                &file_name,
+                entry.path(),
+                &needle,
+                request.case_sensitive,
+                request.filename_match_mode,
+            ) {
+                let rank = highlight.rank;
                 let identity = crate::file_search::model::normalize_path_for_identity(entry.path());
                 if !seen_results.insert(identity) {
                     continue;
@@ -166,8 +171,8 @@ pub fn search_filenames_in_directory(
                     modified: metadata.and_then(|m| m.modified().ok()),
                     rank,
                     match_quality: rank,
-                    filename_match_ranges: Vec::new(),
-                    path_match_ranges: Vec::new(),
+                    filename_match_ranges: highlight.filename_match_ranges,
+                    path_match_ranges: highlight.path_match_ranges,
                     arrival_index: ranked_results.len(),
                 };
                 if event_sender
