@@ -1,4 +1,5 @@
 #![windows_subsystem = "windows"]
+#![allow(clippy::type_complexity)]
 
 use multi_launcher::actions::{load_actions, Action};
 use multi_launcher::gui::LauncherApp;

@@ -133,6 +133,10 @@ pub fn search_filenames_in_directory(
                 summary.skipped_entries += 1;
                 continue;
             }
+            if entry.file_type().is_file() && !extension_allowed(entry.path(), &request) {
+                summary.skipped_entries += 1;
+                continue;
+            }
             let metadata = match entry.metadata() {
                 Ok(metadata) => Some(metadata),
                 Err(_) => {
@@ -277,6 +281,29 @@ fn is_hidden(entry: &DirEntry) -> bool {
     }
 }
 
+fn extension_allowed(path: &Path, request: &SearchRequest) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let norm = |s: &String| s.trim_start_matches('.').to_ascii_lowercase();
+    if !request.included_extensions.is_empty()
+        && !request
+            .included_extensions
+            .iter()
+            .map(norm)
+            .any(|e| e == ext)
+    {
+        return false;
+    }
+    !request
+        .excluded_extensions
+        .iter()
+        .map(norm)
+        .any(|e| e == ext)
+}
+
 fn file_kind(metadata: Option<&std::fs::Metadata>) -> FileKind {
     match metadata {
         Some(metadata) if metadata.is_file() => FileKind::File,
@@ -399,9 +426,11 @@ mod tests {
         let (summary, events) = run(req);
         assert_eq!(summary.results_found, 1);
         assert_eq!(summary.root_errors.len(), 1);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, SearchEvent::Result { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SearchEvent::Result { .. }))
+        );
     }
 
     #[test]
@@ -431,14 +460,16 @@ mod tests {
         let mut req = request(temp.path().join("missing"), "match", 20);
         req.scope = SearchScope::Roots { roots: vec![] };
         let (tx, _) = mpsc::channel();
-        assert!(search_filenames_in_directory(
-            req,
-            &FileSearchSettings::default(),
-            &CancellationToken::new(),
-            &tx,
-            SearchId(1)
-        )
-        .is_err());
+        assert!(
+            search_filenames_in_directory(
+                req,
+                &FileSearchSettings::default(),
+                &CancellationToken::new(),
+                &tx,
+                SearchId(1)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -489,24 +520,28 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut req = request(temp.path().to_path_buf(), "x", 10);
         req.kind = SearchKind::Content;
-        assert!(search_filenames_in_directory(
-            req,
-            &FileSearchSettings::default(),
-            &CancellationToken::new(),
-            &mpsc::channel().0,
-            SearchId(1)
-        )
-        .is_err());
+        assert!(
+            search_filenames_in_directory(
+                req,
+                &FileSearchSettings::default(),
+                &CancellationToken::new(),
+                &mpsc::channel().0,
+                SearchId(1)
+            )
+            .is_err()
+        );
 
         let mut req = request(temp.path().to_path_buf(), "x", 10);
         req.scope = SearchScope::Roots { roots: Vec::new() };
-        assert!(search_filenames_in_directory(
-            req,
-            &FileSearchSettings::default(),
-            &CancellationToken::new(),
-            &mpsc::channel().0,
-            SearchId(1)
-        )
-        .is_err());
+        assert!(
+            search_filenames_in_directory(
+                req,
+                &FileSearchSettings::default(),
+                &CancellationToken::new(),
+                &mpsc::channel().0,
+                SearchId(1)
+            )
+            .is_err()
+        );
     }
 }

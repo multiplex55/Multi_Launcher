@@ -208,13 +208,7 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
         }
         let minimized = placement.showCmd == SW_SHOWMINIMIZED.0 as u32
             || placement.showCmd == SW_MINIMIZE.0 as u32;
-        let allow_minimized = if ctx.options.include_minimized {
-            true
-        } else if ctx.options.exclude_minimized {
-            false
-        } else {
-            false
-        };
+        let allow_minimized = ctx.options.include_minimized;
         if minimized && !allow_minimized {
             return BOOL(1);
         }

@@ -15,6 +15,27 @@ pub struct BackendPlan {
     pub candidates: Vec<SearchBackend>,
 }
 
+pub trait BackendAvailability: Send + Sync + 'static {
+    fn availability(
+        &self,
+        backend: SearchBackend,
+        settings: &FileSearchSettings,
+    ) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProductionBackendAvailability;
+
+impl BackendAvailability for ProductionBackendAvailability {
+    fn availability(
+        &self,
+        backend: SearchBackend,
+        settings: &FileSearchSettings,
+    ) -> Result<(), String> {
+        production_availability(backend, settings)
+    }
+}
+
 /// Production file-search dispatcher that selects an available backend for a
 /// request and delegates execution to the corresponding backend executor.
 #[derive(Clone)]
@@ -24,6 +45,7 @@ pub struct FileSearchExecutor {
     native: Arc<dyn SearchExecutor>,
     walkdir: Arc<dyn SearchExecutor>,
     everything: Arc<dyn SearchExecutor>,
+    availability: Arc<dyn BackendAvailability>,
 }
 
 impl FileSearchExecutor {
@@ -48,12 +70,31 @@ impl FileSearchExecutor {
         walkdir: Arc<dyn SearchExecutor>,
         everything: Arc<dyn SearchExecutor>,
     ) -> Self {
+        Self::with_backend_executors_and_availability(
+            settings,
+            ripgrep,
+            native,
+            walkdir,
+            everything,
+            Arc::new(ProductionBackendAvailability),
+        )
+    }
+
+    pub fn with_backend_executors_and_availability(
+        settings: FileSearchSettings,
+        ripgrep: Arc<dyn SearchExecutor>,
+        native: Arc<dyn SearchExecutor>,
+        walkdir: Arc<dyn SearchExecutor>,
+        everything: Arc<dyn SearchExecutor>,
+        availability: Arc<dyn BackendAvailability>,
+    ) -> Self {
         Self {
             settings,
             ripgrep,
             native,
             walkdir,
             everything,
+            availability,
         }
     }
 
@@ -84,38 +125,7 @@ impl FileSearchExecutor {
     }
 
     fn availability(&self, backend: SearchBackend) -> Result<(), String> {
-        match backend {
-            SearchBackend::Ripgrep => {
-                let configured = &self.settings.ripgrep_executable_path;
-                if configured.is_absolute() && !configured.is_file() {
-                    return Err(format!(
-                        "ripgrep executable was not found at configured path '{}'",
-                        configured.display()
-                    ));
-                }
-                if !configured.as_os_str().is_empty()
-                    && configured.components().count() > 1
-                    && !configured.is_absolute()
-                {
-                    return Err(format!(
-                        "ripgrep executable path '{}' must be absolute when it includes directories",
-                        configured.display()
-                    ));
-                }
-                resolve_ripgrep_executable(configured)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            }
-            SearchBackend::Everything => {
-                let diagnostic = everything_diagnostic(&self.settings);
-                diagnostic.detected_path.map(|_| ()).ok_or_else(|| {
-                    diagnostic
-                        .unavailable_reason
-                        .unwrap_or_else(|| "Everything executable is unavailable".to_owned())
-                })
-            }
-            SearchBackend::WalkDir | SearchBackend::Native => Ok(()),
-        }
+        self.availability.availability(backend, &self.settings)
     }
 
     fn executor_for(&self, backend: SearchBackend) -> Arc<dyn SearchExecutor> {
@@ -134,9 +144,10 @@ impl FileSearchExecutor {
     ) -> SearchRequest {
         if backend == SearchBackend::WalkDir
             && let SearchScope::Roots { roots } = &mut request.scope
-                && roots.is_empty() {
-                    *roots = self.settings.global_search_roots.clone();
-                }
+            && roots.is_empty()
+        {
+            *roots = self.settings.global_search_roots.clone();
+        }
         request
     }
 }
@@ -184,6 +195,44 @@ impl SearchExecutor for FileSearchExecutor {
     }
 }
 
+fn production_availability(
+    backend: SearchBackend,
+    settings: &FileSearchSettings,
+) -> Result<(), String> {
+    match backend {
+        SearchBackend::Ripgrep => {
+            let configured = &settings.ripgrep_executable_path;
+            if configured.is_absolute() && !configured.is_file() {
+                return Err(format!(
+                    "ripgrep executable was not found at configured path '{}'",
+                    configured.display()
+                ));
+            }
+            if !configured.as_os_str().is_empty()
+                && configured.components().count() > 1
+                && !configured.is_absolute()
+            {
+                return Err(format!(
+                    "ripgrep executable path '{}' must be absolute when it includes directories",
+                    configured.display()
+                ));
+            }
+            resolve_ripgrep_executable(configured)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        SearchBackend::Everything => {
+            let diagnostic = everything_diagnostic(settings);
+            diagnostic.detected_path.map(|_| ()).ok_or_else(|| {
+                diagnostic
+                    .unavailable_reason
+                    .unwrap_or_else(|| "Everything executable is unavailable".to_owned())
+            })
+        }
+        SearchBackend::WalkDir | SearchBackend::Native => Ok(()),
+    }
+}
+
 fn is_custom_root(roots: &[std::path::PathBuf], settings: &FileSearchSettings) -> bool {
     !roots_match_global_search_roots(roots, settings)
 }
@@ -216,6 +265,7 @@ fn roots_match_global_search_roots(
 mod tests {
     use super::*;
     use crate::file_search::model::{ContentMatchMode, FileTypeFilter};
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -268,6 +318,49 @@ mod tests {
         everything: Arc<RecordingExecutor>,
     ) -> FileSearchExecutor {
         FileSearchExecutor::with_backend_executors(settings, ripgrep, native, walkdir, everything)
+    }
+
+    #[derive(Default)]
+    struct MockAvailability {
+        results: Mutex<HashMap<SearchBackend, Result<(), String>>>,
+    }
+    impl MockAvailability {
+        fn with(self: Arc<Self>, backend: SearchBackend, result: Result<(), String>) -> Arc<Self> {
+            self.results.lock().unwrap().insert(backend, result);
+            self
+        }
+    }
+    impl BackendAvailability for MockAvailability {
+        fn availability(
+            &self,
+            backend: SearchBackend,
+            _settings: &FileSearchSettings,
+        ) -> Result<(), String> {
+            self.results
+                .lock()
+                .unwrap()
+                .get(&backend)
+                .cloned()
+                .unwrap_or(Ok(()))
+        }
+    }
+
+    fn dispatcher_with_availability(
+        settings: FileSearchSettings,
+        availability: Arc<dyn BackendAvailability>,
+        ripgrep: Arc<RecordingExecutor>,
+        native: Arc<RecordingExecutor>,
+        walkdir: Arc<RecordingExecutor>,
+        everything: Arc<RecordingExecutor>,
+    ) -> FileSearchExecutor {
+        FileSearchExecutor::with_backend_executors_and_availability(
+            settings,
+            ripgrep,
+            native,
+            walkdir,
+            everything,
+            availability,
+        )
     }
 
     #[test]
@@ -417,5 +510,147 @@ mod tests {
         );
         assert_eq!(plan.candidates[0], SearchBackend::Ripgrep);
         assert!(executor.availability(SearchBackend::Ripgrep).is_ok());
+    }
+
+    #[test]
+    fn mocked_ripgrep_available_selects_ripgrep_without_real_installation() {
+        let ripgrep = Arc::new(RecordingExecutor::default());
+        let native = Arc::new(RecordingExecutor::default());
+        let walkdir = Arc::new(RecordingExecutor::default());
+        let everything = Arc::new(RecordingExecutor::default());
+        let availability = Arc::new(MockAvailability::default());
+        let executor = dispatcher_with_availability(
+            FileSearchSettings::default(),
+            availability,
+            ripgrep.clone(),
+            native,
+            walkdir,
+            everything,
+        );
+        let (tx, rx) = mpsc::channel();
+        executor.execute(
+            SearchId(31),
+            request(
+                SearchKind::Content,
+                SearchScope::Roots {
+                    roots: vec![PathBuf::from(".")],
+                },
+            ),
+            CancellationToken::new(),
+            tx,
+        );
+        assert!(rx.try_iter().any(|e| e
+            == SearchEvent::Started {
+                id: SearchId(31),
+                backend: SearchBackend::Ripgrep
+            }));
+        assert_eq!(ripgrep.calls(), vec![SearchId(31)]);
+    }
+
+    #[test]
+    fn mocked_ripgrep_missing_falls_back_to_native() {
+        let ripgrep = Arc::new(RecordingExecutor::default());
+        let native = Arc::new(RecordingExecutor::default());
+        let availability = Arc::new(MockAvailability::default())
+            .with(SearchBackend::Ripgrep, Err("missing rg".into()));
+        let executor = dispatcher_with_availability(
+            FileSearchSettings::default(),
+            availability,
+            ripgrep.clone(),
+            native.clone(),
+            Arc::new(RecordingExecutor::default()),
+            Arc::new(RecordingExecutor::default()),
+        );
+        let (tx, rx) = mpsc::channel();
+        executor.execute(
+            SearchId(32),
+            request(
+                SearchKind::Content,
+                SearchScope::Roots {
+                    roots: vec![PathBuf::from(".")],
+                },
+            ),
+            CancellationToken::new(),
+            tx,
+        );
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SearchEvent::BackendFallback {
+                from: SearchBackend::Ripgrep,
+                to: SearchBackend::Native,
+                ..
+            }
+        )));
+        assert_eq!(native.calls(), vec![SearchId(32)]);
+        assert!(ripgrep.calls().is_empty());
+    }
+
+    #[test]
+    fn invalid_configured_ripgrep_path_can_fall_back_to_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let configured = temp.path().join("missing-rg");
+        let sidecar = temp.path().join("rg.exe");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&sidecar, "#!/bin/sh\necho ripgrep sidecar\n").unwrap();
+            let mut perms = std::fs::metadata(&sidecar).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&sidecar, perms).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let Some(source) =
+                crate::file_search::discovery::find_on_process_path(std::path::Path::new("rg.exe"))
+            else {
+                return;
+            };
+            std::fs::copy(source, &sidecar).unwrap();
+        }
+        let ctx = crate::file_search::discovery::ExecutableSearchContext {
+            launcher_directory: temp.path().into(),
+            path_directories: vec![],
+        };
+        let resolution =
+            crate::file_search::discovery::discover_ripgrep(&configured, &ctx).unwrap();
+        assert_eq!(
+            resolution.source,
+            crate::file_search::discovery::ExecutableResolutionSource::LauncherSidecar
+        );
+        assert!(!resolution.warnings.is_empty());
+    }
+
+    #[test]
+    fn mocked_everything_unavailable_falls_back_to_walkdir() {
+        let walkdir = Arc::new(RecordingExecutor::default());
+        let everything = Arc::new(RecordingExecutor::default());
+        let availability = Arc::new(MockAvailability::default())
+            .with(SearchBackend::Everything, Err("no everything".into()));
+        let executor = dispatcher_with_availability(
+            FileSearchSettings {
+                everything_enabled: true,
+                ..Default::default()
+            },
+            availability,
+            Arc::new(RecordingExecutor::default()),
+            Arc::new(RecordingExecutor::default()),
+            walkdir.clone(),
+            everything.clone(),
+        );
+        let (tx, rx) = mpsc::channel();
+        executor.execute(
+            SearchId(33),
+            request(SearchKind::Filename, SearchScope::Roots { roots: vec![] }),
+            CancellationToken::new(),
+            tx,
+        );
+        assert!(rx.try_iter().any(|e| e
+            == SearchEvent::Started {
+                id: SearchId(33),
+                backend: SearchBackend::WalkDir
+            }));
+        assert_eq!(walkdir.calls(), vec![SearchId(33)]);
+        assert!(everything.calls().is_empty());
     }
 }
