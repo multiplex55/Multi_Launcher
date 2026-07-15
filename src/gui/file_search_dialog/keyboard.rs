@@ -65,22 +65,31 @@ impl FileSearchDialogState {
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::Escape))
-            && self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
-                ui.ctx().request_repaint();
-            }
+            && self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel
+        {
+            ui.ctx().request_repaint();
+        }
 
-        if command && !modifiers.shift && ui.input(|i| i.key_pressed(egui::Key::C))
-            && let Some(payload) = self.copy_selected_path_payload() {
-                self.copy_text_payload("copy selected path", payload);
-            }
-        if command && modifiers.shift && ui.input(|i| i.key_pressed(egui::Key::C))
-            && let Some(payload) = self.copy_all_visible_results_payload() {
-                self.copy_text_payload("copy visible results", payload);
-            }
-        if command && ui.input(|i| i.key_pressed(egui::Key::L))
-            && let Some(payload) = self.copy_selected_match_line_payload() {
-                self.copy_text_payload("copy matching line", payload);
-            }
+        if command
+            && !modifiers.shift
+            && ui.input(|i| i.key_pressed(egui::Key::C))
+            && let Some(payload) = self.copy_selected_path_payload()
+        {
+            self.copy_text_payload("copy selected path", payload);
+        }
+        if command
+            && modifiers.shift
+            && ui.input(|i| i.key_pressed(egui::Key::C))
+            && let Some(payload) = self.copy_all_visible_results_payload()
+        {
+            self.copy_text_payload("copy visible results", payload);
+        }
+        if command
+            && ui.input(|i| i.key_pressed(egui::Key::L))
+            && let Some(payload) = self.copy_selected_match_line_payload()
+        {
+            self.copy_text_payload("copy matching line", payload);
+        }
         if command && ui.input(|i| i.key_pressed(egui::Key::F)) {
             self.refine_from_selection(coordinator);
             ui.ctx().request_repaint();
@@ -88,17 +97,18 @@ impl FileSearchDialogState {
     }
 
     pub(super) fn move_selection(&mut self, movement: SelectionMove) {
-        if self.result_rows.is_empty() {
+        let selectable_rows: Vec<_> = self.selectable_result_rows().cloned().collect();
+        if selectable_rows.is_empty() {
             self.clear_selection();
             return;
         }
         let current_key = self.selected_result_key();
         let current_idx = current_key.as_ref().and_then(|key| {
-            self.result_rows
+            selectable_rows
                 .iter()
                 .position(|row| row.id.result_key == *key)
         });
-        let last = self.result_rows.len() - 1;
+        let last = selectable_rows.len() - 1;
         let page = 10;
         let next_idx = match (movement, current_idx) {
             (SelectionMove::First, _) => 0,
@@ -110,7 +120,7 @@ impl FileSearchDialogState {
             (SelectionMove::Previous | SelectionMove::PagePrevious, None) => last,
             (SelectionMove::Next | SelectionMove::PageNext, None) => 0,
         };
-        let row = self.result_rows[next_idx].clone();
+        let row = selectable_rows[next_idx].clone();
         self.select_result(&row);
     }
 
@@ -237,7 +247,8 @@ impl FileSearchDialogState {
                     modified: *modified,
                     match_quality: Some(*match_quality),
                 }),
-                FileSearchRowPayload::Content { .. } => None,
+                FileSearchRowPayload::Content { .. }
+                | FileSearchRowPayload::ContentGroupHeader { .. } => None,
             })
             .collect()
     }
@@ -271,7 +282,8 @@ impl FileSearchDialogState {
                         match_quality: source.and_then(|file| file.filename_relevance),
                     })
                 }
-                FileSearchRowPayload::Filename { .. } => None,
+                FileSearchRowPayload::Filename { .. }
+                | FileSearchRowPayload::ContentGroupHeader { .. } => None,
             })
             .collect()
     }
