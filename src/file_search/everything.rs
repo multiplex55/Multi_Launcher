@@ -1,5 +1,5 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
-use crate::file_search::matching::rank_filename_match;
+use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
     FileKind, FilenameRank, FilenameResult, SearchEvent, SearchId, SearchKind, SearchProgress,
     SearchRequest, SearchResult, SearchScope, SearchStatus,
@@ -440,7 +440,16 @@ pub fn parse_everything_line(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
-    let rank = rank_filename_match(&file_name, &path, &request.text, request.case_sensitive)
+    let highlight = filename_highlight_match(
+        &file_name,
+        &path,
+        &request.text,
+        request.case_sensitive,
+        request.filename_match_mode,
+    );
+    let rank = highlight
+        .as_ref()
+        .map(|h| h.rank)
         .unwrap_or(FilenameRank::FullPathContains);
     Ok(FilenameResult {
         path: path.clone(),
@@ -451,8 +460,11 @@ pub fn parse_everything_line(
         modified: metadata.and_then(|m| m.modified().ok()),
         rank,
         match_quality: rank,
-        filename_match_ranges: Vec::new(),
-        path_match_ranges: Vec::new(),
+        filename_match_ranges: highlight
+            .as_ref()
+            .map(|h| h.filename_match_ranges.clone())
+            .unwrap_or_default(),
+        path_match_ranges: highlight.map(|h| h.path_match_ranges).unwrap_or_default(),
         arrival_index: 0,
     })
 }
@@ -501,9 +513,11 @@ fn passes_post_filters(
     settings: &FileSearchSettings,
 ) -> bool {
     if let SearchScope::Roots { roots } = &request.scope
-        && !roots.is_empty() && !roots.iter().any(|root| result.path.starts_with(root)) {
-            return false;
-        }
+        && !roots.is_empty()
+        && !roots.iter().any(|root| result.path.starts_with(root))
+    {
+        return false;
+    }
     if !request.include_hidden_files
         && result
             .path
@@ -685,18 +699,22 @@ mod tests {
             PathBuf::from("C:/Program Files/Everything/es.exe")
         );
         assert!(spec.args.contains(&OsString::from("-csv")));
-        assert!(spec
-            .args
-            .windows(2)
-            .any(|w| w == [OsString::from("-n"), OsString::from("7")]));
-        assert!(spec
-            .args
-            .windows(2)
-            .any(|w| w == [OsString::from("-s"), OsString::from("-dash query")]));
-        assert!(!spec
-            .args
-            .iter()
-            .any(|a| a == "-dash query" && spec.args.first() == Some(a)));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == [OsString::from("-n"), OsString::from("7")])
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == [OsString::from("-s"), OsString::from("-dash query")])
+        );
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|a| a == "-dash query" && spec.args.first() == Some(a))
+        );
     }
 
     #[test]
@@ -711,14 +729,18 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].kind, FileKind::File);
         assert_eq!(results[1].kind, FileKind::Directory);
-        assert!(results[0]
-            .path
-            .to_string_lossy()
-            .contains("path with spaces"));
+        assert!(
+            results[0]
+                .path
+                .to_string_lossy()
+                .contains("path with spaces")
+        );
         assert!(results[1].path.to_string_lossy().contains("ユニコード"));
-        assert!(parse_everything_output("", &request("x"))
-            .unwrap()
-            .is_empty());
+        assert!(
+            parse_everything_output("", &request("x"))
+                .unwrap()
+                .is_empty()
+        );
         assert!(parse_everything_output("\"unterminated", &request("x")).is_err());
     }
 
@@ -796,8 +818,9 @@ exit /b 3
         };
         search_with_everything(req, &settings, &CancellationToken::new(), &tx, SearchId(99))
             .unwrap();
-        assert!(rx
-            .try_iter()
-            .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) })));
+        assert!(
+            rx.try_iter()
+                .any(|event| matches!(event, SearchEvent::Completed { id: SearchId(99) }))
+        );
     }
 }

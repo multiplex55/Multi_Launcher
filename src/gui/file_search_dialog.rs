@@ -1254,8 +1254,8 @@ impl FileSearchDialogState {
                             row.col(|ui| {
                                 ui.push_id((result_row_id_source(row_id.search_id, &row_id), *column), |ui| {
                                     let response = match column {
-                                        crate::file_search::settings::FileSearchColumn::Name => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job(&display_filename, &filename_match_ranges))),
-                                        crate::file_search::settings::FileSearchColumn::Directory => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job(&parent_directory_display, &path_match_ranges))),
+                                        crate::file_search::settings::FileSearchColumn::Name => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &display_filename, &filename_match_ranges, is_selected))),
+                                        crate::file_search::settings::FileSearchColumn::Directory => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &parent_directory_display, &path_match_ranges, is_selected))),
                                         crate::file_search::settings::FileSearchColumn::Kind => results::non_wrapping_selectable_label(ui, is_selected, format!("{kind:?}")),
                                         crate::file_search::settings::FileSearchColumn::MatchQuality => results::non_wrapping_selectable_label(ui, is_selected, results::format_match_quality(match_quality)),
                                         crate::file_search::settings::FileSearchColumn::Size => results::non_wrapping_selectable_label(ui, is_selected, size.map(results::format_size).unwrap_or_else(|| "—".to_owned())),

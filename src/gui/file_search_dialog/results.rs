@@ -5,7 +5,7 @@ use crate::file_search::model::{
 use crate::file_search::settings::{
     FileSearchColumn, FileSearchContentSort, FileSearchFilenameSort, FileSearchUiPreferences,
 };
-use eframe::egui::{self, Color32, FontId, TextFormat, WidgetText, text::LayoutJob};
+use eframe::egui::{self, FontId, Stroke, TextFormat, WidgetText, text::LayoutJob};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -280,39 +280,79 @@ pub fn format_modified(time: SystemTime) -> String {
 
 pub fn highlighted_job(text: &str, ranges: &[TextMatchRange]) -> LayoutJob {
     let ranges: Vec<_> = ranges.iter().map(|r| (r.byte_start, r.byte_end)).collect();
-    highlighted_job_from_byte_ranges(text, &ranges)
+    highlighted_job_from_byte_ranges(text, &ranges, default_highlight_formats())
 }
 
 pub fn highlighted_content_job(text: &str, ranges: &[ContentMatchRange]) -> LayoutJob {
     let ranges: Vec<_> = ranges.iter().map(|r| (r.byte_start, r.byte_end)).collect();
-    highlighted_job_from_byte_ranges(text, &ranges)
+    highlighted_job_from_byte_ranges(text, &ranges, default_highlight_formats())
 }
 
-fn highlighted_job_from_byte_ranges(text: &str, ranges: &[(usize, usize)]) -> LayoutJob {
+pub fn highlighted_job_for_ui(
+    ui: &egui::Ui,
+    text: &str,
+    ranges: &[TextMatchRange],
+    selected: bool,
+) -> LayoutJob {
+    let ranges: Vec<_> = ranges.iter().map(|r| (r.byte_start, r.byte_end)).collect();
+    highlighted_job_from_byte_ranges(text, &ranges, visual_highlight_formats(ui, selected))
+}
+
+fn default_highlight_formats() -> (TextFormat, TextFormat) {
     let normal = TextFormat {
         font_id: FontId::proportional(14.0),
-        color: Color32::WHITE,
         ..Default::default()
     };
     let highlight = TextFormat {
         font_id: FontId::proportional(14.0),
-        color: Color32::BLACK,
-        background: Color32::YELLOW,
+        underline: Stroke::new(1.0, egui::Color32::PLACEHOLDER),
         ..Default::default()
     };
+    (normal, highlight)
+}
+
+fn visual_highlight_formats(ui: &egui::Ui, selected: bool) -> (TextFormat, TextFormat) {
+    let visuals = ui.visuals();
+    let normal_color = if selected {
+        visuals.selection.stroke.color
+    } else {
+        visuals.text_color()
+    };
+    let highlight_bg = if selected {
+        visuals.selection.bg_fill
+    } else {
+        visuals.faint_bg_color
+    };
+    let highlight_color = if selected {
+        visuals.selection.stroke.color
+    } else {
+        visuals.strong_text_color()
+    };
+    let normal = TextFormat {
+        font_id: FontId::proportional(14.0),
+        color: normal_color,
+        ..Default::default()
+    };
+    let highlight = TextFormat {
+        font_id: FontId::proportional(14.0),
+        color: highlight_color,
+        background: highlight_bg,
+        underline: Stroke::new(1.0, highlight_color),
+        ..Default::default()
+    };
+    (normal, highlight)
+}
+
+fn highlighted_job_from_byte_ranges(
+    text: &str,
+    ranges: &[(usize, usize)],
+    formats: (TextFormat, TextFormat),
+) -> LayoutJob {
+    let (normal, highlight) = formats;
     let mut job = LayoutJob::default();
     let mut cursor = 0;
-    let mut sorted = ranges.to_vec();
-    sorted.sort_unstable();
+    let sorted = normalized_highlight_ranges(text, ranges);
     for (start, end) in sorted {
-        if start >= end
-            || end > text.len()
-            || !text.is_char_boundary(start)
-            || !text.is_char_boundary(end)
-            || start < cursor
-        {
-            continue;
-        }
         if cursor < start {
             job.append(&text[cursor..start], 0.0, normal.clone());
         }
@@ -323,6 +363,36 @@ fn highlighted_job_from_byte_ranges(text: &str, ranges: &[(usize, usize)]) -> La
         job.append(&text[cursor..], 0.0, normal);
     }
     job
+}
+
+fn normalized_highlight_ranges(text: &str, ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(start, end) in ranges {
+        let start = clamp_to_char_boundary(text, start.min(text.len()));
+        let end = clamp_to_char_boundary(text, end.min(text.len()));
+        if start < end {
+            out.push((start, end));
+        }
+    }
+    out.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in out {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn clamp_to_char_boundary(text: &str, mut index: usize) -> usize {
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 pub(super) fn non_wrapping_selectable_label(
@@ -487,11 +557,64 @@ mod tests {
         );
 
         assert_eq!(job.text, "café needle");
-        assert!(job.sections.iter().any(|section| {
-            section.byte_range.start == 6
-                && section.byte_range.end == 12
-                && section.format.background == Color32::YELLOW
-        }));
+        assert!(
+            job.sections
+                .iter()
+                .any(|section| { section.byte_range.start == 6 && section.byte_range.end == 12 })
+        );
+    }
+
+    #[test]
+    fn content_highlighting_renders_multiple_ranges_on_one_line() {
+        let job = highlighted_content_job(
+            "needle hay needle",
+            &[
+                ContentMatchRange {
+                    byte_start: 0,
+                    byte_end: 6,
+                },
+                ContentMatchRange {
+                    byte_start: 11,
+                    byte_end: 17,
+                },
+            ],
+        );
+
+        let highlighted: Vec<_> = job
+            .sections
+            .iter()
+            .map(|section| (section.byte_range.start, section.byte_range.end))
+            .filter(|range| *range == (0, 6) || *range == (11, 17))
+            .collect();
+        assert_eq!(highlighted, vec![(0, 6), (11, 17)]);
+    }
+
+    #[test]
+    fn out_of_bound_and_invalid_ranges_are_clamped_safely() {
+        let job = highlighted_job(
+            "café",
+            &[
+                TextMatchRange {
+                    byte_start: 3,
+                    byte_end: 99,
+                },
+                TextMatchRange {
+                    byte_start: 4,
+                    byte_end: 4,
+                },
+                TextMatchRange {
+                    byte_start: 5,
+                    byte_end: 1,
+                },
+            ],
+        );
+
+        assert_eq!(job.text, "café");
+        assert!(
+            job.sections
+                .iter()
+                .any(|section| { section.byte_range.start == 3 && section.byte_range.end == 5 })
+        );
     }
 
     #[test]
