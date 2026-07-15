@@ -1,8 +1,8 @@
 use crate::file_search::coordinator::{CancellationToken, SearchExecutor};
 use crate::file_search::model::{
     ContentFileResult, ContentFileResultBuilder, ContentMatch, ContentMatchMode, ContentMatchRange,
-    SearchEvent, SearchId, SearchKind, SearchProgress, SearchRequest, SearchResult, SearchScope,
-    SearchStatus,
+    InaccessiblePathDetail, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchProgress,
+    SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::collections::HashSet;
@@ -45,6 +45,7 @@ pub struct NativeSearchSummary {
     pub directories_scanned: u64,
     pub cancelled: bool,
     pub global_truncated: bool,
+    pub inaccessible_paths: Vec<InaccessiblePathDetail>,
 }
 
 pub fn search_content_native(
@@ -55,6 +56,12 @@ pub fn search_content_native(
     events: &mpsc::Sender<SearchEvent>,
 ) -> Result<(), String> {
     let summary = search_content_native_summary(request, settings, cancellation)?;
+    for detail in summary.inaccessible_paths.iter().cloned() {
+        let _ = events.send(SearchEvent::Diagnostic {
+            id,
+            diagnostic: SearchDiagnostic::InaccessiblePath(detail),
+        });
+    }
     for result in summary.results.iter().cloned() {
         if cancellation.is_cancelled() {
             let mut cancelled_summary = summary.clone();
@@ -163,11 +170,22 @@ fn collect_paths(
                     summary.cancelled = true;
                     break;
                 }
-                if root.is_file() {
+                let root_meta = match fs::metadata(root) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        summary.inaccessible_paths.push(InaccessiblePathDetail {
+                            path: root.clone(),
+                            operation: "stat root".to_string(),
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if root_meta.is_file() {
                     if accept_file_path(root, request, seen) {
                         out.push(root.clone());
                     }
-                } else if root.is_dir() {
+                } else if root_meta.is_dir() {
                     let walker = WalkDir::new(root)
                         .follow_links(false)
                         .into_iter()
@@ -177,7 +195,20 @@ fn collect_paths(
                             summary.cancelled = true;
                             break;
                         }
-                        let Ok(entry) = entry else { continue };
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(err) => {
+                                summary.inaccessible_paths.push(InaccessiblePathDetail {
+                                    path: err
+                                        .path()
+                                        .map(|p| p.to_path_buf())
+                                        .unwrap_or_else(|| root.clone()),
+                                    operation: "read directory entry".to_string(),
+                                    error: err.to_string(),
+                                });
+                                continue;
+                            }
+                        };
                         if entry.file_type().is_dir() {
                             summary.directories_scanned += 1;
                             continue;
@@ -263,7 +294,17 @@ fn search_file(
         summary.cancelled = true;
         return None;
     }
-    let meta = fs::metadata(path).ok()?;
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) => {
+            summary.inaccessible_paths.push(InaccessiblePathDetail {
+                path: path.to_path_buf(),
+                operation: "metadata".to_string(),
+                error: err.to_string(),
+            });
+            return None;
+        }
+    };
     if !meta.is_file() || meta.len() > request.max_file_size_bytes {
         return None;
     }
@@ -272,7 +313,17 @@ fn search_file(
         summary.cancelled = true;
         return None;
     }
-    let file = File::open(path).ok()?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            summary.inaccessible_paths.push(InaccessiblePathDetail {
+                path: path.to_path_buf(),
+                operation: "open file".to_string(),
+                error: err.to_string(),
+            });
+            return None;
+        }
+    };
     let mut reader = BufReader::new(file);
     if reader.fill_buf().ok().is_some_and(|b| b.contains(&0)) {
         return None;
@@ -617,5 +668,30 @@ mod tests {
         write(&d.path().join("unicodé/雪.txt"), "café ☕\n".as_bytes());
         let s = run(req(d.path().into(), "fé"));
         assert_eq!(s.results[0].matches[0].byte_start, 2);
+    }
+
+    #[test]
+    fn inaccessible_missing_root_is_recorded_from_actual_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("missing");
+        let summary = run(SearchRequest {
+            scope: SearchScope::Roots {
+                roots: vec![missing.clone()],
+            },
+            ..req(temp.path().into(), "needle")
+        });
+        assert_eq!(summary.inaccessible_paths.len(), 1);
+        assert_eq!(summary.inaccessible_paths[0].path, missing);
+        assert_eq!(summary.inaccessible_paths[0].operation, "stat root");
+    }
+
+    #[test]
+    fn directory_file_count_mismatch_does_not_create_fake_inaccessible_warning() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join("subdir")).unwrap();
+        std::fs::write(temp.path().join("haystack.txt"), "needle").unwrap();
+        let summary = run(req(temp.path().into(), "needle"));
+        assert!(summary.directories_scanned > summary.files_scanned);
+        assert!(summary.inaccessible_paths.is_empty());
     }
 }

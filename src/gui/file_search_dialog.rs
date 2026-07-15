@@ -10,14 +10,15 @@ use crate::file_search::actions::{
 };
 use crate::file_search::coordinator::{event_id, SearchCoordinator};
 use crate::file_search::model::{
-    ContentMatch, FileKind, FileSearchResultKey, PathIdentity, SearchBackend, SearchEvent,
-    SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
+    ContentMatch, FileKind, FileSearchResultKey, PathIdentity, SearchBackend, SearchDiagnostic,
+    SearchEvent, SearchId, SearchKind, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::preview::PreviewRequest;
 use crate::file_search::settings::{
     FileSearchContentSort, FileSearchFilenameSort, FileSearchSettings, FileSearchUiPreferences,
 };
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
+use diagnostics::FileSearchDiagnostics;
 use eframe::egui;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -264,6 +265,7 @@ pub struct FileSearchDialogState {
     pub selected_result: Option<SelectedFileSearchResult>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
+    pub diagnostics: FileSearchDiagnostics,
     pub preview_dialog: FileSearchPreviewDialogState,
     pub persisted_window_size: egui::Vec2,
     pub settings: FileSearchSettings,
@@ -295,6 +297,7 @@ impl Default for FileSearchDialogState {
             selected_result: None,
             warning_error_message: None,
             inaccessible_path_warnings: 0,
+            diagnostics: FileSearchDiagnostics::default(),
             preview_dialog: FileSearchPreviewDialogState::default(),
             persisted_window_size: DEFAULT_WINDOW_SIZE,
             settings: FileSearchSettings::default(),
@@ -392,6 +395,7 @@ impl FileSearchDialogState {
         self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
+        self.diagnostics.clear();
         self.current_status = SearchStatus::Running;
         self.backend = Some(SearchCoordinator::select_backend_with_settings(
             &request,
@@ -434,57 +438,98 @@ impl FileSearchDialogState {
         if Some(event_id(&event)) != self.active_search_id {
             return false;
         }
-        let observed_terminal_event = match event {
-            SearchEvent::Started { backend, .. } => {
-                self.backend = Some(backend);
-                self.current_status = SearchStatus::Running;
-                false
-            }
-            SearchEvent::BackendFallback {
-                from, to, reason, ..
-            } => {
-                self.backend = Some(to);
-                self.warning_error_message = Some(format!(
-                    "Search backend fallback: {from:?} → {to:?}: {reason}"
-                ));
-                if from == SearchBackend::Ripgrep
-                    && to == SearchBackend::Native
-                    && !self.ripgrep_missing_prompt_dismissed
-                {
-                    self.show_ripgrep_missing_prompt = true;
+        let observed_terminal_event =
+            match event {
+                SearchEvent::Started { backend, .. } => {
+                    self.backend = Some(backend);
+                    self.diagnostics.backend = Some(backend);
+                    self.current_status = SearchStatus::Running;
+                    false
                 }
-                false
-            }
-            SearchEvent::Result { result, .. } => {
-                self.push_result(result);
-                false
-            }
-            SearchEvent::Progress { progress, .. } => {
-                self.inaccessible_path_warnings = progress
-                    .directories_scanned
-                    .saturating_sub(progress.files_scanned)
-                    .try_into()
-                    .unwrap_or(usize::MAX);
-                false
-            }
-            SearchEvent::Completed { .. } => {
-                self.current_status = SearchStatus::Completed;
-                self.finalize_completed_results();
-                self.request_immediate_repaint = true;
-                true
-            }
-            SearchEvent::Cancelled { .. } => {
-                self.current_status = SearchStatus::Cancelled;
-                self.request_immediate_repaint = true;
-                true
-            }
-            SearchEvent::Failed { error, .. } => {
-                self.current_status = SearchStatus::Failed;
-                self.warning_error_message = Some(error);
-                self.request_immediate_repaint = true;
-                true
-            }
-        };
+                SearchEvent::BackendFallback {
+                    from, to, reason, ..
+                } => {
+                    self.backend = Some(to);
+                    self.diagnostics.backend = Some(to);
+                    let warning = if from == SearchBackend::Ripgrep && to == SearchBackend::Native {
+                        "ripgrep was not found. Native content search is being used.".to_string()
+                    } else {
+                        format!("Search backend fallback: {from:?} → {to:?}: {reason}")
+                    };
+                    self.warning_error_message = Some(warning.clone());
+                    self.diagnostics.record(SearchDiagnostic::Warning(format!(
+                        "{warning} Reason: {reason}"
+                    )));
+                    if from == SearchBackend::Ripgrep
+                        && to == SearchBackend::Native
+                        && !self.ripgrep_missing_prompt_dismissed
+                    {
+                        self.show_ripgrep_missing_prompt = true;
+                    }
+                    false
+                }
+                SearchEvent::Result { result, .. } => {
+                    if let SearchResult::ContentFile(content) = &result {
+                        if content.truncated {
+                            self.diagnostics
+                                .record(SearchDiagnostic::PerFileContentTruncated {
+                                    path: content.path.clone(),
+                                    total_matches: content.total_matches,
+                                    displayed_matches: content.matches.len(),
+                                });
+                        }
+                    }
+                    self.push_result(result);
+                    false
+                }
+                SearchEvent::Progress { progress, .. } => {
+                    if progress.global_truncated {
+                        match self.selected_mode {
+                            FileSearchMode::Filename => self.diagnostics.record(
+                                SearchDiagnostic::FilenameResultsTruncated {
+                                    limit: self
+                                        .last_submitted_request
+                                        .as_ref()
+                                        .map(|r| r.max_results)
+                                        .unwrap_or(progress.results_found),
+                                },
+                            ),
+                            FileSearchMode::Content => self.diagnostics.record(
+                                SearchDiagnostic::GlobalMatchedFilesTruncated {
+                                    limit: self
+                                        .last_submitted_request
+                                        .as_ref()
+                                        .map(|r| r.max_results)
+                                        .unwrap_or(progress.results_found),
+                                },
+                            ),
+                        }
+                    }
+                    false
+                }
+                SearchEvent::Diagnostic { diagnostic, .. } => {
+                    self.diagnostics.record(diagnostic);
+                    self.inaccessible_path_warnings = self.diagnostics.inaccessible_paths.len();
+                    false
+                }
+                SearchEvent::Completed { .. } => {
+                    self.current_status = SearchStatus::Completed;
+                    self.finalize_completed_results();
+                    self.request_immediate_repaint = true;
+                    true
+                }
+                SearchEvent::Cancelled { .. } => {
+                    self.current_status = SearchStatus::Cancelled;
+                    self.request_immediate_repaint = true;
+                    true
+                }
+                SearchEvent::Failed { error, .. } => {
+                    self.current_status = SearchStatus::Failed;
+                    self.warning_error_message = Some(error);
+                    self.request_immediate_repaint = true;
+                    true
+                }
+            };
         self.selection_is_valid();
         observed_terminal_event
     }
@@ -950,14 +995,18 @@ impl FileSearchDialogState {
         });
         self.filters_ui(ui);
         ui.label(format!(
-            "Backend: {} | Status: {:?} | {} | Inaccessible-path warnings: {}",
-            self.backend
-                .map(|b| format!("{b:?}"))
-                .unwrap_or_else(|| "not selected".to_string()),
+            "Status: {:?} | {} | Warnings: {}",
             self.current_status,
             self.result_count_status_text(),
-            self.inaccessible_path_warnings
+            self.diagnostics.warning_count()
         ));
+        egui::CollapsingHeader::new("Diagnostics")
+            .default_open(false)
+            .show(ui, |ui| {
+                for line in self.diagnostics.summary_lines() {
+                    ui.label(line);
+                }
+            });
         if let Some(msg) = &self.warning_error_message {
             ui.colored_label(egui::Color32::YELLOW, msg);
         }
@@ -1486,6 +1535,7 @@ impl FileSearchDialogState {
         self.clear_results_and_selection();
         self.warning_error_message = None;
         self.inaccessible_path_warnings = 0;
+        self.diagnostics.clear();
         self.current_status = SearchStatus::Running;
         self.backend = Some(SearchCoordinator::select_backend_with_settings(
             &request,
@@ -2122,7 +2172,7 @@ mod tests {
         state.apply_event(SearchEvent::Completed { id: SearchId(7) });
         assert_eq!(state.backend, Some(SearchBackend::WalkDir));
         assert_eq!(state.results.len(), 1);
-        assert_eq!(state.inaccessible_path_warnings, 3);
+        assert_eq!(state.inaccessible_path_warnings, 0);
         assert_eq!(state.current_status, SearchStatus::Completed);
     }
 
@@ -3365,6 +3415,26 @@ mod tests {
             .warning_error_message
             .as_deref()
             .is_some_and(|message| message.contains("/tmp/a.txt")));
+    }
+
+    #[test]
+    fn fallback_warning_does_not_mark_successful_search_failed() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(99)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::BackendFallback {
+            id: SearchId(99),
+            from: SearchBackend::Ripgrep,
+            to: SearchBackend::Native,
+            reason: "not found".to_string(),
+        });
+        state.apply_event(SearchEvent::Completed { id: SearchId(99) });
+        assert_eq!(state.current_status, SearchStatus::Completed);
+        assert!(state
+            .warning_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Native content search is being used")));
     }
 
     #[test]
