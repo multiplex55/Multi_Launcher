@@ -2,7 +2,9 @@ use crate::file_search::model::{
     ContentFileResult, ContentMatch, ContentMatchRange, FileKind, FilenameMatchQuality,
     FilenameRank, FilenameResult, TextMatchRange,
 };
-use crate::file_search::settings::{FileSearchColumn, FileSearchUiPreferences};
+use crate::file_search::settings::{
+    FileSearchColumn, FileSearchFilenameSort, FileSearchUiPreferences,
+};
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, TextFormat, WidgetText};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -67,7 +69,7 @@ pub fn filename_row_presentation(
             FileSearchColumn::Path => result.path.display().to_string(),
             FileSearchColumn::Line | FileSearchColumn::MatchText => continue,
             FileSearchColumn::Size => result.size.map(format_size).unwrap_or_default(),
-            FileSearchColumn::Modified => result.modified.map(format_modified).unwrap_or_default(),
+            FileSearchColumn::Modified => format_optional_modified(result.modified),
         };
         columns.push(RenderedColumn {
             column: *column,
@@ -115,27 +117,144 @@ pub fn content_group_presentation(result: &ContentFileResult) -> ContentFileGrou
 
 pub fn format_match_quality(rank: FilenameMatchQuality) -> String {
     match rank {
-        FilenameRank::ExactFilename => "Exact filename",
-        FilenameRank::FilenameStartsWith => "Name starts with",
-        FilenameRank::FilenameContains => "Name contains",
-        FilenameRank::FullPathContains => "Path contains",
+        FilenameRank::ExactFilename => "Exact",
+        FilenameRank::FilenameStartsWith => "Prefix",
+        FilenameRank::FilenameContains => "Filename",
+        FilenameRank::FullPathContains => "Path",
     }
     .to_owned()
 }
 
-fn format_size(size: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    if size >= MB {
-        format!("{:.1} MB", size as f64 / MB as f64)
-    } else if size >= KB {
-        format!("{:.1} KB", size as f64 / KB as f64)
+pub const DEFAULT_FILENAME_COLUMNS: &[FileSearchColumn] = &[
+    FileSearchColumn::Name,
+    FileSearchColumn::Directory,
+    FileSearchColumn::MatchQuality,
+];
+
+pub const OPTIONAL_FILENAME_COLUMNS: &[FileSearchColumn] = &[
+    FileSearchColumn::Kind,
+    FileSearchColumn::Size,
+    FileSearchColumn::Modified,
+];
+
+pub fn default_filename_columns() -> Vec<FileSearchColumn> {
+    DEFAULT_FILENAME_COLUMNS.to_vec()
+}
+
+pub fn reset_filename_columns_to_defaults(prefs: &mut FileSearchUiPreferences) {
+    prefs.visible_columns = default_filename_columns();
+}
+
+pub fn set_filename_column_visible(
+    prefs: &mut FileSearchUiPreferences,
+    column: FileSearchColumn,
+    visible: bool,
+) -> bool {
+    if visible {
+        if !prefs.visible_columns.contains(&column) {
+            prefs.visible_columns.push(column);
+        }
+        true
+    } else if prefs.visible_columns.len() <= 1 && prefs.visible_columns.contains(&column) {
+        false
     } else {
-        format!("{size} B")
+        prefs.visible_columns.retain(|c| *c != column);
+        true
     }
 }
 
-fn format_modified(time: SystemTime) -> String {
+pub fn ensure_filename_columns_visible(prefs: &mut FileSearchUiPreferences) {
+    prefs.visible_columns.retain(|c| {
+        matches!(
+            c,
+            FileSearchColumn::Name
+                | FileSearchColumn::Directory
+                | FileSearchColumn::MatchQuality
+                | FileSearchColumn::Kind
+                | FileSearchColumn::Size
+                | FileSearchColumn::Modified
+        )
+    });
+    if prefs.visible_columns.is_empty() {
+        reset_filename_columns_to_defaults(prefs);
+    }
+}
+
+pub fn filename_sort_after_header_click(
+    active: FileSearchFilenameSort,
+    column: FileSearchColumn,
+) -> Option<FileSearchFilenameSort> {
+    Some(match column {
+        FileSearchColumn::Name => match active {
+            FileSearchFilenameSort::FilenameAscending => FileSearchFilenameSort::FilenameDescending,
+            FileSearchFilenameSort::FilenameDescending => FileSearchFilenameSort::FilenameAscending,
+            _ => FileSearchFilenameSort::FilenameAscending,
+        },
+        FileSearchColumn::Modified => match active {
+            FileSearchFilenameSort::ModifiedNewest => FileSearchFilenameSort::ModifiedOldest,
+            FileSearchFilenameSort::ModifiedOldest => FileSearchFilenameSort::ModifiedNewest,
+            _ => FileSearchFilenameSort::ModifiedNewest,
+        },
+        FileSearchColumn::Size => match active {
+            FileSearchFilenameSort::SizeLargest => FileSearchFilenameSort::SizeSmallest,
+            FileSearchFilenameSort::SizeSmallest => FileSearchFilenameSort::SizeLargest,
+            _ => FileSearchFilenameSort::SizeLargest,
+        },
+        FileSearchColumn::MatchQuality => FileSearchFilenameSort::Relevance,
+        _ => return None,
+    })
+}
+
+pub fn filename_sort_indicator(
+    sort: FileSearchFilenameSort,
+    column: FileSearchColumn,
+) -> &'static str {
+    match (sort, column) {
+        (FileSearchFilenameSort::FilenameAscending, FileSearchColumn::Name) => " ↑",
+        (FileSearchFilenameSort::FilenameDescending, FileSearchColumn::Name) => " ↓",
+        (FileSearchFilenameSort::ModifiedNewest, FileSearchColumn::Modified) => " ↓",
+        (FileSearchFilenameSort::ModifiedOldest, FileSearchColumn::Modified) => " ↑",
+        (FileSearchFilenameSort::SizeLargest, FileSearchColumn::Size) => " ↓",
+        (FileSearchFilenameSort::SizeSmallest, FileSearchColumn::Size) => " ↑",
+        (FileSearchFilenameSort::Relevance, FileSearchColumn::MatchQuality) => " •",
+        _ => "",
+    }
+}
+
+pub fn column_label(column: FileSearchColumn) -> &'static str {
+    match column {
+        FileSearchColumn::Name => "Name",
+        FileSearchColumn::Directory => "Directory",
+        FileSearchColumn::Kind => "Type",
+        FileSearchColumn::MatchQuality => "Match quality",
+        FileSearchColumn::Size => "Size",
+        FileSearchColumn::Modified => "Modified",
+        FileSearchColumn::Path => "Path",
+        FileSearchColumn::Line => "Line",
+        FileSearchColumn::MatchText => "Match text",
+    }
+}
+
+pub fn format_size(size: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if size >= GIB {
+        format!("{:.1} GiB", size as f64 / GIB as f64)
+    } else if size >= MIB {
+        format!("{:.1} MiB", size as f64 / MIB as f64)
+    } else if size >= KIB {
+        format!("{:.1} KiB", size as f64 / KIB as f64)
+    } else {
+        format!("{size} bytes")
+    }
+}
+
+pub fn format_optional_modified(time: Option<SystemTime>) -> String {
+    time.map(format_modified).unwrap_or_else(|| "—".to_owned())
+}
+
+pub fn format_modified(time: SystemTime) -> String {
     let dt: chrono::DateTime<chrono::Local> = time.into();
     dt.format("%Y-%m-%d %H:%M").to_string()
 }
@@ -370,6 +489,135 @@ mod tests {
             vec![FileSearchColumn::Name, FileSearchColumn::Size]
         );
         assert_eq!(row.columns[0].width, Some(120));
-        assert_eq!(row.columns[1].text, "42 B");
+        assert_eq!(row.columns[1].text, "42 bytes");
+    }
+
+    #[test]
+    fn filename_column_defaults_are_name_directory_quality() {
+        assert_eq!(
+            default_filename_columns(),
+            vec![
+                FileSearchColumn::Name,
+                FileSearchColumn::Directory,
+                FileSearchColumn::MatchQuality,
+            ]
+        );
+    }
+
+    #[test]
+    fn filename_columns_cannot_all_be_hidden() {
+        let mut prefs = FileSearchUiPreferences {
+            visible_columns: vec![FileSearchColumn::Size],
+            ..Default::default()
+        };
+        assert!(!set_filename_column_visible(
+            &mut prefs,
+            FileSearchColumn::Size,
+            false
+        ));
+        assert_eq!(prefs.visible_columns, vec![FileSearchColumn::Size]);
+    }
+
+    #[test]
+    fn filename_columns_reset_to_defaults() {
+        let mut prefs = FileSearchUiPreferences {
+            visible_columns: vec![FileSearchColumn::Size, FileSearchColumn::Modified],
+            ..Default::default()
+        };
+        reset_filename_columns_to_defaults(&mut prefs);
+        assert_eq!(prefs.visible_columns, default_filename_columns());
+    }
+
+    #[test]
+    fn header_click_sort_mapping_selects_expected_sorts() {
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::Relevance,
+                FileSearchColumn::Name
+            ),
+            Some(FileSearchFilenameSort::FilenameAscending)
+        );
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::Relevance,
+                FileSearchColumn::Modified
+            ),
+            Some(FileSearchFilenameSort::ModifiedNewest)
+        );
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::Relevance,
+                FileSearchColumn::Size
+            ),
+            Some(FileSearchFilenameSort::SizeLargest)
+        );
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::FilenameAscending,
+                FileSearchColumn::MatchQuality
+            ),
+            Some(FileSearchFilenameSort::Relevance)
+        );
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::Relevance,
+                FileSearchColumn::Directory
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn active_header_click_toggles_direction() {
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::FilenameAscending,
+                FileSearchColumn::Name
+            ),
+            Some(FileSearchFilenameSort::FilenameDescending)
+        );
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::ModifiedNewest,
+                FileSearchColumn::Modified
+            ),
+            Some(FileSearchFilenameSort::ModifiedOldest)
+        );
+        assert_eq!(
+            filename_sort_after_header_click(
+                FileSearchFilenameSort::SizeLargest,
+                FileSearchColumn::Size
+            ),
+            Some(FileSearchFilenameSort::SizeSmallest)
+        );
+    }
+
+    #[test]
+    fn size_formatting_uses_binary_units() {
+        assert_eq!(format_size(0), "0 bytes");
+        assert_eq!(format_size(1023), "1023 bytes");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
+    }
+
+    #[test]
+    fn modified_time_formatting_handles_none_consistently() {
+        assert_eq!(format_optional_modified(None), "—");
+        assert!(!format_optional_modified(Some(UNIX_EPOCH)).is_empty());
+    }
+
+    #[test]
+    fn match_quality_formatting_uses_short_labels() {
+        assert_eq!(format_match_quality(FilenameRank::ExactFilename), "Exact");
+        assert_eq!(
+            format_match_quality(FilenameRank::FilenameStartsWith),
+            "Prefix"
+        );
+        assert_eq!(
+            format_match_quality(FilenameRank::FilenameContains),
+            "Filename"
+        );
+        assert_eq!(format_match_quality(FilenameRank::FullPathContains), "Path");
     }
 }

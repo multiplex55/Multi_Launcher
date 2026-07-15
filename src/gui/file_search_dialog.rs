@@ -20,6 +20,7 @@ use crate::file_search::settings::{
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
 use diagnostics::FileSearchDiagnostics;
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1072,6 +1073,39 @@ impl FileSearchDialogState {
     }
 
     fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+        let previous_columns = self.ui_preferences.visible_columns.clone();
+        results::ensure_filename_columns_visible(&mut self.ui_preferences);
+        if self.ui_preferences.visible_columns != previous_columns {
+            self.ui_preferences_dirty = true;
+        }
+        ui.horizontal(|ui| {
+            ui.menu_button("Columns", |ui| {
+                let mut dirty = false;
+                for column in results::OPTIONAL_FILENAME_COLUMNS {
+                    let mut visible = self.ui_preferences.visible_columns.contains(column);
+                    if ui
+                        .checkbox(&mut visible, results::column_label(*column))
+                        .changed()
+                    {
+                        dirty |= results::set_filename_column_visible(
+                            &mut self.ui_preferences,
+                            *column,
+                            visible,
+                        );
+                    }
+                }
+                ui.separator();
+                if ui.button("Reset to defaults").clicked() {
+                    results::reset_filename_columns_to_defaults(&mut self.ui_preferences);
+                    dirty = true;
+                    ui.close_menu();
+                }
+                if dirty {
+                    self.ui_preferences_dirty = true;
+                }
+            });
+        });
+
         let rows: Vec<_> = self
             .result_rows
             .iter()
@@ -1103,95 +1137,59 @@ impl FileSearchDialogState {
                 FileSearchRowPayload::Content { .. } => None,
             })
             .collect();
-        for (
-            row_id,
-            path,
-            display_filename,
-            parent_directory_display,
-            kind,
-            size,
-            modified,
-            rank,
-            match_quality,
-            filename_match_ranges,
-            path_match_ranges,
-        ) in rows
-        {
-            ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
-                let mut parts = Vec::new();
-                for column in &self.ui_preferences.visible_columns {
-                    let value = match column {
-                        crate::file_search::settings::FileSearchColumn::Name => {
-                            display_filename.clone()
+
+        let visible_columns = self.ui_preferences.visible_columns.clone();
+        let mut table = TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click());
+        for column in &visible_columns {
+            let width = self
+                .ui_preferences
+                .column_widths
+                .get(column)
+                .copied()
+                .unwrap_or(match column {
+                    crate::file_search::settings::FileSearchColumn::Name => 180,
+                    crate::file_search::settings::FileSearchColumn::Directory => 260,
+                    crate::file_search::settings::FileSearchColumn::MatchQuality => 110,
+                    crate::file_search::settings::FileSearchColumn::Kind => 70,
+                    crate::file_search::settings::FileSearchColumn::Size => 80,
+                    crate::file_search::settings::FileSearchColumn::Modified => 130,
+                    _ => 100,
+                });
+            table = table.column(Column::initial(width as f32).resizable(true).clip(true));
+        }
+
+        table
+            .header(20.0, |mut header| {
+                for column in &visible_columns {
+                    header.col(|ui| {
+                        let label = format!(
+                            "{}{}",
+                            results::column_label(*column),
+                            results::filename_sort_indicator(self.ui_preferences.filename_sort, *column)
+                        );
+                        if ui.button(label).clicked() {
+                            if let Some(sort) = results::filename_sort_after_header_click(
+                                self.ui_preferences.filename_sort,
+                                *column,
+                            ) {
+                                self.ui_preferences.filename_sort = sort;
+                                self.ui_preferences_dirty = true;
+                                self.pending_sort_change = true;
+                            }
                         }
-                        crate::file_search::settings::FileSearchColumn::Directory => {
-                            parent_directory_display.clone()
-                        }
-                        crate::file_search::settings::FileSearchColumn::Kind => format!("{kind:?}"),
-                        crate::file_search::settings::FileSearchColumn::MatchQuality => {
-                            results::format_match_quality(match_quality)
-                        }
-                        crate::file_search::settings::FileSearchColumn::Size => {
-                            size.map(|s| s.to_string()).unwrap_or_default()
-                        }
-                        crate::file_search::settings::FileSearchColumn::Modified => modified
-                            .map(|t| {
-                                let dt: chrono::DateTime<chrono::Local> = t.into();
-                                dt.format("%Y-%m-%d %H:%M").to_string()
-                            })
-                            .unwrap_or_default(),
-                        crate::file_search::settings::FileSearchColumn::Path => {
-                            path.display().to_string()
-                        }
-                        crate::file_search::settings::FileSearchColumn::Line
-                        | crate::file_search::settings::FileSearchColumn::MatchText => continue,
-                    };
-                    let width = self.ui_preferences.column_widths.get(column).copied();
-                    parts.push(
-                        width
-                            .map(|w| format!("{value:<width$}", width = w as usize))
-                            .unwrap_or(value),
-                    );
-                }
-                let row_text = parts.join(" | ");
-                let is_selected = self
-                    .selected_result()
-                    .map(|selected| selected.row_id == row_id)
-                    .unwrap_or(false);
-                let response = results::non_wrapping_selectable_label(ui, is_selected, row_text)
-                    .on_hover_text(path.display().to_string());
-                let double_clicked = response.double_clicked();
-                if is_selected {
-                    response.scroll_to_me(Some(egui::Align::Center));
-                }
-                if response.clicked() {
-                    self.select_result(&FileSearchResultRow {
-                        id: row_id.clone(),
-                        payload: FileSearchRowPayload::Filename {
-                            path: path.clone(),
-                            display_filename: display_filename.clone(),
-                            parent_directory_display: parent_directory_display.clone(),
-                            kind,
-                            size,
-                            modified,
-                            rank,
-                            match_quality,
-                            filename_match_ranges: filename_match_ranges.clone(),
-                            path_match_ranges: path_match_ranges.clone(),
-                        },
                     });
                 }
-                response.context_menu(|ui| {
-                    self.result_context_menu(
-                        ui,
-                        &path,
-                        kind == crate::file_search::model::FileKind::Directory,
-                        None,
-                        coordinator,
-                    )
-                });
-                if double_clicked {
-                    self.open_result_row(&FileSearchResultRow {
+            })
+            .body(|mut body| {
+                for (row_id, path, display_filename, parent_directory_display, kind, size, modified, rank, match_quality, filename_match_ranges, path_match_ranges) in rows {
+                    let is_selected = self
+                        .selected_result()
+                        .map(|selected| selected.row_id == row_id)
+                        .unwrap_or(false);
+                    let row_payload = FileSearchResultRow {
                         id: row_id.clone(),
                         payload: FileSearchRowPayload::Filename {
                             path: path.clone(),
@@ -1205,10 +1203,46 @@ impl FileSearchDialogState {
                             filename_match_ranges: filename_match_ranges.clone(),
                             path_match_ranges: path_match_ranges.clone(),
                         },
+                    };
+                    body.row(22.0, |mut row| {
+                        for column in &visible_columns {
+                            row.col(|ui| {
+                                ui.push_id((result_row_id_source(row_id.search_id, &row_id), *column), |ui| {
+                                    let response = match column {
+                                        crate::file_search::settings::FileSearchColumn::Name => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job(&display_filename, &filename_match_ranges))),
+                                        crate::file_search::settings::FileSearchColumn::Directory => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job(&parent_directory_display, &path_match_ranges))),
+                                        crate::file_search::settings::FileSearchColumn::Kind => results::non_wrapping_selectable_label(ui, is_selected, format!("{kind:?}")),
+                                        crate::file_search::settings::FileSearchColumn::MatchQuality => results::non_wrapping_selectable_label(ui, is_selected, results::format_match_quality(match_quality)),
+                                        crate::file_search::settings::FileSearchColumn::Size => results::non_wrapping_selectable_label(ui, is_selected, size.map(results::format_size).unwrap_or_else(|| "—".to_owned())),
+                                        crate::file_search::settings::FileSearchColumn::Modified => results::non_wrapping_selectable_label(ui, is_selected, results::format_optional_modified(modified)),
+                                        _ => results::non_wrapping_selectable_label(ui, is_selected, ""),
+                                    }
+                                    .on_hover_text(path.display().to_string());
+                                    let double_clicked = response.double_clicked();
+                                    if is_selected {
+                                        response.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    if response.clicked() {
+                                        self.select_result(&row_payload);
+                                    }
+                                    response.context_menu(|ui| {
+                                        self.result_context_menu(
+                                            ui,
+                                            &path,
+                                            kind == crate::file_search::model::FileKind::Directory,
+                                            None,
+                                            coordinator,
+                                        )
+                                    });
+                                    if double_clicked {
+                                        self.open_result_row(&row_payload);
+                                    }
+                                });
+                            });
+                        }
                     });
                 }
             });
-        }
     }
 
     fn clear_selection_if_mode_changed(&mut self, previously_selected_mode: FileSearchMode) {
@@ -1264,56 +1298,57 @@ impl FileSearchDialogState {
             ) in rows
             {
                 ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
-                    let column = content_match
-                        .column
-                        .map(|column| format!(":{}", column.saturating_add(1)))
-                        .unwrap_or_default();
-                    let row_text = results::content_line_label(
-                        &content_match,
-                        is_last_displayed_match_from_truncated_file,
-                    );
-                    let is_selected = self
-                        .selected_result()
-                        .map(|selected| selected.row_id == row_id)
-                        .unwrap_or(false);
-                    let response =
-                        results::non_wrapping_selectable_label(ui, is_selected, row_text)
-                            .on_hover_text(format!("{}{}", path.display(), column));
-                    let double_clicked = response.double_clicked();
-                    if is_selected {
-                        response.scroll_to_me(Some(egui::Align::Center));
-                    }
-                    if response.clicked() {
-                        self.select_result(&FileSearchResultRow {
-                            id: row_id.clone(),
-                            payload: FileSearchRowPayload::Content {
-                                path: path.clone(),
-                                content_match: content_match.clone(),
-                                content_file_truncated,
-                                is_last_displayed_match_from_truncated_file,
-                            },
+                        let column = content_match
+                            .column
+                            .map(|column| format!(":{}", column.saturating_add(1)))
+                            .unwrap_or_default();
+                        let row_text = results::content_line_label(
+                            &content_match,
+                            is_last_displayed_match_from_truncated_file,
+                        );
+                        let is_selected = self
+                            .selected_result()
+                            .map(|selected| selected.row_id == row_id)
+                            .unwrap_or(false);
+                        let response =
+                            results::non_wrapping_selectable_label(ui, is_selected, row_text)
+                                .on_hover_text(format!("{}{}", path.display(), column));
+                        let double_clicked = response.double_clicked();
+                        if is_selected {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.clicked() {
+                            self.select_result(&FileSearchResultRow {
+                                id: row_id.clone(),
+                                payload: FileSearchRowPayload::Content {
+                                    path: path.clone(),
+                                    content_match: content_match.clone(),
+                                    content_file_truncated,
+                                    is_last_displayed_match_from_truncated_file,
+                                },
+                            });
+                        }
+                        response.context_menu(|ui| {
+                            self.content_result_context_menu(
+                                ui,
+                                &path,
+                                content_match.clone(),
+                                coordinator,
+                            )
                         });
-                    }
-                    response.context_menu(|ui| {
-                        self.content_result_context_menu(
-                            ui,
-                            &path,
-                            content_match.clone(),
-                            coordinator,
-                        )
-                    });
-                    if double_clicked {
-                        self.open_result_row(&FileSearchResultRow {
-                            id: row_id.clone(),
-                            payload: FileSearchRowPayload::Content {
-                                path: path.clone(),
-                                content_match: content_match.clone(),
-                                content_file_truncated,
-                                is_last_displayed_match_from_truncated_file,
-                            },
-                        });
-                    }
-                });
+                        if double_clicked {
+                            self.open_result_row(&FileSearchResultRow {
+                                id: row_id.clone(),
+                                payload: FileSearchRowPayload::Content {
+                                    path: path.clone(),
+                                    content_match: content_match.clone(),
+                                    content_file_truncated,
+                                    is_last_displayed_match_from_truncated_file,
+                                },
+                            });
+                        }
+                    },
+                );
                 if is_last_displayed_match_from_truncated_file {
                     ui.push_id(
                         omitted_matches_id_source(
