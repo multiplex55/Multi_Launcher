@@ -3,9 +3,9 @@ use crate::file_search::model::{
     FilenameRank, FilenameResult, TextMatchRange,
 };
 use crate::file_search::settings::{
-    FileSearchColumn, FileSearchFilenameSort, FileSearchUiPreferences,
+    FileSearchColumn, FileSearchContentSort, FileSearchFilenameSort, FileSearchUiPreferences,
 };
-use eframe::egui::{self, text::LayoutJob, Color32, FontId, TextFormat, WidgetText};
+use eframe::egui::{self, Color32, FontId, TextFormat, WidgetText, text::LayoutJob};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -38,6 +38,9 @@ pub struct RenderedColumn {
 pub struct ContentFileGroupPresentation {
     pub path: PathBuf,
     pub header: String,
+    pub total_matches: usize,
+    pub truncated: bool,
+    pub modified: Option<SystemTime>,
     pub selectable: bool,
     pub rows: Vec<ContentLineRowPresentation>,
 }
@@ -45,6 +48,7 @@ pub struct ContentFileGroupPresentation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentLineRowPresentation {
     pub line_number: usize,
+    pub column: Option<usize>,
     pub line: String,
     pub ranges: Vec<ContentMatchRange>,
     pub selectable: bool,
@@ -92,21 +96,36 @@ pub fn filename_row_presentation(
     }
 }
 
-pub fn content_group_presentation(result: &ContentFileResult) -> ContentFileGroupPresentation {
+pub fn content_group_presentation(
+    result: &ContentFileResult,
+    active_sort: FileSearchContentSort,
+) -> ContentFileGroupPresentation {
+    let mut header = format!(
+        "{}                         {} match{}",
+        result.path.display(),
+        result.total_matches,
+        if result.total_matches == 1 { "" } else { "es" }
+    );
+    if result.truncated {
+        header.push_str(" (truncated)");
+    }
+    if matches!(active_sort, FileSearchContentSort::ModifiedNewest) {
+        header.push_str(" | modified ");
+        header.push_str(&format_optional_modified(result.modified));
+    }
     ContentFileGroupPresentation {
         path: result.path.clone(),
-        header: format!(
-            "{} ({} match{})",
-            result.path.display(),
-            result.total_matches,
-            if result.total_matches == 1 { "" } else { "es" }
-        ),
+        header,
+        total_matches: result.total_matches,
+        truncated: result.truncated,
+        modified: result.modified,
         selectable: false,
         rows: result
             .matches
             .iter()
             .map(|m| ContentLineRowPresentation {
                 line_number: m.line_number,
+                column: m.column,
                 line: m.line.clone(),
                 ranges: m.ranges.clone(),
                 selectable: true,
@@ -344,17 +363,17 @@ pub(super) fn non_wrapping_selectable_label(
     response
 }
 
-pub fn content_line_label(m: &ContentMatch, truncated: bool) -> WidgetText {
-    let prefix = format!("{}: ", m.line_number);
+pub fn content_line_label(m: &ContentMatch) -> WidgetText {
+    let prefix = match m.column {
+        Some(column) => format!("{}:{}: ", m.line_number, column.saturating_add(1)),
+        None => format!("{}: ", m.line_number),
+    };
     let mut job = LayoutJob::default();
     job.append(&prefix, 0.0, TextFormat::default());
     let highlighted = highlighted_content_job(&m.line, &m.ranges);
     for section in highlighted.sections {
         let text = &highlighted.text[section.byte_range];
         job.append(text, section.leading_space, section.format);
-    }
-    if truncated {
-        job.append(" … truncated", 0.0, TextFormat::default());
     }
     WidgetText::LayoutJob(job)
 }
@@ -422,14 +441,17 @@ mod tests {
         let header_count = results
             .iter()
             .filter_map(|r| match r {
-                SearchResult::ContentFile(content) => Some(content_group_presentation(content)),
+                SearchResult::ContentFile(content) => Some(content_group_presentation(
+                    content,
+                    FileSearchContentSort::PathThenLine,
+                )),
                 _ => None,
             })
             .filter(|group| group.header.contains("main.rs"))
             .count();
 
         assert_eq!(header_count, 1);
-        assert!(!content_group_presentation(&file).selectable);
+        assert!(!content_group_presentation(&file, FileSearchContentSort::PathThenLine).selectable);
     }
 
     #[test]
@@ -447,7 +469,7 @@ mod tests {
             ],
             truncated: false,
         };
-        let group = content_group_presentation(&file);
+        let group = content_group_presentation(&file, FileSearchContentSort::PathThenLine);
 
         assert_eq!(group.rows.len(), 2);
         assert!(group.rows.iter().all(|row| row.selectable));

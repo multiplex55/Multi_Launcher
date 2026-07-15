@@ -151,6 +151,13 @@ pub struct FileSearchResultCounts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileSearchRowPayload {
+    ContentGroupHeader {
+        path: PathBuf,
+        header: String,
+        total_matches: usize,
+        truncated: bool,
+        modified: Option<std::time::SystemTime>,
+    },
     Filename {
         path: PathBuf,
         display_filename: String,
@@ -609,6 +616,7 @@ impl FileSearchDialogState {
                 path: path.clone(),
                 content_match: content_match.clone(),
             },
+            FileSearchRowPayload::ContentGroupHeader { .. } => return,
         };
         self.selected_result = Some(SelectedFileSearchResult {
             row_id: row.id.clone(),
@@ -676,10 +684,37 @@ impl FileSearchDialogState {
                 });
             }
             SearchResult::ContentFile(content) => {
-                let last_displayed_match_index = content.matches.len().checked_sub(1);
+                let group =
+                    results::content_group_presentation(content, self.ui_preferences.content_sort);
+                self.result_rows.push(FileSearchResultRow {
+                    id: FileSearchResultRowId {
+                        search_id,
+                        result_key: FileSearchResultKey::Content {
+                            path: crate::file_search::sorting::path_identity(&content.path),
+                            line_number: 0,
+                            byte_start: 0,
+                            byte_end: 0,
+                            occurrence: usize::MAX,
+                        },
+                        match_index: None,
+                        path: content.path.clone(),
+                        line_number: None,
+                        column: None,
+                    },
+                    payload: FileSearchRowPayload::ContentGroupHeader {
+                        path: content.path.clone(),
+                        header: group.header,
+                        total_matches: content.total_matches,
+                        truncated: content.truncated,
+                        modified: content.modified,
+                    },
+                });
+                let mut matches = content.matches.clone();
+                crate::file_search::sorting::sort_content_matches(&mut matches);
+                let last_displayed_match_index = matches.len().checked_sub(1);
                 let mut occurrence_counts: std::collections::HashMap<(usize, usize, usize), usize> =
                     std::collections::HashMap::new();
-                for (match_index, content_match) in content.matches.iter().cloned().enumerate() {
+                for (match_index, content_match) in matches.into_iter().enumerate() {
                     let occurrence_key = (
                         content_match.line_number,
                         content_match.byte_start,
@@ -743,6 +778,15 @@ impl FileSearchDialogState {
             .iter()
             .filter(|row| matches!(row.payload, FileSearchRowPayload::Content { .. }))
             .count()
+    }
+
+    pub fn selectable_result_rows(&self) -> impl Iterator<Item = &FileSearchResultRow> {
+        self.result_rows.iter().filter(|row| {
+            matches!(
+                row.payload,
+                FileSearchRowPayload::Filename { .. } | FileSearchRowPayload::Content { .. }
+            )
+        })
     }
 
     pub fn content_truncated_displayed_match_count(&self) -> usize {
@@ -1134,7 +1178,8 @@ impl FileSearchDialogState {
                     filename_match_ranges.clone(),
                     path_match_ranges.clone(),
                 )),
-                FileSearchRowPayload::Content { .. } => None,
+                FileSearchRowPayload::Content { .. }
+                | FileSearchRowPayload::ContentGroupHeader { .. } => None,
             })
             .collect();
 
@@ -1252,81 +1297,56 @@ impl FileSearchDialogState {
     }
 
     fn content_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
-        let grouped_paths: Vec<_> = self
-            .results
-            .iter()
-            .filter_map(|result| {
-                if let SearchResult::ContentFile(content) = result {
-                    Some((
-                        content.path.clone(),
-                        results::content_group_presentation(content).header,
-                    ))
-                } else {
-                    None
+        let rows = self.result_rows.clone();
+        for display_row in rows {
+            match display_row.payload {
+                FileSearchRowPayload::ContentGroupHeader { path, header, .. } => {
+                    ui.push_id(("content_file_header", &path), |ui| {
+                        let response = ui
+                            .label(egui::RichText::new(header).strong())
+                            .on_hover_text(path.display().to_string());
+                        response.context_menu(|ui| {
+                            self.result_context_menu(ui, &path, false, None, coordinator)
+                        });
+                    });
                 }
-            })
-            .collect();
-        for (group_path, header) in grouped_paths {
-            ui.push_id(("content_file_header", &group_path), |ui| {
-                ui.label(egui::RichText::new(header).strong());
-            });
-            let rows: Vec<_> = self
-                .result_rows
-                .iter()
-                .filter_map(|row| match &row.payload {
-                    FileSearchRowPayload::Content {
-                        path,
-                        content_match,
-                        content_file_truncated,
-                        is_last_displayed_match_from_truncated_file,
-                    } if *path == group_path => Some((
-                        row.id.clone(),
-                        path.clone(),
-                        content_match.clone(),
-                        *content_file_truncated,
-                        *is_last_displayed_match_from_truncated_file,
-                    )),
-                    _ => None,
-                })
-                .collect();
-            for (
-                row_id,
-                path,
-                content_match,
-                content_file_truncated,
-                is_last_displayed_match_from_truncated_file,
-            ) in rows
-            {
-                ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
-                        let column = content_match
+                FileSearchRowPayload::Content {
+                    path,
+                    content_match,
+                    content_file_truncated,
+                    is_last_displayed_match_from_truncated_file,
+                } => {
+                    let row_id = display_row.id;
+                    ui.push_id(result_row_id_source(row_id.search_id, &row_id), |ui| {
+                        let hover_location = content_match
                             .column
-                            .map(|column| format!(":{}", column.saturating_add(1)))
-                            .unwrap_or_default();
-                        let row_text = results::content_line_label(
-                            &content_match,
-                            is_last_displayed_match_from_truncated_file,
-                        );
+                            .map(|column| {
+                                format!("{}:{}", path.display(), column.saturating_add(1))
+                            })
+                            .unwrap_or_else(|| path.display().to_string());
+                        let row_text = results::content_line_label(&content_match);
                         let is_selected = self
                             .selected_result()
                             .map(|selected| selected.row_id == row_id)
                             .unwrap_or(false);
                         let response =
                             results::non_wrapping_selectable_label(ui, is_selected, row_text)
-                                .on_hover_text(format!("{}{}", path.display(), column));
+                                .on_hover_text(hover_location);
                         let double_clicked = response.double_clicked();
+                        let row_payload = FileSearchResultRow {
+                            id: row_id.clone(),
+                            payload: FileSearchRowPayload::Content {
+                                path: path.clone(),
+                                content_match: content_match.clone(),
+                                content_file_truncated,
+                                is_last_displayed_match_from_truncated_file,
+                            },
+                        };
                         if is_selected {
                             response.scroll_to_me(Some(egui::Align::Center));
                         }
                         if response.clicked() {
-                            self.select_result(&FileSearchResultRow {
-                                id: row_id.clone(),
-                                payload: FileSearchRowPayload::Content {
-                                    path: path.clone(),
-                                    content_match: content_match.clone(),
-                                    content_file_truncated,
-                                    is_last_displayed_match_from_truncated_file,
-                                },
-                            });
+                            self.select_result(&row_payload);
                         }
                         response.context_menu(|ui| {
                             self.content_result_context_menu(
@@ -1337,35 +1357,11 @@ impl FileSearchDialogState {
                             )
                         });
                         if double_clicked {
-                            self.open_result_row(&FileSearchResultRow {
-                                id: row_id.clone(),
-                                payload: FileSearchRowPayload::Content {
-                                    path: path.clone(),
-                                    content_match: content_match.clone(),
-                                    content_file_truncated,
-                                    is_last_displayed_match_from_truncated_file,
-                                },
-                            });
+                            self.open_result_row(&row_payload);
                         }
-                    },
-                );
-                if is_last_displayed_match_from_truncated_file {
-                    ui.push_id(
-                        omitted_matches_id_source(
-                            row_id.search_id,
-                            row_id.result_key.clone(),
-                            &path,
-                        ),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(
-                                    "Additional matches in this file were omitted.",
-                                )
-                                .weak(),
-                            );
-                        },
-                    );
+                    });
                 }
+                FileSearchRowPayload::Filename { .. } => {}
             }
         }
     }
@@ -1511,6 +1507,7 @@ impl FileSearchDialogState {
                 content_match,
                 ..
             } => (path.clone(), false, Some(content_match.clone())),
+            FileSearchRowPayload::ContentGroupHeader { path, .. } => (path.clone(), false, None),
         };
 
         let mut actions = vec![
@@ -2282,10 +2279,14 @@ mod tests {
             }),
         });
 
-        assert_eq!(state.result_rows.len(), 2);
-        assert_eq!(state.result_rows[0].id.match_index, Some(0));
-        assert_eq!(state.result_rows[1].id.match_index, Some(1));
-        match &state.result_rows[1].payload {
+        assert_eq!(state.result_rows.len(), 3);
+        assert!(matches!(
+            state.result_rows[0].payload,
+            FileSearchRowPayload::ContentGroupHeader { .. }
+        ));
+        assert_eq!(state.result_rows[1].id.match_index, Some(0));
+        assert_eq!(state.result_rows[2].id.match_index, Some(1));
+        match &state.result_rows[2].payload {
             FileSearchRowPayload::Content {
                 is_last_displayed_match_from_truncated_file,
                 ..
@@ -2319,10 +2320,10 @@ mod tests {
             }),
         });
 
-        assert_eq!(state.result_rows.len(), 2);
+        assert_eq!(state.result_rows.len(), 3);
         assert_ne!(
-            state.result_rows[0].id.result_key,
-            state.result_rows[1].id.result_key
+            state.result_rows[1].id.result_key,
+            state.result_rows[2].id.result_key
         );
     }
 
@@ -2384,7 +2385,7 @@ mod tests {
             }),
         });
 
-        for row in &state.result_rows {
+        for row in state.selectable_result_rows() {
             match &row.payload {
                 FileSearchRowPayload::Content {
                     content_file_truncated,
@@ -2420,8 +2421,7 @@ mod tests {
         });
 
         let marked: Vec<_> = state
-            .result_rows
-            .iter()
+            .selectable_result_rows()
             .map(|row| match &row.payload {
                 FileSearchRowPayload::Content {
                     is_last_displayed_match_from_truncated_file,
@@ -2457,7 +2457,7 @@ mod tests {
             }),
         });
 
-        for row in &state.result_rows {
+        for row in state.selectable_result_rows() {
             match &row.payload {
                 FileSearchRowPayload::Content {
                     content_file_truncated,
@@ -2492,7 +2492,7 @@ mod tests {
             }),
         });
 
-        let row_id = &state.result_rows[0].id;
+        let row_id = &state.result_rows[1].id;
         let selectable_id = egui::Id::new(result_row_id_source(row_id.search_id, row_id));
         let omitted_id = egui::Id::new(omitted_matches_id_source(
             row_id.search_id,
@@ -2526,12 +2526,12 @@ mod tests {
             }),
         });
 
-        assert_eq!(state.result_rows.len(), 2);
-        assert_eq!(state.result_rows[0].id.line_number, Some(4));
+        assert_eq!(state.result_rows.len(), 3);
         assert_eq!(state.result_rows[1].id.line_number, Some(4));
-        assert_eq!(state.result_rows[0].id.column, Some(0));
-        assert_eq!(state.result_rows[1].id.column, Some(7));
-        assert_ne!(state.result_rows[0].id, state.result_rows[1].id);
+        assert_eq!(state.result_rows[2].id.line_number, Some(4));
+        assert_eq!(state.result_rows[1].id.column, Some(0));
+        assert_eq!(state.result_rows[2].id.column, Some(7));
+        assert_ne!(state.result_rows[1].id, state.result_rows[2].id);
     }
 
     #[test]
@@ -2557,10 +2557,12 @@ mod tests {
         }
 
         assert_eq!(state.result_rows[0].id.path, PathBuf::from("b.rs"));
-        assert_eq!(state.result_rows[1].id.path, PathBuf::from("a.rs"));
+        assert_eq!(state.result_rows[1].id.path, PathBuf::from("b.rs"));
+        assert_eq!(state.result_rows[2].id.path, PathBuf::from("a.rs"));
+        assert_eq!(state.result_rows[3].id.path, PathBuf::from("a.rs"));
         assert_ne!(
-            state.result_rows[0].id.result_key,
-            state.result_rows[1].id.result_key
+            state.result_rows[1].id.result_key,
+            state.result_rows[3].id.result_key
         );
     }
 
@@ -2585,12 +2587,12 @@ mod tests {
             }),
         });
 
-        assert_eq!(state.result_rows.len(), 1);
-        assert_eq!(state.result_rows[0].id.search_id, SearchId(7));
-        assert_eq!(state.result_rows[0].id.path, PathBuf::from("src/lib.rs"));
-        assert_eq!(state.result_rows[0].id.line_number, Some(12));
-        assert_eq!(state.result_rows[0].id.column, Some(6));
-        match &state.result_rows[0].payload {
+        assert_eq!(state.result_rows.len(), 2);
+        assert_eq!(state.result_rows[1].id.search_id, SearchId(7));
+        assert_eq!(state.result_rows[1].id.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(state.result_rows[1].id.line_number, Some(12));
+        assert_eq!(state.result_rows[1].id.column, Some(6));
+        match &state.result_rows[1].payload {
             FileSearchRowPayload::Content {
                 path,
                 content_match: row_match,
@@ -3154,7 +3156,11 @@ mod tests {
             id: SearchId(1),
             result: content_search_result(path, 1, 1, false),
         });
-        let row = state.result_rows[0].clone();
+        let row = state
+            .selectable_result_rows()
+            .find(|row| matches!(row.payload, FileSearchRowPayload::Content { .. }))
+            .expect("content helper should create a selectable content row")
+            .clone();
         state.select_result(&row);
         state
     }
@@ -3378,7 +3384,11 @@ mod tests {
             id: SearchId(1),
             result: content_search_result(path, 1, 1, false),
         });
-        let double_clicked_row = double_click_state.result_rows[0].clone();
+        let double_clicked_row = double_click_state
+            .selectable_result_rows()
+            .find(|row| matches!(row.payload, FileSearchRowPayload::Content { .. }))
+            .expect("double-click test should have a selectable content row")
+            .clone();
 
         let open_action = open_button_state.open_selected_result();
         let double_click_action = double_click_state.open_result_row(&double_clicked_row);
@@ -3526,5 +3536,191 @@ mod tests {
         });
         assert!(!state.show_ripgrep_missing_prompt);
         assert!(state.ripgrep_missing_prompt_dismissed);
+    }
+    #[test]
+    fn content_display_rows_have_one_header_per_file_and_total_match_count() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(9)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(9),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/file_search/ripgrep.rs".into(),
+                file_name: "ripgrep.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 7,
+                matches: vec![
+                    ContentMatch::new(10, "needle".into(), 0, 6),
+                    ContentMatch::new(20, "needle".into(), 0, 6),
+                ],
+                truncated: false,
+            }),
+        });
+        let headers: Vec<_> = state
+            .result_rows
+            .iter()
+            .filter_map(|row| match &row.payload {
+                FileSearchRowPayload::ContentGroupHeader {
+                    header,
+                    total_matches,
+                    ..
+                } => Some((header, *total_matches)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].1, 7);
+        assert!(headers[0].0.contains("7 matches"));
+        assert_eq!(state.content_displayed_match_row_count(), 2);
+    }
+
+    #[test]
+    fn content_matches_stay_under_correct_headers_for_duplicate_filenames() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(10)),
+            ..Default::default()
+        };
+        for (idx, dir, line) in [(0, "src/a", 3), (1, "src/b", 9)] {
+            let path = PathBuf::from(dir).join("main.rs");
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(10),
+                result: SearchResult::ContentFile(ContentFileResult {
+                    path,
+                    file_name: "main.rs".into(),
+                    modified: None,
+                    filename_relevance: None,
+                    arrival_index: idx,
+                    total_matches: 1,
+                    matches: vec![ContentMatch::new(line, "needle".into(), 0, 6)],
+                    truncated: false,
+                }),
+            });
+        }
+        assert!(matches!(
+            state.result_rows[0].payload,
+            FileSearchRowPayload::ContentGroupHeader { .. }
+        ));
+        assert_eq!(state.result_rows[0].id.path, PathBuf::from("src/a/main.rs"));
+        assert_eq!(state.result_rows[1].id.path, PathBuf::from("src/a/main.rs"));
+        assert!(matches!(
+            state.result_rows[2].payload,
+            FileSearchRowPayload::ContentGroupHeader { .. }
+        ));
+        assert_eq!(state.result_rows[2].id.path, PathBuf::from("src/b/main.rs"));
+        assert_eq!(state.result_rows[3].id.path, PathBuf::from("src/b/main.rs"));
+        assert_ne!(
+            state.result_rows[0].id.result_key,
+            state.result_rows[2].id.result_key
+        );
+    }
+
+    #[test]
+    fn truncated_indicator_appears_once_per_group() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(11)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(11),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 5,
+                matches: vec![
+                    ContentMatch::new(1, "needle".into(), 0, 6),
+                    ContentMatch::new(2, "needle".into(), 0, 6),
+                ],
+                truncated: true,
+            }),
+        });
+        let count = state
+            .result_rows
+            .iter()
+            .filter(|row| match &row.payload {
+                FileSearchRowPayload::ContentGroupHeader { header, .. } => {
+                    header.contains("truncated")
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn selected_content_match_survives_group_reorder() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(12)),
+            current_status: SearchStatus::Completed,
+            ..Default::default()
+        };
+        for (idx, path, count) in [(0, "b.rs", 1), (1, "a.rs", 9)] {
+            state
+                .results
+                .push(SearchResult::ContentFile(ContentFileResult {
+                    path: path.into(),
+                    file_name: path.into(),
+                    modified: None,
+                    filename_relevance: None,
+                    arrival_index: idx,
+                    total_matches: count,
+                    matches: vec![ContentMatch::new(1, format!("{path} needle"), 0, 6)],
+                    truncated: false,
+                }));
+        }
+        state.rebuild_result_rows();
+        let selected = state
+            .result_rows
+            .iter()
+            .find(|row| {
+                row.id.path == PathBuf::from("b.rs")
+                    && matches!(row.payload, FileSearchRowPayload::Content { .. })
+            })
+            .unwrap()
+            .clone();
+        let selected_key = selected.id.result_key.clone();
+        state.select_result(&selected);
+        state.ui_preferences.content_sort = FileSearchContentSort::MatchCountDescending;
+        state.finalize_completed_results();
+        assert_eq!(
+            state.selected_result().unwrap().row_id.result_key,
+            selected_key
+        );
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("b.rs")
+        );
+    }
+
+    #[test]
+    fn keyboard_navigation_skips_content_group_headers() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(13)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(13),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 1,
+                matches: vec![ContentMatch::new(8, "needle".into(), 0, 6)],
+                truncated: false,
+            }),
+        });
+        state.move_selection(crate::gui::file_search_dialog::keyboard::SelectionMove::Next);
+        assert!(matches!(
+            state.selected_result().unwrap().payload,
+            SelectedFileSearchResultPayload::Content { .. }
+        ));
+        assert_eq!(state.selected_result().unwrap().row_id.line_number, Some(8));
     }
 }
