@@ -916,6 +916,37 @@ impl FileSearchDialogState {
                 self.open_selected_result();
                 ui.ctx().request_repaint();
             }
+            if ui
+                .add_enabled(
+                    self.selected_result().is_some(),
+                    egui::Button::new("Copy selected"),
+                )
+                .clicked()
+            {
+                if let Some(payload) = self.copy_selected_payload() {
+                    self.copy_text_payload("copy selected", payload);
+                }
+            }
+            if ui
+                .add_enabled(
+                    !self.result_rows.is_empty(),
+                    egui::Button::new("Copy all visible"),
+                )
+                .clicked()
+            {
+                if let Some(payload) = self.copy_all_visible_results_payload() {
+                    self.copy_text_payload("copy visible results", payload);
+                }
+            }
+            if ui
+                .add_enabled(
+                    !self.result_rows.is_empty(),
+                    egui::Button::new("Export visible results…"),
+                )
+                .clicked()
+            {
+                self.export_visible_results_to_file();
+            }
         });
         self.filters_ui(ui);
         ui.label(format!(
