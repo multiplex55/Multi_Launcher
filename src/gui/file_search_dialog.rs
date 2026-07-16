@@ -273,7 +273,7 @@ pub struct FileSearchDialogState {
     pub result_rows: Vec<FileSearchResultRow>,
     pub selected_result: Option<SelectedFileSearchResult>,
     pub refinement_text: String,
-    refinement_restore_selection: Option<SelectedFileSearchResult>,
+    pub(super) refinement_restore_selection: Option<SelectedFileSearchResult>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
     pub diagnostics: FileSearchDiagnostics,
