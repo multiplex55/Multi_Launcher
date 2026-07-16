@@ -4,8 +4,8 @@ use super::{
     SelectedFileSearchResultPayload,
 };
 use crate::file_search::actions::{
-    InvocationTarget, containing_directory, execute_explorer_action, open_in_configured_editor,
-    open_path, resolve_explorer_action,
+    containing_directory, execute_explorer_action, open_in_configured_editor, open_path,
+    resolve_explorer_action, InvocationTarget,
 };
 use crate::file_search::coordinator::SearchCoordinator;
 use crate::file_search::export;
@@ -30,11 +30,14 @@ impl FileSearchDialogState {
     ) {
         let ctx = ui.ctx();
         let modifiers = ctx.input(|i| i.modifiers);
-        let text_field_focused = ctx.memory(|m| {
-            m.focused().is_some_and(|id| {
+        let (text_field_focused, search_submit_field_focused) = ctx.memory(|m| {
+            let focused = m.focused();
+            let search_submit = focused.is_some_and(|id| {
                 id == Self::search_field_id()
                     || (0..self.custom_roots.len()).any(|idx| id == Self::root_text_field_id(idx))
-            })
+            });
+            let any_text = search_submit || focused == Some(Self::refinement_field_id());
+            (any_text, search_submit)
         });
         let menu_or_combo_active = ctx.wants_keyboard_input() && !text_field_focused;
 
@@ -60,16 +63,19 @@ impl FileSearchDialogState {
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !menu_or_combo_active {
-            if text_field_focused {
+            if search_submit_field_focused {
                 self.start_search(coordinator);
-            } else if modifiers.ctrl {
-                self.open_selected_in_editor();
-            } else if modifiers.alt {
-                self.reveal_selected_in_explorer();
-            } else {
-                self.open_selected_result();
+                ctx.request_repaint();
+            } else if !text_field_focused {
+                if modifiers.ctrl {
+                    self.open_selected_in_editor();
+                } else if modifiers.alt {
+                    self.reveal_selected_in_explorer();
+                } else {
+                    self.open_selected_result();
+                }
+                ctx.request_repaint();
             }
-            ctx.request_repaint();
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -91,7 +97,7 @@ impl FileSearchDialogState {
     }
 
     pub(super) fn move_selection(&mut self, movement: SelectionMove) {
-        let selectable_rows: Vec<_> = self.selectable_result_rows().cloned().collect();
+        let selectable_rows: Vec<_> = self.visible_selectable_result_rows().collect();
         if selectable_rows.is_empty() {
             self.clear_selection();
             return;
@@ -224,7 +230,7 @@ impl FileSearchDialogState {
     }
 
     pub(super) fn copy_all_visible_results_payload(&self) -> Option<String> {
-        if self.result_rows.is_empty() {
+        if self.visible_selectable_result_rows().next().is_none() {
             return None;
         }
         Some(match self.selected_mode {
@@ -279,7 +285,7 @@ impl FileSearchDialogState {
     }
 
     fn visible_filename_export_rows(&self) -> Vec<export::FilenameExportRow> {
-        self.result_rows
+        self.visible_result_rows()
             .iter()
             .filter_map(|row| match &row.payload {
                 FileSearchRowPayload::Filename {
@@ -305,7 +311,7 @@ impl FileSearchDialogState {
     }
 
     fn visible_content_export_rows(&self) -> Vec<export::ContentExportRow> {
-        self.result_rows
+        self.visible_result_rows()
             .iter()
             .filter_map(|row| match &row.payload {
                 FileSearchRowPayload::Content {

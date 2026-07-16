@@ -3,6 +3,16 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::path::Path;
 
+/// Returns true when `needle` occurs literally in `haystack`, ignoring case.
+pub fn literal_contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack: String = haystack.chars().flat_map(|c| c.to_lowercase()).collect();
+    let needle: String = needle.chars().flat_map(|c| c.to_lowercase()).collect();
+    haystack.contains(&needle)
+}
+
 pub fn rank_filename_match(
     file_name: &str,
     path: &Path,
@@ -281,6 +291,13 @@ pub fn fuzzy_char_indices_to_byte_ranges(
 mod tests {
     use super::*;
     use crate::file_search::model::FilenameRank;
+
+    #[test]
+    fn literal_refinement_matching_is_case_insensitive() {
+        assert!(literal_contains_case_insensitive("Src/Main.RS", "main.rs"));
+        assert!(literal_contains_case_insensitive("Line 42: Needle", "42"));
+        assert!(!literal_contains_case_insensitive("alpha", "beta"));
+    }
 
     #[test]
     fn ranks_filename_before_path_matches() {
