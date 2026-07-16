@@ -4,8 +4,8 @@ use super::{
     SelectedFileSearchResultPayload,
 };
 use crate::file_search::actions::{
-    containing_directory, execute_explorer_action, open_in_configured_editor, open_path,
-    resolve_explorer_action, InvocationTarget,
+    InvocationTarget, containing_directory, execute_explorer_action, open_in_configured_editor,
+    open_path, resolve_explorer_action,
 };
 use crate::file_search::coordinator::SearchCoordinator;
 use crate::file_search::export;
@@ -229,11 +229,8 @@ impl FileSearchDialogState {
             })
     }
 
-    pub(super) fn copy_all_visible_results_payload(&self) -> Option<String> {
-        if self.visible_selectable_result_rows().next().is_none() {
-            return None;
-        }
-        Some(match self.selected_mode {
+    pub(super) fn copy_all_visible_results_payload(&self) -> Result<String, String> {
+        let payload = match self.selected_mode {
             super::FileSearchMode::Filename => {
                 let rows = self.visible_filename_export_rows();
                 export::all_visible_filename_results(rows.iter())
@@ -242,11 +239,16 @@ impl FileSearchDialogState {
                 let rows = self.visible_content_export_rows();
                 export::all_visible_content_results(rows.iter())
             }
-        })
+        };
+        export::non_empty_export(payload)
     }
 
-    pub(super) fn export_visible_results_tsv(&self) -> String {
-        match self.selected_mode {
+    pub(super) fn export_visible_results_tsv(&self) -> Result<String, String> {
+        let has_rows = self.visible_selectable_result_rows().next().is_some();
+        if !has_rows {
+            return Err("There are no visible file-search results to export.".to_string());
+        }
+        Ok(match self.selected_mode {
             super::FileSearchMode::Filename => {
                 let rows = self.visible_filename_export_rows();
                 export::filename_results_tsv(rows.iter())
@@ -255,7 +257,12 @@ impl FileSearchDialogState {
                 let rows = self.visible_content_export_rows();
                 export::content_results_tsv(rows.iter())
             }
-        }
+        })
+    }
+
+    pub(super) fn copy_visible_full_paths_payload(&self) -> Result<String, String> {
+        let rows = self.visible_selectable_result_rows().collect::<Vec<_>>();
+        export::visible_full_paths(rows.iter().map(|row| row.id.path.as_path()))
     }
 
     pub(super) fn export_visible_results_to_file(&mut self) {
@@ -270,9 +277,15 @@ impl FileSearchDialogState {
         else {
             return;
         };
-        let payload = self.export_visible_results_tsv();
+        let payload = match self.export_visible_results_tsv() {
+            Ok(payload) => payload,
+            Err(err) => {
+                self.warning_error_message = Some(err);
+                return;
+            }
+        };
         self.run_result_action("export visible results", || {
-            std::fs::write(&path, payload)?;
+            std::fs::write(&path, payload.as_bytes())?;
             Ok(())
         });
     }
@@ -292,6 +305,7 @@ impl FileSearchDialogState {
                     path,
                     display_filename,
                     parent_directory_display,
+                    kind,
                     size,
                     modified,
                     match_quality,
@@ -300,6 +314,7 @@ impl FileSearchDialogState {
                     path: path.clone(),
                     file_name: display_filename.clone(),
                     directory: parent_directory_display.clone(),
+                    kind: *kind,
                     size: *size,
                     modified: *modified,
                     match_quality: Some(*match_quality),
@@ -335,8 +350,8 @@ impl FileSearchDialogState {
                         line_number: content_match.line_number,
                         column: content_match.column,
                         line_preview: content_match.line.clone(),
-                        modified: source.and_then(|file| file.modified),
-                        match_quality: source.and_then(|file| file.filename_relevance),
+                        total_matches_in_file: source.map(|file| file.total_matches).unwrap_or(1),
+                        file_truncated: source.map(|file| file.truncated).unwrap_or(false),
                     })
                 }
                 FileSearchRowPayload::Filename { .. }
