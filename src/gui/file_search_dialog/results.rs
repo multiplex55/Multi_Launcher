@@ -5,7 +5,7 @@ use crate::file_search::model::{
 use crate::file_search::settings::{
     FileSearchColumn, FileSearchContentSort, FileSearchFilenameSort, FileSearchUiPreferences,
 };
-use eframe::egui::{self, FontId, Stroke, TextFormat, WidgetText, text::LayoutJob};
+use eframe::egui::{self, text::LayoutJob, FontId, Stroke, TextFormat, WidgetText};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -448,6 +448,52 @@ pub fn content_line_label(m: &ContentMatch) -> WidgetText {
     WidgetText::LayoutJob(job)
 }
 
+pub fn row_matches_refinement(
+    row: &crate::gui::file_search_dialog::FileSearchResultRow,
+    query: &str,
+) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    match &row.payload {
+        crate::gui::file_search_dialog::FileSearchRowPayload::Filename {
+            path,
+            display_filename,
+            parent_directory_display,
+            kind,
+            match_quality,
+            ..
+        } => {
+            let fields = vec![
+                display_filename.clone(),
+                parent_directory_display.clone(),
+                path.display().to_string(),
+                format!("{kind:?}"),
+                format_match_quality(*match_quality),
+            ];
+            fields.iter().any(|text| {
+                crate::file_search::matching::literal_contains_case_insensitive(text, query)
+            })
+        }
+        crate::gui::file_search_dialog::FileSearchRowPayload::Content {
+            path,
+            content_match,
+            ..
+        } => {
+            let fields = vec![
+                path.display().to_string(),
+                content_match.line_number.to_string(),
+                content_match.line.clone(),
+            ];
+            fields.iter().any(|text| {
+                crate::file_search::matching::literal_contains_case_insensitive(text, query)
+            })
+        }
+        crate::gui::file_search_dialog::FileSearchRowPayload::ContentGroupHeader { .. } => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,11 +603,10 @@ mod tests {
         );
 
         assert_eq!(job.text, "café needle");
-        assert!(
-            job.sections
-                .iter()
-                .any(|section| { section.byte_range.start == 6 && section.byte_range.end == 12 })
-        );
+        assert!(job
+            .sections
+            .iter()
+            .any(|section| { section.byte_range.start == 6 && section.byte_range.end == 12 }));
     }
 
     #[test]
@@ -610,11 +655,10 @@ mod tests {
         );
 
         assert_eq!(job.text, "café");
-        assert!(
-            job.sections
-                .iter()
-                .any(|section| { section.byte_range.start == 3 && section.byte_range.end == 5 })
-        );
+        assert!(job
+            .sections
+            .iter()
+            .any(|section| { section.byte_range.start == 3 && section.byte_range.end == 5 }));
     }
 
     #[test]

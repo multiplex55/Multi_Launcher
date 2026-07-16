@@ -30,6 +30,7 @@ const ACTIVE_SEARCH_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 pub const FILE_SEARCH_SEARCH_FIELD_ID_SOURCE: &str = "file_search_search_text";
 pub const FILE_SEARCH_ROOT_FIELD_ID_SOURCE: &str = "file_search_root_directory";
 pub const FILE_SEARCH_RESULT_LIST_ID_SOURCE: &str = "file_search_result_list";
+pub const FILE_SEARCH_REFINEMENT_FIELD_ID_SOURCE: &str = "file_search_refine_text";
 pub const FILE_SEARCH_CONTEXT_MENU_ID_SOURCE: &str = "file_search_context_menu";
 
 impl From<FileSearchFilenameSort> for crate::file_search::sorting::FilenameSort {
@@ -271,6 +272,8 @@ pub struct FileSearchDialogState {
     pub results: Vec<SearchResult>,
     pub result_rows: Vec<FileSearchResultRow>,
     pub selected_result: Option<SelectedFileSearchResult>,
+    pub refinement_text: String,
+    refinement_restore_selection: Option<SelectedFileSearchResult>,
     pub warning_error_message: Option<String>,
     pub inaccessible_path_warnings: usize,
     pub diagnostics: FileSearchDiagnostics,
@@ -305,6 +308,8 @@ impl Default for FileSearchDialogState {
             results: Vec::new(),
             result_rows: Vec::new(),
             selected_result: None,
+            refinement_text: String::new(),
+            refinement_restore_selection: None,
             warning_error_message: None,
             inaccessible_path_warnings: 0,
             diagnostics: FileSearchDiagnostics::default(),
@@ -349,6 +354,10 @@ impl FileSearchDialogState {
 
     pub fn result_list_id() -> egui::Id {
         egui::Id::new(FILE_SEARCH_RESULT_LIST_ID_SOURCE)
+    }
+
+    pub fn refinement_field_id() -> egui::Id {
+        egui::Id::new(FILE_SEARCH_REFINEMENT_FIELD_ID_SOURCE)
     }
 
     pub fn context_menu_id() -> egui::Id {
@@ -668,7 +677,10 @@ impl FileSearchDialogState {
         let Some(selected) = &self.selected_result else {
             return false;
         };
-        let is_valid = self.result_rows.iter().any(|row| row.id == selected.row_id);
+        let is_valid = self
+            .visible_result_rows()
+            .iter()
+            .any(|row| row.id == selected.row_id);
         if !is_valid {
             self.clear_selection();
         }
@@ -678,6 +690,8 @@ impl FileSearchDialogState {
     pub fn clear_results_and_selection(&mut self) {
         self.results.clear();
         self.result_rows.clear();
+        self.refinement_text.clear();
+        self.refinement_restore_selection = None;
         self.clear_selection();
     }
 
@@ -786,6 +800,101 @@ impl FileSearchDialogState {
         }
     }
 
+    pub fn set_refinement_text(&mut self, text: impl Into<String>) {
+        let next = text.into();
+        if self.refinement_text == next {
+            return;
+        }
+        let was_empty = self.refinement_text.trim().is_empty();
+        let will_be_empty = next.trim().is_empty();
+        if was_empty && !will_be_empty {
+            self.refinement_restore_selection = self.selected_result.clone();
+        }
+        self.refinement_text = next;
+        if will_be_empty {
+            if let Some(selection) = self.refinement_restore_selection.take() {
+                if self
+                    .result_rows
+                    .iter()
+                    .any(|row| row.id == selection.row_id)
+                {
+                    self.selected_result = Some(selection);
+                } else {
+                    self.clear_selection();
+                }
+            }
+        } else if self.selected_result.as_ref().is_some_and(|selected| {
+            !self
+                .visible_result_rows()
+                .iter()
+                .any(|row| row.id == selected.row_id)
+        }) {
+            self.clear_selection();
+        }
+    }
+
+    pub fn clear_refinement(&mut self) {
+        self.set_refinement_text(String::new());
+    }
+
+    pub fn visible_result_rows(&self) -> Vec<FileSearchResultRow> {
+        let query = self.refinement_text.trim();
+        if query.is_empty() {
+            return self.result_rows.clone();
+        }
+        match self.selected_mode {
+            FileSearchMode::Filename => self
+                .result_rows
+                .iter()
+                .filter(|row| matches!(row.payload, FileSearchRowPayload::Filename { .. }))
+                .filter(|row| results::row_matches_refinement(row, query))
+                .cloned()
+                .collect(),
+            FileSearchMode::Content => {
+                let mut visible = Vec::new();
+                let mut idx = 0;
+                while idx < self.result_rows.len() {
+                    let row = &self.result_rows[idx];
+                    if !matches!(row.payload, FileSearchRowPayload::ContentGroupHeader { .. }) {
+                        idx += 1;
+                        continue;
+                    }
+                    let header = row.clone();
+                    idx += 1;
+                    let mut children = Vec::new();
+                    while idx < self.result_rows.len()
+                        && !matches!(
+                            self.result_rows[idx].payload,
+                            FileSearchRowPayload::ContentGroupHeader { .. }
+                        )
+                    {
+                        let child = &self.result_rows[idx];
+                        if matches!(child.payload, FileSearchRowPayload::Content { .. })
+                            && results::row_matches_refinement(child, query)
+                        {
+                            children.push(child.clone());
+                        }
+                        idx += 1;
+                    }
+                    if !children.is_empty() {
+                        visible.push(header);
+                        visible.extend(children);
+                    }
+                }
+                visible
+            }
+        }
+    }
+
+    pub fn visible_selectable_result_rows(&self) -> impl Iterator<Item = FileSearchResultRow> {
+        self.visible_result_rows().into_iter().filter(|row| {
+            matches!(
+                row.payload,
+                FileSearchRowPayload::Filename { .. } | FileSearchRowPayload::Content { .. }
+            )
+        })
+    }
+
     pub fn result_counts(&self) -> FileSearchResultCounts {
         FileSearchResultCounts {
             filename_rows: self.filename_row_count(),
@@ -842,13 +951,23 @@ impl FileSearchDialogState {
 
     fn result_count_status_text(&self) -> String {
         let counts = self.result_counts();
-        match self.selected_mode {
-            FileSearchMode::Filename => format!("Results: {}", counts.filename_rows),
-            FileSearchMode::Content => format!(
-                "Rows: {} | Matched files: {}",
-                counts.content_displayed_match_rows, counts.content_matched_files
-            ),
-        }
+        let visible = self.visible_selectable_result_rows().count();
+        let total = match self.selected_mode {
+            FileSearchMode::Filename => counts.filename_rows,
+            FileSearchMode::Content => counts.content_displayed_match_rows,
+        };
+        let prefix = if self.refinement_text.trim().is_empty() {
+            match self.selected_mode {
+                FileSearchMode::Filename => format!("Results: {total}"),
+                FileSearchMode::Content => format!(
+                    "Rows: {total} | Matched files: {}",
+                    counts.content_matched_files
+                ),
+            }
+        } else {
+            format!("Showing {visible} of {total} results")
+        };
+        prefix
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, coordinator: &mut SearchCoordinator) {
@@ -1061,7 +1180,7 @@ impl FileSearchDialogState {
             }
             if ui
                 .add_enabled(
-                    !self.result_rows.is_empty(),
+                    self.visible_selectable_result_rows().next().is_some(),
                     egui::Button::new("Copy all visible"),
                 )
                 .clicked()
@@ -1071,12 +1190,32 @@ impl FileSearchDialogState {
             }
             if ui
                 .add_enabled(
-                    !self.result_rows.is_empty(),
+                    self.visible_selectable_result_rows().next().is_some(),
                     egui::Button::new("Export visible results…"),
                 )
                 .clicked()
             {
                 self.export_visible_results_to_file();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            let mut refinement = self.refinement_text.clone();
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut refinement)
+                    .id_source(Self::refinement_field_id())
+                    .hint_text("Filter current results"),
+            );
+            if response.changed() {
+                self.set_refinement_text(refinement);
+                ui.ctx().request_repaint();
+            }
+            if ui
+                .add_enabled(!self.refinement_text.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                self.clear_refinement();
+                ui.ctx().request_repaint();
             }
         });
         self.filters_ui(ui);
@@ -1192,8 +1331,8 @@ impl FileSearchDialogState {
             });
         });
 
-        let rows: Vec<_> = self
-            .result_rows
+        let visible_rows = self.visible_result_rows();
+        let rows: Vec<_> = visible_rows
             .iter()
             .filter_map(|row| match &row.payload {
                 FileSearchRowPayload::Filename {
@@ -1339,7 +1478,7 @@ impl FileSearchDialogState {
     }
 
     fn content_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
-        let rows = self.result_rows.clone();
+        let rows = self.visible_result_rows();
         for display_row in rows {
             match display_row.payload {
                 FileSearchRowPayload::ContentGroupHeader { path, header, .. } => {
@@ -3579,6 +3718,180 @@ mod tests {
         assert!(!state.show_ripgrep_missing_prompt);
         assert!(state.ripgrep_missing_prompt_dismissed);
     }
+
+    #[test]
+    fn filename_refinement_matches_filename() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(20)),
+            ..Default::default()
+        };
+        for path in ["/tmp/alpha.txt", "/tmp/beta.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(20),
+                result: filename_search_result(path),
+            });
+        }
+        state.set_refinement_text("ALPHA");
+        let rows: Vec<_> = state.visible_selectable_result_rows().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.path, PathBuf::from("/tmp/alpha.txt"));
+    }
+
+    #[test]
+    fn directory_and_path_refinement_matches_filename_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(21)),
+            ..Default::default()
+        };
+        for path in ["/tmp/project/src/main.rs", "/tmp/project/tests/main.rs"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(21),
+                result: filename_search_result(path),
+            });
+        }
+        state.set_refinement_text("TESTS/main");
+        let rows: Vec<_> = state.visible_selectable_result_rows().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.path, PathBuf::from("/tmp/project/tests/main.rs"));
+    }
+
+    #[test]
+    fn content_line_refinement_matches_source_line() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(22)),
+            selected_mode: FileSearchMode::Content,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(22),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 2,
+                matches: vec![
+                    ContentMatch::new(3, "alpha needle".into(), 6, 12),
+                    ContentMatch::new(9, "beta needle".into(), 5, 11),
+                ],
+                truncated: false,
+            }),
+        });
+        state.set_refinement_text("BETA");
+        let rows: Vec<_> = state.visible_selectable_result_rows().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.line_number, Some(9));
+    }
+
+    #[test]
+    fn line_number_refinement_matches_content_rows() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(23)),
+            selected_mode: FileSearchMode::Content,
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(23),
+            result: SearchResult::ContentFile(ContentFileResult {
+                path: "src/lib.rs".into(),
+                file_name: "lib.rs".into(),
+                modified: None,
+                filename_relevance: None,
+                arrival_index: 0,
+                total_matches: 2,
+                matches: vec![
+                    ContentMatch::new(12, "alpha".into(), 0, 5),
+                    ContentMatch::new(99, "beta".into(), 0, 4),
+                ],
+                truncated: false,
+            }),
+        });
+        state.set_refinement_text("99");
+        let rows: Vec<_> = state.visible_selectable_result_rows().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.line_number, Some(99));
+    }
+
+    #[test]
+    fn hidden_rows_are_excluded_from_keyboard_navigation() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(24)),
+            ..Default::default()
+        };
+        for path in ["/tmp/a.txt", "/tmp/b.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(24),
+                result: filename_search_result(path),
+            });
+        }
+        state.set_refinement_text("b.txt");
+        state.move_selection(keyboard::SelectionMove::Next);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/b.txt")
+        );
+    }
+
+    #[test]
+    fn clearing_refinement_restores_all_rows_and_prior_selection_when_possible() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(25)),
+            ..Default::default()
+        };
+        for path in ["/tmp/a.txt", "/tmp/b.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(25),
+                result: filename_search_result(path),
+            });
+        }
+        let selected = state.result_rows[0].clone();
+        state.select_result(&selected);
+        state.set_refinement_text("b.txt");
+        assert_eq!(state.visible_selectable_result_rows().count(), 1);
+        assert!(state.selected_result().is_none());
+        state.clear_refinement();
+        assert_eq!(state.visible_selectable_result_rows().count(), 2);
+        assert_eq!(
+            state.selected_result().unwrap().row_id.path,
+            PathBuf::from("/tmp/a.txt")
+        );
+    }
+
+    #[test]
+    fn backend_storage_remains_unchanged_when_refinement_changes() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(26)),
+            ..Default::default()
+        };
+        for path in ["/tmp/a.txt", "/tmp/b.txt"] {
+            state.apply_event(SearchEvent::Result {
+                id: SearchId(26),
+                result: filename_search_result(path),
+            });
+        }
+        let results = state.results.clone();
+        let rows = state.result_rows.clone();
+        state.set_refinement_text("a.txt");
+        assert_eq!(state.results, results);
+        assert_eq!(state.result_rows, rows);
+        assert_eq!(state.visible_selectable_result_rows().count(), 1);
+    }
+
+    #[test]
+    fn refinement_does_not_start_backend_search_or_change_backend() {
+        let executor = RecordingExecutor::new();
+        let mut coordinator = SearchCoordinator::with_executor(executor.clone());
+        let mut state = FileSearchDialogState {
+            backend: Some(SearchBackend::WalkDir),
+            ..Default::default()
+        };
+        state.set_refinement_text("needle");
+        state.drain_events(&mut coordinator);
+        assert!(executor.requests.lock().unwrap().is_empty());
+        assert_eq!(state.backend, Some(SearchBackend::WalkDir));
+    }
+
     #[test]
     fn content_display_rows_have_one_header_per_file_and_total_match_count() {
         let mut state = FileSearchDialogState {
