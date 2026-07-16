@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Describes whether a search should match file names or file contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,6 +110,44 @@ pub struct InaccessiblePathDetail {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathIssue {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchSummary {
+    pub elapsed: Duration,
+    pub files_scanned: u64,
+    pub directories_scanned: u64,
+    pub result_files: usize,
+    pub displayed_rows: usize,
+    pub skipped_entries: u64,
+    pub inaccessible_count: u64,
+    pub inaccessible_entries: Vec<PathIssue>,
+    pub result_limit_reached: bool,
+    pub per_file_limit_reached: bool,
+    pub cancelled: bool,
+    pub stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendExecutionDetails {
+    pub backend: SearchBackend,
+    pub executable_path: Option<PathBuf>,
+    pub version: Option<String>,
+    pub resolution_source: Option<String>,
+    pub command_for_display: Option<String>,
+    pub command_without_query: Option<String>,
+    pub search_roots: Vec<PathBuf>,
+    pub started_at: SystemTime,
+    pub ended_at: Option<SystemTime>,
+    pub stderr: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchDiagnostic {
     Warning(String),
     BackendStderr(String),
@@ -125,6 +163,7 @@ pub enum SearchDiagnostic {
     FilenameResultsTruncated {
         limit: usize,
     },
+    BackendExecution(Box<BackendExecutionDetails>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -45,7 +45,17 @@ pub struct NativeSearchSummary {
     pub directories_scanned: u64,
     pub cancelled: bool,
     pub global_truncated: bool,
+    pub inaccessible_count: u64,
     pub inaccessible_paths: Vec<InaccessiblePathDetail>,
+}
+
+const INACCESSIBLE_SAMPLE_LIMIT: usize = 100;
+
+fn record_inaccessible(summary: &mut NativeSearchSummary, detail: InaccessiblePathDetail) {
+    summary.inaccessible_count = summary.inaccessible_count.saturating_add(1);
+    if summary.inaccessible_paths.len() < INACCESSIBLE_SAMPLE_LIMIT {
+        summary.inaccessible_paths.push(detail);
+    }
 }
 
 pub fn search_content_native(
@@ -173,11 +183,14 @@ fn collect_paths(
                 let root_meta = match fs::metadata(root) {
                     Ok(meta) => meta,
                     Err(err) => {
-                        summary.inaccessible_paths.push(InaccessiblePathDetail {
-                            path: root.clone(),
-                            operation: "stat root".to_string(),
-                            error: err.to_string(),
-                        });
+                        record_inaccessible(
+                            summary,
+                            InaccessiblePathDetail {
+                                path: root.clone(),
+                                operation: "stat root".to_string(),
+                                error: err.to_string(),
+                            },
+                        );
                         continue;
                     }
                 };
@@ -198,14 +211,17 @@ fn collect_paths(
                         let entry = match entry {
                             Ok(entry) => entry,
                             Err(err) => {
-                                summary.inaccessible_paths.push(InaccessiblePathDetail {
-                                    path: err
-                                        .path()
-                                        .map(|p| p.to_path_buf())
-                                        .unwrap_or_else(|| root.clone()),
-                                    operation: "read directory entry".to_string(),
-                                    error: err.to_string(),
-                                });
+                                record_inaccessible(
+                                    summary,
+                                    InaccessiblePathDetail {
+                                        path: err
+                                            .path()
+                                            .map(|p| p.to_path_buf())
+                                            .unwrap_or_else(|| root.clone()),
+                                        operation: "read directory entry".to_string(),
+                                        error: err.to_string(),
+                                    },
+                                );
                                 continue;
                             }
                         };
@@ -236,9 +252,10 @@ fn should_descend(entry: &DirEntry, request: &SearchRequest) -> bool {
         return false;
     }
     if entry.file_type().is_dir()
-        && let Some(name) = entry.file_name().to_str() {
-            return !request.excluded_directory_names.iter().any(|d| d == name);
-        }
+        && let Some(name) = entry.file_name().to_str()
+    {
+        return !request.excluded_directory_names.iter().any(|d| d == name);
+    }
     true
 }
 
@@ -296,11 +313,14 @@ fn search_file(
     let meta = match fs::metadata(path) {
         Ok(meta) => meta,
         Err(err) => {
-            summary.inaccessible_paths.push(InaccessiblePathDetail {
-                path: path.to_path_buf(),
-                operation: "metadata".to_string(),
-                error: err.to_string(),
-            });
+            record_inaccessible(
+                summary,
+                InaccessiblePathDetail {
+                    path: path.to_path_buf(),
+                    operation: "metadata".to_string(),
+                    error: err.to_string(),
+                },
+            );
             return None;
         }
     };
@@ -315,11 +335,14 @@ fn search_file(
     let file = match File::open(path) {
         Ok(file) => file,
         Err(err) => {
-            summary.inaccessible_paths.push(InaccessiblePathDetail {
-                path: path.to_path_buf(),
-                operation: "open file".to_string(),
-                error: err.to_string(),
-            });
+            record_inaccessible(
+                summary,
+                InaccessiblePathDetail {
+                    path: path.to_path_buf(),
+                    operation: "open file".to_string(),
+                    error: err.to_string(),
+                },
+            );
             return None;
         }
     };

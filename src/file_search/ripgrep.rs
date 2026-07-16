@@ -6,9 +6,9 @@ pub use crate::file_search::discovery::{
 use crate::file_search::error::FileSearchError;
 use crate::file_search::matching::filename_highlight_match;
 use crate::file_search::model::{
-    ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind, FileTypeFilter,
-    FilenameResult, SearchDiagnostic, SearchEvent, SearchId, SearchKind, SearchProgress,
-    SearchRequest, SearchResult, SearchScope, SearchStatus,
+    BackendExecutionDetails, ContentFileResult, ContentFileResultBuilder, ContentMatch, FileKind,
+    FileTypeFilter, FilenameResult, SearchBackend, SearchDiagnostic, SearchEvent, SearchId,
+    SearchKind, SearchProgress, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
 use serde_json::Value;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone)]
 pub struct RipgrepSearchExecutor {
@@ -64,6 +64,7 @@ pub struct RipgrepSearchSummary {
     pub cancelled: bool,
     pub stderr: String,
     pub global_truncated: bool,
+    pub execution_details: Option<BackendExecutionDetails>,
 }
 
 fn execute_content_search(
@@ -74,6 +75,12 @@ fn execute_content_search(
     events: &mpsc::Sender<SearchEvent>,
 ) -> Result<(), FileSearchError> {
     let summary = search_content_with_ripgrep(request, settings, token)?;
+    if let Some(details) = summary.execution_details.clone() {
+        let _ = events.send(SearchEvent::Diagnostic {
+            id,
+            diagnostic: SearchDiagnostic::BackendExecution(Box::new(details)),
+        });
+    }
     send_bounded_stderr_diagnostic(id, &summary.stderr, events);
     for result in summary.results {
         if events
@@ -117,6 +124,12 @@ fn execute_filename_search(
     events: &mpsc::Sender<SearchEvent>,
 ) -> Result<(), FileSearchError> {
     let summary = search_filenames_with_ripgrep(request, settings, token)?;
+    if let Some(details) = summary.execution_details.clone() {
+        let _ = events.send(SearchEvent::Diagnostic {
+            id,
+            diagnostic: SearchDiagnostic::BackendExecution(Box::new(details)),
+        });
+    }
     send_bounded_stderr_diagnostic(id, &summary.stderr, events);
     for result in summary.results {
         if events
@@ -171,6 +184,7 @@ pub struct RipgrepFilenameSearchSummary {
     pub cancelled: bool,
     pub stderr: String,
     pub global_truncated: bool,
+    pub execution_details: Option<BackendExecutionDetails>,
 }
 
 pub fn search_content_with_ripgrep(
@@ -189,10 +203,18 @@ pub fn search_content_with_ripgrep(
         });
     }
 
-    let executable = resolve_ripgrep_executable(&settings.ripgrep_executable_path)?;
+    let resolution = resolve_ripgrep_with_context(
+        &settings.ripgrep_executable_path,
+        &ExecutableSearchContext::from_process(),
+    )?;
+    let executable = resolution.path.clone();
     tracing::debug!(executable = %executable.display(), "starting ripgrep content search");
     let roots = search_roots(&request, settings)?;
     let mut command = build_ripgrep_command(&executable, &request, settings, &roots);
+    let started_at = SystemTime::now();
+    let started = Instant::now();
+    let command_for_display = command_to_string(&command, false);
+    let command_without_query = command_to_string(&command, true);
     let mut child = spawn_ripgrep_child(&mut command, &executable)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -215,6 +237,24 @@ pub fn search_content_with_ripgrep(
     let stderr = stderr_handle.join().unwrap_or_default();
     summary.cancelled = process.cancelled;
     summary.stderr = stderr.clone();
+    summary.execution_details = Some(BackendExecutionDetails {
+        backend: SearchBackend::Ripgrep,
+        executable_path: Some(executable.clone()),
+        version: resolution.version,
+        resolution_source: Some(format!("{:?}", resolution.source)),
+        command_for_display: Some(command_for_display),
+        command_without_query: Some(command_without_query),
+        search_roots: roots,
+        started_at,
+        ended_at: started_at.checked_add(started.elapsed()),
+        stderr: if stderr.trim().is_empty() {
+            None
+        } else {
+            Some(stderr.clone())
+        },
+        fallback_reason: None,
+        cancelled: process.cancelled,
+    });
     if !process.cancelled
         && let Some(status) = process.status
     {
@@ -295,6 +335,38 @@ fn read_bounded_to_string(reader: impl Read, limit: usize) -> String {
     String::from_utf8_lossy(&output).to_string()
 }
 
+fn command_to_string(command: &Command, redact_query: bool) -> String {
+    let program = shell_quote_arg(&command.get_program().to_string_lossy());
+    let mut redact_next = false;
+    let args = command.get_args().map(|arg| {
+        let text = arg.to_string_lossy();
+        if redact_next {
+            redact_next = false;
+            return shell_quote_arg("<query>");
+        }
+        if redact_query && text == "-e" {
+            redact_next = true;
+        }
+        shell_quote_arg(&text)
+    });
+    std::iter::once(program)
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+    if arg.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '/' | '\\' | '.' | '_' | '-' | ':' | '=')
+    }) {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 pub fn search_filenames_with_ripgrep(
     request: SearchRequest,
     settings: &FileSearchSettings,
@@ -311,9 +383,17 @@ pub fn search_filenames_with_ripgrep(
         });
     }
 
-    let executable = resolve_ripgrep_executable(&settings.ripgrep_executable_path)?;
+    let resolution = resolve_ripgrep_with_context(
+        &settings.ripgrep_executable_path,
+        &ExecutableSearchContext::from_process(),
+    )?;
+    let executable = resolution.path.clone();
     let roots = search_roots(&request, settings)?;
     let mut command = build_ripgrep_files_command(&executable, &request, settings, &roots);
+    let started_at = SystemTime::now();
+    let started = Instant::now();
+    let command_for_display = command_to_string(&command, false);
+    let command_without_query = command_to_string(&command, true);
     let mut child = spawn_ripgrep_child(&mut command, &executable)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -376,6 +456,24 @@ pub fn search_filenames_with_ripgrep(
     let stderr = stderr_handle.join().unwrap_or_default();
     summary.cancelled |= process.cancelled;
     summary.stderr = stderr.clone();
+    summary.execution_details = Some(BackendExecutionDetails {
+        backend: SearchBackend::Ripgrep,
+        executable_path: Some(executable.clone()),
+        version: resolution.version,
+        resolution_source: Some(format!("{:?}", resolution.source)),
+        command_for_display: Some(command_for_display),
+        command_without_query: Some(command_without_query),
+        search_roots: roots,
+        started_at,
+        ended_at: started_at.checked_add(started.elapsed()),
+        stderr: if stderr.trim().is_empty() {
+            None
+        } else {
+            Some(stderr.clone())
+        },
+        fallback_reason: None,
+        cancelled: summary.cancelled,
+    });
     if !summary.cancelled
         && let Some(status) = process.status
     {
@@ -737,6 +835,7 @@ fn parse_ripgrep_json_reader<R: Read>(
         cancelled: false,
         stderr: String::new(),
         global_truncated,
+        execution_details: None,
     })
 }
 

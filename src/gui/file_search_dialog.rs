@@ -18,7 +18,7 @@ use crate::file_search::settings::{
     FileSearchContentSort, FileSearchFilenameSort, FileSearchSettings, FileSearchUiPreferences,
 };
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
-use diagnostics::FileSearchDiagnostics;
+use diagnostics::{FileSearchDiagnostics, format_status_line};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use std::path::PathBuf;
@@ -1221,15 +1221,32 @@ impl FileSearchDialogState {
             }
         });
         self.filters_ui(ui);
-        ui.label(format!(
-            "Status: {:?} | {} | Warnings: {}",
+        let counts = self.result_counts();
+        let displayed = match self.selected_mode {
+            FileSearchMode::Filename => counts.filename_rows,
+            FileSearchMode::Content => counts.content_matched_files,
+        };
+        let truncated = self.diagnostics.global_matched_file_truncation.is_some()
+            || self.diagnostics.filename_result_limit_truncation.is_some();
+        ui.label(format_status_line(
             self.current_status,
-            self.result_count_status_text(),
-            self.diagnostics.warning_count()
+            displayed,
+            truncated,
         ));
         egui::CollapsingHeader::new("Diagnostics")
             .default_open(false)
             .show(ui, |ui| {
+                if ui.button("Copy diagnostics").clicked() {
+                    self.copy_text_payload(
+                        "copy diagnostics",
+                        self.diagnostics.copy_diagnostics_text(),
+                    );
+                }
+                if let Some(command) = self.diagnostics.full_command_text()
+                    && ui.button("Copy full command (may include query)").clicked()
+                {
+                    self.copy_text_payload("copy full command", command);
+                }
                 for line in self.diagnostics.summary_lines() {
                     ui.label(line);
                 }
