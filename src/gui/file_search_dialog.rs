@@ -1168,35 +1168,37 @@ impl FileSearchDialogState {
                 self.open_selected_result();
                 ui.ctx().request_repaint();
             }
-            if ui
-                .add_enabled(
-                    self.selected_result().is_some(),
-                    egui::Button::new("Copy selected"),
-                )
-                .clicked()
-                && let Some(payload) = self.copy_selected_payload()
-            {
-                self.copy_text_payload("copy selected", payload);
-            }
-            if ui
-                .add_enabled(
-                    self.visible_selectable_result_rows().next().is_some(),
-                    egui::Button::new("Copy all visible"),
-                )
-                .clicked()
-                && let Some(payload) = self.copy_all_visible_results_payload()
-            {
-                self.copy_text_payload("copy visible results", payload);
-            }
-            if ui
-                .add_enabled(
-                    self.visible_selectable_result_rows().next().is_some(),
-                    egui::Button::new("Export visible results…"),
-                )
-                .clicked()
-            {
-                self.export_visible_results_to_file();
-            }
+            ui.menu_button("Export", |ui| {
+                if ui.button("Copy visible results").clicked() {
+                    match self.copy_all_visible_results_payload() {
+                        Ok(payload) => self.copy_text_payload("copy visible results", payload),
+                        Err(err) => self.warning_error_message = Some(err),
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Save visible results as TSV…").clicked() {
+                    self.export_visible_results_to_file();
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        self.selected_result().is_some(),
+                        egui::Button::new("Copy selected result"),
+                    )
+                    .clicked()
+                    && let Some(payload) = self.copy_selected_payload()
+                {
+                    self.copy_text_payload("copy selected", payload);
+                    ui.close_menu();
+                }
+                if ui.button("Copy visible full paths").clicked() {
+                    match self.copy_visible_full_paths_payload() {
+                        Ok(payload) => self.copy_text_payload("copy visible full paths", payload),
+                        Err(err) => self.warning_error_message = Some(err),
+                    }
+                    ui.close_menu();
+                }
+            });
         });
         ui.horizontal(|ui| {
             ui.label("Filter");
@@ -3458,7 +3460,59 @@ mod tests {
         );
         assert_eq!(
             state.copy_all_visible_results_payload().as_deref(),
-            Some("/tmp/match.txt:1:6: line 0 needle")
+            Ok("/tmp/match.txt:1:6: line 0 needle")
+        );
+    }
+
+    #[test]
+    fn visible_export_uses_filtered_rows_only() {
+        let mut state = FileSearchDialogState {
+            active_search_id: Some(SearchId(12)),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(12),
+            result: filename_search_result("/tmp/keep.txt"),
+        });
+        state.apply_event(SearchEvent::Result {
+            id: SearchId(12),
+            result: filename_search_result("/tmp/drop.txt"),
+        });
+        state.set_refinement_text("keep");
+
+        assert_eq!(
+            state.copy_all_visible_results_payload().as_deref(),
+            Ok("/tmp/keep.txt")
+        );
+        assert!(
+            state
+                .export_visible_results_tsv()
+                .unwrap()
+                .contains("keep.txt")
+        );
+        assert!(
+            !state
+                .export_visible_results_tsv()
+                .unwrap()
+                .contains("drop.txt")
+        );
+    }
+
+    #[test]
+    fn empty_visible_export_returns_user_facing_error() {
+        let state = FileSearchDialogState::default();
+
+        assert_eq!(
+            state.copy_all_visible_results_payload().unwrap_err(),
+            "There are no visible file-search results to export."
+        );
+        assert_eq!(
+            state.copy_visible_full_paths_payload().unwrap_err(),
+            "There are no visible file-search results to export."
+        );
+        assert_eq!(
+            state.export_visible_results_tsv().unwrap_err(),
+            "There are no visible file-search results to export."
         );
     }
 
