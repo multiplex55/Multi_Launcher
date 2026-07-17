@@ -1,6 +1,6 @@
 use crate::file_search::model::{FilenameMatchMode, FilenameRank, TextMatchRange};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use std::path::Path;
 
 /// Returns true when `needle` occurs literally in `haystack`, ignoring case.
@@ -390,5 +390,50 @@ mod tests {
             |range| "FileSearchDialog".is_char_boundary(range.byte_start)
                 && "FileSearchDialog".is_char_boundary(range.byte_end)
         ));
+    }
+
+    #[test]
+    fn fuzzy_indices_survive_unicode_case_folding() {
+        let ranges = fuzzy_filename_match_ranges("ÅngströmReport.md", "ång", false).unwrap();
+        assert_eq!(
+            ranges.first().copied(),
+            Some(TextMatchRange {
+                byte_start: 0,
+                byte_end: "Ång".len()
+            })
+        );
+        assert!(
+            ranges
+                .iter()
+                .all(|r| "ÅngströmReport.md".is_char_boundary(r.byte_start)
+                    && "ÅngströmReport.md".is_char_boundary(r.byte_end))
+        );
+    }
+
+    #[test]
+    fn ranked_highlights_report_filename_and_path_ranges_separately() {
+        let filename_hit = filename_highlight_match(
+            "notes.txt",
+            "archive/notes.txt".as_ref(),
+            "note",
+            false,
+            FilenameMatchMode::RankedSubstring,
+        )
+        .unwrap();
+        assert_eq!(filename_hit.rank, FilenameRank::FilenameStartsWith);
+        assert!(!filename_hit.filename_match_ranges.is_empty());
+        assert!(filename_hit.path_match_ranges.is_empty());
+
+        let path_hit = filename_highlight_match(
+            "notes.txt",
+            "archive/project/notes.txt".as_ref(),
+            "project",
+            false,
+            FilenameMatchMode::RankedSubstring,
+        )
+        .unwrap();
+        assert_eq!(path_hit.rank, FilenameRank::FullPathContains);
+        assert!(path_hit.filename_match_ranges.is_empty());
+        assert!(!path_hit.path_match_ranges.is_empty());
     }
 }

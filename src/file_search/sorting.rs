@@ -224,22 +224,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::file_search::model::{FileKind, FilenameRank};
+    use crate::file_search::model::FilenameRank;
+    use crate::file_search::test_fixtures::{
+        content_file_result as fixture_content_file_result, content_match as fixture_content_match,
+        filename_result as fixture_filename_result,
+    };
     fn result(path: &str, rank: FilenameRank) -> FilenameResult {
-        let path = PathBuf::from(path);
-        FilenameResult {
-            file_name: path.file_name().unwrap().to_string_lossy().to_string(),
-            parent_directory: path.parent().map(Path::to_path_buf),
-            path,
-            kind: FileKind::File,
-            size: None,
-            modified: None,
-            rank,
-            match_quality: rank,
-            filename_match_ranges: vec![],
-            path_match_ranges: vec![],
-            arrival_index: 0,
-        }
+        fixture_filename_result(path, rank)
     }
     #[test]
     fn every_filename_sort_mode_is_deterministic() {
@@ -264,16 +255,7 @@ mod tests {
         }
     }
     fn cf(path: &str, arrival: usize, total: usize) -> ContentFileResult {
-        ContentFileResult {
-            path: path.into(),
-            file_name: path.into(),
-            modified: None,
-            filename_relevance: None,
-            arrival_index: arrival,
-            total_matches: total,
-            matches: vec![ContentMatch::new(arrival + 1, "x".into(), 0, 1)],
-            truncated: false,
-        }
+        fixture_content_file_result(path, arrival, total)
     }
     #[test]
     fn every_content_sort_mode_is_deterministic() {
@@ -379,38 +361,10 @@ mod tests {
     #[test]
     fn content_matches_sort_by_line_column_end_then_original_occurrence() {
         let mut matches = vec![
-            ContentMatch {
-                line_number: 2,
-                column: Some(0),
-                line: "d".into(),
-                byte_start: 0,
-                byte_end: 2,
-                ranges: vec![],
-            },
-            ContentMatch {
-                line_number: 1,
-                column: Some(4),
-                line: "c".into(),
-                byte_start: 4,
-                byte_end: 9,
-                ranges: vec![],
-            },
-            ContentMatch {
-                line_number: 1,
-                column: Some(4),
-                line: "b".into(),
-                byte_start: 4,
-                byte_end: 8,
-                ranges: vec![],
-            },
-            ContentMatch {
-                line_number: 1,
-                column: Some(1),
-                line: "a".into(),
-                byte_start: 1,
-                byte_end: 2,
-                ranges: vec![],
-            },
+            fixture_content_match(2, "d", 0, 2),
+            fixture_content_match(1, "c", 4, 9),
+            fixture_content_match(1, "b", 4, 8),
+            fixture_content_match(1, "a", 1, 2),
         ];
         sort_content_matches(&mut matches);
         assert_eq!(
