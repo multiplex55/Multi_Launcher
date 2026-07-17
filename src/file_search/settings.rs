@@ -301,13 +301,7 @@ impl FileSearchSettings {
             });
         }
 
-        let ripgrep_path = &self.ripgrep_executable_path;
-        let ripgrep_explicit_path_missing = !ripgrep_path.as_os_str().is_empty()
-            && ((ripgrep_path.is_absolute() && !ripgrep_path.is_file())
-                || (ripgrep_path.components().count() > 1 && !ripgrep_path.is_absolute()));
-        if ripgrep_explicit_path_missing
-            || crate::file_search::ripgrep::resolve_ripgrep_executable(ripgrep_path).is_err()
-        {
+        if !ripgrep_path_is_statically_valid(&self.ripgrep_executable_path) {
             diagnostics.push(FileSearchSettingsDiagnostic::MissingExecutable {
                 name: "ripgrep",
                 path: self.ripgrep_executable_path.clone(),
@@ -390,9 +384,87 @@ fn executable_path_is_configured_file(path: &PathBuf) -> Option<bool> {
     Some(path.is_file())
 }
 
+fn ripgrep_path_is_statically_valid(path: &PathBuf) -> bool {
+    if path.as_os_str().is_empty() {
+        return true;
+    }
+
+    if path.is_absolute() {
+        return path.is_file();
+    }
+
+    path.components().count() == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn has_missing_ripgrep_diagnostic(diagnostics: &[FileSearchSettingsDiagnostic]) -> bool {
+        diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                FileSearchSettingsDiagnostic::MissingExecutable {
+                    name: "ripgrep",
+                    ..
+                }
+            )
+        })
+    }
+
+    fn settings_with_ripgrep_path(path: PathBuf) -> FileSearchSettings {
+        FileSearchSettings {
+            global_search_roots: Vec::new(),
+            everything_enabled: false,
+            ripgrep_executable_path: path,
+            ..FileSearchSettings::default()
+        }
+    }
+
+    #[test]
+    fn static_ripgrep_validation_accepts_empty_path_for_auto_detect() {
+        let settings = settings_with_ripgrep_path(PathBuf::new());
+
+        let diagnostics = settings.validate_configured_executables();
+
+        assert!(!has_missing_ripgrep_diagnostic(&diagnostics));
+    }
+
+    #[test]
+    fn static_ripgrep_validation_accepts_bare_executable_name() {
+        let settings = settings_with_ripgrep_path(PathBuf::from("rg"));
+
+        let diagnostics = settings.validate_configured_executables();
+
+        assert!(!has_missing_ripgrep_diagnostic(&diagnostics));
+    }
+
+    #[test]
+    fn static_ripgrep_validation_accepts_bare_windows_executable_name() {
+        let settings = settings_with_ripgrep_path(PathBuf::from("rg.exe"));
+
+        let diagnostics = settings.validate_configured_executables();
+
+        assert!(!has_missing_ripgrep_diagnostic(&diagnostics));
+    }
+
+    #[test]
+    fn static_ripgrep_validation_rejects_relative_path_with_directory_components() {
+        let settings = settings_with_ripgrep_path(PathBuf::from("tools/rg.exe"));
+
+        let diagnostics = settings.validate_configured_executables();
+
+        assert!(has_missing_ripgrep_diagnostic(&diagnostics));
+    }
+
+    #[test]
+    fn static_ripgrep_validation_rejects_absolute_nonexistent_path() {
+        let settings = settings_with_ripgrep_path(PathBuf::from("/definitely/missing/rg"));
+
+        let diagnostics = settings.validate_configured_executables();
+
+        assert!(has_missing_ripgrep_diagnostic(&diagnostics));
+    }
 
     #[test]
     fn default_settings_include_expected_values() {
