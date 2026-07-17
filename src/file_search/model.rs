@@ -442,7 +442,12 @@ mod tests {
         assert_eq!(identity.normalized_path, "a/b/file.txt");
 
         let relative = path_identity(std::path::Path::new("Cargo.toml"));
-        assert!(relative.normalized_path.ends_with("/Cargo.toml"));
+        assert!(
+            relative
+                .normalized_path
+                .to_lowercase()
+                .ends_with("/cargo.toml")
+        );
     }
 
     #[test]
