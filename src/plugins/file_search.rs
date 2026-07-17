@@ -1,24 +1,30 @@
 use crate::actions::Action;
 use crate::file_search::actions::{
-    encode_action_payload, mode_action_payload, start_action_payload, MODE_PREFIX, OPEN_ACTION,
-    START_PREFIX,
+    MODE_PREFIX, OPEN_ACTION, START_PREFIX, encode_action_payload, mode_action_payload,
+    start_action_payload,
 };
 use crate::file_search::discovery::{self, ExecutableResolutionSource, ExecutableSearchContext};
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
 use crate::file_search::settings::{
-    FileSearchDiagnosticsState, FileSearchSettings, DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES,
+    DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES, FileSearchDiagnosticsState, FileSearchSettings,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FileSearchPlugin {
     settings: FileSearchSettings,
+    ripgrep_ui: RipgrepSettingsUiState,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RipgrepSettingsUiState {
+    automatic_result: Option<crate::file_search::discovery::RipgrepResolution>,
+    configured_result: Option<crate::file_search::discovery::RipgrepResolution>,
+    last_tested_path: Option<PathBuf>,
+}
 
 impl Plugin for FileSearchPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
@@ -114,7 +120,7 @@ impl Plugin for FileSearchPlugin {
             "Everything ES CLI executable path (es.exe)",
             &mut cfg.everything_executable_path,
         );
-        ripgrep_settings_ui(ui, &mut cfg.ripgrep_executable_path);
+        ripgrep_settings_ui(ui, &mut cfg.ripgrep_executable_path, &mut self.ripgrep_ui);
         ui.horizontal(|ui| {
             ui.label("Preferred editor command");
             ui.text_edit_singleline(&mut cfg.preferred_editor_command);
@@ -168,15 +174,15 @@ fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
     }
 }
 
-fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
+fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut RipgrepSettingsUiState) {
     ui.separator();
     ui.label("ripgrep executable");
-    let context = ExecutableSearchContext::from_process();
     let mut text = path.display().to_string();
     ui.horizontal(|ui| {
         ui.label("Absolute path");
         if ui.text_edit_singleline(&mut text).changed() {
             *path = PathBuf::from(text.trim());
+            invalidate_configured_ripgrep_state(state);
         }
         if ui.button("Browse…").clicked() {
             #[cfg(windows)]
@@ -185,19 +191,18 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
             let dialog = rfd::FileDialog::new();
             if let Some(selected) = dialog.pick_file() {
                 *path = selected.canonicalize().unwrap_or(selected);
+                invalidate_configured_ripgrep_state(state);
             }
         }
     });
 
-    let automatic = discovery::discover_ripgrep(std::path::Path::new(""), &context);
-    let configured_resolution = discovery::discover_ripgrep(path, &context);
-    let display_resolution = configured_resolution.as_ref().or(automatic.as_ref());
-
     ui.horizontal(|ui| {
         if ui.button("Auto-detect").clicked() {
-            // Detection is intentionally non-mutating; the current automatic result is shown below.
+            let context = ExecutableSearchContext::from_process();
+            state.automatic_result = discovery::discover_ripgrep(Path::new(""), &context);
         }
-        if let Some(detected) = automatic
+        if let Some(detected) = state
+            .automatic_result
             .as_ref()
             .filter(|detected| detected.version.is_some())
         {
@@ -207,48 +212,66 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
             ));
             if detected.path != *path && ui.button("Use detected path").clicked() {
                 *path = detected.path.clone();
+                invalidate_configured_ripgrep_state(state);
             }
-        } else {
+        } else if state.automatic_result.is_some() {
             ui.label("Best detected candidate: not found");
+        } else {
+            ui.label("Best detected candidate: not run yet");
         }
     });
 
     ui.horizontal(|ui| {
         if ui.button("Test").clicked() {
-            // The labels below always reflect testing the entered path first, falling back to auto-discovery when empty.
+            let context = ExecutableSearchContext::from_process();
+            let result = if path.as_os_str().is_empty() {
+                state.automatic_result.clone().or_else(|| {
+                    let automatic = discovery::discover_ripgrep(Path::new(""), &context);
+                    state.automatic_result = automatic.clone();
+                    automatic
+                })
+            } else {
+                discovery::discover_ripgrep(path, &context)
+            };
+            state.configured_result = result;
+            state.last_tested_path = Some(path.clone());
         }
-        let test_resolution = if path.as_os_str().is_empty() {
-            automatic.as_ref()
+        if configured_ripgrep_result_is_current(state, path) {
+            match state.configured_result.as_ref() {
+                Some(resolution) if resolution.version.is_some() => {
+                    ui.colored_label(egui::Color32::GREEN, "Validation: ripgrep is available");
+                }
+                Some(resolution) if !resolution.warnings.is_empty() => {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Validation: {}", resolution.warnings.join("; ")),
+                    );
+                }
+                _ => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        "Validation: ripgrep was not found or failed rg --version",
+                    );
+                }
+            }
         } else {
-            configured_resolution.as_ref()
-        };
-        match test_resolution {
-            Some(resolution) if resolution.version.is_some() => {
-                ui.colored_label(egui::Color32::GREEN, "Validation: ripgrep is available");
-            }
-            Some(resolution) if !resolution.warnings.is_empty() => {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    format!("Validation: {}", resolution.warnings.join("; ")),
-                );
-            }
-            _ => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    "Validation: ripgrep was not found or failed rg --version",
-                );
-            }
+            ui.label("Validation: not tested yet");
         }
     });
 
+    let configured_resolution = configured_ripgrep_result_is_current(state, path)
+        .then_some(state.configured_result.as_ref())
+        .flatten();
+    let display_resolution = configured_resolution.or(state.automatic_result.as_ref());
     let open_folder_path = display_resolution
         .and_then(|resolution| resolution.version.as_ref().map(|_| resolution.path.clone()))
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
     ui.add_enabled_ui(open_folder_path.is_some(), |ui| {
         if ui.button("Open folder").clicked()
-            && let Some(folder) = open_folder_path.as_ref() {
-                let _ = open::that(folder);
-            }
+            && let Some(folder) = open_folder_path.as_ref()
+        {
+            let _ = open::that(folder);
+        }
     });
 
     if let Some(resolution) = display_resolution {
@@ -275,11 +298,17 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf) {
     } else {
         ui.label("Resolution source: unavailable");
         ui.label("Detected version: not available");
-        ui.colored_label(
-            egui::Color32::RED,
-            "Validation error: no usable ripgrep executable resolved",
-        );
+        ui.label("Validation error: not tested yet");
     }
+}
+
+fn configured_ripgrep_result_is_current(state: &RipgrepSettingsUiState, path: &Path) -> bool {
+    state.last_tested_path.as_deref() == Some(path)
+}
+
+fn invalidate_configured_ripgrep_state(state: &mut RipgrepSettingsUiState) {
+    state.configured_result = None;
+    state.last_tested_path = None;
 }
 
 fn resolution_source_label(source: &ExecutableResolutionSource) -> &'static str {
@@ -438,6 +467,77 @@ mod tests {
         let bytes = base64::Engine::decode(&URL_SAFE_NO_PAD, encoded)
             .expect("payload should be URL-safe base64");
         serde_json::from_slice(&bytes).expect("payload should be JSON")
+    }
+
+    fn sample_ripgrep_resolution(path: &str) -> crate::file_search::discovery::RipgrepResolution {
+        crate::file_search::discovery::RipgrepResolution {
+            path: PathBuf::from(path),
+            source: ExecutableResolutionSource::ConfiguredPath,
+            version: Some("ripgrep 14.1.0".to_owned()),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn configured_ripgrep_result_is_valid_only_for_last_tested_path() {
+        let mut state = RipgrepSettingsUiState {
+            configured_result: Some(sample_ripgrep_resolution("rg")),
+            last_tested_path: Some(PathBuf::from("rg")),
+            ..Default::default()
+        };
+
+        assert!(configured_ripgrep_result_is_current(
+            &state,
+            Path::new("rg")
+        ));
+        assert!(!configured_ripgrep_result_is_current(
+            &state,
+            Path::new("/usr/bin/rg")
+        ));
+
+        state.configured_result = None;
+        assert!(configured_ripgrep_result_is_current(
+            &state,
+            Path::new("rg")
+        ));
+
+        state.last_tested_path = None;
+        assert!(!configured_ripgrep_result_is_current(
+            &state,
+            Path::new("rg")
+        ));
+    }
+
+    #[test]
+    fn invalidating_configured_ripgrep_state_clears_test_result_and_path() {
+        let mut state = RipgrepSettingsUiState {
+            configured_result: Some(sample_ripgrep_resolution("rg")),
+            last_tested_path: Some(PathBuf::from("rg")),
+            ..Default::default()
+        };
+
+        invalidate_configured_ripgrep_state(&mut state);
+
+        assert!(state.configured_result.is_none());
+        assert!(state.last_tested_path.is_none());
+    }
+
+    #[test]
+    fn editing_ripgrep_path_from_rg_to_another_path_clears_configured_test_state() {
+        let mut state = RipgrepSettingsUiState {
+            configured_result: Some(sample_ripgrep_resolution("rg")),
+            last_tested_path: Some(PathBuf::from("rg")),
+            ..Default::default()
+        };
+        let mut path = PathBuf::from("rg");
+
+        path = PathBuf::from("/custom/bin/rg");
+        invalidate_configured_ripgrep_state(&mut state);
+
+        assert_eq!(path, PathBuf::from("/custom/bin/rg"));
+        assert!(state.configured_result.is_none());
+        assert!(state.last_tested_path.is_none());
+        assert!(!configured_ripgrep_result_is_current(&state, &path));
     }
 
     #[test]
