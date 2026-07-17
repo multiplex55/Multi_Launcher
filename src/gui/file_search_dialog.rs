@@ -258,6 +258,12 @@ pub enum FileSearchContextMenuAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum FileSearchUiCommand {
+    ConfigureRipgrep(PathBuf),
+    PersistPreferences(FileSearchUiPreferences),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FileSearchDialogState {
     pub open: bool,
     pub selected_mode: FileSearchMode,
@@ -970,7 +976,11 @@ impl FileSearchDialogState {
         prefix
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, coordinator: &mut SearchCoordinator) {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        coordinator: &mut SearchCoordinator,
+    ) -> Vec<FileSearchUiCommand> {
         self.drain_events(coordinator);
         if self.consume_immediate_repaint_request() {
             ctx.request_repaint();
@@ -979,7 +989,7 @@ impl FileSearchDialogState {
             ctx.request_repaint_after(ACTIVE_SEARCH_REPAINT_INTERVAL);
         }
         if !self.open {
-            return;
+            return Vec::new();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.handle_escape(coordinator) == FileSearchEscapeAction::Cancel {
@@ -988,6 +998,7 @@ impl FileSearchDialogState {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         }
         let mut open = self.open;
+        let mut commands = Vec::new();
         if let Some(resp) = egui::Window::new("File Search")
             .open(&mut open)
             .default_size(DEFAULT_WINDOW_SIZE)
@@ -996,8 +1007,10 @@ impl FileSearchDialogState {
             .show(ctx, |ui| self.contents(ui, coordinator))
         {
             self.persisted_window_size = resp.response.rect.size();
+            commands = resp.inner.unwrap_or_default();
         }
         self.open = open;
+        commands
     }
 
     pub fn set_ui_preferences(&mut self, preferences: FileSearchUiPreferences) {
@@ -1031,7 +1044,12 @@ impl FileSearchDialogState {
         self.ui_preferences_dirty = false;
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+    fn contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        coordinator: &mut SearchCoordinator,
+    ) -> Vec<FileSearchUiCommand> {
+        let mut commands = Vec::new();
         self.handle_result_keyboard_shortcuts(ui, coordinator);
         let previously_selected_mode = self.selected_mode;
         ui.horizontal(|ui| {
@@ -1254,7 +1272,7 @@ impl FileSearchDialogState {
         if let Some(msg) = &self.warning_error_message {
             ui.colored_label(egui::Color32::YELLOW, msg);
         }
-        self.ripgrep_missing_prompt_ui(ui, coordinator);
+        commands.extend(self.ripgrep_missing_prompt_ui(ui));
         let results_region_size = ui.available_size();
         ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
             ui.push_id(Self::result_list_id(), |ui| {
@@ -1267,15 +1285,18 @@ impl FileSearchDialogState {
                     });
             });
         });
+        if self.ui_preferences_dirty {
+            commands.push(FileSearchUiCommand::PersistPreferences(
+                self.ui_preferences.clone(),
+            ));
+        }
+        commands
     }
 
-    fn ripgrep_missing_prompt_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        coordinator: &mut SearchCoordinator,
-    ) {
+    fn ripgrep_missing_prompt_ui(&mut self, ui: &mut egui::Ui) -> Vec<FileSearchUiCommand> {
+        let mut commands = Vec::new();
         if !self.show_ripgrep_missing_prompt || self.ripgrep_missing_prompt_dismissed {
-            return;
+            return commands;
         }
         ui.horizontal(|ui| {
             ui.colored_label(egui::Color32::YELLOW, "ripgrep (rg) was not found. Native content search will continue; configure rg for faster future searches.");
@@ -1283,11 +1304,8 @@ impl FileSearchDialogState {
                 && let Some(path) = rfd::FileDialog::new().add_filter("Executable", &["exe", ""]).pick_file() {
                     match validate_ripgrep_selection(&path) {
                         Ok(abs) => {
-                            self.settings.ripgrep_executable_path = abs;
-                            self.ui_preferences_dirty = true;
-                            coordinator.reconfigure_from_settings(self.settings.clone());
+                            commands.push(FileSearchUiCommand::ConfigureRipgrep(abs));
                             self.show_ripgrep_missing_prompt = false;
-                            self.warning_error_message = Some("ripgrep path saved for future searches.".to_owned());
                         }
                         Err(err) => self.warning_error_message = Some(err),
                     }
@@ -1296,6 +1314,7 @@ impl FileSearchDialogState {
                 self.dismiss_ripgrep_missing_prompt();
             }
         });
+        commands
     }
 
     pub fn dismiss_ripgrep_missing_prompt(&mut self) {
@@ -1306,14 +1325,10 @@ impl FileSearchDialogState {
     pub fn configure_ripgrep_path_for_future_searches(
         &mut self,
         path: PathBuf,
-        coordinator: &mut SearchCoordinator,
-    ) -> Result<(), String> {
+    ) -> Result<FileSearchUiCommand, String> {
         let abs = validate_ripgrep_selection(&path)?;
-        self.settings.ripgrep_executable_path = abs;
-        self.ui_preferences_dirty = true;
-        coordinator.reconfigure_from_settings(self.settings.clone());
         self.show_ripgrep_missing_prompt = false;
-        Ok(())
+        Ok(FileSearchUiCommand::ConfigureRipgrep(abs))
     }
 
     fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {

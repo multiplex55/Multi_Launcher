@@ -54,7 +54,7 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
-pub use file_search_dialog::{FileSearchDialogState, FileSearchMode, FileSearchScopeMode};
+pub use file_search_dialog::{FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand};
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
@@ -607,8 +607,14 @@ impl LauncherApp {
 
     pub fn apply_file_search_settings(
         &mut self,
-        settings: crate::file_search::settings::FileSearchSettings,
+        mut settings: crate::file_search::settings::FileSearchSettings,
     ) {
+        if self.file_search_dialog.ui_preferences_dirty {
+            settings.ui_preferences = self.file_search_dialog.ui_preferences.clone();
+        }
+        for diagnostic in settings.validate() {
+            tracing::warn!(%diagnostic, "file_search settings warning during runtime apply");
+        }
         self.file_search_dialog
             .cancel_search(&mut self.file_search_coordinator);
         self.file_search_coordinator
@@ -621,17 +627,73 @@ impl LauncherApp {
     }
 
     pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self) {
-        if !self.file_search_dialog.ui_preferences_dirty {
-            return;
+        if self.file_search_dialog.ui_preferences_dirty {
+            self.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(
+                self.file_search_dialog.ui_preferences.clone(),
+            ));
         }
-        self.file_search_dialog.save_dirty_ui_preferences();
-        if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path)
-            && let Ok(value) = serde_json::to_value(&self.file_search_dialog.settings) {
-                settings
-                    .plugin_settings
-                    .insert("file_search".to_owned(), value);
-                let _ = settings.save(&self.settings_path);
+    }
+
+    pub(crate) fn handle_file_search_ui_command(&mut self, command: FileSearchUiCommand) {
+        match command {
+            FileSearchUiCommand::PersistPreferences(preferences) => {
+                self.file_search_dialog.settings.ui_preferences = preferences.clone();
+                self.file_search_dialog.set_ui_preferences(preferences);
+                match crate::settings::Settings::load(&self.settings_path) {
+                    Ok(mut settings) => {
+                        let mut cfg = settings
+                            .plugin_settings
+                            .get("file_search")
+                            .and_then(|value| serde_json::from_value(value.clone()).ok())
+                            .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                        cfg.ui_preferences = self.file_search_dialog.ui_preferences.clone();
+                        if let Ok(value) = serde_json::to_value(&cfg) {
+                            settings.plugin_settings.insert("file_search".to_owned(), value.clone());
+                            self.settings_editor.set_plugin_setting_value("file_search", value);
+                            if let Err(error) = settings.save(&self.settings_path) {
+                                self.report_error_message("file_search.preferences.save", format!("Failed to save file-search preferences: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => self.report_error_message(
+                        "file_search.preferences.load",
+                        format!("Failed to load settings: {error}"),
+                    ),
+                }
             }
+            FileSearchUiCommand::ConfigureRipgrep(path) => {
+                match crate::settings::Settings::load(&self.settings_path) {
+                    Ok(mut settings) => {
+                        let mut cfg = settings
+                            .plugin_settings
+                            .get("file_search")
+                            .and_then(|value| serde_json::from_value(value.clone()).ok())
+                            .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                        cfg.ripgrep_executable_path = path;
+                        if let Ok(value) = serde_json::to_value(&cfg) {
+                            settings.plugin_settings.insert("file_search".to_owned(), value.clone());
+                            self.settings_editor.set_plugin_setting_value("file_search", value);
+                            match settings.save(&self.settings_path) {
+                                Ok(()) => {
+                                    self.apply_file_search_settings(cfg);
+                                    self.file_search_dialog.warning_error_message = Some(
+                                        "ripgrep path saved for future searches.".to_owned(),
+                                    );
+                                }
+                                Err(error) => self.report_error_message(
+                                    "file_search.ripgrep.save",
+                                    format!("Failed to save ripgrep path: {error}"),
+                                ),
+                            }
+                        }
+                    }
+                    Err(error) => self.report_error_message(
+                        "file_search.ripgrep.load",
+                        format!("Failed to load settings: {error}"),
+                    ),
+                }
+            }
+        }
     }
 
     pub(crate) fn merge_file_search_ui_preferences_into_settings(

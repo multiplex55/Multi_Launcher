@@ -1232,8 +1232,12 @@ impl eframe::App for LauncherApp {
         fav_dlg.ui(ctx, self);
         self.fav_dialog = fav_dlg;
         let file_search_was_open = self.file_search_dialog.open;
-        self.file_search_dialog
+        let file_search_commands = self
+            .file_search_dialog
             .ui(ctx, &mut self.file_search_coordinator);
+        for command in file_search_commands {
+            self.handle_file_search_ui_command(command);
+        }
         if file_search_was_open && !self.file_search_dialog.open {
             self.save_file_search_ui_preferences_if_dirty();
         }
