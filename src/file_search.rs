@@ -14,4 +14,6 @@ pub mod query;
 pub mod ripgrep;
 pub mod settings;
 pub mod sorting;
+#[cfg(test)]
+pub mod test_fixtures;
 pub mod walkdir;

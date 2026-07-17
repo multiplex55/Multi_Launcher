@@ -944,6 +944,25 @@ mod tests {
     }
 
     #[test]
+    fn content_command_keeps_patterns_before_separator_and_roots_after() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let mut request = req(root.clone());
+        request.content_match_mode = crate::file_search::model::ContentMatchMode::AnyTerm;
+        request.text = "one two".to_owned();
+        let args = args(&build_ripgrep_command(
+            Path::new("rg"),
+            &request,
+            &FileSearchSettings::default(),
+            std::slice::from_ref(&root),
+        ));
+        let sep = args.iter().position(|arg| arg == "--").unwrap();
+        assert!(args[..sep].windows(2).any(|w| w == ["-e", "one"]));
+        assert!(args[..sep].windows(2).any(|w| w == ["-e", "two"]));
+        assert_eq!(args.last(), Some(&root.to_string_lossy().to_string()));
+    }
+
+    #[test]
     fn hidden_flag_only_when_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let mut request = req(temp.path().to_path_buf());
@@ -1063,6 +1082,14 @@ mod tests {
         let summary = parse_ripgrep_json_limited(json, 25, 1).unwrap();
         assert_eq!(summary.results.len(), 1);
         assert!(summary.global_truncated);
+    }
+
+    #[test]
+    fn streaming_parser_finalizes_open_file_without_end_event() {
+        let json = r#"{"type":"match","data":{"path":{"text":"open.txt"},"lines":{"text":"needle\n"},"line_number":1,"submatches":[{"start":0,"end":6}]}}"#;
+        let summary = parse_ripgrep_json_reader(json.as_bytes(), 25, 10).unwrap();
+        assert_eq!(summary.results.len(), 1);
+        assert_eq!(summary.results[0].path, PathBuf::from("open.txt"));
     }
 
     #[cfg(unix)]

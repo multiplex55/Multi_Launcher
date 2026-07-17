@@ -435,4 +435,34 @@ mod tests {
         assert_eq!(content_match.line, "abc needle");
         assert_eq!(content_match.ranges.len(), 1);
     }
+
+    #[test]
+    fn path_identity_normalizes_separators_and_relative_paths() {
+        let identity = PathIdentity::from_path(std::path::Path::new("a\\b\\file.txt"));
+        assert_eq!(identity.normalized_path, "a/b/file.txt");
+
+        let relative = path_identity(std::path::Path::new("Cargo.toml"));
+        assert!(
+            relative
+                .normalized_path
+                .to_lowercase()
+                .ends_with("/cargo.toml")
+        );
+    }
+
+    #[test]
+    fn result_keys_keep_filename_and_content_identities_distinct() {
+        let path = PathIdentity {
+            normalized_path: "/tmp/a.txt".into(),
+        };
+        let filename = FileSearchResultKey::Filename { path: path.clone() };
+        let content = FileSearchResultKey::Content {
+            path,
+            line_number: 1,
+            byte_start: 0,
+            byte_end: 6,
+            occurrence: 0,
+        };
+        assert_ne!(filename, content);
+    }
 }
