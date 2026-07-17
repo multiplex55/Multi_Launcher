@@ -244,57 +244,112 @@ Good favorites to create:
 
 Open the dedicated file-search UI from the launcher with the file-search action, then choose **Filename** or **Content** mode and **Global** or **Directory** scope. File search is intentionally explicit: edit the query and filters, then press **Search** or **Enter** in the search/root field to run it. It does not automatically search while typing, rerun when filters change, or persist typed search text.
 
-### Search roots
+### Launcher commands
 
-- **Global search roots** come from `settings.json` under `plugin_settings.file_search.global_search_roots`. These are the default roots used when the UI is in **Global** scope. Invalid or duplicate roots are ignored at request time, and the UI warns when no valid global roots remain.
-- **Custom multiple roots** are available in **Directory** scope. Use **Add folder…** to add one or more temporary roots, or type roots directly. These custom roots apply to the current search session; they are not saved as history.
+- `fs` opens the file-search dialog with the last saved UI preferences.
+- `fs file` opens the dialog in **Filename** mode.
+- `fs content` opens the dialog in **Content** mode.
+- `fs here file <query>` or `fs here content <query>` prompts for a folder, then searches that folder in **Directory** scope.
+- `fs file <query> [root]` and `fs content <query> [root]` start a search immediately. If the final argument is an existing directory, it becomes the temporary **Directory** root; otherwise the search uses **Global** scope.
+
+Examples: `fs`, `fs file README`, `fs content "TODO item"`, `fs here content launch_action`.
+
+### Search roots and scope
+
+- **Global** scope searches only the configured roots in `settings.json` at `plugin_settings.file_search.global_search_roots`; it does not mean the whole computer or every indexed drive. Invalid or duplicate roots are ignored at request time, and the UI warns when no valid global roots remain.
+- Configure multiple permanent global roots by adding multiple paths to `global_search_roots` in settings.
+- **Directory** scope uses custom temporary roots. Use **Add folder…** repeatedly to add multiple roots, or type/paste roots in the **Root** fields. These roots apply to the current search session and are not saved as history.
 - The search text, selected result rows, custom directory-root selections, and file-search query history are not persisted. Only explicit UI preferences such as sort/filter defaults are saved.
 
 ### Filename search
 
-Filename mode searches file and directory names under the selected roots.
+**Filename** mode searches file and directory names under the selected roots.
 
-- **Ranked substring matching** is the default. Matches are ranked so exact filenames come before names that start with the query, followed by filenames containing the query, and then paths containing the query.
-- **Fuzzy filename matching** is available from the filename match-mode preference for typo-tolerant name matching.
-- Use the **Files / directories** filter to search files only, directories only, or both.
+- **Ranked substring** is the default **Filename matching** mode. It is case-aware according to **Case-sensitive** and ranks stronger matches first: exact filename, filename starts with the query, filename contains the query, then path contains the query. Highlighting shows the matching filename/path ranges.
+- **Fuzzy** filename matching is available from **Filename matching** for typo-tolerant ordered-character matching. Use it when a filename is approximate or partially remembered; relevance still controls the default ordering.
+- Use the **Type** filter to choose **Files**, **Directories**, or **Files and directories**.
+- **Sort** options for filename results are **Relevance**, **Filename ↑**, **Filename ↓**, **Path ↑**, **Modified newest**, **Modified oldest**, **Size largest**, and **Size smallest**.
+- Filename columns are configurable from the result header/menu preferences and saved in UI preferences. Supported columns are **Name**, **Directory**, **Kind**, **Match quality**, **Size**, **Modified**, and **Path**; defaults are **Name**, **Directory**, and **Match quality**.
 
 ### Content search
 
-Content mode searches text inside files under the selected roots.
+**Content** mode searches text inside files under the selected roots.
 
-- **Exact phrase** mode treats the search text as a fixed string phrase.
-- **Match any term** mode splits the query on whitespace and returns files containing any non-empty term.
-- **Whole word** can be enabled to require word-boundary content matches.
+- **Exact phrase** treats the search text as one fixed string phrase.
+- **Match any term** splits the query on whitespace and returns files containing any non-empty term.
+- **Whole word** requires word-boundary content matches; combine it with either **Exact phrase** or **Match any term**.
+- Content search reads files only; the **Type** filter is disabled in this mode.
+- Content results are grouped by file. Each group header shows the path and match count, followed by displayed match rows with line previews. Per-file match limits can truncate large groups.
+- **Sort** options for content results are **Discovery**, **Path then line**, **Match count**, **Modified newest**, **Filename relevance**, and **Line number**.
 - Content search uses ripgrep when available and automatically falls back to the native content-search backend when ripgrep is missing or unavailable.
 
-### Filters
+### Filters and refinement
 
-- **Include extension filters** limit results to matching extensions, such as `rs` or `.md`.
-- **Exclude extension filters** remove matching extensions from results.
-- **File/directory filters** control whether filename searches include files, directories, or both.
-- **Temporary directory-exclusion overrides** let the UI preference list replace the default excluded directory names for a search request. This is useful for temporarily including or excluding directories such as `.git`, `target`, `node_modules`, `bin`, or `obj` without changing the built-in defaults permanently.
+- **Include extensions** and **Exclude extensions** accept comma-separated extensions. Leading dots are optional and normalized, so `rs, .md, toml` is valid. Include filters limit results to those extensions; exclude filters remove matching extensions.
+- **Excluded directories** contains directory names to skip, not paths or globs. Use **Add exclusion** to add names such as `.git`, `target`, `node_modules`, `bin`, or `obj`; use **Remove** per entry, **Restore defaults** to return to `settings.json`, or **Clear** to temporarily search without those exclusions.
+- Directory-exclusion edits in the dialog are temporary UI overrides for the next search request and do not rewrite the configured defaults unless preferences are explicitly saved by the app.
+- The **Filter** field performs search-within-results refinement on the current visible result set. It does not start a backend search; use **Clear** to remove the refinement and **Search** again to apply changed backend filters.
 
 ### ripgrep discovery and fallback
 
-For content search, Multi Launcher looks for ripgrep in this order:
+For content search, Multi Launcher resolves ripgrep in this order:
 
-1. A configured absolute `plugin_settings.file_search.ripgrep_executable_path`.
-2. `rg.exe` next to the launcher executable.
-3. `tools/ripgrep/rg.exe` next to the launcher executable.
-4. `rg.exe` or `rg` on the process `PATH`.
+1. Absolute `plugin_settings.file_search.ripgrep_executable_path` if configured and valid.
+2. Fixed sidecar `rg.exe` next to the launcher executable.
+3. Fixed portable location `tools/ripgrep/rg.exe` next to the launcher executable.
+4. `rg.exe`, then `rg`, on the process `PATH`.
 5. Native content-search fallback when ripgrep cannot be found or validated.
 
 A configured bare command such as `rg` is allowed so PATH/sidecar discovery can run, but arbitrary relative configured paths with directory components, such as `tools/rg.exe` or `..\rg.exe`, are rejected. Use an absolute path for a custom executable location, or leave the setting empty/defaulted for auto-discovery.
 
-If ripgrep is missing, content search starts with the native backend automatically and shows a non-blocking prompt offering **Locate rg.exe** for faster future searches. Dismissing or ignoring that prompt does not stop the active search.
+If ripgrep is missing, content search starts with the native backend automatically and shows a non-blocking prompt offering **Locate rg.exe** for faster future searches. Dismissing or ignoring that prompt does not stop the active search. The native fallback is portable and does not require external tools, but may be slower than ripgrep.
 
-### Clipboard, TSV export, and shortcuts
+### Everything CLI expectations
 
-- **Copy selected** copies a TSV payload for the selected result.
-- **Copy all visible** copies TSV for the currently visible result rows.
-- **Export visible results…** writes the same TSV-style data to a file. Filename exports include path, file name, directory, size, modified time, and match quality. Content exports include path, file name, directory, line number, line preview, modified time, and match quality.
-- Result context menus can copy the full path, filename, and (for content results) the matching line.
-- Keyboard shortcuts: **Enter** in the search field or a custom root field starts a search; **Escape** cancels an active search or closes the dialog when idle; double-clicking a result opens it; selecting a row makes it the target for **Open** and **Copy selected**.
+When `plugin_settings.file_search.everything_enabled` is true, **Global** **Filename** searches in **Ranked substring** mode may use the Everything ES CLI before falling back to the walkdir backend. Everything is not used for **Fuzzy** filename searches, **Directory** custom-root searches, content searches, or global filename searches whose include-extension/type combination cannot be represented safely.
+
+Expected CLI setup:
+
+- Install or provide Everything's command-line tool `es.exe`; the GUI executable `Everything.exe` is not a substitute.
+- Configure `plugin_settings.file_search.everything_executable_path` with an absolute path or a bare command name, or put `es.exe` on `PATH`.
+- Common Windows install locations under `Program Files`, `Program Files (x86)`, and `LOCALAPPDATA` are also checked.
+- Multi Launcher still restricts Everything queries to the configured **Global** roots.
+
+### Keyboard shortcuts
+
+- **Up/Down** moves the selected visible result.
+- **Enter** starts a search when focus is in **Search** or a **Root** field; otherwise it opens the selected result.
+- **Ctrl+Enter** opens the selected result in the configured editor, including line/column for content matches when available.
+- **Alt+Enter** reveals the selected result in Explorer.
+- **Ctrl+C** copies the selected result path when the focus is not editing text.
+- **Ctrl+Shift+C** copies the selected matching line for content results when available.
+- **Ctrl+F** focuses the **Search** field.
+- **Ctrl+L** focuses the first **Root** field in **Directory** scope.
+- **Tab/Shift+Tab** follows normal UI focus traversal between fields and controls.
+- **Escape** cancels an active search; when idle, it closes the dialog.
+
+### Export and copy actions
+
+Use the **Export** menu for visible-result exports:
+
+- **Copy visible results** copies TSV for currently visible rows after **Filter** refinement.
+- **Save visible results as TSV…** writes the visible TSV to `filename-results.tsv` or `content-results.tsv` by default.
+- **Copy selected result** copies the selected filename path or selected content match line.
+- **Copy visible full paths** copies only full paths for the currently visible selectable rows.
+
+Result context menus can also copy the full path, filename, and matching line for content results.
+
+### Diagnostics
+
+Open **Diagnostics** in the dialog to inspect the active/last backend:
+
+- Backend identity, executable path, version, resolution source, roots, start/end time, and cancellation state.
+- Command details, including a query-redacted command in copied diagnostics and **Copy full command (may include query)** when a literal command is needed.
+- Truncation details for global result limits, filename result limits, and per-file content match limits.
+- Inaccessible paths and sampled path errors.
+- Backend stderr snippets.
+- Search summary details such as duration, files/directories scanned, result count, displayed rows, and cancellation.
+- **Copy diagnostics** places the diagnostic report on the clipboard; it includes stderr and inaccessible-path samples, so review it before sharing.
 
 ### Deferred features
 

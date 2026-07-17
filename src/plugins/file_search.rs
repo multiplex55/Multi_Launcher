@@ -51,6 +51,7 @@ impl Plugin for FileSearchPlugin {
             command_action("fs", "Open local file search"),
             command_action("fs file", "Search local filenames"),
             command_action("fs content", "Search local file contents"),
+            command_action("fs here", "Choose a folder for a local file search"),
             command_action("fs here file", "Search filenames in a selected folder"),
             command_action("fs here content", "Search contents in a selected folder"),
         ]
