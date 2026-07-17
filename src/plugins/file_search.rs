@@ -7,7 +7,8 @@ use crate::file_search::discovery::{self, ExecutableResolutionSource, Executable
 use crate::file_search::model::SearchKind;
 use crate::file_search::query::{FileSearchCommand, SearchRequestDraft};
 use crate::file_search::settings::{
-    DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES, FileSearchDiagnosticsState, FileSearchSettings,
+    DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES, FileSearchDiagnosticsState,
+    FileSearchExecutableProbe, FileSearchSettings,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 pub struct FileSearchPlugin {
     settings: FileSearchSettings,
     ripgrep_ui: RipgrepSettingsUiState,
+    diagnostics: Option<FileSearchDiagnosticsState>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,13 +141,33 @@ impl Plugin for FileSearchPlugin {
             ui.colored_label(egui::Color32::YELLOW, diagnostic.to_string());
         }
         ui.collapsing("Diagnostics", |ui| {
-            ui.monospace(FileSearchDiagnosticsState::from_settings(&cfg).to_string());
+            if ui.button("Refresh diagnostics").clicked() {
+                self.diagnostics = Some(refreshed_diagnostics(&cfg));
+            }
+            let diagnostics = self
+                .diagnostics
+                .clone()
+                .unwrap_or_else(|| FileSearchDiagnosticsState::from_settings(&cfg));
+            ui.monospace(diagnostics.to_string());
         });
         self.settings = cfg.clone();
         if let Ok(v) = serde_json::to_value(&cfg) {
             *value = v;
         }
     }
+}
+
+fn refreshed_diagnostics(settings: &FileSearchSettings) -> FileSearchDiagnosticsState {
+    let mut diagnostics = FileSearchDiagnosticsState::from_settings(settings);
+    diagnostics.detected_everything =
+        crate::file_search::everything::detect_everything_executable(settings)
+            .map(FileSearchExecutableProbe::Detected)
+            .unwrap_or(FileSearchExecutableProbe::NotDetected);
+    diagnostics.detected_ripgrep =
+        crate::file_search::settings::detect_ripgrep_executable(settings)
+            .map(FileSearchExecutableProbe::Detected)
+            .unwrap_or(FileSearchExecutableProbe::NotDetected);
+    diagnostics
 }
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
