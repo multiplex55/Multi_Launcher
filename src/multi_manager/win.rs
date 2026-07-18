@@ -21,6 +21,16 @@ pub struct EnumeratedWindow {
     pub rect: MmRect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowIdentitySnapshot {
+    pub hwnd: usize,
+    pub is_window: bool,
+    pub live_title: String,
+    pub process_path: String,
+    pub executable: String,
+    pub class_name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureKeyAction {
     Confirm,
@@ -256,6 +266,41 @@ pub fn window_executable(hwnd: usize) -> Option<String> {
 #[cfg(not(windows))]
 pub fn window_executable(_hwnd: usize) -> Option<String> {
     None
+}
+
+pub fn query_hwnd_identity(hwnd: usize) -> WindowIdentitySnapshot {
+    let is_window = is_valid_window(hwnd);
+    let live_title = if is_window {
+        window_title(hwnd).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let process_path = if is_window {
+        window_process_path(hwnd).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let executable = if is_window {
+        executable_from_process_path(&process_path)
+            .or_else(|| window_executable(hwnd))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let class_name = if is_window {
+        window_class_name(hwnd).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    WindowIdentitySnapshot {
+        hwnd,
+        is_window,
+        live_title,
+        process_path,
+        executable,
+        class_name,
+    }
 }
 
 #[cfg(windows)]

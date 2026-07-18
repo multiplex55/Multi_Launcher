@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::multi_manager::identity;
 use crate::multi_manager::model::{MmWindow, MmWorkspace};
 use crate::multi_manager::win::{self, EnumeratedWindow};
 
@@ -45,22 +46,24 @@ fn has_only_title_metadata(window: &MmWindow) -> bool {
 
 fn identity_score(window: &MmWindow, live: &EnumeratedWindow) -> Option<u8> {
     let title = same_stored(&window.captured_title, &live.title);
-    let process_path = same_stored(&window.process_path, &live.process_path);
-    let executable = same_stored(&window.executable, &live.executable);
-    let class_name = same_stored(&window.class_name, &live.class_name);
+    if !title || !identity::stable_identity_matches_enumerated(window, live) {
+        return None;
+    }
 
-    if process_path && class_name && title {
+    let process_path = identity::same_process_path(&window.process_path, &live.process_path);
+    let executable = identity::same_value(&window.executable, &live.executable);
+    let class_name = identity::same_value(&window.class_name, &live.class_name);
+
+    if process_path && class_name {
         Some(100)
-    } else if process_path && title {
+    } else if process_path {
         Some(90)
-    } else if executable && class_name && title {
+    } else if executable && class_name {
         Some(80)
-    } else if executable && title {
+    } else if executable {
         Some(70)
-    } else if class_name && title {
+    } else if class_name {
         Some(60)
-    } else if title {
-        Some(40)
     } else {
         None
     }
@@ -76,7 +79,8 @@ fn matching_existing_hwnd<'a>(
     }
 
     live.iter().find(|candidate| {
-        candidate.hwnd == window.hwnd && identity_score(window, candidate).is_some()
+        candidate.hwnd == window.hwnd
+            && identity::stable_identity_matches_enumerated(window, candidate)
     })
 }
 
@@ -286,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_title_only_legacy_reconnect() {
+    fn title_only_legacy_reconnect_is_missing() {
         let mut workspaces = workspace(MmWindow {
             captured_title: " Notes ".into(),
             valid: false,
@@ -294,22 +298,23 @@ mod tests {
         });
         let summary =
             reconnect_workspaces_with_windows(&mut workspaces, &[live(10, "notes", "", "", "")]);
-        assert_eq!(summary.reconnected, 1);
-        assert_eq!(workspaces[0].windows[0].hwnd, 10);
-        assert!(workspaces[0].windows[0].valid);
+        assert_eq!(summary.missing, 1);
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert!(!workspaces[0].windows[0].valid);
     }
 
     #[test]
     fn duplicate_title_only_candidates_are_ambiguous() {
         let mut workspaces = workspace(MmWindow {
             captured_title: "Notes".into(),
+            executable: "notes.exe".into(),
             ..MmWindow::default()
         });
         let summary = reconnect_workspaces_with_windows(
             &mut workspaces,
             &[
-                live(10, "Notes", "", "", ""),
-                live(11, " notes ", "", "", ""),
+                live(10, "Notes", "notes.exe", "", ""),
+                live(11, " notes ", "notes.exe", "", ""),
             ],
         );
         assert_eq!(summary.ambiguous, 1);
@@ -340,11 +345,12 @@ mod tests {
             hwnd: 5,
             captured_title: "Doc".into(),
             executable: "edit.exe".into(),
+            process_path: "C:/Apps/edit.exe".into(),
             ..MmWindow::default()
         });
         let summary = reconnect_workspaces_with_windows(
             &mut workspaces,
-            &[live(5, "Other", "edit.exe", "", "")],
+            &[live(5, "Other", "edit.exe", "", "C:/Other/edit.exe")],
         );
         assert_eq!(summary.invalidated, 1);
         assert_eq!(summary.missing, 1);
@@ -375,17 +381,21 @@ mod tests {
             windows: vec![
                 MmWindow {
                     captured_title: "Doc".into(),
+                    executable: "app.exe".into(),
                     ..MmWindow::default()
                 },
                 MmWindow {
                     captured_title: "Doc".into(),
+                    executable: "app.exe".into(),
                     ..MmWindow::default()
                 },
             ],
             ..MmWorkspace::default()
         }];
-        let summary =
-            reconnect_workspaces_with_windows(&mut workspaces, &[live(8, "Doc", "", "", "")]);
+        let summary = reconnect_workspaces_with_windows(
+            &mut workspaces,
+            &[live(8, "Doc", "app.exe", "", "")],
+        );
         assert_eq!(summary.reconnected, 1);
         assert_eq!(summary.missing, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 8);
@@ -393,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_saved_window_with_only_title_still_reconnects() {
+    fn legacy_saved_window_with_only_title_does_not_reconnect() {
         let mut workspaces = workspace(MmWindow {
             alias: "Old".into(),
             captured_title: "Legacy App".into(),
@@ -403,7 +413,7 @@ mod tests {
             &mut workspaces,
             &[live(77, "legacy app", "app.exe", "Class", "C:/app.exe")],
         );
-        assert_eq!(summary.reconnected, 1);
-        assert_eq!(workspaces[0].windows[0].hwnd, 77);
+        assert_eq!(summary.missing, 1);
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
     }
 }

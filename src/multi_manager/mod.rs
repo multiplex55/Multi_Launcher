@@ -2,6 +2,7 @@ pub mod apply_capture;
 pub mod bindings;
 pub mod capture;
 pub mod commands;
+pub mod identity;
 pub mod model;
 pub mod reconnect;
 pub mod runtime;
