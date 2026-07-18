@@ -137,6 +137,7 @@ impl MultiManagerRuntime {
                     &thread_control,
                     &mut last_reconnect,
                     now,
+                    |hwnd| win::is_valid_window(hwnd),
                     || win::enumerate_top_level_windows().unwrap_or_default(),
                 );
                 if let Ok(mut workspaces) = thread_workspaces.lock() {
@@ -335,6 +336,7 @@ pub fn maybe_runtime_reconnect(
     control: &RuntimeControl,
     last_reconnect: &mut Instant,
     now: Instant,
+    is_window: impl Fn(usize) -> bool,
     enumerate: impl FnOnce() -> Vec<win::EnumeratedWindow>,
 ) -> bool {
     let reconnect_interval =
@@ -349,23 +351,39 @@ pub fn maybe_runtime_reconnect(
         return false;
     }
 
-    let needs_reconnect = workspaces
-        .lock()
-        .map(|workspaces| reconnect::needs_reconnect(&workspaces))
-        .unwrap_or(false);
-    if !needs_reconnect {
-        *last_reconnect = now;
+    let Ok(mut workspaces) = workspaces.lock() else {
         return false;
+    };
+
+    let mut hwnd_changed = false;
+    for window in workspaces
+        .iter_mut()
+        .filter(|workspace| !workspace.disabled)
+        .flat_map(|workspace| &mut workspace.windows)
+        .filter(|window| !window.disabled && window.hwnd != 0)
+    {
+        if is_window(window.hwnd) {
+            continue;
+        }
+        window.mark_closed();
+        hwnd_changed = true;
     }
 
-    let live = enumerate();
-    if let Ok(mut workspaces) = workspaces.lock() {
-        reconnect::reconnect_workspaces_with_windows(&mut workspaces, &live);
-        *last_reconnect = now;
-        true
-    } else {
-        false
+    let has_unresolved = workspaces
+        .iter()
+        .filter(|workspace| !workspace.disabled)
+        .flat_map(|workspace| &workspace.windows)
+        .any(|window| !window.disabled && (window.hwnd == 0 || !window.valid));
+
+    if has_unresolved {
+        let live = enumerate();
+        let summary =
+            reconnect::reconnect_unresolved_workspaces_with_windows(&mut workspaces, &live);
+        hwnd_changed |= summary.binding_snapshot_changed;
     }
+
+    *last_reconnect = now;
+    hwnd_changed
 }
 
 pub fn runtime_tick(
@@ -450,7 +468,7 @@ mod tests {
     use super::*;
     use crate::multi_manager::model::{MmHotkey, MmWindow};
     use crate::multi_manager::win::EnumeratedWindow;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn rect(x: i32) -> MmRect {
         MmRect {
@@ -649,10 +667,17 @@ mod tests {
         let mut last = now - Duration::from_secs(10);
         let enumerated = RefCell::new(false);
 
-        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
-            *enumerated.borrow_mut() = true;
-            vec![live(10, "anything")]
-        });
+        let reconnected = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |_| true,
+            || {
+                *enumerated.borrow_mut() = true;
+                vec![live(10, "anything")]
+            },
+        );
 
         assert!(!reconnected);
         assert!(!*enumerated.borrow());
@@ -664,15 +689,106 @@ mod tests {
         let control = RuntimeControl::new(true);
         let now = Instant::now();
         let mut last = now - Duration::from_secs(10);
-        let enumerated = RefCell::new(false);
+        let is_window_calls = Cell::new(0);
+        let enumerations = Cell::new(0);
 
-        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
-            *enumerated.borrow_mut() = true;
-            Vec::new()
-        });
+        let reconnected = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |_| {
+                is_window_calls.set(is_window_calls.get() + 1);
+                true
+            },
+            || {
+                enumerations.set(enumerations.get() + 1);
+                Vec::new()
+            },
+        );
 
         assert!(!reconnected);
-        assert!(!*enumerated.borrow());
+        assert_eq!(is_window_calls.get(), 2);
+        assert_eq!(enumerations.get(), 0);
+    }
+
+    #[test]
+    fn runtime_reconnect_enumerates_once_when_one_hwnd_is_invalid() {
+        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
+        let control = RuntimeControl::new(true);
+        let now = Instant::now();
+        let mut last = now - Duration::from_secs(10);
+        let enumerations = Cell::new(0);
+
+        let changed = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |hwnd| hwnd != 1,
+            || {
+                enumerations.set(enumerations.get() + 1);
+                Vec::new()
+            },
+        );
+
+        assert!(changed);
+        assert_eq!(enumerations.get(), 1);
+        assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 0);
+    }
+
+    #[test]
+    fn runtime_reconnect_clears_closed_hwnd_even_when_previously_valid() {
+        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
+        let control = RuntimeControl::new(true);
+        let now = Instant::now();
+        let mut last = now - Duration::from_secs(10);
+
+        let changed = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |hwnd| hwnd != 1,
+            || Vec::new(),
+        );
+
+        let locked = workspaces.lock().unwrap();
+        assert!(changed);
+        assert_eq!(locked[0].windows[0].hwnd, 0);
+        assert!(!locked[0].windows[0].valid);
+        assert_eq!(locked[0].windows[1].hwnd, 2);
+        assert!(locked[0].windows[1].valid);
+    }
+
+    #[test]
+    fn runtime_reconnect_leaves_unresolved_window_disconnected_without_affecting_valid_bindings() {
+        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
+        {
+            let mut locked = workspaces.lock().unwrap();
+            locked[0].windows[0].hwnd = 0;
+            locked[0].windows[0].valid = false;
+            locked[0].windows[0].captured_title = "Missing".into();
+        }
+        let control = RuntimeControl::new(true);
+        let now = Instant::now();
+        let mut last = now - Duration::from_secs(10);
+
+        let changed = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |_| true,
+            || vec![live(99, "Other")],
+        );
+
+        let locked = workspaces.lock().unwrap();
+        assert!(!changed);
+        assert_eq!(locked[0].windows[0].hwnd, 0);
+        assert!(!locked[0].windows[0].valid);
+        assert_eq!(locked[0].windows[1].hwnd, 2);
+        assert!(locked[0].windows[1].valid);
     }
 
     #[test]
@@ -690,9 +806,14 @@ mod tests {
         let now = Instant::now();
         let mut last = now - Duration::from_secs(10);
 
-        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
-            vec![live(42, "Notes")]
-        });
+        let reconnected = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |_| true,
+            || vec![live(42, "Notes")],
+        );
 
         assert!(reconnected);
         assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 42);
@@ -715,10 +836,17 @@ mod tests {
         let mut last = now - Duration::from_secs(10);
         let enumerated = RefCell::new(false);
 
-        let reconnected = maybe_runtime_reconnect(&workspaces, &control, &mut last, now, || {
-            *enumerated.borrow_mut() = true;
-            vec![live(42, "Notes")]
-        });
+        let reconnected = maybe_runtime_reconnect(
+            &workspaces,
+            &control,
+            &mut last,
+            now,
+            |_| true,
+            || {
+                *enumerated.borrow_mut() = true;
+                vec![live(42, "Notes")]
+            },
+        );
 
         assert!(reconnected);
         assert!(*enumerated.borrow());
@@ -744,6 +872,7 @@ mod tests {
             &control,
             &mut last,
             now,
+            |_| true,
             || vec![live(42, "Notes")],
         ));
 
