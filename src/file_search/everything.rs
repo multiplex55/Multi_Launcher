@@ -5,6 +5,7 @@ use crate::file_search::model::{
     SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
+use crate::process::configure_background_command;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
@@ -296,10 +297,13 @@ fn run_everything_command(
     search_id: SearchId,
     seen: &mut HashSet<String>,
 ) -> Result<usize, String> {
-    let mut child = Command::new(&spec.executable)
+    let mut command = Command::new(&spec.executable);
+    command
         .args(&spec.args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_background_command(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|e| {
             format!(

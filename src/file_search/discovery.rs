@@ -1,4 +1,5 @@
 use crate::file_search::error::FileSearchError;
+use crate::process::configure_background_command;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -166,7 +167,10 @@ fn validate_ripgrep_candidate(executable: &Path) -> CandidateValidation {
     if !executable.is_file() {
         return CandidateValidation::Invalid("path does not exist or is not a file".to_owned());
     }
-    let output = match Command::new(executable).arg("--version").output() {
+    let mut command = Command::new(executable);
+    command.arg("--version");
+    configure_background_command(&mut command);
+    let output = match command.output() {
         Ok(output) => output,
         Err(error) => return CandidateValidation::Invalid(format!("failed to start: {error}")),
     };

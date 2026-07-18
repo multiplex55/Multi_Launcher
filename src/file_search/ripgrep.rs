@@ -11,6 +11,7 @@ use crate::file_search::model::{
     SearchKind, SearchProgress, SearchRequest, SearchResult, SearchScope, SearchStatus,
 };
 use crate::file_search::settings::FileSearchSettings;
+use crate::process::configure_background_command;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
@@ -513,6 +514,7 @@ pub fn build_ripgrep_command(
     roots: &[PathBuf],
 ) -> Command {
     let mut command = Command::new(executable);
+    configure_background_command(&mut command);
     command.arg("--json").arg("--no-ignore");
     if request.case_sensitive {
         command.arg("--case-sensitive");
@@ -566,6 +568,7 @@ pub fn build_ripgrep_files_command(
     roots: &[PathBuf],
 ) -> Command {
     let mut command = Command::new(executable);
+    configure_background_command(&mut command);
     command.arg("--files").arg("--no-ignore");
     if request.include_hidden_files {
         command.arg("--hidden");
