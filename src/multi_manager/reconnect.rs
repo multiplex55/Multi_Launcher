@@ -230,9 +230,12 @@ pub fn reconnect_workspaces_with_deps(
                 }
                 ReconnectOutcome::Closed => {
                     summary.invalidated += 1;
+                    let was_already_invalid = !window.valid;
                     window.mark_closed();
                     window.live_title.clear();
-                    continue;
+                    if !was_already_invalid {
+                        continue;
+                    }
                 }
                 ReconnectOutcome::MetadataMismatch => {
                     summary.metadata_mismatch += 1;
@@ -429,6 +432,33 @@ mod tests {
         assert_eq!(summary.invalidated, 1);
         assert_eq!(summary.reconnected, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 9);
+        assert!(workspaces[0].windows[0].binding_verified);
+    }
+
+    #[test]
+    fn stale_unverified_invalid_hwnd_reconnects_to_one_exact_title_candidate() {
+        let candidate = live(42, "Notes", "app.exe", "AppClass", "C:/app.exe");
+        let mut workspaces = workspace(MmWindow {
+            hwnd: 7,
+            valid: false,
+            binding_verified: false,
+            captured_title: "Notes".into(),
+            executable: "app.exe".into(),
+            class_name: "AppClass".into(),
+            process_path: "C:/app.exe".into(),
+            ..MmWindow::default()
+        });
+        let summary = reconnect_workspaces_with_deps(
+            &mut workspaces,
+            ReconnectDeps {
+                is_window: &|hwnd| hwnd == 42,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| vec![candidate.clone()],
+            },
+        );
+        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.reconnected, 1);
+        assert_eq!(workspaces[0].windows[0].hwnd, 42);
         assert!(workspaces[0].windows[0].binding_verified);
     }
 
