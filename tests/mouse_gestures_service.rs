@@ -154,11 +154,19 @@ impl CursorPositionProvider for TestCursorProvider {
 }
 
 fn wait_for_hint(state: &HintRecordingState, timeout: Duration) -> Option<String> {
+    wait_for_hint_matching(state, timeout, |_| true)
+}
+
+fn wait_for_hint_matching(
+    state: &HintRecordingState,
+    timeout: Duration,
+    matches: impl Fn(&str) -> bool,
+) -> Option<String> {
     let start = Instant::now();
     loop {
         if let Ok(guard) = state.hints.lock()
-            && let Some(last) = guard.last() {
-                return Some(last.clone());
+            && let Some(hit) = guard.iter().rev().find(|hint| matches(hint)) {
+                return Some(hit.clone());
             }
         if start.elapsed() >= timeout {
             return None;
@@ -691,7 +699,12 @@ fn numeric_selection_updates_hint_text() {
     assert!(handle.emit(HookEvent::SelectBinding(1)));
     sleep(Duration::from_millis(10));
 
-    let last = wait_for_hint(&hint_state, Duration::from_millis(500)).expect("hint text");
+    let last = wait_for_hint_matching(&hint_state, Duration::from_millis(500), |hint| {
+        hint.lines()
+            .next()
+            .is_some_and(|first_line| first_line.contains("Second"))
+    })
+    .expect("selected hint text");
     let first_line = last.lines().next().expect("first line");
     assert!(first_line.contains("Second"));
 
