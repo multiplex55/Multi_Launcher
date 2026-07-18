@@ -1,6 +1,6 @@
 use crate::multi_manager::model::{MmWorkspace, PendingCaptureAction, RecaptureQueueItem};
 use crate::multi_manager::runtime::MultiManagerRuntime;
-use crate::multi_manager::{reconnect, store};
+use crate::multi_manager::{bindings, reconnect, store, win};
 use crate::settings::MultiManagerSettings;
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
@@ -39,16 +39,18 @@ impl MultiManagerState {
             .unwrap_or_else(|| Path::new("."));
         let workspace_path = resolve_relative_to(settings_dir, &settings.workspaces_path);
         let bindings_path = resolve_relative_to(settings_dir, &settings.bindings_path);
-        let mut loaded = store::load_or_default(&workspace_path);
-        if settings.auto_reconnect_on_load {
-            reconnect::reconnect_workspaces(&mut loaded);
-        }
+
+        // Startup always attempts to restore saved HWND binding snapshots first.
+        // `auto_reconnect_on_load` only controls the exact-title fallback for windows
+        // that snapshot restore could not resolve during startup/reload.
+        // `auto_reconnect_missing_windows` controls the runtime's periodic reconnect loop.
+        let loaded = prepare_workspaces_for_startup(
+            store::load_or_default(&workspace_path),
+            &bindings_path,
+            settings.auto_reconnect_on_load,
+        );
         let workspaces = Arc::new(Mutex::new(loaded));
-        let runtime = if settings.enabled {
-            MultiManagerRuntime::start(Arc::clone(&workspaces), settings.clone())
-        } else {
-            MultiManagerRuntime::inactive(Arc::clone(&workspaces))
-        };
+        let runtime = start_runtime_after_restore(Arc::clone(&workspaces), settings);
         let last_hotkey_info = Arc::clone(&runtime.last_hotkey_info);
 
         Self {
@@ -92,9 +94,11 @@ impl MultiManagerState {
 
     pub fn reload(&mut self) -> Result<()> {
         let mut loaded = store::load_workspaces(&self.workspace_path)?;
-        if self.auto_reconnect_on_load {
-            reconnect::reconnect_workspaces(&mut loaded);
-        }
+        restore_and_optionally_reconnect(
+            &mut loaded,
+            &self.bindings_path,
+            self.auto_reconnect_on_load,
+        );
         let mut workspaces = self
             .workspaces
             .lock()
@@ -124,10 +128,11 @@ impl MultiManagerState {
         if self
             .dirty_since
             .is_some_and(|dirty_since| dirty_since.elapsed() >= self.save_debounce)
-            && let Err(err) = self.save() {
-                tracing::error!(error = %err, "failed to auto-save MultiManager workspaces");
-                self.last_save_attempt = Some(Instant::now());
-            }
+            && let Err(err) = self.save()
+        {
+            tracing::error!(error = %err, "failed to auto-save MultiManager workspaces");
+            self.last_save_attempt = Some(Instant::now());
+        }
     }
 
     pub fn validate_capture_state_debug(&self) {
@@ -204,10 +209,10 @@ pub(crate) fn capture_state_invariant_violations(
     }
 
     if let (Some(pending), Some(queued)) = (pending_capture, queued_capture)
-        && capture_action_target(pending) != capture_action_target(queued) {
-            violations
-                .push("queued_capture must not coexist with unrelated active pending_capture");
-        }
+        && capture_action_target(pending) != capture_action_target(queued)
+    {
+        violations.push("queued_capture must not coexist with unrelated active pending_capture");
+    }
 
     violations
 }
@@ -220,6 +225,52 @@ fn capture_action_target(action: &PendingCaptureAction) -> (&str, Option<usize>)
             workspace_id,
             window_index,
         } => (workspace_id, Some(*window_index)),
+    }
+}
+
+fn prepare_workspaces_for_startup(
+    mut workspaces: Vec<MmWorkspace>,
+    bindings_path: &Path,
+    auto_reconnect_on_load: bool,
+) -> Vec<MmWorkspace> {
+    restore_and_optionally_reconnect(&mut workspaces, bindings_path, auto_reconnect_on_load);
+    workspaces
+}
+
+fn restore_and_optionally_reconnect(
+    workspaces: &mut [MmWorkspace],
+    bindings_path: &Path,
+    auto_reconnect_on_load: bool,
+) {
+    let snapshots_loaded = match bindings::load_bindings_if_exists(bindings_path) {
+        Ok(Some(snapshots)) => {
+            bindings::restore_bindings(workspaces, &snapshots);
+            true
+        }
+        Ok(None) => {
+            tracing::debug!(path = %bindings_path.display(), "MultiManager bindings file not found; leaving startup windows unresolved");
+            false
+        }
+        Err(err) => {
+            tracing::error!(error = %err, path = %bindings_path.display(), "failed to load MultiManager bindings; continuing without saved HWND restore");
+            false
+        }
+    };
+
+    if snapshots_loaded && auto_reconnect_on_load {
+        let live = win::enumerate_top_level_windows().unwrap_or_default();
+        reconnect::reconnect_unresolved_workspaces_with_windows(workspaces, &live);
+    }
+}
+
+fn start_runtime_after_restore(
+    workspaces: Arc<Mutex<Vec<MmWorkspace>>>,
+    settings: &MultiManagerSettings,
+) -> MultiManagerRuntime {
+    if settings.enabled {
+        MultiManagerRuntime::start(workspaces, settings.clone())
+    } else {
+        MultiManagerRuntime::inactive(workspaces)
     }
 }
 
@@ -316,6 +367,103 @@ mod tests {
             state.bindings_path,
             dir.path().join("multi_manager_bindings.json")
         );
+    }
+
+    #[test]
+    fn missing_binding_file_does_not_break_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        std::fs::write(&workspace_path, r#"[{"id":"ws","name":"Loaded"}]"#).unwrap();
+
+        let state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "workspaces.json".into(),
+                bindings_path: "missing-bindings.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert_eq!(state.workspaces.lock().unwrap()[0].name, "Loaded");
+        assert_eq!(
+            state.bindings_path,
+            dir.path().join("missing-bindings.json")
+        );
+    }
+
+    #[test]
+    fn malformed_binding_file_does_not_break_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(
+            dir.path().join("workspaces.json"),
+            r#"[{"id":"ws","name":"Loaded"}]"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bindings.json"), "not json").unwrap();
+
+        let state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "workspaces.json".into(),
+                bindings_path: "bindings.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert_eq!(state.workspaces.lock().unwrap()[0].name, "Loaded");
+    }
+
+    #[test]
+    fn runtime_is_created_from_prepared_workspace_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(
+            dir.path().join("workspaces.json"),
+            r#"[{"id":"","name":"Normalized"}]"#,
+        )
+        .unwrap();
+
+        let state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "workspaces.json".into(),
+                bindings_path: "missing-bindings.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        let runtime_workspaces = state.runtime.workspaces.lock().unwrap();
+        assert_eq!(runtime_workspaces[0].name, "Normalized");
+        assert!(!runtime_workspaces[0].id.is_empty());
+    }
+
+    #[test]
+    fn reload_prepares_temporary_workspace_list_before_replacing_shared_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        std::fs::write(&workspace_path, r#"[{"id":"old","name":"Old"}]"#).unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "workspaces.json".into(),
+                bindings_path: "missing-bindings.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        std::fs::write(&workspace_path, r#"[{"id":"","name":"Reloaded"}]"#).unwrap();
+
+        state.reload().unwrap();
+
+        let workspaces = state.workspaces.lock().unwrap();
+        assert_eq!(workspaces[0].name, "Reloaded");
+        assert!(!workspaces[0].id.is_empty());
     }
 
     #[test]

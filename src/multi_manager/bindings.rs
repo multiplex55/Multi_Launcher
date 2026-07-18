@@ -5,6 +5,7 @@ use crate::multi_manager::win::{self, EnumeratedWindow};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -70,6 +71,16 @@ pub fn load_bindings(path: &Path) -> Result<Vec<WorkspaceBindingSnapshot>> {
     serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))
 }
 
+pub fn load_bindings_if_exists(path: &Path) -> Result<Option<Vec<WorkspaceBindingSnapshot>>> {
+    match std::fs::read_to_string(path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map(Some)
+            .with_context(|| format!("parse {}", path.display())),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
 pub fn restore_bindings(workspaces: &mut [MmWorkspace], snapshots: &[WorkspaceBindingSnapshot]) {
     let mut live = win::enumerate_top_level_windows().unwrap_or_default();
     for window_snapshot in snapshots.iter().flat_map(|snapshot| &snapshot.windows) {
@@ -131,16 +142,9 @@ fn restore_bindings_with_windows(
                 candidate.hwnd == window_snapshot.hwnd
                     && identity::stable_identity_matches_enumerated(&saved_window, candidate)
             });
-            let hwnd = direct_match.map(|candidate| candidate.hwnd).or_else(|| {
-                let (_, hwnd) =
-                    reconnect::match_saved_window_against_candidates(&saved_window, live);
-                hwnd
-            });
-            if let Some(hwnd) = hwnd {
-                workspace.windows[window_index].mark_reconnected(hwnd);
-                if let Some(live_window) = live.iter().find(|candidate| candidate.hwnd == hwnd) {
-                    workspace.windows[window_index].live_title = live_window.title.clone();
-                }
+            if let Some(candidate) = direct_match {
+                workspace.windows[window_index].mark_reconnected(candidate.hwnd);
+                workspace.windows[window_index].live_title = candidate.title.clone();
             } else if workspace.windows[window_index].hwnd == window_snapshot.hwnd {
                 workspace.windows[window_index].mark_missing();
                 workspace.windows[window_index].live_title.clear();
@@ -401,8 +405,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_reconnect_can_restore_safe_replacement() {
-        let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 0)])];
+    fn direct_restore_accepts_saved_hwnd_when_metadata_matches_and_title_changed() {
+        let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 44)])];
         let snapshots = vec![WorkspaceBindingSnapshot {
             workspace_id: Some("id".into()),
             workspace_name: "name".into(),
@@ -419,11 +423,62 @@ mod tests {
         restore_bindings_with_windows(
             &mut workspaces,
             &snapshots,
-            &[
-                live(44, "Other", "other.exe", "Other", "C:/Other.exe"),
-                live(55, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe"),
-            ],
+            &[live(
+                44,
+                "Renamed",
+                "editor.exe",
+                "Editor",
+                "C:/Apps/editor.exe",
+            )],
         );
+
+        assert_eq!(workspaces[0].windows[0].hwnd, 44);
+        assert!(workspaces[0].windows[0].valid);
+        assert!(workspaces[0].windows[0].binding_verified);
+        assert_eq!(workspaces[0].windows[0].live_title, "Renamed");
+    }
+
+    #[test]
+    fn missing_binding_file_loads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-bindings.json");
+
+        assert!(load_bindings_if_exists(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_binding_json_is_parse_error_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.json");
+        std::fs::write(&path, "not json").unwrap();
+
+        let err = load_bindings_if_exists(&path).expect_err("malformed JSON should be reported");
+
+        assert!(err.to_string().contains("parse"));
+    }
+
+    #[test]
+    fn fallback_reconnect_can_restore_safe_replacement() {
+        let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 0)])];
+        let snapshots = vec![WorkspaceBindingSnapshot {
+            workspace_id: Some("id".into()),
+            workspace_name: "name".into(),
+            windows: vec![WindowBindingSnapshot {
+                hwnd: 44,
+                captured_title: "Doc".into(),
+                executable: Some("editor.exe".into()),
+                class_name: Some("Editor".into()),
+                process_path: Some("C:/Apps/editor.exe".into()),
+                ..Default::default()
+            }],
+        }];
+
+        let live_windows = [
+            live(44, "Other", "other.exe", "Other", "C:/Other.exe"),
+            live(55, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe"),
+        ];
+        restore_bindings_with_windows(&mut workspaces, &snapshots, &live_windows);
+        reconnect::reconnect_unresolved_workspaces_with_windows(&mut workspaces, &live_windows);
 
         assert_eq!(workspaces[0].windows[0].hwnd, 55);
         assert!(workspaces[0].windows[0].valid);
