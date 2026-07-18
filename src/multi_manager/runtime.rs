@@ -1,8 +1,11 @@
+use crate::multi_manager::activation::{
+    self, ActivationDeps, ActivationOperation, ActivationResult,
+};
 use crate::multi_manager::model::{MmHotkey, MmRect, MmWorkspace};
 use crate::multi_manager::{reconnect, win};
 use crate::settings::MultiManagerSettings;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -62,10 +65,35 @@ impl RuntimeControl {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultiManagerRuntimeEvent {
+    WorkspaceActionCompleted {
+        workspace_id: String,
+        operation: ActivationOperation,
+        result: ActivationResult,
+    },
+    BindingReconnected {
+        workspace_id: String,
+        result: ActivationResult,
+    },
+    MovementFailed {
+        workspace_id: String,
+        errors: Vec<String>,
+    },
+    RuntimeLockFailed {
+        context: String,
+    },
+    EnumerationFailed {
+        context: String,
+        error: String,
+    },
+}
+
 pub struct MultiManagerRuntime {
     pub workspaces: Arc<Mutex<Vec<MmWorkspace>>>,
     pub control: Arc<RuntimeControl>,
     pub last_hotkey_info: Arc<Mutex<Option<(String, Instant)>>>,
+    pub event_queue: Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>>,
     pub join_handle: Option<JoinHandle<()>>,
 }
 
@@ -75,6 +103,7 @@ impl MultiManagerRuntime {
             workspaces,
             control: Arc::new(RuntimeControl::new(false)),
             last_hotkey_info: Arc::new(Mutex::new(None)),
+            event_queue: Arc::new(Mutex::new(VecDeque::new())),
             join_handle: None,
         }
     }
@@ -88,9 +117,11 @@ impl MultiManagerRuntime {
             .auto_reconnect_interval_ms
             .store(settings.auto_reconnect_interval_ms, Ordering::Relaxed);
         let last_hotkey_info = Arc::new(Mutex::new(None));
+        let event_queue = Arc::new(Mutex::new(VecDeque::new()));
         let thread_workspaces = Arc::clone(&workspaces);
         let thread_control = Arc::clone(&control);
         let thread_last_hotkey_info = Arc::clone(&last_hotkey_info);
+        let thread_event_queue = Arc::clone(&event_queue);
         let poll = Duration::from_millis(settings.hotkey_poll_ms);
         let reconnect_interval = Duration::from_millis(settings.auto_reconnect_interval_ms);
         let join_handle = thread::spawn(move || {
@@ -113,12 +144,19 @@ impl MultiManagerRuntime {
                         &mut workspaces,
                         &thread_control,
                         &thread_last_hotkey_info,
+                        &thread_event_queue,
                         &mut debounce,
                         DEFAULT_DEBOUNCE,
                         &win_ops,
                         &hotkey_ops,
+                        &|hwnd| win::is_valid_window(hwnd),
+                        &|| win::enumerate_top_level_windows().unwrap_or_default(),
                         now,
                     );
+                } else if let Ok(mut events) = thread_event_queue.lock() {
+                    events.push_back(MultiManagerRuntimeEvent::RuntimeLockFailed {
+                        context: "runtime tick workspace lock".to_string(),
+                    });
                 }
             }
         });
@@ -127,6 +165,7 @@ impl MultiManagerRuntime {
             workspaces,
             control,
             last_hotkey_info,
+            event_queue,
             join_handle: Some(join_handle),
         }
     }
@@ -333,10 +372,13 @@ pub fn runtime_tick(
     workspaces: &mut [MmWorkspace],
     control: &RuntimeControl,
     last_hotkey_info: &Arc<Mutex<Option<(String, Instant)>>>,
+    event_queue: &Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>>,
     debounce: &mut HashMap<String, Instant>,
     debounce_duration: Duration,
     window_ops: &impl WindowOps,
     hotkey_ops: &impl HotkeyOps,
+    is_window: &dyn Fn(usize) -> bool,
+    enumerate_top_level_windows: &dyn Fn() -> Vec<win::EnumeratedWindow>,
     now: Instant,
 ) {
     if !control.enabled.load(Ordering::Relaxed) || control.capture_pending.load(Ordering::Relaxed) {
@@ -356,11 +398,51 @@ pub fn runtime_tick(
             continue;
         }
         debounce.insert(workspace.id.clone(), now);
-        toggle_workspace_with(workspace, window_ops);
+        let workspace_id = workspace.id.clone();
+        let deps = ActivationDeps {
+            window_ops,
+            is_window,
+            enumerate_top_level_windows,
+        };
+        let result = activation::activate_workspace_with_deps(
+            std::slice::from_mut(workspace),
+            &workspace_id,
+            ActivationOperation::Toggle,
+            &deps,
+        )
+        .unwrap_or_default();
+        push_runtime_activation_events(
+            event_queue,
+            workspace_id.clone(),
+            ActivationOperation::Toggle,
+            result,
+        );
         if let Ok(mut info) = last_hotkey_info.lock() {
             *info = Some((workspace.id.clone(), now));
         }
     }
+}
+
+fn push_runtime_activation_events(
+    event_queue: &Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>>,
+    workspace_id: String,
+    operation: ActivationOperation,
+    result: ActivationResult,
+) {
+    let Ok(mut events) = event_queue.lock() else {
+        return;
+    };
+    if result.reconnected > 0 {
+        events.push_back(MultiManagerRuntimeEvent::BindingReconnected {
+            workspace_id: workspace_id.clone(),
+            result: result.clone(),
+        });
+    }
+    events.push_back(MultiManagerRuntimeEvent::WorkspaceActionCompleted {
+        workspace_id,
+        operation,
+        result,
+    });
 }
 
 #[cfg(test)]
@@ -410,6 +492,10 @@ mod tests {
             target_rect: Some(target),
             ..MmWindow::default()
         }
+    }
+
+    fn event_queue() -> Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>> {
+        Arc::new(Mutex::new(VecDeque::new()))
     }
 
     fn live(hwnd: usize, title: &str) -> EnumeratedWindow {
@@ -540,10 +626,13 @@ mod tests {
             &mut workspaces,
             &control,
             &info,
+            &event_queue(),
             &mut debounce,
             DEFAULT_DEBOUNCE,
             &ops,
             &FakeHotkeyOps(true),
+            &|_| true,
+            &|| Vec::new(),
             Instant::now(),
         );
         assert!(ops.moves.borrow().is_empty());
@@ -666,10 +755,13 @@ mod tests {
             &mut workspaces.lock().unwrap(),
             &control,
             &info,
+            &event_queue(),
             &mut debounce,
             DEFAULT_DEBOUNCE,
             &ops,
             &FakeHotkeyOps(true),
+            &|hwnd| hwnd != 0,
+            &|| Vec::new(),
             now + Duration::from_secs(1),
         );
 
@@ -685,6 +777,7 @@ mod tests {
         let mut workspaces = vec![workspace()];
         let control = RuntimeControl::new(true);
         let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
         let mut debounce = HashMap::new();
         let mut ops = FakeWindowOps::default();
         ops.at_home.insert(1, rect(1));
@@ -694,23 +787,141 @@ mod tests {
             &mut workspaces,
             &control,
             &info,
+            &events,
             &mut debounce,
             DEFAULT_DEBOUNCE,
             &ops,
             &FakeHotkeyOps(true),
+            &|_| true,
+            &|| Vec::new(),
             now,
         );
         runtime_tick(
             &mut workspaces,
             &control,
             &info,
+            &events,
             &mut debounce,
             DEFAULT_DEBOUNCE,
             &ops,
             &FakeHotkeyOps(true),
+            &|_| true,
+            &|| Vec::new(),
             now + Duration::from_millis(100),
         );
         assert_eq!(ops.moves.borrow().len(), 2);
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hotkey_activation_attempts_fallback_before_moving() {
+        let mut workspaces = vec![workspace()];
+        workspaces[0].windows = vec![window(7, false, rect(1), rect(11))];
+        workspaces[0].windows[0].captured_title = "Notes".into();
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
+        let mut debounce = HashMap::new();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(42, rect(1));
+        let now = Instant::now();
+
+        runtime_tick(
+            &mut workspaces,
+            &control,
+            &info,
+            &events,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &FakeHotkeyOps(true),
+            &|hwnd| hwnd == 42,
+            &|| vec![live(42, "Notes")],
+            now,
+        );
+
+        assert_eq!(*ops.moves.borrow(), vec![(42, rect(11))]);
+        assert_eq!(workspaces[0].windows[0].hwnd, 42);
+    }
+
+    #[test]
+    fn hotkey_moves_valid_windows_when_one_binding_is_missing() {
+        let mut workspaces = vec![workspace()];
+        workspaces[0].windows[0].captured_title = "Missing".into();
+        workspaces[0].windows[0].hwnd = 0;
+        workspaces[0].windows[0].valid = false;
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
+        let mut debounce = HashMap::new();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(2, rect(2));
+
+        runtime_tick(
+            &mut workspaces,
+            &control,
+            &info,
+            &events,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &FakeHotkeyOps(true),
+            &|hwnd| hwnd == 2,
+            &|| Vec::new(),
+            Instant::now(),
+        );
+
+        assert_eq!(*ops.moves.borrow(), vec![(2, rect(12))]);
+    }
+
+    #[test]
+    fn runtime_events_report_unresolved_windows() {
+        let mut workspaces = vec![workspace()];
+        workspaces[0].windows[0].alias = "Missing App".into();
+        workspaces[0].windows[0].captured_title = "Missing".into();
+        workspaces[0].windows[0].hwnd = 0;
+        workspaces[0].windows[0].valid = false;
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
+        let mut debounce = HashMap::new();
+        let ops = FakeWindowOps::default();
+
+        runtime_tick(
+            &mut workspaces,
+            &control,
+            &info,
+            &events,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &FakeHotkeyOps(true),
+            &|hwnd| hwnd == 2,
+            &|| Vec::new(),
+            Instant::now(),
+        );
+
+        let events = events.lock().unwrap();
+        let MultiManagerRuntimeEvent::WorkspaceActionCompleted { result, .. } =
+            events.back().unwrap()
+        else {
+            panic!("expected workspace action event");
+        };
+        assert_eq!(result.missing, 1);
+        assert_eq!(result.unresolved_labels, vec!["Missing App".to_string()]);
+    }
+
+    #[test]
+    fn runtime_event_definitions_do_not_reference_egui_types() {
+        let source = include_str!("runtime.rs");
+        let start = source.find("pub enum MultiManagerRuntimeEvent").unwrap();
+        let end = source[start..]
+            .find("pub struct MultiManagerRuntime")
+            .unwrap()
+            + start;
+        let event_definition = &source[start..end];
+        assert!(!event_definition.contains("egui"));
+        assert!(!event_definition.contains("Toast"));
     }
 
     #[cfg(windows)]

@@ -4,10 +4,64 @@ use crate::multi_manager::apply_capture::{self, ApplyCaptureResult};
 use crate::multi_manager::bindings;
 use crate::multi_manager::capture;
 use crate::multi_manager::model::{PendingCaptureAction, RecaptureQueueItem};
+use crate::multi_manager::runtime::MultiManagerRuntimeEvent;
 use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
 use std::sync::atomic::Ordering;
 
 impl LauncherApp {
+    pub(crate) fn multi_manager_drain_runtime_events(&mut self) {
+        let events = if let Ok(mut queue) = self.multi_manager.runtime.event_queue.lock() {
+            queue.drain(..).collect::<Vec<_>>()
+        } else {
+            self.report_error_message(
+                "multi_manager.runtime",
+                "Failed to lock MultiManager runtime event queue",
+            );
+            return;
+        };
+
+        for event in events {
+            match event {
+                MultiManagerRuntimeEvent::WorkspaceActionCompleted { result, .. } => {
+                    if result.bindings_changed {
+                        self.multi_manager.mark_dirty();
+                    }
+                    self.multi_manager_report_activation(
+                        "MultiManager hotkey activated workspace",
+                        result,
+                    );
+                }
+                MultiManagerRuntimeEvent::BindingReconnected { .. } => {
+                    // The completed action event carries the same activation summary; avoid
+                    // duplicate toasts while still preserving this structured runtime event.
+                }
+                MultiManagerRuntimeEvent::MovementFailed {
+                    workspace_id,
+                    errors,
+                } => {
+                    self.report_error_message(
+                        "multi_manager.runtime",
+                        format!(
+                            "MultiManager workspace {workspace_id} movement errors: {}",
+                            errors.join("; ")
+                        ),
+                    );
+                }
+                MultiManagerRuntimeEvent::RuntimeLockFailed { context } => {
+                    self.report_error_message(
+                        "multi_manager.runtime",
+                        format!("Failed to lock MultiManager runtime state: {context}"),
+                    );
+                }
+                MultiManagerRuntimeEvent::EnumerationFailed { context, error } => {
+                    self.report_error_message(
+                        "multi_manager.runtime",
+                        format!("Failed to enumerate MultiManager windows for {context}: {error}"),
+                    );
+                }
+            }
+        }
+    }
     pub fn open_multi_manager(&mut self) {
         self.multi_manager_dialog.open = true;
         self.focus_query = false;

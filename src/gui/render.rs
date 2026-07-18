@@ -639,6 +639,7 @@ impl eframe::App for LauncherApp {
         if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
+        self.multi_manager_drain_runtime_events();
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
