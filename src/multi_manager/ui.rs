@@ -188,12 +188,11 @@ impl MultiManagerDialog {
                 ui.push_id(("multi_manager_workspace", id), |ui| {
                     ui.horizontal(|ui| {
                         if self.rename.workspace_id == id {
-                            ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut self.rename.value)
-                                        .id_source(("mm_workspace_rename", id)),
-                                )
-                                .changed();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.rename.value)
+                                    .id_source(("mm_workspace_rename", id)),
+                            )
+                            .changed();
                             if ui.button("Apply").clicked() {
                                 let val = self.rename.value.clone();
                                 app.multi_manager.with_workspace_mut(id, |w| w.name = val);
@@ -540,7 +539,10 @@ fn window_status_text_color(
 }
 
 fn window_metadata_ui(ui: &mut egui::Ui, win: &MmWindow) {
-    ui.label(format!("Title: {}", win.title));
+    ui.label(format!("Title: {}", win.current_display_title()));
+    if !win.live_title.trim().is_empty() && win.live_title.trim() != win.captured_title.trim() {
+        ui.label(format!("Captured title: {}", win.fallback_title()));
+    }
     ui.label(format!("Class: {}", win.class_name));
     ui.label(format!("Executable: {}", win.executable));
     if !win.process_path.trim().is_empty() {
@@ -679,10 +681,11 @@ fn delete_workspace(app: &mut LauncherApp, id: &str) {
 }
 fn reorder_workspace(app: &mut LauncherApp, id: &str, delta: isize) {
     if let Ok(mut w) = app.multi_manager.workspaces.lock()
-        && let Some(i) = w.iter().position(|x| x.id == id) {
-            let j = (i as isize + delta).clamp(0, w.len().saturating_sub(1) as isize) as usize;
-            w.swap(i, j);
-        }
+        && let Some(i) = w.iter().position(|x| x.id == id)
+    {
+        let j = (i as isize + delta).clamp(0, w.len().saturating_sub(1) as isize) as usize;
+        w.swap(i, j);
+    }
     app.multi_manager.mark_dirty();
 }
 fn reorder_window(app: &mut LauncherApp, id: &str, index: usize, delta: isize) {
@@ -825,9 +828,10 @@ fn set_window_rect(
 }
 fn move_window(app: &mut LauncherApp, w: &MmWindow, home: bool) {
     if let Some(r) = if home { w.home_rect } else { w.target_rect }
-        && let Err(err) = win::move_window_to_rect(w.hwnd, r) {
-            app.report_error_message("multi_manager.move_window", format!("{err}"));
-        }
+        && let Err(err) = win::move_window_to_rect(w.hwnd, r)
+    {
+        app.report_error_message("multi_manager.move_window", format!("{err}"));
+    }
 }
 
 fn begin_hotkey_edit(
@@ -1212,7 +1216,7 @@ mod tests {
         assert_eq!(window.home_rect, Some(home));
         assert_eq!(window.target_rect, Some(target));
         assert_eq!(window.alias, "Alias");
-        assert_eq!(window.title, "Title");
+        assert_eq!(window.captured_title, "Title");
         assert_eq!(window.hwnd, 42);
         assert!(window.valid);
     }
@@ -1239,7 +1243,7 @@ mod tests {
         assert_eq!(window.home_rect, Some(home));
         assert_eq!(window.target_rect, Some(target));
         assert_eq!(window.alias, "Alias");
-        assert_eq!(window.title, "Title");
+        assert_eq!(window.captured_title, "Title");
         assert_eq!(window.hwnd, 42);
         assert!(window.valid);
     }
@@ -1311,7 +1315,7 @@ mod tests {
             id: "workspace".into(),
             windows: vec![MmWindow {
                 alias: "Alias".into(),
-                title: "Title".into(),
+                captured_title: "Title".into(),
                 home_rect,
                 target_rect,
                 hwnd: 42,

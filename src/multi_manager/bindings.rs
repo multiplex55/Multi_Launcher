@@ -18,7 +18,8 @@ pub struct WorkspaceBindingSnapshot {
 pub struct WindowBindingSnapshot {
     pub window_id: usize,
     pub window_index: usize,
-    pub title: String,
+    #[serde(rename = "title")]
+    pub captured_title: String,
     pub alias: Option<String>,
     pub hwnd: usize,
     pub executable: Option<String>,
@@ -46,7 +47,7 @@ pub fn save_bindings(path: &Path, workspaces: &[MmWorkspace]) -> Result<()> {
                 .map(|(index, window)| WindowBindingSnapshot {
                     window_id: index,
                     window_index: index,
-                    title: window.title.clone(),
+                    captured_title: window.captured_title.clone(),
                     alias: (!window.alias.is_empty()).then(|| window.alias.clone()),
                     hwnd: window.hwnd,
                     executable: non_empty_string(&window.executable),
@@ -100,11 +101,13 @@ fn restore_bindings_with_windows(
             let saved_window = window_from_snapshot(window_snapshot);
             let (_, hwnd) = reconnect::match_saved_window_against_candidates(&saved_window, live);
             if let Some(hwnd) = hwnd {
-                workspace.windows[window_index].hwnd = hwnd;
-                workspace.windows[window_index].valid = true;
+                workspace.windows[window_index].mark_reconnected(hwnd);
+                if let Some(live_window) = live.iter().find(|candidate| candidate.hwnd == hwnd) {
+                    workspace.windows[window_index].live_title = live_window.title.clone();
+                }
             } else if workspace.windows[window_index].hwnd == window_snapshot.hwnd {
-                workspace.windows[window_index].hwnd = 0;
-                workspace.windows[window_index].valid = false;
+                workspace.windows[window_index].mark_missing();
+                workspace.windows[window_index].live_title.clear();
             }
         }
     }
@@ -119,17 +122,17 @@ fn find_window_index(workspace: &MmWorkspace, snapshot: &WindowBindingSnapshot) 
             .windows
             .iter()
             .position(|window| window.alias == alias)
-        {
-            return Some(index);
-        }
-    if !snapshot.title.is_empty()
+    {
+        return Some(index);
+    }
+    if !snapshot.captured_title.is_empty()
         && let Some(index) = workspace
             .windows
             .iter()
-            .position(|window| window.title == snapshot.title)
-        {
-            return Some(index);
-        }
+            .position(|window| window.captured_title == snapshot.captured_title)
+    {
+        return Some(index);
+    }
     (snapshot.window_index < workspace.windows.len()).then_some(snapshot.window_index)
 }
 
@@ -138,15 +141,16 @@ fn non_empty_string(value: &str) -> Option<String> {
 }
 
 fn window_from_snapshot(snapshot: &WindowBindingSnapshot) -> MmWindow {
-    MmWindow {
+    let mut window = MmWindow {
         alias: snapshot.alias.clone().unwrap_or_default(),
-        title: snapshot.title.clone(),
+        captured_title: snapshot.captured_title.clone(),
         executable: snapshot.executable.clone().unwrap_or_default(),
         class_name: snapshot.class_name.clone().unwrap_or_default(),
         process_path: snapshot.process_path.clone().unwrap_or_default(),
-        hwnd: snapshot.hwnd,
         ..Default::default()
-    }
+    };
+    window.mark_bound(snapshot.hwnd);
+    window
 }
 
 pub fn duplicate_hwnds(workspaces: &[MmWorkspace]) -> Vec<DuplicateHwnd> {
@@ -178,12 +182,14 @@ pub fn refresh_titles_with(
     let mut changed = false;
     for workspace in workspaces {
         for window in &mut workspace.windows {
-            if window.hwnd != 0 && is_valid(window.hwnd)
+            if window.hwnd != 0
+                && is_valid(window.hwnd)
                 && let Some(new_title) = title(window.hwnd)
-                    && window.title != new_title {
-                        window.title = new_title;
-                        changed = true;
-                    }
+                && window.live_title != new_title
+            {
+                window.live_title = new_title;
+                changed = true;
+            }
         }
     }
     changed
@@ -206,10 +212,10 @@ mod tests {
             ..Default::default()
         }
     }
-    fn win(alias: &str, title: &str, hwnd: usize) -> MmWindow {
+    fn win(alias: &str, captured_title: &str, hwnd: usize) -> MmWindow {
         MmWindow {
             alias: alias.into(),
-            title: title.into(),
+            captured_title: captured_title.into(),
             hwnd,
             ..Default::default()
         }
@@ -217,14 +223,14 @@ mod tests {
 
     fn live(
         hwnd: usize,
-        title: &str,
+        captured_title: &str,
         executable: &str,
         class_name: &str,
         process_path: &str,
     ) -> EnumeratedWindow {
         EnumeratedWindow {
             hwnd,
-            title: title.into(),
+            title: captured_title.into(),
             executable: executable.into(),
             class_name: class_name.into(),
             process_path: process_path.into(),
@@ -257,7 +263,7 @@ mod tests {
             workspace_name: "old".into(),
             windows: vec![WindowBindingSnapshot {
                 hwnd: 7,
-                title: "Doc".into(),
+                captured_title: "Doc".into(),
                 ..Default::default()
             }],
         }];
@@ -274,7 +280,7 @@ mod tests {
             workspace_name: "name".into(),
             windows: vec![WindowBindingSnapshot {
                 hwnd: 8,
-                title: "Doc".into(),
+                captured_title: "Doc".into(),
                 ..Default::default()
             }],
         }];
@@ -326,7 +332,7 @@ mod tests {
             workspace_name: "name".into(),
             windows: vec![WindowBindingSnapshot {
                 hwnd: 44,
-                title: "Doc".into(),
+                captured_title: "Doc".into(),
                 executable: Some("editor.exe".into()),
                 class_name: Some("Editor".into()),
                 process_path: Some("C:/Apps/editor.exe".into()),
@@ -352,7 +358,7 @@ mod tests {
             workspace_name: "name".into(),
             windows: vec![WindowBindingSnapshot {
                 hwnd: 44,
-                title: "Doc".into(),
+                captured_title: "Doc".into(),
                 executable: Some("editor.exe".into()),
                 class_name: Some("Editor".into()),
                 process_path: Some("C:/Apps/editor.exe".into()),
@@ -395,7 +401,8 @@ mod tests {
             |_| true,
             |_| Some("new".into())
         ));
-        assert_eq!(workspaces[0].windows[0].title, "new");
+        assert_eq!(workspaces[0].windows[0].captured_title, "old");
+        assert_eq!(workspaces[0].windows[0].live_title, "new");
         assert_eq!(workspaces[0].windows[0].alias, "alias");
     }
 }

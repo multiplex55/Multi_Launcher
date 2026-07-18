@@ -37,14 +37,14 @@ fn same_stored(value: &str, live: &str) -> bool {
 }
 
 fn has_only_title_metadata(window: &MmWindow) -> bool {
-    !window.title.trim().is_empty()
+    !window.captured_title.trim().is_empty()
         && window.executable.trim().is_empty()
         && window.class_name.trim().is_empty()
         && window.process_path.trim().is_empty()
 }
 
 fn identity_score(window: &MmWindow, live: &EnumeratedWindow) -> Option<u8> {
-    let title = same_stored(&window.title, &live.title);
+    let title = same_stored(&window.captured_title, &live.title);
     let process_path = same_stored(&window.process_path, &live.process_path);
     let executable = same_stored(&window.executable, &live.executable);
     let class_name = same_stored(&window.class_name, &live.class_name);
@@ -193,35 +193,47 @@ pub fn reconnect_workspaces_with_windows(
         match outcome {
             ReconnectOutcome::AlreadyValid => {
                 summary.already_valid += 1;
-                window.valid = true;
+                if let Some(hwnd) = hwnd {
+                    window.mark_bound(hwnd);
+                } else {
+                    window.mark_missing();
+                }
             }
             ReconnectOutcome::Reconnected => {
                 summary.reconnected += 1;
-                window.valid = true;
+                if let Some(hwnd) = hwnd {
+                    window.mark_reconnected(hwnd);
+                } else {
+                    window.mark_missing();
+                }
             }
             ReconnectOutcome::Invalidated => {
                 summary.invalidated += 1;
-                if hwnd.is_some() {
+                if let Some(hwnd) = hwnd {
                     summary.reconnected += 1;
-                    window.valid = true;
+                    window.mark_reconnected(hwnd);
                 } else {
                     summary.missing += 1;
-                    window.valid = false;
+                    window.mark_metadata_mismatch();
                 }
             }
             ReconnectOutcome::Ambiguous => {
                 summary.ambiguous += 1;
-                window.valid = false;
+                window.mark_ambiguous();
             }
             ReconnectOutcome::Missing => {
                 summary.missing += 1;
-                window.valid = false;
+                window.mark_missing();
             }
         }
 
-        window.hwnd = hwnd.unwrap_or(0);
-        if window.hwnd != 0 {
-            assigned.insert(window.hwnd);
+        if let Some(hwnd) = hwnd {
+            if let Some(live_window) = live.iter().find(|candidate| candidate.hwnd == hwnd) {
+                window.live_title = live_window.title.clone();
+            }
+            assigned.insert(hwnd);
+        } else {
+            window.live_title.clear();
         }
     }
 
@@ -251,14 +263,14 @@ mod tests {
 
     fn live(
         hwnd: usize,
-        title: &str,
+        captured_title: &str,
         executable: &str,
         class_name: &str,
         process_path: &str,
     ) -> EnumeratedWindow {
         EnumeratedWindow {
             hwnd,
-            title: title.into(),
+            title: captured_title.into(),
             executable: executable.into(),
             class_name: class_name.into(),
             process_path: process_path.into(),
@@ -276,7 +288,7 @@ mod tests {
     #[test]
     fn unique_title_only_legacy_reconnect() {
         let mut workspaces = workspace(MmWindow {
-            title: " Notes ".into(),
+            captured_title: " Notes ".into(),
             valid: false,
             ..MmWindow::default()
         });
@@ -290,7 +302,7 @@ mod tests {
     #[test]
     fn duplicate_title_only_candidates_are_ambiguous() {
         let mut workspaces = workspace(MmWindow {
-            title: "Notes".into(),
+            captured_title: "Notes".into(),
             ..MmWindow::default()
         });
         let summary = reconnect_workspaces_with_windows(
@@ -308,7 +320,7 @@ mod tests {
     #[test]
     fn process_path_class_title_strong_match() {
         let mut workspaces = workspace(MmWindow {
-            title: "Doc".into(),
+            captured_title: "Doc".into(),
             class_name: "Editor".into(),
             process_path: "C:/Apps/Edit.exe".into(),
             ..MmWindow::default()
@@ -326,7 +338,7 @@ mod tests {
     fn stale_hwnd_invalidated() {
         let mut workspaces = workspace(MmWindow {
             hwnd: 5,
-            title: "Doc".into(),
+            captured_title: "Doc".into(),
             executable: "edit.exe".into(),
             ..MmWindow::default()
         });
@@ -344,7 +356,7 @@ mod tests {
     fn valid_matching_hwnd_preserved() {
         let mut workspaces = workspace(MmWindow {
             hwnd: 5,
-            title: "Doc".into(),
+            captured_title: "Doc".into(),
             executable: "Edit.EXE".into(),
             ..MmWindow::default()
         });
@@ -362,11 +374,11 @@ mod tests {
         let mut workspaces = vec![MmWorkspace {
             windows: vec![
                 MmWindow {
-                    title: "Doc".into(),
+                    captured_title: "Doc".into(),
                     ..MmWindow::default()
                 },
                 MmWindow {
-                    title: "Doc".into(),
+                    captured_title: "Doc".into(),
                     ..MmWindow::default()
                 },
             ],
@@ -384,7 +396,7 @@ mod tests {
     fn legacy_saved_window_with_only_title_still_reconnects() {
         let mut workspaces = workspace(MmWindow {
             alias: "Old".into(),
-            title: "Legacy App".into(),
+            captured_title: "Legacy App".into(),
             ..MmWindow::default()
         });
         let summary = reconnect_workspaces_with_windows(

@@ -1,4 +1,4 @@
-use crate::multi_manager::model::{new_workspace_id, MmWorkspace};
+use crate::multi_manager::model::{MmWorkspace, new_workspace_id};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::Write;
@@ -143,7 +143,7 @@ mod tests {
         assert!(!loaded[0].id.is_empty());
         assert!(loaded[0].valid);
         assert!(!loaded[0].disabled);
-        assert_eq!(loaded[0].windows[0].title, "Notepad");
+        assert_eq!(loaded[0].windows[0].captured_title, "Notepad");
         assert!(loaded[0].windows[0].valid);
     }
 
@@ -191,9 +191,11 @@ mod tests {
         let loaded = load_workspaces(&path).unwrap();
 
         assert_eq!(loaded.len(), 3);
-        assert!(loaded
-            .iter()
-            .all(|workspace| workspace.name == "New Workspace" && !workspace.id.is_empty()));
+        assert!(
+            loaded
+                .iter()
+                .all(|workspace| workspace.name == "New Workspace" && !workspace.id.is_empty())
+        );
         assert_ne!(loaded[0].id, loaded[1].id);
         assert_ne!(loaded[0].id, loaded[2].id);
         assert_ne!(loaded[1].id, loaded[2].id);
@@ -216,7 +218,7 @@ mod tests {
             aliases: vec!["main".into(), "work".into()],
             windows: vec![MmWindow {
                 alias: "Editor".into(),
-                title: "Editor".into(),
+                captured_title: "Editor".into(),
                 executable: "code.exe".into(),
                 class_name: "Chrome_WidgetWin_1".into(),
                 process_path: "C:/Code/code.exe".into(),
@@ -235,6 +237,7 @@ mod tests {
                 disabled: true,
                 valid: false,
                 hwnd: 0,
+                ..MmWindow::default()
             }],
             home_rect: Some(MmRect {
                 x: 10,
@@ -302,7 +305,7 @@ mod tests {
                 id: "second".into(),
                 name: "Second".into(),
                 windows: vec![MmWindow {
-                    title: "Window".into(),
+                    captured_title: "Window".into(),
                     ..MmWindow::default()
                 }],
                 ..MmWorkspace::default()
