@@ -147,10 +147,27 @@ impl fmt::Display for FileSearchSettingsDiagnostic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileSearchExecutableProbe {
+    NotChecked,
+    NotDetected,
+    Detected(PathBuf),
+}
+
+impl FileSearchExecutableProbe {
+    fn display_label(&self) -> String {
+        match self {
+            Self::NotChecked => "not checked".to_owned(),
+            Self::NotDetected => "not detected".to_owned(),
+            Self::Detected(path) => path.display().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSearchDiagnosticsState {
     pub everything_enabled: bool,
-    pub detected_everything: Option<PathBuf>,
-    pub detected_ripgrep: Option<PathBuf>,
+    pub detected_everything: FileSearchExecutableProbe,
+    pub detected_ripgrep: FileSearchExecutableProbe,
     pub valid_roots: Vec<PathBuf>,
     pub invalid_roots: Vec<PathBuf>,
     pub current_backend: Option<String>,
@@ -176,10 +193,8 @@ impl FileSearchDiagnosticsState {
         }
         Self {
             everything_enabled: settings.everything_enabled,
-            detected_everything: crate::file_search::everything::detect_everything_executable(
-                settings,
-            ),
-            detected_ripgrep: detect_ripgrep_executable(settings),
+            detected_everything: FileSearchExecutableProbe::NotChecked,
+            detected_ripgrep: FileSearchExecutableProbe::NotChecked,
             valid_roots,
             invalid_roots,
             current_backend: None,
@@ -200,14 +215,8 @@ impl fmt::Display for FileSearchDiagnosticsState {
             f,
             "Use Everything for global filename search: {}; detected es.exe: {}; detected rg: {}; valid roots: {}; invalid roots: {}; current backend: {}; active search state: {}; last search duration: {}; last result count: {}; last backend error: {}; inaccessible entries: {}; preview cache: {}; full-file preview limit: {} bytes",
             self.everything_enabled,
-            self.detected_everything
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "not detected".into()),
-            self.detected_ripgrep
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "not detected".into()),
+            self.detected_everything.display_label(),
+            self.detected_ripgrep.display_label(),
             self.valid_roots.len(),
             self.invalid_roots.len(),
             self.current_backend.as_deref().unwrap_or("none"),
@@ -743,11 +752,61 @@ mod diagnostics_state_tests {
     }
 
     #[test]
+    fn diagnostics_from_settings_leaves_executables_not_checked() {
+        let settings = FileSearchSettings {
+            ripgrep_executable_path: PathBuf::from("/definitely/missing/rg"),
+            everything_executable_path: PathBuf::from("/definitely/missing/es.exe"),
+            everything_enabled: true,
+            ..FileSearchSettings::default()
+        };
+
+        let state = FileSearchDiagnosticsState::from_settings(&settings);
+
+        assert_eq!(
+            state.detected_ripgrep,
+            FileSearchExecutableProbe::NotChecked
+        );
+        assert_eq!(
+            state.detected_everything,
+            FileSearchExecutableProbe::NotChecked
+        );
+        assert!(state.to_string().contains("detected rg: not checked"));
+        assert!(state.to_string().contains("detected es.exe: not checked"));
+    }
+
+    #[test]
+    fn diagnostics_can_display_cached_detected_state() {
+        let mut state = FileSearchDiagnosticsState::from_settings(&FileSearchSettings::default());
+        state.detected_ripgrep = FileSearchExecutableProbe::Detected(PathBuf::from("/tmp/rg"));
+        state.detected_everything = FileSearchExecutableProbe::NotDetected;
+
+        let formatted = state.to_string();
+
+        assert!(formatted.contains("detected rg: /tmp/rg"));
+        assert!(formatted.contains("detected es.exe: not detected"));
+    }
+
+    #[test]
+    fn diagnostics_from_settings_reports_invalid_roots_with_static_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let settings = FileSearchSettings {
+            global_search_roots: vec![temp.path().to_path_buf(), missing.clone()],
+            ..FileSearchSettings::default()
+        };
+
+        let state = FileSearchDiagnosticsState::from_settings(&settings);
+
+        assert_eq!(state.valid_roots, vec![temp.path().to_path_buf()]);
+        assert_eq!(state.invalid_roots, vec![missing]);
+    }
+
+    #[test]
     fn diagnostics_formatting_includes_expected_fields() {
         let state = FileSearchDiagnosticsState {
             everything_enabled: true,
-            detected_everything: Some(PathBuf::from("es.exe")),
-            detected_ripgrep: Some(PathBuf::from("rg")),
+            detected_everything: FileSearchExecutableProbe::Detected(PathBuf::from("es.exe")),
+            detected_ripgrep: FileSearchExecutableProbe::Detected(PathBuf::from("rg")),
             valid_roots: vec![PathBuf::from("/")],
             invalid_roots: vec![PathBuf::from("/missing")],
             current_backend: Some("ripgrep".into()),
