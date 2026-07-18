@@ -196,7 +196,19 @@ fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
     }
 }
 
+type RipgrepProbe<'a> =
+    dyn Fn(&Path, &ExecutableSearchContext) -> Option<discovery::RipgrepResolution> + 'a;
+
 fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut RipgrepSettingsUiState) {
+    ripgrep_settings_ui_with_probe(ui, path, state, &discovery::discover_ripgrep);
+}
+
+fn ripgrep_settings_ui_with_probe(
+    ui: &mut egui::Ui,
+    path: &mut PathBuf,
+    state: &mut RipgrepSettingsUiState,
+    probe: &RipgrepProbe<'_>,
+) {
     ui.separator();
     ui.label("ripgrep executable");
     let mut text = path.display().to_string();
@@ -204,7 +216,7 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
         ui.label("Absolute path");
         if ui.text_edit_singleline(&mut text).changed() {
             *path = PathBuf::from(text.trim());
-            invalidate_configured_ripgrep_state(state);
+            invalidate_configured_result(state);
         }
         if ui.button("Browse…").clicked() {
             #[cfg(windows)]
@@ -213,7 +225,7 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
             let dialog = rfd::FileDialog::new();
             if let Some(selected) = dialog.pick_file() {
                 *path = selected.canonicalize().unwrap_or(selected);
-                invalidate_configured_ripgrep_state(state);
+                invalidate_configured_result(state);
             }
         }
     });
@@ -221,7 +233,7 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
     ui.horizontal(|ui| {
         if ui.button("Auto-detect").clicked() {
             let context = ExecutableSearchContext::from_process();
-            state.automatic_result = discovery::discover_ripgrep(Path::new(""), &context);
+            auto_detect_ripgrep(state, &context, probe);
         }
         if let Some(detected) = state
             .automatic_result
@@ -234,7 +246,7 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
             ));
             if detected.path != *path && ui.button("Use detected path").clicked() {
                 *path = detected.path.clone();
-                invalidate_configured_ripgrep_state(state);
+                invalidate_configured_result(state);
             }
         } else if state.automatic_result.is_some() {
             ui.label("Best detected candidate: not found");
@@ -246,20 +258,10 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
     ui.horizontal(|ui| {
         if ui.button("Test").clicked() {
             let context = ExecutableSearchContext::from_process();
-            let result = if path.as_os_str().is_empty() {
-                state.automatic_result.clone().or_else(|| {
-                    let automatic = discovery::discover_ripgrep(Path::new(""), &context);
-                    state.automatic_result = automatic.clone();
-                    automatic
-                })
-            } else {
-                discovery::discover_ripgrep(path, &context)
-            };
-            state.configured_result = result;
-            state.last_tested_path = Some(path.clone());
+            test_configured_ripgrep(state, path, &context, probe);
         }
-        if configured_ripgrep_result_is_current(state, path) {
-            match state.configured_result.as_ref() {
+        if cached_configured_result_for_path(state, path).is_some() {
+            match cached_configured_result_for_path(state, path) {
                 Some(resolution) if resolution.version.is_some() => {
                     ui.colored_label(egui::Color32::GREEN, "Validation: ripgrep is available");
                 }
@@ -281,10 +283,7 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
         }
     });
 
-    let configured_resolution = configured_ripgrep_result_is_current(state, path)
-        .then_some(state.configured_result.as_ref())
-        .flatten();
-    let display_resolution = configured_resolution.or(state.automatic_result.as_ref());
+    let display_resolution = display_resolution_for_state(state, path);
     let open_folder_path = display_resolution
         .and_then(|resolution| resolution.version.as_ref().map(|_| resolution.path.clone()))
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
@@ -324,13 +323,56 @@ fn ripgrep_settings_ui(ui: &mut egui::Ui, path: &mut PathBuf, state: &mut Ripgre
     }
 }
 
-fn configured_ripgrep_result_is_current(state: &RipgrepSettingsUiState, path: &Path) -> bool {
-    state.last_tested_path.as_deref() == Some(path)
+fn cached_configured_result_for_path<'a>(
+    state: &'a RipgrepSettingsUiState,
+    path: &Path,
+) -> Option<&'a discovery::RipgrepResolution> {
+    (state.last_tested_path.as_deref() == Some(path))
+        .then_some(state.configured_result.as_ref())
+        .flatten()
 }
 
-fn invalidate_configured_ripgrep_state(state: &mut RipgrepSettingsUiState) {
+fn configured_ripgrep_result_is_current(state: &RipgrepSettingsUiState, path: &Path) -> bool {
+    cached_configured_result_for_path(state, path).is_some()
+}
+
+fn invalidate_configured_result(state: &mut RipgrepSettingsUiState) {
     state.configured_result = None;
     state.last_tested_path = None;
+}
+
+fn display_resolution_for_state<'a>(
+    state: &'a RipgrepSettingsUiState,
+    path: &Path,
+) -> Option<&'a discovery::RipgrepResolution> {
+    cached_configured_result_for_path(state, path).or(state.automatic_result.as_ref())
+}
+
+fn auto_detect_ripgrep(
+    state: &mut RipgrepSettingsUiState,
+    context: &ExecutableSearchContext,
+    probe: &RipgrepProbe<'_>,
+) {
+    state.automatic_result = probe(Path::new(""), context);
+}
+
+fn test_configured_ripgrep(
+    state: &mut RipgrepSettingsUiState,
+    path: &Path,
+    context: &ExecutableSearchContext,
+    probe: &RipgrepProbe<'_>,
+) {
+    let result = if path.as_os_str().is_empty() {
+        state.automatic_result.clone().or_else(|| {
+            let automatic = probe(Path::new(""), context);
+            state.automatic_result = automatic.clone();
+            automatic
+        })
+    } else {
+        probe(path, context)
+    };
+    state.configured_result = result;
+    state.last_tested_path = Some(path.to_path_buf());
 }
 
 fn resolution_source_label(source: &ExecutableResolutionSource) -> &'static str {
@@ -477,6 +519,7 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::Value;
+    use std::cell::{Cell, RefCell};
 
     fn plugin() -> FileSearchPlugin {
         FileSearchPlugin::default()
@@ -500,6 +543,121 @@ mod tests {
         }
     }
 
+    fn deterministic_context() -> ExecutableSearchContext {
+        ExecutableSearchContext {
+            launcher_directory: PathBuf::from("launcher"),
+            path_directories: vec![PathBuf::from("path-entry")],
+        }
+    }
+
+    #[test]
+    fn display_helper_reads_cached_results_without_probing() {
+        let call_count = Cell::new(0);
+        let probe = |_path: &Path, _context: &ExecutableSearchContext| {
+            call_count.set(call_count.get() + 1);
+            Some(sample_ripgrep_resolution("unexpected"))
+        };
+        let state = RipgrepSettingsUiState {
+            automatic_result: Some(sample_ripgrep_resolution("auto-rg")),
+            configured_result: Some(sample_ripgrep_resolution("configured-rg")),
+            last_tested_path: Some(PathBuf::from("configured-rg")),
+        };
+
+        let resolution = display_resolution_for_state(&state, Path::new("configured-rg"))
+            .expect("cached configured resolution should be displayed");
+
+        assert_eq!(resolution.path, PathBuf::from("configured-rg"));
+        assert_eq!(call_count.get(), 0);
+        let _ = probe;
+    }
+
+    #[test]
+    fn auto_detect_action_probes_once_with_empty_path() {
+        let call_count = Cell::new(0);
+        let probed_paths = RefCell::new(Vec::new());
+        let probe = |path: &Path, _context: &ExecutableSearchContext| {
+            call_count.set(call_count.get() + 1);
+            probed_paths.borrow_mut().push(path.to_path_buf());
+            Some(sample_ripgrep_resolution("auto-rg"))
+        };
+        let mut state = RipgrepSettingsUiState::default();
+
+        auto_detect_ripgrep(&mut state, &deterministic_context(), &probe);
+
+        assert_eq!(call_count.get(), 1);
+        assert_eq!(probed_paths.borrow().as_slice(), &[PathBuf::new()]);
+        assert_eq!(
+            state.automatic_result.as_ref().map(|result| &result.path),
+            Some(&PathBuf::from("auto-rg"))
+        );
+    }
+
+    #[test]
+    fn test_action_probes_once_with_configured_path() {
+        let call_count = Cell::new(0);
+        let probed_paths = RefCell::new(Vec::new());
+        let configured_path = PathBuf::from("custom-rg");
+        let probe = |path: &Path, _context: &ExecutableSearchContext| {
+            call_count.set(call_count.get() + 1);
+            probed_paths.borrow_mut().push(path.to_path_buf());
+            Some(sample_ripgrep_resolution(&path.to_string_lossy()))
+        };
+        let mut state = RipgrepSettingsUiState::default();
+
+        test_configured_ripgrep(
+            &mut state,
+            &configured_path,
+            &deterministic_context(),
+            &probe,
+        );
+
+        assert_eq!(call_count.get(), 1);
+        assert_eq!(probed_paths.borrow().as_slice(), &[configured_path.clone()]);
+        assert_eq!(state.last_tested_path.as_ref(), Some(&configured_path));
+        assert!(cached_configured_result_for_path(&state, &configured_path).is_some());
+    }
+
+    #[test]
+    fn repeated_display_calls_after_test_action_do_not_probe_again() {
+        let call_count = Cell::new(0);
+        let configured_path = PathBuf::from("custom-rg");
+        let probe = |path: &Path, _context: &ExecutableSearchContext| {
+            call_count.set(call_count.get() + 1);
+            Some(sample_ripgrep_resolution(&path.to_string_lossy()))
+        };
+        let mut state = RipgrepSettingsUiState::default();
+
+        test_configured_ripgrep(
+            &mut state,
+            &configured_path,
+            &deterministic_context(),
+            &probe,
+        );
+        assert_eq!(call_count.get(), 1);
+
+        for _ in 0..3 {
+            let resolution = display_resolution_for_state(&state, &configured_path)
+                .expect("tested configured result should be displayed");
+            assert_eq!(resolution.path, configured_path);
+        }
+        assert_eq!(call_count.get(), 1);
+    }
+
+    #[test]
+    fn changing_configured_path_invalidates_configured_cached_result() {
+        let mut state = RipgrepSettingsUiState {
+            configured_result: Some(sample_ripgrep_resolution("rg")),
+            last_tested_path: Some(PathBuf::from("rg")),
+            ..Default::default()
+        };
+
+        invalidate_configured_result(&mut state);
+
+        assert!(cached_configured_result_for_path(&state, Path::new("rg")).is_none());
+        assert!(state.configured_result.is_none());
+        assert!(state.last_tested_path.is_none());
+    }
+
     #[test]
     fn configured_ripgrep_result_is_valid_only_for_last_tested_path() {
         let mut state = RipgrepSettingsUiState {
@@ -518,7 +676,7 @@ mod tests {
         ));
 
         state.configured_result = None;
-        assert!(configured_ripgrep_result_is_current(
+        assert!(!configured_ripgrep_result_is_current(
             &state,
             Path::new("rg")
         ));
@@ -538,7 +696,7 @@ mod tests {
             ..Default::default()
         };
 
-        invalidate_configured_ripgrep_state(&mut state);
+        invalidate_configured_result(&mut state);
 
         assert!(state.configured_result.is_none());
         assert!(state.last_tested_path.is_none());
@@ -551,10 +709,8 @@ mod tests {
             last_tested_path: Some(PathBuf::from("rg")),
             ..Default::default()
         };
-        let mut path = PathBuf::from("rg");
-
-        path = PathBuf::from("/custom/bin/rg");
-        invalidate_configured_ripgrep_state(&mut state);
+        let path = PathBuf::from("/custom/bin/rg");
+        invalidate_configured_result(&mut state);
 
         assert_eq!(path, PathBuf::from("/custom/bin/rg"));
         assert!(state.configured_result.is_none());
