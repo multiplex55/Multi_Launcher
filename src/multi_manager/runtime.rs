@@ -822,7 +822,8 @@ mod tests {
         let info = Arc::new(Mutex::new(None));
         let events = event_queue();
         let mut debounce = HashMap::new();
-        let ops = FakeWindowOps::default();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(42, rect(1));
         let now = Instant::now();
 
         runtime_tick(
@@ -853,7 +854,8 @@ mod tests {
         let info = Arc::new(Mutex::new(None));
         let events = event_queue();
         let mut debounce = HashMap::new();
-        let ops = FakeWindowOps::default();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(2, rect(2));
 
         runtime_tick(
             &mut workspaces,
