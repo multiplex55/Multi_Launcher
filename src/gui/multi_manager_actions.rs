@@ -1,4 +1,5 @@
 use super::*;
+use crate::multi_manager::activation::{self, ActivationOperation, ActivationResult};
 use crate::multi_manager::apply_capture::{self, ApplyCaptureResult};
 use crate::multi_manager::bindings;
 use crate::multi_manager::capture;
@@ -44,22 +45,23 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_send_all_home(&mut self) {
-        let workspaces = self
-            .multi_manager
-            .workspaces
-            .lock()
-            .ok()
-            .map(|workspaces| workspaces.clone());
-        let Some(workspaces) = workspaces else {
+        let result = {
+            match self.multi_manager.workspaces.lock() {
+                Ok(mut workspaces) => Ok(activation::activate_all_home(&mut workspaces)),
+                Err(_) => Err(()),
+            }
+        };
+        let Ok(result) = result else {
             self.report_error_message(
                 "multi_manager.send_all_home",
                 "Failed to lock MultiManager workspaces to send all windows home",
             );
             return;
         };
-
-        crate::multi_manager::runtime::send_all_home(&workspaces);
-        self.add_success_toast("Sent all MultiManager windows home");
+        if result.bindings_changed {
+            self.multi_manager.mark_dirty();
+        }
+        self.multi_manager_report_activation("Sent all MultiManager windows home", result);
     }
 
     pub fn multi_manager_reconnect_windows(&mut self) {
@@ -184,21 +186,12 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_toggle_workspace(&mut self, workspace_id: &str) {
-        if self
-            .multi_manager
-            .with_workspace_mut(
-                workspace_id,
-                crate::multi_manager::runtime::toggle_workspace,
-            )
-            .is_some()
-        {
-            self.add_success_toast("Toggled MultiManager workspace");
-        } else {
-            self.report_error_message(
-                "multi_manager.toggle",
-                format!("Failed to toggle MultiManager workspace: {workspace_id}"),
-            );
-        }
+        self.multi_manager_activate_workspace(
+            workspace_id,
+            ActivationOperation::Toggle,
+            "Toggled MultiManager workspace",
+            "multi_manager.toggle",
+        );
     }
 
     pub fn multi_manager_send_home(&mut self, workspace_id: &str) {
@@ -366,26 +359,76 @@ impl LauncherApp {
     }
 
     fn multi_manager_move_workspace(&mut self, workspace_id: &str, home: bool) {
-        let workspace = match self.multi_manager.workspaces.lock() {
-            Ok(workspaces) => workspaces
-                .iter()
-                .find(|workspace| workspace.id == workspace_id)
-                .cloned(),
+        let (operation, success) = if home {
+            (
+                ActivationOperation::SendHome,
+                "Sent MultiManager workspace home",
+            )
+        } else {
+            (
+                ActivationOperation::SendTarget,
+                "Sent MultiManager workspace to target",
+            )
+        };
+        self.multi_manager_activate_workspace(
+            workspace_id,
+            operation,
+            success,
+            "multi_manager.move",
+        );
+    }
+
+    fn multi_manager_activate_workspace(
+        &mut self,
+        workspace_id: &str,
+        operation: ActivationOperation,
+        success_message: &str,
+        error_context: &'static str,
+    ) {
+        let result = match self.multi_manager.workspaces.lock() {
+            Ok(mut workspaces) => {
+                activation::activate_workspace(&mut workspaces, workspace_id, operation)
+            }
             Err(_) => None,
         };
-        let Some(workspace) = workspace else {
+        let Some(result) = result else {
             self.report_error_message(
-                "multi_manager.move",
-                format!("Failed to move MultiManager workspace: {workspace_id}"),
+                error_context,
+                format!("Failed to activate MultiManager workspace: {workspace_id}"),
             );
             return;
         };
-        if home {
-            crate::multi_manager::runtime::send_workspace_home(&workspace);
-            self.add_success_toast("Sent MultiManager workspace home");
+        if result.bindings_changed {
+            self.multi_manager.mark_dirty();
+        }
+        self.multi_manager_report_activation(success_message, result);
+    }
+
+    fn multi_manager_report_activation(&mut self, success_message: &str, result: ActivationResult) {
+        if result.all_active_handled() {
+            self.add_success_toast(success_message);
+        } else if result.moved > 0 && result.has_unresolved() {
+            let labels = if result.unresolved_labels.is_empty() {
+                "unknown windows".to_string()
+            } else {
+                result.unresolved_labels.join(", ")
+            };
+            self.add_warning_toast(format!("{success_message}; unresolved: {labels}"));
+        } else if !result.movement_errors.is_empty() {
+            self.report_error_message(
+                "multi_manager.activate",
+                format!(
+                    "MultiManager movement errors: {}",
+                    result.movement_errors.join("; ")
+                ),
+            );
+        } else if result.has_unresolved() {
+            let labels = result.unresolved_labels.join(", ");
+            self.add_warning_toast(format!(
+                "No MultiManager windows moved; unresolved: {labels}"
+            ));
         } else {
-            crate::multi_manager::runtime::send_workspace_target(&workspace);
-            self.add_success_toast("Sent MultiManager workspace to target");
+            self.add_success_toast(success_message);
         }
     }
 
@@ -831,6 +874,16 @@ impl LauncherApp {
             self.add_toast(Toast {
                 text: msg.into().into(),
                 kind: ToastKind::Success,
+                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+            });
+        }
+    }
+
+    pub(crate) fn add_warning_toast(&mut self, msg: impl Into<String>) {
+        if self.enable_toasts {
+            self.add_toast(Toast {
+                text: msg.into().into(),
+                kind: ToastKind::Warning,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
             });
         }

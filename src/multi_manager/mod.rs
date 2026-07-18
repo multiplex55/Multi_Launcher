@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod apply_capture;
 pub mod bindings;
 pub mod capture;
