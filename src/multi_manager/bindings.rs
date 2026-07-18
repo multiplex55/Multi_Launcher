@@ -1,3 +1,4 @@
+use crate::multi_manager::identity;
 use crate::multi_manager::model::{MmWindow, MmWorkspace};
 use crate::multi_manager::reconnect;
 use crate::multi_manager::win::{self, EnumeratedWindow};
@@ -70,7 +71,34 @@ pub fn load_bindings(path: &Path) -> Result<Vec<WorkspaceBindingSnapshot>> {
 }
 
 pub fn restore_bindings(workspaces: &mut [MmWorkspace], snapshots: &[WorkspaceBindingSnapshot]) {
-    let live = win::enumerate_top_level_windows().unwrap_or_default();
+    let mut live = win::enumerate_top_level_windows().unwrap_or_default();
+    for window_snapshot in snapshots.iter().flat_map(|snapshot| &snapshot.windows) {
+        if window_snapshot.hwnd == 0
+            || live
+                .iter()
+                .any(|window| window.hwnd == window_snapshot.hwnd)
+        {
+            continue;
+        }
+        let direct = win::query_hwnd_identity(window_snapshot.hwnd);
+        if direct.is_window {
+            live.push(EnumeratedWindow {
+                hwnd: direct.hwnd,
+                title: direct.live_title,
+                executable: direct.executable,
+                class_name: direct.class_name,
+                process_path: direct.process_path,
+                rect: win::window_rect(window_snapshot.hwnd).unwrap_or(
+                    crate::multi_manager::model::MmRect {
+                        x: 0,
+                        y: 0,
+                        w: 0,
+                        h: 0,
+                    },
+                ),
+            });
+        }
+    }
     restore_bindings_with_windows(workspaces, snapshots, &live);
 }
 
@@ -99,7 +127,15 @@ fn restore_bindings_with_windows(
                 continue;
             };
             let saved_window = window_from_snapshot(window_snapshot);
-            let (_, hwnd) = reconnect::match_saved_window_against_candidates(&saved_window, live);
+            let direct_match = live.iter().find(|candidate| {
+                candidate.hwnd == window_snapshot.hwnd
+                    && identity::stable_identity_matches_enumerated(&saved_window, candidate)
+            });
+            let hwnd = direct_match.map(|candidate| candidate.hwnd).or_else(|| {
+                let (_, hwnd) =
+                    reconnect::match_saved_window_against_candidates(&saved_window, live);
+                hwnd
+            });
             if let Some(hwnd) = hwnd {
                 workspace.windows[window_index].mark_reconnected(hwnd);
                 if let Some(live_window) = live.iter().find(|candidate| candidate.hwnd == hwnd) {
@@ -264,10 +300,17 @@ mod tests {
             windows: vec![WindowBindingSnapshot {
                 hwnd: 7,
                 captured_title: "Doc".into(),
+                executable: Some("editor.exe".into()),
+                class_name: Some("Editor".into()),
+                process_path: Some("C:/Apps/editor.exe".into()),
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_windows(&mut workspaces, &snapshots, &[live(7, "Doc", "", "", "")]);
+        restore_bindings_with_windows(
+            &mut workspaces,
+            &snapshots,
+            &[live(7, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe")],
+        );
         assert_eq!(workspaces[0].windows[0].hwnd, 7);
         assert_eq!(workspaces[1].windows[0].hwnd, 0);
     }
@@ -281,10 +324,17 @@ mod tests {
             windows: vec![WindowBindingSnapshot {
                 hwnd: 8,
                 captured_title: "Doc".into(),
+                executable: Some("editor.exe".into()),
+                class_name: Some("Editor".into()),
+                process_path: Some("C:/Apps/editor.exe".into()),
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_windows(&mut workspaces, &snapshots, &[live(8, "Doc", "", "", "")]);
+        restore_bindings_with_windows(
+            &mut workspaces,
+            &snapshots,
+            &[live(8, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe")],
+        );
         assert_eq!(workspaces[0].windows[0].hwnd, 8);
     }
 
