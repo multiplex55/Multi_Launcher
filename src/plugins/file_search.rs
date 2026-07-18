@@ -24,6 +24,7 @@ pub struct FileSearchPlugin {
 #[derive(Debug, Clone, Default)]
 struct RipgrepSettingsUiState {
     automatic_result: Option<crate::file_search::discovery::RipgrepResolution>,
+    automatic_checked: bool,
     configured_result: Option<crate::file_search::discovery::RipgrepResolution>,
     last_tested_path: Option<PathBuf>,
 }
@@ -216,7 +217,6 @@ fn ripgrep_settings_ui_with_probe(
         ui.label("Absolute path");
         if ui.text_edit_singleline(&mut text).changed() {
             *path = PathBuf::from(text.trim());
-            invalidate_configured_result(state);
         }
         if ui.button("Browse…").clicked() {
             #[cfg(windows)]
@@ -225,7 +225,6 @@ fn ripgrep_settings_ui_with_probe(
             let dialog = rfd::FileDialog::new();
             if let Some(selected) = dialog.pick_file() {
                 *path = selected.canonicalize().unwrap_or(selected);
-                invalidate_configured_result(state);
             }
         }
     });
@@ -235,23 +234,16 @@ fn ripgrep_settings_ui_with_probe(
             let context = ExecutableSearchContext::from_process();
             auto_detect_ripgrep(state, &context, probe);
         }
+        ui.label(auto_detect_label(state));
         if let Some(detected) = state
             .automatic_result
             .as_ref()
-            .filter(|detected| detected.version.is_some())
+            .filter(|detected| ripgrep_resolution_has_valid_path_and_version(detected))
         {
-            ui.label(format!(
-                "Best detected candidate: {}",
-                detected.path.display()
-            ));
             if detected.path != *path && ui.button("Use detected path").clicked() {
                 *path = detected.path.clone();
                 invalidate_configured_result(state);
             }
-        } else if state.automatic_result.is_some() {
-            ui.label("Best detected candidate: not found");
-        } else {
-            ui.label("Best detected candidate: not run yet");
         }
     });
 
@@ -260,32 +252,27 @@ fn ripgrep_settings_ui_with_probe(
             let context = ExecutableSearchContext::from_process();
             test_configured_ripgrep(state, path, &context, probe);
         }
-        if cached_configured_result_for_path(state, path).is_some() {
-            match cached_configured_result_for_path(state, path) {
-                Some(resolution) if resolution.version.is_some() => {
-                    ui.colored_label(egui::Color32::GREEN, "Validation: ripgrep is available");
-                }
-                Some(resolution) if !resolution.warnings.is_empty() => {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        format!("Validation: {}", resolution.warnings.join("; ")),
-                    );
-                }
-                _ => {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        "Validation: ripgrep was not found or failed rg --version",
-                    );
-                }
+        let label = configured_validation_label(state, path);
+        match configured_validation_label_kind(state, path) {
+            ValidationLabelKind::Available => {
+                ui.colored_label(egui::Color32::GREEN, label);
             }
-        } else {
-            ui.label("Validation: not tested yet");
+            ValidationLabelKind::Warning => {
+                ui.colored_label(egui::Color32::YELLOW, label);
+            }
+            ValidationLabelKind::Failure => {
+                ui.colored_label(egui::Color32::RED, label);
+            }
+            ValidationLabelKind::Untested => {
+                ui.label(label);
+            }
         }
     });
 
     let display_resolution = display_resolution_for_state(state, path);
     let open_folder_path = display_resolution
-        .and_then(|resolution| resolution.version.as_ref().map(|_| resolution.path.clone()))
+        .filter(|resolution| ripgrep_resolution_has_valid_path_and_version(resolution))
+        .map(|resolution| resolution.path.clone())
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
     ui.add_enabled_ui(open_folder_path.is_some(), |ui| {
         if ui.button("Open folder").clicked()
@@ -348,11 +335,76 @@ fn display_resolution_for_state<'a>(
     cached_configured_result_for_path(state, path).or(state.automatic_result.as_ref())
 }
 
+fn ripgrep_resolution_has_valid_path_and_version(
+    resolution: &discovery::RipgrepResolution,
+) -> bool {
+    !resolution.path.as_os_str().is_empty() && resolution.version.is_some()
+}
+
+fn auto_detect_label(state: &RipgrepSettingsUiState) -> String {
+    match (state.automatic_checked, state.automatic_result.as_ref()) {
+        (false, _) => "Best detected candidate: not checked".to_owned(),
+        (true, Some(resolution)) if ripgrep_resolution_has_valid_path_and_version(resolution) => {
+            format!(
+                "Best detected candidate: {} ({})",
+                resolution.path.display(),
+                resolution
+                    .version
+                    .as_deref()
+                    .unwrap_or("version not available")
+            )
+        }
+        (true, Some(resolution)) if !resolution.path.as_os_str().is_empty() => {
+            format!("Best detected candidate: {}", resolution.path.display())
+        }
+        (true, _) => "Best detected candidate: not found".to_owned(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationLabelKind {
+    Available,
+    Warning,
+    Failure,
+    Untested,
+}
+
+fn configured_validation_label_kind(
+    state: &RipgrepSettingsUiState,
+    path: &Path,
+) -> ValidationLabelKind {
+    match cached_configured_result_for_path(state, path) {
+        Some(resolution) if !resolution.warnings.is_empty() => ValidationLabelKind::Warning,
+        Some(resolution) if ripgrep_resolution_has_valid_path_and_version(resolution) => {
+            ValidationLabelKind::Available
+        }
+        Some(_) => ValidationLabelKind::Failure,
+        None => ValidationLabelKind::Untested,
+    }
+}
+
+fn configured_validation_label(state: &RipgrepSettingsUiState, path: &Path) -> String {
+    match cached_configured_result_for_path(state, path) {
+        Some(resolution) if !resolution.warnings.is_empty() => {
+            format!("Validation: {}", resolution.warnings.join("; "))
+        }
+        Some(resolution) if ripgrep_resolution_has_valid_path_and_version(resolution) => {
+            "Validation: ripgrep is available".to_owned()
+        }
+        Some(_) => "Validation: ripgrep was not found or failed rg --version".to_owned(),
+        None if state.configured_result.is_some() || state.last_tested_path.is_some() => {
+            "Validation: not tested for this path".to_owned()
+        }
+        None => "Validation: not tested".to_owned(),
+    }
+}
+
 fn auto_detect_ripgrep(
     state: &mut RipgrepSettingsUiState,
     context: &ExecutableSearchContext,
     probe: &RipgrepProbe<'_>,
 ) {
+    state.automatic_checked = true;
     state.automatic_result = probe(Path::new(""), context);
 }
 
@@ -551,6 +603,65 @@ mod tests {
     }
 
     #[test]
+    fn auto_detect_label_tracks_not_checked_success_and_failure_states() {
+        let mut state = RipgrepSettingsUiState::default();
+        assert_eq!(
+            auto_detect_label(&state),
+            "Best detected candidate: not checked"
+        );
+
+        state.automatic_checked = true;
+        state.automatic_result = Some(sample_ripgrep_resolution("auto-rg"));
+        assert_eq!(
+            auto_detect_label(&state),
+            "Best detected candidate: auto-rg (ripgrep 14.1.0)"
+        );
+
+        state.automatic_result = None;
+        assert_eq!(
+            auto_detect_label(&state),
+            "Best detected candidate: not found"
+        );
+    }
+
+    #[test]
+    fn configured_validation_label_tracks_current_stale_warning_and_failure_states() {
+        let mut state = RipgrepSettingsUiState::default();
+        assert_eq!(
+            configured_validation_label(&state, Path::new("rg")),
+            "Validation: not tested"
+        );
+
+        state.configured_result = Some(sample_ripgrep_resolution("rg"));
+        state.last_tested_path = Some(PathBuf::from("rg"));
+        assert_eq!(
+            configured_validation_label(&state, Path::new("rg")),
+            "Validation: ripgrep is available"
+        );
+        assert_eq!(
+            configured_validation_label(&state, Path::new("other-rg")),
+            "Validation: not tested for this path"
+        );
+
+        let mut warning = sample_ripgrep_resolution("rg");
+        warning.version = None;
+        warning.warnings = vec!["rg --version exited with status 1".to_owned()];
+        state.configured_result = Some(warning);
+        assert_eq!(
+            configured_validation_label(&state, Path::new("rg")),
+            "Validation: rg --version exited with status 1"
+        );
+
+        let mut failure = sample_ripgrep_resolution("rg");
+        failure.version = None;
+        state.configured_result = Some(failure);
+        assert_eq!(
+            configured_validation_label(&state, Path::new("rg")),
+            "Validation: ripgrep was not found or failed rg --version"
+        );
+    }
+
+    #[test]
     fn display_helper_reads_cached_results_without_probing() {
         let call_count = Cell::new(0);
         let probe = |_path: &Path, _context: &ExecutableSearchContext| {
@@ -559,6 +670,7 @@ mod tests {
         };
         let state = RipgrepSettingsUiState {
             automatic_result: Some(sample_ripgrep_resolution("auto-rg")),
+            automatic_checked: true,
             configured_result: Some(sample_ripgrep_resolution("configured-rg")),
             last_tested_path: Some(PathBuf::from("configured-rg")),
         };
