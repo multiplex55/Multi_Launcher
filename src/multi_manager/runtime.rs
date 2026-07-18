@@ -188,7 +188,7 @@ pub fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) 
     let all_at_home = workspace
         .windows
         .iter()
-        .filter(|w| !w.disabled && w.valid && w.hwnd != 0)
+        .filter(|w| w.can_activate())
         .all(|w| {
             w.home_rect
                 .is_some_and(|rect| ops.is_window_at_rect(w.hwnd, rect))
@@ -210,9 +210,7 @@ pub fn rotate_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) 
         .windows
         .iter()
         .enumerate()
-        .filter_map(|(idx, window)| {
-            (!window.disabled && window.valid && window.hwnd != 0).then_some(idx)
-        })
+        .filter_map(|(idx, window)| window.can_activate().then_some(idx))
         .collect();
     if valid_indices.is_empty() {
         return;
@@ -258,7 +256,7 @@ fn move_workspace_windows(workspace: &MmWorkspace, kind: RectKind, ops: &impl Wi
         return;
     }
     for window in &workspace.windows {
-        if window.disabled || !window.valid || window.hwnd == 0 {
+        if !window.can_activate() {
             continue;
         }
         let rect = match kind {
@@ -594,7 +592,7 @@ mod tests {
         {
             let mut locked = workspaces.lock().unwrap();
             locked[0].windows[0].hwnd = 0;
-            locked[0].windows[0].title = "Notes".into();
+            locked[0].windows[0].captured_title = "Notes".into();
             locked[0].windows[0].executable = "app.exe".into();
             locked[0].windows[0].class_name = "AppClass".into();
             locked[0].windows[0].process_path = "C:/app.exe".into();
@@ -618,7 +616,7 @@ mod tests {
             let mut locked = workspaces.lock().unwrap();
             locked[0].windows[0].hwnd = 7;
             locked[0].windows[0].valid = false;
-            locked[0].windows[0].title = "Notes".into();
+            locked[0].windows[0].captured_title = "Notes".into();
             locked[0].windows[0].executable = "app.exe".into();
             locked[0].windows[0].class_name = "AppClass".into();
             locked[0].windows[0].process_path = "C:/app.exe".into();
@@ -644,7 +642,7 @@ mod tests {
         {
             let mut locked = workspaces.lock().unwrap();
             locked[0].windows = vec![window(0, true, rect(1), rect(11))];
-            locked[0].windows[0].title = "Notes".into();
+            locked[0].windows[0].captured_title = "Notes".into();
             locked[0].windows[0].executable = "app.exe".into();
             locked[0].windows[0].class_name = "AppClass".into();
             locked[0].windows[0].process_path = "C:/app.exe".into();

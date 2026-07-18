@@ -23,18 +23,19 @@ pub fn apply_capture_to_workspaces(
                 return ApplyCaptureResult::MissingWorkspace;
             };
 
-            workspace.windows.push(MmWindow {
+            let mut window = MmWindow {
                 alias: captured.title.clone(),
-                title: captured.title,
-                hwnd: captured.hwnd,
+                captured_title: captured.title.clone(),
+                live_title: captured.title,
                 home_rect: Some(captured.rect),
                 target_rect: Some(captured.rect),
                 executable: captured.executable,
                 class_name: captured.class_name,
                 process_path: captured.process_path,
-                valid: true,
                 ..Default::default()
-            });
+            };
+            window.mark_bound(captured.hwnd);
+            workspace.windows.push(window);
             ApplyCaptureResult::Applied
         }
         PendingCaptureAction::RecaptureWindow {
@@ -51,12 +52,12 @@ pub fn apply_capture_to_workspaces(
                 return ApplyCaptureResult::MissingWindow;
             };
 
-            window.hwnd = captured.hwnd;
-            window.title = captured.title.clone();
+            window.captured_title = captured.title.clone();
+            window.live_title = captured.title.clone();
             window.executable = captured.executable;
             window.class_name = captured.class_name;
             window.process_path = captured.process_path;
-            window.valid = true;
+            window.mark_bound(captured.hwnd);
             if window.alias.trim().is_empty() {
                 window.alias = captured.title;
             }
@@ -81,20 +82,20 @@ mod tests {
         MmRect { x, y, w, h }
     }
 
-    fn captured(hwnd: usize, title: &str, rect: MmRect) -> CapturedWindow {
+    fn captured(hwnd: usize, captured_title: &str, rect: MmRect) -> CapturedWindow {
         captured_with_metadata(
             hwnd,
-            title,
+            captured_title,
             rect,
-            &format!("{title}.exe"),
-            &format!("{title}Class"),
-            &format!("C:/Apps/{title}.exe"),
+            &format!("{captured_title}.exe"),
+            &format!("{captured_title}Class"),
+            &format!("C:/Apps/{captured_title}.exe"),
         )
     }
 
     fn captured_with_metadata(
         hwnd: usize,
-        title: &str,
+        captured_title: &str,
         rect: MmRect,
         executable: &str,
         class_name: &str,
@@ -102,7 +103,7 @@ mod tests {
     ) -> CapturedWindow {
         CapturedWindow {
             hwnd,
-            title: title.to_string(),
+            title: captured_title.to_string(),
             rect,
             executable: executable.to_string(),
             class_name: class_name.to_string(),
@@ -126,7 +127,7 @@ mod tests {
         assert_eq!(workspaces[0].windows.len(), 1);
         let window = &workspaces[0].windows[0];
         assert_eq!(window.alias, "Editor");
-        assert_eq!(window.title, "Editor");
+        assert_eq!(window.captured_title, "Editor");
         assert_eq!(window.hwnd, 7);
         assert_eq!(window.home_rect, Some(capture_rect));
         assert_eq!(window.target_rect, Some(capture_rect));
@@ -161,8 +162,8 @@ mod tests {
         );
 
         assert_eq!(workspaces[0].windows.len(), 2);
-        assert_eq!(workspaces[0].windows[0].title, "One");
-        assert_eq!(workspaces[0].windows[1].title, "Two");
+        assert_eq!(workspaces[0].windows[0].captured_title, "One");
+        assert_eq!(workspaces[0].windows[1].captured_title, "Two");
     }
 
     #[test]
@@ -170,7 +171,7 @@ mod tests {
         let mut workspaces = vec![MmWorkspace {
             id: "w".into(),
             windows: vec![MmWindow {
-                title: "Old".into(),
+                captured_title: "Old".into(),
                 alias: "Alias".into(),
                 hwnd: 1,
                 valid: false,
@@ -190,7 +191,7 @@ mod tests {
 
         assert_eq!(result, ApplyCaptureResult::Applied);
         assert_eq!(workspaces[0].windows[0].hwnd, 99);
-        assert_eq!(workspaces[0].windows[0].title, "New");
+        assert_eq!(workspaces[0].windows[0].captured_title, "New");
         assert_eq!(workspaces[0].windows[0].executable, "New.exe");
         assert_eq!(workspaces[0].windows[0].class_name, "NewClass");
         assert_eq!(workspaces[0].windows[0].process_path, "C:/Apps/New.exe");
@@ -233,7 +234,7 @@ mod tests {
             id: "w".into(),
             windows: vec![MmWindow {
                 alias: "Stable Alias".into(),
-                title: "Old Title".into(),
+                captured_title: "Old Title".into(),
                 hwnd: 11,
                 executable: "old.exe".into(),
                 class_name: "OldClass".into(),
@@ -265,7 +266,7 @@ mod tests {
         assert_eq!(result, ApplyCaptureResult::Applied);
         assert_eq!(window.alias, "Stable Alias");
         assert_eq!(window.hwnd, 22);
-        assert_eq!(window.title, "New Title");
+        assert_eq!(window.captured_title, "New Title");
         assert_eq!(window.executable, "new.exe");
         assert_eq!(window.class_name, "NewClass");
         assert_eq!(window.process_path, "C:/New/new.exe");

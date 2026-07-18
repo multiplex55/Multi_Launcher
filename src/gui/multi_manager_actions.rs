@@ -325,9 +325,9 @@ impl LauncherApp {
                 .is_some_and(|item| {
                     item.workspace_id == *workspace_id && item.window_index == *window_index
                 })
-            {
-                self.multi_manager.recapture_queue.pop_front();
-            }
+        {
+            self.multi_manager.recapture_queue.pop_front();
+        }
     }
 
     fn multi_manager_capture_target_exists(
@@ -892,10 +892,13 @@ pub(crate) fn build_recapture_queue(
                 .windows
                 .iter()
                 .enumerate()
-                .filter(|&(_window_index, window)| window.hwnd == 0 || !win::is_valid_window(window.hwnd) ).map(|(window_index, _window)| RecaptureQueueItem {
-                            workspace_id: workspace.id.clone(),
-                            window_index,
-                        })
+                .filter(|&(_window_index, window)| {
+                    window.hwnd == 0 || !win::is_valid_window(window.hwnd)
+                })
+                .map(|(window_index, _window)| RecaptureQueueItem {
+                    workspace_id: workspace.id.clone(),
+                    window_index,
+                })
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -961,19 +964,19 @@ mod tests {
         )
     }
 
-    fn captured(hwnd: usize, title: &str) -> CapturedWindow {
+    fn captured(hwnd: usize, captured_title: &str) -> CapturedWindow {
         CapturedWindow {
             hwnd,
-            title: title.to_string(),
+            title: captured_title.to_string(),
             rect: MmRect {
                 x: 0,
                 y: 0,
                 w: 100,
                 h: 100,
             },
-            executable: format!("{title}.exe"),
-            class_name: format!("{title}Class"),
-            process_path: format!("C:/Apps/{title}.exe"),
+            executable: format!("{captured_title}.exe"),
+            class_name: format!("{captured_title}Class"),
+            process_path: format!("C:/Apps/{captured_title}.exe"),
         }
     }
 
@@ -982,12 +985,12 @@ mod tests {
             id: "w".into(),
             windows: vec![
                 MmWindow {
-                    title: "Old 1".into(),
+                    captured_title: "Old 1".into(),
                     hwnd: 0,
                     ..Default::default()
                 },
                 MmWindow {
-                    title: "Old 2".into(),
+                    captured_title: "Old 2".into(),
                     hwnd: 0,
                     ..Default::default()
                 },
@@ -1191,7 +1194,7 @@ mod tests {
         );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
-        assert_eq!(workspaces[0].windows[0].title, "Editor");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Editor");
     }
 
     #[test]
@@ -1230,8 +1233,8 @@ mod tests {
         );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
-        assert_eq!(workspaces[0].windows[0].title, "One");
-        assert_eq!(workspaces[0].windows[1].title, "Two");
+        assert_eq!(workspaces[0].windows[0].captured_title, "One");
+        assert_eq!(workspaces[0].windows[1].captured_title, "Two");
     }
 
     #[test]
@@ -1266,7 +1269,7 @@ mod tests {
         );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
-        assert_eq!(workspaces[0].windows[0].title, "Editor");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Editor");
     }
 
     #[test]
@@ -1389,7 +1392,7 @@ mod tests {
             vec![MmWorkspace {
                 id: "w".into(),
                 windows: vec![MmWindow {
-                    title: "Existing".into(),
+                    captured_title: "Existing".into(),
                     hwnd: 1,
                     ..Default::default()
                 }],
@@ -1422,7 +1425,7 @@ mod tests {
         );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
-        assert_eq!(workspaces[0].windows[0].title, "Existing");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Existing");
     }
 
     #[test]
@@ -1436,7 +1439,7 @@ mod tests {
             vec![MmWorkspace {
                 id: "w".into(),
                 windows: vec![MmWindow {
-                    title: "Old".into(),
+                    captured_title: "Old".into(),
                     hwnd: 10,
                     ..Default::default()
                 }],
@@ -1470,7 +1473,7 @@ mod tests {
         );
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 1);
-        assert_eq!(workspaces[0].windows[0].title, "Old");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Old");
         assert_eq!(workspaces[0].windows[0].hwnd, 10);
     }
 
@@ -1510,7 +1513,7 @@ mod tests {
         assert!(app.multi_manager.capture_session.is_some());
         assert!(app.multi_manager.recapture_queue.is_empty());
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
-        assert_eq!(workspaces[0].windows[0].title, "New");
+        assert_eq!(workspaces[0].windows[0].captured_title, "New");
     }
 
     #[test]
@@ -1818,13 +1821,13 @@ mod tests {
                 id: "w".into(),
                 windows: vec![
                     MmWindow {
-                        title: "Keep".into(),
+                        captured_title: "Keep".into(),
                         alias: "Keep".into(),
                         hwnd: 10,
                         ..Default::default()
                     },
                     MmWindow {
-                        title: "Old".into(),
+                        captured_title: "Old".into(),
                         alias: "Old".into(),
                         hwnd: 11,
                         ..Default::default()
@@ -1840,8 +1843,8 @@ mod tests {
 
         let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
         assert_eq!(workspaces[0].windows.len(), 2);
-        assert_eq!(workspaces[0].windows[0].title, "Keep");
-        assert_eq!(workspaces[0].windows[1].title, "New");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Keep");
+        assert_eq!(workspaces[0].windows[1].captured_title, "New");
         assert_eq!(workspaces[0].windows[1].hwnd, 22);
     }
 

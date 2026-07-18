@@ -129,12 +129,23 @@ impl MmHotkeyValidation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MmBindingStatus {
+    Bound,
+    #[default]
+    Missing,
+    Closed,
+    Ambiguous,
+    Reconnected,
+    MetadataMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmWindow {
     #[serde(default)]
     pub alias: String,
-    #[serde(default)]
-    pub title: String,
+    #[serde(rename = "title", default)]
+    pub captured_title: String,
     #[serde(default)]
     pub executable: String,
     #[serde(default)]
@@ -151,13 +162,110 @@ pub struct MmWindow {
     pub valid: bool,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub hwnd: usize,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub live_title: String,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub binding_status: MmBindingStatus,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub binding_verified: bool,
+}
+
+impl Default for MmWindow {
+    fn default() -> Self {
+        Self {
+            alias: String::new(),
+            captured_title: String::new(),
+            executable: String::new(),
+            class_name: String::new(),
+            process_path: String::new(),
+            home_rect: None,
+            target_rect: None,
+            disabled: false,
+            valid: true,
+            hwnd: 0,
+            live_title: String::new(),
+            binding_status: MmBindingStatus::Missing,
+            binding_verified: false,
+        }
+    }
 }
 
 impl MmWindow {
+    pub fn fallback_title(&self) -> &str {
+        self.captured_title.trim()
+    }
+
+    pub fn current_display_title(&self) -> &str {
+        let live_title = self.live_title.trim();
+        if live_title.is_empty() {
+            self.fallback_title()
+        } else {
+            live_title
+        }
+    }
+
+    pub fn has_bound_hwnd(&self) -> bool {
+        self.hwnd != 0 && self.valid
+    }
+
+    pub fn can_activate(&self) -> bool {
+        !self.disabled && self.has_bound_hwnd()
+    }
+
+    pub fn mark_bound(&mut self, hwnd: usize) {
+        self.hwnd = hwnd;
+        self.valid = hwnd != 0;
+        self.binding_status = if hwnd == 0 {
+            MmBindingStatus::Missing
+        } else {
+            MmBindingStatus::Bound
+        };
+        self.binding_verified = hwnd != 0;
+    }
+
+    pub fn mark_reconnected(&mut self, hwnd: usize) {
+        self.hwnd = hwnd;
+        self.valid = hwnd != 0;
+        self.binding_status = if hwnd == 0 {
+            MmBindingStatus::Missing
+        } else {
+            MmBindingStatus::Reconnected
+        };
+        self.binding_verified = hwnd != 0;
+    }
+
+    pub fn mark_closed(&mut self) {
+        self.hwnd = 0;
+        self.valid = false;
+        self.binding_status = MmBindingStatus::Closed;
+        self.binding_verified = false;
+    }
+
+    pub fn mark_missing(&mut self) {
+        self.hwnd = 0;
+        self.valid = false;
+        self.binding_status = MmBindingStatus::Missing;
+        self.binding_verified = false;
+    }
+
+    pub fn mark_ambiguous(&mut self) {
+        self.hwnd = 0;
+        self.valid = false;
+        self.binding_status = MmBindingStatus::Ambiguous;
+        self.binding_verified = false;
+    }
+
+    pub fn mark_metadata_mismatch(&mut self) {
+        self.hwnd = 0;
+        self.valid = false;
+        self.binding_status = MmBindingStatus::MetadataMismatch;
+        self.binding_verified = false;
+    }
+
     pub fn display_label(&self) -> &str {
         let alias = self.alias.trim();
         if alias.is_empty() {
-            self.title.trim()
+            self.current_display_title()
         } else {
             alias
         }
@@ -165,7 +273,7 @@ impl MmWindow {
 
     pub fn sync_alias_from_title_if_missing(&mut self) {
         if self.alias.trim().is_empty() {
-            self.alias = self.title.trim().to_string();
+            self.alias = self.captured_title.trim().to_string();
         }
     }
 }
@@ -245,7 +353,7 @@ mod tests {
     fn window_display_label_uses_alias_when_non_empty() {
         let window = MmWindow {
             alias: "  Editor  ".into(),
-            title: "Code".into(),
+            captured_title: "Code".into(),
             ..MmWindow::default()
         };
         assert_eq!(window.display_label(), "Editor");
@@ -254,12 +362,12 @@ mod tests {
     #[test]
     fn window_display_label_falls_back_to_title_when_alias_absent_or_blank() {
         let titled = MmWindow {
-            title: "  Browser  ".into(),
+            captured_title: "  Browser  ".into(),
             ..MmWindow::default()
         };
         let blank_alias = MmWindow {
             alias: " \t ".into(),
-            title: "Terminal".into(),
+            captured_title: "Terminal".into(),
             ..MmWindow::default()
         };
         assert_eq!(titled.display_label(), "Browser");
@@ -270,7 +378,7 @@ mod tests {
     fn sync_alias_from_title_if_missing_does_not_overwrite_non_empty_aliases() {
         let mut window = MmWindow {
             alias: "Docs".into(),
-            title: "Untitled - Notepad".into(),
+            captured_title: "Untitled - Notepad".into(),
             ..MmWindow::default()
         };
         window.sync_alias_from_title_if_missing();
@@ -281,11 +389,149 @@ mod tests {
     fn sync_alias_from_title_if_missing_copies_title_for_blank_alias() {
         let mut window = MmWindow {
             alias: "  ".into(),
-            title: "  Notes  ".into(),
+            captured_title: "  Notes  ".into(),
             ..MmWindow::default()
         };
         window.sync_alias_from_title_if_missing();
         assert_eq!(window.alias, "Notes");
+    }
+
+    #[test]
+    fn current_display_title_prefers_live_title() {
+        let window = MmWindow {
+            captured_title: "Captured".into(),
+            live_title: " Live ".into(),
+            ..MmWindow::default()
+        };
+
+        assert_eq!(window.current_display_title(), "Live");
+    }
+
+    #[test]
+    fn current_display_title_falls_back_to_captured_title() {
+        let window = MmWindow {
+            captured_title: " Captured ".into(),
+            live_title: " \t ".into(),
+            ..MmWindow::default()
+        };
+
+        assert_eq!(window.current_display_title(), "Captured");
+    }
+
+    #[test]
+    fn runtime_window_fields_are_not_serialized() {
+        let mut window = MmWindow {
+            captured_title: "Captured".into(),
+            live_title: "Live".into(),
+            ..MmWindow::default()
+        };
+        window.mark_bound(42);
+
+        let json = serde_json::to_value(&window).unwrap();
+
+        assert_eq!(json["title"], "Captured");
+        assert!(json.get("hwnd").is_none());
+        assert!(json.get("live_title").is_none());
+        assert!(json.get("binding_status").is_none());
+        assert!(json.get("binding_verified").is_none());
+    }
+
+    #[test]
+    fn old_json_title_loads_into_captured_title_with_runtime_defaults() {
+        let window: MmWindow =
+            serde_json::from_str(r#"{ "title": "GitHub - Mozilla Firefox" }"#).unwrap();
+
+        assert_eq!(window.captured_title, "GitHub - Mozilla Firefox");
+        assert_eq!(window.hwnd, 0);
+        assert_eq!(window.live_title, "");
+        assert_eq!(window.binding_status, MmBindingStatus::Missing);
+        assert!(!window.binding_verified);
+    }
+
+    #[test]
+    fn status_helpers_keep_runtime_binding_state_consistent() {
+        let mut window = MmWindow::default();
+
+        window.mark_bound(7);
+        assert_eq!(
+            (
+                window.valid,
+                window.hwnd,
+                window.binding_status,
+                window.binding_verified
+            ),
+            (true, 7, MmBindingStatus::Bound, true)
+        );
+        assert!(window.has_bound_hwnd());
+        assert!(window.can_activate());
+
+        window.mark_reconnected(8);
+        assert_eq!(
+            (
+                window.valid,
+                window.hwnd,
+                window.binding_status,
+                window.binding_verified
+            ),
+            (true, 8, MmBindingStatus::Reconnected, true)
+        );
+
+        window.mark_closed();
+        assert_eq!(
+            (
+                window.valid,
+                window.hwnd,
+                window.binding_status,
+                window.binding_verified
+            ),
+            (false, 0, MmBindingStatus::Closed, false)
+        );
+
+        window.mark_missing();
+        assert_eq!(
+            (
+                window.valid,
+                window.hwnd,
+                window.binding_status,
+                window.binding_verified
+            ),
+            (false, 0, MmBindingStatus::Missing, false)
+        );
+
+        window.mark_ambiguous();
+        assert_eq!(
+            (
+                window.valid,
+                window.hwnd,
+                window.binding_status,
+                window.binding_verified
+            ),
+            (false, 0, MmBindingStatus::Ambiguous, false)
+        );
+
+        window.mark_metadata_mismatch();
+        assert_eq!(
+            (
+                window.valid,
+                window.hwnd,
+                window.binding_status,
+                window.binding_verified
+            ),
+            (false, 0, MmBindingStatus::MetadataMismatch, false)
+        );
+    }
+
+    #[test]
+    fn activation_helpers_keep_legacy_valid_hwnd_compatibility() {
+        let window = MmWindow {
+            hwnd: 9,
+            valid: true,
+            binding_verified: false,
+            ..MmWindow::default()
+        };
+
+        assert!(window.has_bound_hwnd());
+        assert!(window.can_activate());
     }
 
     #[test]
