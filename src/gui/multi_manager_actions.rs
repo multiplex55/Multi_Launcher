@@ -877,8 +877,8 @@ pub(crate) fn format_reconnect_summary(
     summary: crate::multi_manager::reconnect::ReconnectSummary,
 ) -> String {
     format!(
-        "Reconnected MultiManager windows: {} reconnected, {} missing, {} ambiguous",
-        summary.reconnected, summary.missing, summary.ambiguous
+        "Reconnected MultiManager windows: {} reconnected, {} missing, {} ambiguous, {} metadata mismatches",
+        summary.reconnected, summary.missing, summary.ambiguous, summary.metadata_mismatch
     )
 }
 
