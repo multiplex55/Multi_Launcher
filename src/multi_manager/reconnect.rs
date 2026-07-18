@@ -289,6 +289,76 @@ pub fn reconnect_workspaces_with_deps(
     summary
 }
 
+/// Runs exact-title reconnect fallback only for unresolved enabled windows, preserving
+/// already-bound valid HWNDs without revalidating or comparing their metadata.
+pub fn reconnect_unresolved_workspaces_with_windows(
+    workspaces: &mut [MmWorkspace],
+    live: &[EnumeratedWindow],
+) -> ReconnectSummary {
+    let before: Vec<(usize, bool)> = workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.windows)
+        .map(|window| (window.hwnd, window.binding_verified))
+        .collect();
+    let mut summary = ReconnectSummary::default();
+    let mut assigned: HashSet<usize> = workspaces
+        .iter()
+        .filter(|workspace| !workspace.disabled)
+        .flat_map(|workspace| &workspace.windows)
+        .filter(|window| !window.disabled && window.hwnd != 0 && window.valid)
+        .map(|window| window.hwnd)
+        .collect();
+
+    for window in workspaces
+        .iter_mut()
+        .filter(|workspace| !workspace.disabled)
+        .flat_map(|workspace| &mut workspace.windows)
+    {
+        if window.disabled || (window.hwnd != 0 && window.valid) {
+            continue;
+        }
+
+        let (outcome, hwnd) = match_unbound_fallback(window, live, &assigned);
+        match outcome {
+            ReconnectOutcome::Reconnected => {
+                summary.reconnected += 1;
+                if let Some(hwnd) = hwnd {
+                    window.mark_reconnected(hwnd);
+                    if let Some(live_window) = live.iter().find(|candidate| candidate.hwnd == hwnd)
+                    {
+                        window.live_title = live_window.title.clone();
+                    }
+                    assigned.insert(hwnd);
+                }
+            }
+            ReconnectOutcome::Ambiguous => {
+                summary.ambiguous += 1;
+                window.mark_ambiguous();
+                window.live_title.clear();
+            }
+            ReconnectOutcome::MetadataMismatch => {
+                summary.metadata_mismatch += 1;
+                window.mark_metadata_mismatch();
+                window.live_title.clear();
+            }
+            ReconnectOutcome::Missing => {
+                summary.missing += 1;
+                window.mark_missing();
+                window.live_title.clear();
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let after: Vec<(usize, bool)> = workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.windows)
+        .map(|window| (window.hwnd, window.binding_verified))
+        .collect();
+    summary.binding_snapshot_changed = before != after;
+    summary
+}
+
 pub fn needs_reconnect(workspaces: &[MmWorkspace]) -> bool {
     workspaces
         .iter()
