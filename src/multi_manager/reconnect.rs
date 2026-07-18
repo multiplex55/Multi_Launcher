@@ -345,11 +345,12 @@ mod tests {
             hwnd: 5,
             captured_title: "Doc".into(),
             executable: "edit.exe".into(),
+            process_path: "C:/Apps/edit.exe".into(),
             ..MmWindow::default()
         });
         let summary = reconnect_workspaces_with_windows(
             &mut workspaces,
-            &[live(5, "Other", "edit.exe", "", "")],
+            &[live(5, "Other", "edit.exe", "", "C:/Other/edit.exe")],
         );
         assert_eq!(summary.invalidated, 1);
         assert_eq!(summary.missing, 1);
