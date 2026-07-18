@@ -205,7 +205,7 @@ impl MmWindow {
     }
 
     pub fn has_bound_hwnd(&self) -> bool {
-        self.hwnd != 0 && self.valid && self.binding_verified
+        self.hwnd != 0 && self.valid
     }
 
     pub fn can_activate(&self) -> bool {
@@ -519,6 +519,19 @@ mod tests {
             ),
             (false, 0, MmBindingStatus::MetadataMismatch, false)
         );
+    }
+
+    #[test]
+    fn activation_helpers_keep_legacy_valid_hwnd_compatibility() {
+        let window = MmWindow {
+            hwnd: 9,
+            valid: true,
+            binding_verified: false,
+            ..MmWindow::default()
+        };
+
+        assert!(window.has_bound_hwnd());
+        assert!(window.can_activate());
     }
 
     #[test]
