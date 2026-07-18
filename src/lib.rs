@@ -37,6 +37,7 @@ pub mod platform;
 pub mod plugin;
 pub mod plugin_editor;
 pub mod plugins;
+pub mod process;
 pub mod plugins_builtin;
 pub mod settings;
 pub mod settings_editor;

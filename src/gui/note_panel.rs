@@ -12,6 +12,7 @@ use crate::plugins::note::{
     save_note,
 };
 use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
 use eframe::egui::{self, Color32, FontId, Key, RichText, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -24,8 +25,6 @@ use regex::Regex;
 use rfd::FileDialog;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::{
     env,
@@ -3581,10 +3580,7 @@ pub fn build_nvim_command(note_path: &Path) -> (Command, String) {
 pub fn build_wezterm_command(note_path: &Path) -> (Command, String) {
     let mut cmd = Command::new("wezterm");
     cmd.arg("start").arg("--").arg("nvim").arg(note_path);
-    #[cfg(windows)]
-    {
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    configure_background_command(&mut cmd);
     let cmd_str = format!("{:?}", cmd);
     (cmd, cmd_str)
 }
