@@ -129,7 +129,6 @@ impl MultiManagerRuntime {
                         &win_ops,
                         &hotkey_ops,
                         &|hwnd| win::is_valid_window(hwnd),
-                        &|| win::enumerate_top_level_windows().unwrap_or_default(),
                         now,
                     );
                 } else if let Ok(mut events) = thread_event_queue.lock() {
@@ -319,7 +318,6 @@ pub fn runtime_tick(
     window_ops: &impl WindowOps,
     hotkey_ops: &impl HotkeyOps,
     is_window: &dyn Fn(usize) -> bool,
-    enumerate_top_level_windows: &dyn Fn() -> Vec<win::EnumeratedWindow>,
     now: Instant,
 ) {
     if !control.enabled.load(Ordering::Relaxed) || control.capture_pending.load(Ordering::Relaxed) {
@@ -343,7 +341,6 @@ pub fn runtime_tick(
         let deps = ActivationDeps {
             window_ops,
             is_window,
-            enumerate_top_level_windows,
         };
         let result = activation::activate_workspace_with_deps(
             std::slice::from_mut(workspace),
@@ -387,8 +384,7 @@ fn push_runtime_activation_events(
 mod tests {
     use super::*;
     use crate::multi_manager::model::{MmHotkey, MmWindow};
-    use crate::multi_manager::win::EnumeratedWindow;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
 
     fn rect(x: i32) -> MmRect {
         MmRect {
@@ -434,17 +430,6 @@ mod tests {
 
     fn event_queue() -> Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>> {
         Arc::new(Mutex::new(VecDeque::new()))
-    }
-
-    fn live(hwnd: usize, title: &str) -> EnumeratedWindow {
-        EnumeratedWindow {
-            hwnd,
-            title: title.into(),
-            executable: "app.exe".into(),
-            class_name: "AppClass".into(),
-            process_path: "C:/app.exe".into(),
-            rect: rect(0),
-        }
     }
 
     fn workspace() -> MmWorkspace {
@@ -570,7 +555,6 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|_| true,
-            &|| Vec::new(),
             Instant::now(),
         );
         assert!(ops.moves.borrow().is_empty());
@@ -587,7 +571,6 @@ mod tests {
         let events = event_queue();
         let mut debounce = HashMap::new();
         let ops = FakeWindowOps::default();
-        let enumerations = Cell::new(0);
         let now = Instant::now();
 
         for offset_ms in [0, 500, 1_000, 5_000, 10_000, 60_000] {
@@ -601,17 +584,12 @@ mod tests {
                 &ops,
                 &FakeHotkeyOps(false),
                 &|hwnd| hwnd == 42,
-                &|| {
-                    enumerations.set(enumerations.get() + 1);
-                    vec![live(42, "Notes")]
-                },
                 now + Duration::from_millis(offset_ms),
             );
         }
 
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
         assert!(events.lock().unwrap().is_empty());
-        assert_eq!(enumerations.get(), 0);
     }
 
     #[test]
@@ -642,7 +620,6 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|hwnd| hwnd != 0,
-            &|| Vec::new(),
             Instant::now(),
         );
 
@@ -674,7 +651,6 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|_| true,
-            &|| Vec::new(),
             now,
         );
         runtime_tick(
@@ -687,7 +663,6 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|_| true,
-            &|| Vec::new(),
             now + Duration::from_millis(100),
         );
         assert_eq!(ops.moves.borrow().len(), 2);
@@ -695,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_activation_attempts_fallback_before_moving() {
+    fn hotkey_activation_does_not_attempt_fallback_before_moving() {
         let mut workspaces = vec![workspace()];
         workspaces[0].windows = vec![window(7, false, rect(1), rect(11))];
         workspaces[0].windows[0].captured_title = "Notes".into();
@@ -717,12 +692,11 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|hwnd| hwnd == 42,
-            &|| vec![live(42, "Notes")],
             now,
         );
 
-        assert_eq!(*ops.moves.borrow(), vec![(42, rect(11))]);
-        assert_eq!(workspaces[0].windows[0].hwnd, 42);
+        assert!(ops.moves.borrow().is_empty());
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
     }
 
     #[test]
@@ -748,7 +722,6 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|hwnd| hwnd == 2,
-            &|| Vec::new(),
             Instant::now(),
         );
 
@@ -778,7 +751,6 @@ mod tests {
             &ops,
             &FakeHotkeyOps(true),
             &|hwnd| hwnd == 2,
-            &|| Vec::new(),
             Instant::now(),
         );
 

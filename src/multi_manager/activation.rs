@@ -1,8 +1,6 @@
 use crate::multi_manager::model::{MmRect, MmWorkspace};
-use crate::multi_manager::reconnect::ReconnectOutcome;
 use crate::multi_manager::runtime::{WinWindowOps, WindowOps};
-use crate::multi_manager::win::{self, EnumeratedWindow};
-use std::collections::HashSet;
+use crate::multi_manager::win;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationOperation {
@@ -16,7 +14,7 @@ pub enum ActivationOperation {
 pub struct ActivationResult {
     pub moved: usize,
     pub already_bound: usize,
-    pub reconnected: usize,
+    pub closed: usize,
     pub missing: usize,
     pub ambiguous: usize,
     pub metadata_mismatch: usize,
@@ -28,25 +26,25 @@ pub struct ActivationResult {
 pub struct ActivationDeps<'a, O: WindowOps> {
     pub window_ops: &'a O,
     pub is_window: &'a dyn Fn(usize) -> bool,
-    pub enumerate_top_level_windows: &'a dyn Fn() -> Vec<EnumeratedWindow>,
 }
 
 impl ActivationResult {
     pub fn all_active_handled(&self) -> bool {
         self.movement_errors.is_empty()
+            && self.closed == 0
             && self.missing == 0
             && self.ambiguous == 0
             && self.metadata_mismatch == 0
     }
 
     pub fn has_unresolved(&self) -> bool {
-        self.missing > 0 || self.ambiguous > 0 || self.metadata_mismatch > 0
+        self.closed > 0 || self.missing > 0 || self.ambiguous > 0 || self.metadata_mismatch > 0
     }
 
     fn merge(&mut self, other: ActivationResult) {
         self.moved += other.moved;
         self.already_bound += other.already_bound;
-        self.reconnected += other.reconnected;
+        self.closed += other.closed;
         self.missing += other.missing;
         self.ambiguous += other.ambiguous;
         self.metadata_mismatch += other.metadata_mismatch;
@@ -65,7 +63,6 @@ pub fn activate_workspace(
     let deps = ActivationDeps {
         window_ops: &ops,
         is_window: &|hwnd| win::is_valid_window(hwnd),
-        enumerate_top_level_windows: &|| win::enumerate_top_level_windows().unwrap_or_default(),
     };
     activate_workspace_with_deps(workspaces, workspace_id, operation, &deps)
 }
@@ -75,7 +72,6 @@ pub fn activate_all_home(workspaces: &mut [MmWorkspace]) -> ActivationResult {
     let deps = ActivationDeps {
         window_ops: &ops,
         is_window: &|hwnd| win::is_valid_window(hwnd),
-        enumerate_top_level_windows: &|| win::enumerate_top_level_windows().unwrap_or_default(),
     };
     activate_all_home_with_deps(workspaces, &deps)
 }
@@ -122,70 +118,29 @@ fn activate_one_workspace<O: WindowOps>(
         .iter()
         .map(|w| (w.hwnd, w.binding_verified))
         .collect();
-    let mut assigned = HashSet::new();
-    let mut unresolved = Vec::new();
-    for (idx, window) in workspace.windows.iter_mut().enumerate() {
-        if window.disabled {
-            continue;
-        }
+
+    for window in workspace.windows.iter_mut().filter(|w| !w.disabled) {
         if window.hwnd != 0 {
             if (deps.is_window)(window.hwnd) {
                 result.already_bound += 1;
-                assigned.insert(window.hwnd);
             } else {
                 window.mark_closed();
                 window.live_title.clear();
-                unresolved.push(idx);
+                result.closed += 1;
+                result.unresolved_labels.push(window_label(window));
             }
-        } else {
-            unresolved.push(idx);
+            continue;
         }
-    }
 
-    if !unresolved.is_empty() {
-        let live = (deps.enumerate_top_level_windows)();
-        for idx in unresolved {
-            if workspace.windows[idx].disabled {
-                continue;
+        match window.binding_status {
+            crate::multi_manager::model::MmBindingStatus::Closed => result.closed += 1,
+            crate::multi_manager::model::MmBindingStatus::Ambiguous => result.ambiguous += 1,
+            crate::multi_manager::model::MmBindingStatus::MetadataMismatch => {
+                result.metadata_mismatch += 1;
             }
-            let (outcome, hwnd) = match_unbound_fallback(&workspace.windows[idx], &live, &assigned);
-            match outcome {
-                ReconnectOutcome::Reconnected => {
-                    result.reconnected += 1;
-                    if let Some(hwnd) = hwnd {
-                        workspace.windows[idx].mark_reconnected(hwnd);
-                        assigned.insert(hwnd);
-                        if let Some(candidate) =
-                            live.iter().find(|candidate| candidate.hwnd == hwnd)
-                        {
-                            workspace.windows[idx].live_title = candidate.title.clone();
-                        }
-                    }
-                }
-                ReconnectOutcome::Missing => {
-                    result.missing += 1;
-                    result
-                        .unresolved_labels
-                        .push(window_label(&workspace.windows[idx]));
-                    workspace.windows[idx].mark_missing();
-                }
-                ReconnectOutcome::Ambiguous => {
-                    result.ambiguous += 1;
-                    result
-                        .unresolved_labels
-                        .push(window_label(&workspace.windows[idx]));
-                    workspace.windows[idx].mark_ambiguous();
-                }
-                ReconnectOutcome::MetadataMismatch => {
-                    result.metadata_mismatch += 1;
-                    result
-                        .unresolved_labels
-                        .push(window_label(&workspace.windows[idx]));
-                    workspace.windows[idx].mark_metadata_mismatch();
-                }
-                _ => {}
-            }
+            _ => result.missing += 1,
         }
+        result.unresolved_labels.push(window_label(window));
     }
 
     match operation {
@@ -206,32 +161,6 @@ fn activate_one_workspace<O: WindowOps>(
         .collect();
     result.bindings_changed = before != after;
     result
-}
-
-fn normalized(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn same_title(value: &str, live: &str) -> bool {
-    let stored = normalized(value);
-    !stored.is_empty() && stored == normalized(live)
-}
-
-fn match_unbound_fallback(
-    window: &crate::multi_manager::model::MmWindow,
-    live: &[EnumeratedWindow],
-    assigned: &HashSet<usize>,
-) -> (ReconnectOutcome, Option<usize>) {
-    let candidates: Vec<&EnumeratedWindow> = live
-        .iter()
-        .filter(|candidate| !assigned.contains(&candidate.hwnd))
-        .filter(|candidate| same_title(window.fallback_title(), &candidate.title))
-        .collect();
-    match candidates.as_slice() {
-        [] => (ReconnectOutcome::Missing, None),
-        [candidate] => (ReconnectOutcome::Reconnected, Some(candidate.hwnd)),
-        _ => (ReconnectOutcome::Ambiguous, None),
-    }
 }
 
 fn window_label(window: &crate::multi_manager::model::MmWindow) -> String {
@@ -334,7 +263,7 @@ fn move_one<O: WindowOps>(hwnd: usize, rect: MmRect, ops: &O, result: &mut Activ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multi_manager::model::{MmRect, MmWindow};
+    use crate::multi_manager::model::{MmBindingStatus, MmRect, MmWindow};
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -371,16 +300,6 @@ mod tests {
             ..MmWindow::default()
         }
     }
-    fn live(hwnd: usize, title: &str) -> EnumeratedWindow {
-        EnumeratedWindow {
-            hwnd,
-            title: title.into(),
-            executable: String::new(),
-            class_name: String::new(),
-            process_path: String::new(),
-            rect: rect(0),
-        }
-    }
     fn ws(windows: Vec<MmWindow>) -> MmWorkspace {
         MmWorkspace {
             id: "ws".into(),
@@ -396,7 +315,6 @@ mod tests {
         let deps = ActivationDeps {
             window_ops: &ops,
             is_window: &|hwnd| hwnd != 2,
-            enumerate_top_level_windows: &Vec::new,
         };
         let result = activate_workspace_with_deps(
             &mut workspaces,
@@ -416,20 +334,30 @@ mod tests {
         let deps = ActivationDeps {
             window_ops: &ops,
             is_window: &|_| false,
-            enumerate_top_level_windows: &Vec::new,
         };
-        activate_workspace_with_deps(&mut workspaces, "ws", ActivationOperation::SendHome, &deps);
+        let result = activate_workspace_with_deps(
+            &mut workspaces,
+            "ws",
+            ActivationOperation::SendHome,
+            &deps,
+        )
+        .unwrap();
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert_eq!(
+            workspaces[0].windows[0].binding_status,
+            MmBindingStatus::Closed
+        );
+        assert_eq!(result.unresolved_labels, vec!["gone"]);
+        assert!(result.bindings_changed);
     }
 
     #[test]
-    fn exact_title_reconnect_is_attempted_before_movement() {
+    fn matching_live_candidate_is_not_auto_reconnected_during_activation() {
         let ops = FakeOps::default();
         let mut workspaces = vec![ws(vec![win(0, "App")])];
         let deps = ActivationDeps {
             window_ops: &ops,
-            is_window: &|_| false,
-            enumerate_top_level_windows: &|| vec![live(42, "App")],
+            is_window: &|hwnd| hwnd == 42,
         };
         let result = activate_workspace_with_deps(
             &mut workspaces,
@@ -438,8 +366,9 @@ mod tests {
             &deps,
         )
         .unwrap();
-        assert_eq!(result.reconnected, 1);
-        assert_eq!(*ops.moves.borrow(), vec![(42, rect(10))]);
+        assert_eq!(result.missing, 1);
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert!(ops.moves.borrow().is_empty());
     }
 
     #[test]
@@ -451,7 +380,6 @@ mod tests {
         let deps = ActivationDeps {
             window_ops: &ops,
             is_window: &|hwnd| hwnd == 1,
-            enumerate_top_level_windows: &Vec::new,
         };
         let result = activate_workspace_with_deps(
             &mut workspaces,
@@ -465,15 +393,74 @@ mod tests {
     }
 
     #[test]
-    fn reconnected_hwnd_remains_stored_in_actual_workspace() {
+    fn zero_handle_statuses_remain_disconnected_and_distinguishable() {
         let ops = FakeOps::default();
-        let mut workspaces = vec![ws(vec![win(0, "App")])];
+        let missing = win(0, "Missing");
+        let mut closed = win(0, "Closed");
+        closed.binding_status = MmBindingStatus::Closed;
+        let mut ambiguous = win(0, "Ambiguous");
+        ambiguous.binding_status = MmBindingStatus::Ambiguous;
+        let mut mismatch = win(0, "Mismatch");
+        mismatch.binding_status = MmBindingStatus::MetadataMismatch;
+        let mut workspaces = vec![ws(vec![missing, closed, ambiguous, mismatch])];
         let deps = ActivationDeps {
             window_ops: &ops,
-            is_window: &|_| false,
-            enumerate_top_level_windows: &|| vec![live(77, "App")],
+            is_window: &|_| true,
         };
-        activate_workspace_with_deps(&mut workspaces, "ws", ActivationOperation::SendHome, &deps);
-        assert_eq!(workspaces[0].windows[0].hwnd, 77);
+
+        let result = activate_workspace_with_deps(
+            &mut workspaces,
+            "ws",
+            ActivationOperation::SendHome,
+            &deps,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (
+                result.missing,
+                result.closed,
+                result.ambiguous,
+                result.metadata_mismatch
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(
+            result.unresolved_labels,
+            vec!["Missing", "Closed", "Ambiguous", "Mismatch"]
+        );
+        assert!(workspaces[0].windows.iter().all(|window| window.hwnd == 0));
+        assert_eq!(
+            workspaces[0].windows[0].binding_status,
+            MmBindingStatus::Missing
+        );
+        assert_eq!(
+            workspaces[0].windows[1].binding_status,
+            MmBindingStatus::Closed
+        );
+        assert_eq!(
+            workspaces[0].windows[2].binding_status,
+            MmBindingStatus::Ambiguous
+        );
+        assert_eq!(
+            workspaces[0].windows[3].binding_status,
+            MmBindingStatus::MetadataMismatch
+        );
+    }
+
+    #[test]
+    fn activation_deps_has_no_enumeration_dependency() {
+        fn accepts_activation_deps<'a, O: WindowOps>(
+            deps: ActivationDeps<'a, O>,
+        ) -> ActivationDeps<'a, O> {
+            deps
+        }
+
+        let ops = FakeOps::default();
+        let deps = accepts_activation_deps(ActivationDeps {
+            window_ops: &ops,
+            is_window: &|_| true,
+        });
+        assert!((deps.is_window)(1));
     }
 }
