@@ -6,6 +6,7 @@ pub enum ApplyCaptureResult {
     Applied,
     MissingWorkspace,
     MissingWindow,
+    DuplicateHwnd,
 }
 
 pub fn apply_capture_to_workspaces(
@@ -16,12 +17,16 @@ pub fn apply_capture_to_workspaces(
     match action {
         PendingCaptureAction::CaptureOneWindow { workspace_id }
         | PendingCaptureAction::CaptureMultipleWindows { workspace_id } => {
-            let Some(workspace) = workspaces
-                .iter_mut()
-                .find(|workspace| workspace.id == *workspace_id)
+            let Some(workspace_index) = workspaces
+                .iter()
+                .position(|workspace| workspace.id == *workspace_id)
             else {
                 return ApplyCaptureResult::MissingWorkspace;
             };
+
+            if hwnd_is_in_use(workspaces, captured.hwnd, None) {
+                return ApplyCaptureResult::DuplicateHwnd;
+            }
 
             let mut window = MmWindow {
                 alias: captured.title.clone(),
@@ -35,19 +40,35 @@ pub fn apply_capture_to_workspaces(
                 ..Default::default()
             };
             window.mark_bound(captured.hwnd);
-            workspace.windows.push(window);
+            workspaces[workspace_index].windows.push(window);
             ApplyCaptureResult::Applied
         }
         PendingCaptureAction::RecaptureWindow {
             workspace_id,
             window_index,
         } => {
-            let Some(workspace) = workspaces
-                .iter_mut()
-                .find(|workspace| workspace.id == *workspace_id)
+            let Some(workspace_index) = workspaces
+                .iter()
+                .position(|workspace| workspace.id == *workspace_id)
             else {
                 return ApplyCaptureResult::MissingWorkspace;
             };
+            if workspaces[workspace_index]
+                .windows
+                .get(*window_index)
+                .is_none()
+            {
+                return ApplyCaptureResult::MissingWindow;
+            }
+            if hwnd_is_in_use(
+                workspaces,
+                captured.hwnd,
+                Some((workspace_index, *window_index)),
+            ) {
+                return ApplyCaptureResult::DuplicateHwnd;
+            }
+
+            let workspace = &mut workspaces[workspace_index];
             let Some(window) = workspace.windows.get_mut(*window_index) else {
                 return ApplyCaptureResult::MissingWindow;
             };
@@ -66,10 +87,31 @@ pub fn apply_capture_to_workspaces(
     }
 }
 
+fn hwnd_is_in_use(
+    workspaces: &[MmWorkspace],
+    hwnd: usize,
+    allowed_location: Option<(usize, usize)>,
+) -> bool {
+    hwnd != 0
+        && workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(workspace_index, workspace)| {
+                workspace
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .map(move |(window_index, window)| (workspace_index, window_index, window))
+            })
+            .any(|(workspace_index, window_index, window)| {
+                window.hwnd == hwnd && allowed_location != Some((workspace_index, window_index))
+            })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multi_manager::model::MmRect;
+    use crate::multi_manager::model::{MmBindingStatus, MmRect};
 
     fn workspace(id: &str) -> MmWorkspace {
         MmWorkspace {
@@ -128,7 +170,11 @@ mod tests {
         let window = &workspaces[0].windows[0];
         assert_eq!(window.alias, "Editor");
         assert_eq!(window.captured_title, "Editor");
+        assert_eq!(window.live_title, "Editor");
         assert_eq!(window.hwnd, 7);
+        assert_eq!(window.binding_status, MmBindingStatus::Bound);
+        assert!(window.binding_verified);
+        assert!(window.can_activate());
         assert_eq!(window.home_rect, Some(capture_rect));
         assert_eq!(window.target_rect, Some(capture_rect));
         assert_eq!(window.executable, "Editor.exe");
@@ -192,6 +238,13 @@ mod tests {
         assert_eq!(result, ApplyCaptureResult::Applied);
         assert_eq!(workspaces[0].windows[0].hwnd, 99);
         assert_eq!(workspaces[0].windows[0].captured_title, "New");
+        assert_eq!(workspaces[0].windows[0].live_title, "New");
+        assert_eq!(
+            workspaces[0].windows[0].binding_status,
+            MmBindingStatus::Bound
+        );
+        assert!(workspaces[0].windows[0].binding_verified);
+        assert!(workspaces[0].windows[0].can_activate());
         assert_eq!(workspaces[0].windows[0].executable, "New.exe");
         assert_eq!(workspaces[0].windows[0].class_name, "NewClass");
         assert_eq!(workspaces[0].windows[0].process_path, "C:/Apps/New.exe");
@@ -267,6 +320,7 @@ mod tests {
         assert_eq!(window.alias, "Stable Alias");
         assert_eq!(window.hwnd, 22);
         assert_eq!(window.captured_title, "New Title");
+        assert_eq!(window.live_title, "New Title");
         assert_eq!(window.executable, "new.exe");
         assert_eq!(window.class_name, "NewClass");
         assert_eq!(window.process_path, "C:/New/new.exe");
@@ -340,5 +394,63 @@ mod tests {
 
         assert_eq!(workspaces[0].windows[0].alias, "Custom");
         assert_eq!(workspaces[0].windows[1].alias, "New B");
+    }
+
+    #[test]
+    fn capture_rejects_duplicate_hwnd_before_appending() {
+        let mut workspaces = vec![MmWorkspace {
+            id: "w".into(),
+            windows: vec![MmWindow {
+                hwnd: 7,
+                captured_title: "Existing".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+
+        let result = apply_capture_to_workspaces(
+            &mut workspaces,
+            &PendingCaptureAction::CaptureOneWindow {
+                workspace_id: "w".into(),
+            },
+            captured(7, "Duplicate", rect(0, 0, 1, 1)),
+        );
+
+        assert_eq!(result, ApplyCaptureResult::DuplicateHwnd);
+        assert_eq!(workspaces[0].windows.len(), 1);
+        assert_eq!(workspaces[0].windows[0].captured_title, "Existing");
+    }
+
+    #[test]
+    fn recapture_rejects_hwnd_already_bound_to_another_window() {
+        let mut workspaces = vec![MmWorkspace {
+            id: "w".into(),
+            windows: vec![
+                MmWindow {
+                    hwnd: 1,
+                    captured_title: "First".into(),
+                    ..Default::default()
+                },
+                MmWindow {
+                    hwnd: 2,
+                    captured_title: "Second".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+
+        let result = apply_capture_to_workspaces(
+            &mut workspaces,
+            &PendingCaptureAction::RecaptureWindow {
+                workspace_id: "w".into(),
+                window_index: 1,
+            },
+            captured(1, "Duplicate", rect(0, 0, 1, 1)),
+        );
+
+        assert_eq!(result, ApplyCaptureResult::DuplicateHwnd);
+        assert_eq!(workspaces[0].windows[1].hwnd, 2);
+        assert_eq!(workspaces[0].windows[1].captured_title, "Second");
     }
 }

@@ -895,6 +895,14 @@ impl LauncherApp {
                 self.multi_manager_finish_capture();
                 return;
             }
+            ApplyCaptureResult::DuplicateHwnd => {
+                self.report_error_message(
+                    "multi_manager.capture",
+                    "Failed to apply capture: window is already captured in MultiManager",
+                );
+                self.multi_manager_finish_capture();
+                return;
+            }
         }
 
         match action {
@@ -1297,9 +1305,13 @@ mod tests {
                 .capture_pending
                 .load(Ordering::Relaxed)
         );
-        let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
-        assert_eq!(workspaces[0].windows.len(), 1);
-        assert_eq!(workspaces[0].windows[0].captured_title, "Editor");
+        {
+            let workspaces = app.multi_manager.workspaces.lock().expect("workspaces");
+            assert_eq!(workspaces[0].windows.len(), 1);
+            assert_eq!(workspaces[0].windows[0].captured_title, "Editor");
+        }
+        assert!(app.multi_manager.dirty);
+        assert!(app.multi_manager.bindings_dirty);
     }
 
     #[test]
