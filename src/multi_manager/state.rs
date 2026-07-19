@@ -75,14 +75,10 @@ impl MultiManagerState {
         let workspace_path = resolve_relative_to(settings_dir, &settings.workspaces_path);
         let bindings_path = resolve_relative_to(settings_dir, &settings.bindings_path);
 
-        // Startup always attempts to restore saved HWND binding snapshots first.
-        // `auto_reconnect_on_load` only controls the exact-title fallback for windows
-        // that snapshot restore could not resolve during startup/reload.
-        let loaded = prepare_workspaces_for_startup(
-            store::load_or_default(&workspace_path),
-            &bindings_path,
-            settings.auto_reconnect_on_load,
-        );
+        // Startup only restores saved HWND binding snapshots here. Any title/window
+        // matching is scheduled later and performed by the async reconnect coordinator.
+        let loaded =
+            prepare_workspaces_for_startup(store::load_or_default(&workspace_path), &bindings_path);
         let workspaces = Arc::new(Mutex::new(loaded));
         let runtime = start_runtime_after_restore(Arc::clone(&workspaces), settings);
         let last_hotkey_info = Arc::clone(&runtime.last_hotkey_info);
@@ -115,7 +111,7 @@ impl MultiManagerState {
             shutdown_started: false,
         };
         if settings.auto_reconnect_on_load {
-            let _ = state.start_reconnect(ReconnectTrigger::Startup);
+            state.pending_automatic_reconnect = true;
         }
         state
     }
@@ -252,6 +248,14 @@ impl MultiManagerState {
             }
         }));
         ReconnectStartResult::Started
+    }
+
+    pub fn start_pending_automatic_reconnect(&mut self) -> Option<ReconnectStartResult> {
+        if !self.pending_automatic_reconnect {
+            return None;
+        }
+        self.pending_automatic_reconnect = false;
+        Some(self.start_reconnect(ReconnectTrigger::Startup))
     }
 
     pub fn reap_reconnect_worker(&mut self) {
@@ -451,7 +455,6 @@ fn capture_action_target(action: &PendingCaptureAction) -> (&str, Option<usize>)
 fn prepare_workspaces_for_startup(
     mut workspaces: Vec<MmWorkspace>,
     bindings_path: &Path,
-    _auto_reconnect_on_load: bool,
 ) -> Vec<MmWorkspace> {
     restore_bindings_for_load(&mut workspaces, bindings_path);
     workspaces
@@ -791,6 +794,166 @@ mod tests {
         state.maybe_auto_save_bindings();
         assert!(state.bindings_dirty);
         assert!(!state.dirty);
+    }
+
+    #[test]
+    fn enabled_startup_reconnect_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: true,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert!(state.pending_automatic_reconnect);
+        assert_eq!(
+            state.start_pending_automatic_reconnect(),
+            Some(ReconnectStartResult::Started)
+        );
+        assert!(!state.pending_automatic_reconnect);
+        assert_eq!(state.start_pending_automatic_reconnect(), None);
+        state.shutdown();
+    }
+
+    #[test]
+    fn disabled_startup_reconnect_runs_zero_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert!(!state.pending_automatic_reconnect);
+        assert_eq!(state.start_pending_automatic_reconnect(), None);
+        assert!(state.reconnect_job.is_none());
+    }
+
+    #[test]
+    fn missing_binding_snapshot_still_allows_one_startup_reconnect_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: true,
+                bindings_path: "missing-bindings.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert_eq!(
+            state.start_pending_automatic_reconnect(),
+            Some(ReconnectStartResult::Started)
+        );
+        assert!(!state.pending_automatic_reconnect);
+        state.shutdown();
+    }
+
+    #[test]
+    fn malformed_binding_snapshot_still_allows_one_startup_reconnect_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(dir.path().join("bindings.json"), "not json").unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: true,
+                bindings_path: "bindings.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert_eq!(
+            state.start_pending_automatic_reconnect(),
+            Some(ReconnectStartResult::Started)
+        );
+        assert!(!state.pending_automatic_reconnect);
+        state.shutdown();
+    }
+
+    #[test]
+    fn failed_startup_reconnect_does_not_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: true,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        let workspaces = Arc::clone(&state.workspaces);
+        let held = workspaces.lock().unwrap();
+
+        assert_eq!(
+            state.start_pending_automatic_reconnect(),
+            Some(ReconnectStartResult::SnapshotLockFailed)
+        );
+        assert!(!state.pending_automatic_reconnect);
+        drop(held);
+        assert_eq!(state.start_pending_automatic_reconnect(), None);
+    }
+
+    #[test]
+    fn reload_schedules_one_additional_automatic_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        std::fs::write(&workspace_path, r#"[{"id":"ws","name":"Loaded"}]"#).unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: true,
+                workspaces_path: "workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.pending_automatic_reconnect = false;
+
+        state.reload().unwrap();
+
+        assert!(state.reconnect_job.is_some());
+        assert!(!state.pending_automatic_reconnect);
+        state.shutdown();
+    }
+
+    #[test]
+    fn active_reconnect_plus_reload_queues_at_most_one_automatic_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        std::fs::write(&workspace_path, r#"[{"id":"ws","name":"Loaded"}]"#).unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: true,
+                workspaces_path: "workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.pending_automatic_reconnect = false;
+        state.reconnect_in_progress.store(true, Ordering::Relaxed);
+
+        state.reload().unwrap();
+        state.reload().unwrap();
+
+        assert!(state.pending_automatic_reconnect);
+        assert!(state.reconnect_job.is_none());
+        state.reconnect_in_progress.store(false, Ordering::Relaxed);
     }
 
     #[test]
