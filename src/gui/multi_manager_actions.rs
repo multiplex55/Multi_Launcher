@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     fn clear_toast_log() {
-        let _ = std::fs::remove_file(crate::toast_log::TOAST_LOG_FILE);
+        std::fs::write(crate::toast_log::TOAST_LOG_FILE, "").expect("clear toast log");
     }
 
     fn toast_log_contents() -> String {

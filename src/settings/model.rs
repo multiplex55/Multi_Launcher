@@ -1,6 +1,6 @@
 use crate::gui::Panel;
 use crate::hotkey::Key;
-use crate::hotkey::{Hotkey, parse_hotkey};
+use crate::hotkey::{parse_hotkey, Hotkey};
 use crate::settings::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -779,6 +779,41 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
         assert!(!restored.multi_manager.auto_reconnect_on_load);
         assert_eq!(restored.multi_manager, settings.multi_manager);
+    }
+
+    #[test]
+    fn multi_manager_old_json_defaults_auto_reconnect_and_ignores_obsolete_reconnect_fields() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "multi_manager": {
+                    "enabled": true,
+                    "periodic_reconnect_enabled": true,
+                    "reconnect_interval_ms": 1000,
+                    "auto_reconnect_period_ms": 2500
+                }
+            }"#,
+        )
+        .expect("old settings should deserialize");
+
+        assert!(parsed.multi_manager.auto_reconnect_on_load);
+        assert_eq!(
+            parsed.multi_manager.workspaces_path,
+            MultiManagerSettings::default().workspaces_path
+        );
+    }
+
+    #[test]
+    fn multi_manager_serialization_omits_obsolete_periodic_reconnect_fields() {
+        let json = serde_json::to_value(Settings::default()).expect("serialize settings");
+        let multi_manager = json
+            .get("multi_manager")
+            .and_then(serde_json::Value::as_object)
+            .expect("multi manager object");
+
+        assert!(multi_manager.contains_key("auto_reconnect_on_load"));
+        assert!(!multi_manager.contains_key("periodic_reconnect_enabled"));
+        assert!(!multi_manager.contains_key("reconnect_interval_ms"));
+        assert!(!multi_manager.contains_key("auto_reconnect_period_ms"));
     }
 
     #[test]
