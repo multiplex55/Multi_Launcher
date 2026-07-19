@@ -58,17 +58,34 @@ impl LauncherApp {
                         format!("Failed to enumerate MultiManager windows for {context}: {error}"),
                     );
                 }
-                MultiManagerRuntimeEvent::ReconnectCompleted { summary, .. } => {
+                MultiManagerRuntimeEvent::ReconnectCompleted { trigger, summary } => {
                     if summary.binding_snapshot_changed {
                         self.multi_manager.mark_bindings_dirty();
                     }
-                    self.add_success_toast(format_reconnect_summary(summary));
+                    if summary.stale_results_discarded > 0 {
+                        tracing::warn!(
+                            trigger = ?trigger,
+                            stale_results_discarded = summary.stale_results_discarded,
+                            "discarded stale MultiManager reconnect results"
+                        );
+                    }
+                    if trigger == ReconnectTrigger::Manual {
+                        self.add_success_toast(format_reconnect_summary(summary));
+                    }
                 }
-                MultiManagerRuntimeEvent::ReconnectFailed { error, .. } => {
-                    self.report_error_message(
-                        "multi_manager.reconnect",
-                        format!("Failed to reconnect MultiManager windows: {error}"),
-                    );
+                MultiManagerRuntimeEvent::ReconnectFailed { trigger, error } => {
+                    if trigger == ReconnectTrigger::Manual {
+                        self.report_error_message(
+                            "multi_manager.reconnect",
+                            format!("Failed to reconnect MultiManager windows: {error}"),
+                        );
+                    } else {
+                        tracing::error!(
+                            trigger = ?trigger,
+                            error = %error,
+                            "automatic MultiManager reconnect failed"
+                        );
+                    }
                 }
             }
         }

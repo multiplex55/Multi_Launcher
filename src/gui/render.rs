@@ -640,6 +640,7 @@ impl eframe::App for LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.multi_manager_drain_runtime_events();
+        let _ = self.multi_manager.start_pending_automatic_reconnect();
         self.multi_manager.maybe_auto_save_bindings();
         if self.enable_toasts {
             self.toasts.show(ctx);
