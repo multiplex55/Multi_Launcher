@@ -218,9 +218,10 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_refresh_titles(&mut self) {
+        self.multi_manager.last_live_title_refresh = Some(std::time::Instant::now());
         let changed = {
             match self.multi_manager.workspaces.lock() {
-                Ok(mut workspaces) => Ok(bindings::refresh_titles(&mut workspaces)),
+                Ok(mut workspaces) => Ok(bindings::refresh_live_titles(&mut workspaces)),
                 Err(_) => Err(()),
             }
         };

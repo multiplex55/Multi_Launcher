@@ -257,29 +257,34 @@ pub fn duplicate_hwnds(workspaces: &[MmWorkspace]) -> Vec<DuplicateHwnd> {
     duplicates
 }
 
-pub fn refresh_titles_with(
+pub fn refresh_live_titles_with(
     workspaces: &mut [MmWorkspace],
-    is_valid: impl Fn(usize) -> bool,
-    title: impl Fn(usize) -> Option<String>,
+    mut is_valid: impl FnMut(usize) -> bool,
+    mut window_title: impl FnMut(usize) -> Option<String>,
 ) -> bool {
-    let mut changed = false;
+    let mut runtime_cache_changed = false;
     for workspace in workspaces {
         for window in &mut workspace.windows {
-            if window.hwnd != 0
-                && is_valid(window.hwnd)
-                && let Some(new_title) = title(window.hwnd)
+            if !window.has_bound_hwnd() {
+                continue;
+            }
+            let hwnd = window.hwnd;
+            if !is_valid(hwnd) {
+                continue;
+            }
+            if let Some(new_title) = window_title(hwnd)
                 && window.live_title != new_title
             {
                 window.live_title = new_title;
-                changed = true;
+                runtime_cache_changed = true;
             }
         }
     }
-    changed
+    runtime_cache_changed
 }
 
-pub fn refresh_titles(workspaces: &mut [MmWorkspace]) -> bool {
-    refresh_titles_with(workspaces, win::is_valid_window, win::window_title)
+pub fn refresh_live_titles(workspaces: &mut [MmWorkspace]) -> bool {
+    refresh_live_titles_with(workspaces, win::is_valid_window, win::window_title)
 }
 
 #[cfg(test)]
@@ -542,9 +547,9 @@ mod tests {
     }
 
     #[test]
-    fn title_refresh_preserves_aliases() {
+    fn live_title_refresh_preserves_aliases_and_captured_title() {
         let mut workspaces = vec![ws("id", "name", vec![win("alias", "old", 4)])];
-        assert!(refresh_titles_with(
+        assert!(refresh_live_titles_with(
             &mut workspaces,
             |_| true,
             |_| Some("new".into())
@@ -552,6 +557,56 @@ mod tests {
         assert_eq!(workspaces[0].windows[0].captured_title, "old");
         assert_eq!(workspaces[0].windows[0].live_title, "new");
         assert_eq!(workspaces[0].windows[0].alias, "alias");
+    }
+
+    #[test]
+    fn live_title_refresh_only_queries_valid_bound_nonzero_hwnds() {
+        let mut valid_window = win("", "captured", 4);
+        valid_window.live_title = "old-live".into();
+        let mut invalid_bound_window = win("", "invalid", 5);
+        invalid_bound_window.valid = false;
+        let mut zero_hwnd_window = win("", "zero", 0);
+        zero_hwnd_window.valid = true;
+        let mut workspaces = vec![ws(
+            "id",
+            "name",
+            vec![valid_window, invalid_bound_window, zero_hwnd_window],
+        )];
+        let mut valid_queries = Vec::new();
+        let mut title_queries = Vec::new();
+
+        assert!(refresh_live_titles_with(
+            &mut workspaces,
+            |hwnd| {
+                valid_queries.push(hwnd);
+                hwnd == 4
+            },
+            |hwnd| {
+                title_queries.push(hwnd);
+                Some("new-live".into())
+            },
+        ));
+
+        assert_eq!(valid_queries, vec![4]);
+        assert_eq!(title_queries, vec![4]);
+        assert_eq!(workspaces[0].windows[0].captured_title, "captured");
+        assert_eq!(workspaces[0].windows[0].live_title, "new-live");
+        assert_eq!(workspaces[0].windows[1].live_title, "");
+    }
+
+    #[test]
+    fn live_title_refresh_performs_no_enumeration_or_fallback_matching() {
+        let mut workspaces = vec![ws("id", "name", vec![win("", "captured", 8)])];
+
+        assert!(!refresh_live_titles_with(
+            &mut workspaces,
+            |_| true,
+            |_| None
+        ));
+
+        assert_eq!(workspaces[0].windows[0].hwnd, 8);
+        assert_eq!(workspaces[0].windows[0].captured_title, "captured");
+        assert_eq!(workspaces[0].windows[0].live_title, "");
     }
     #[test]
     fn cleared_hwnd_is_removed_from_next_snapshot() {
