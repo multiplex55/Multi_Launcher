@@ -56,4 +56,48 @@ mod tests {
         );
         assert_eq!(restored.multi_manager, updated);
     }
+
+    #[test]
+    fn save_multi_manager_settings_omits_obsolete_periodic_reconnect_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{
+                "multi_manager": {
+                    "periodic_reconnect_enabled": true,
+                    "reconnect_interval_ms": 1000,
+                    "auto_reconnect_period_ms": 2500
+                }
+            }"#,
+        )
+        .expect("write legacy settings");
+        let settings_path = settings_path.to_string_lossy().to_string();
+
+        let updated = MultiManagerSettings {
+            auto_reconnect_on_load: false,
+            ..Default::default()
+        };
+        save_multi_manager_settings(&settings_path, updated.clone())
+            .expect("save multi manager settings");
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("read settings"))
+                .expect("parse saved settings");
+        let multi_manager = saved
+            .get("multi_manager")
+            .and_then(serde_json::Value::as_object)
+            .expect("multi manager object");
+        assert_eq!(
+            multi_manager.get("auto_reconnect_on_load"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert!(!multi_manager.contains_key("periodic_reconnect_enabled"));
+        assert!(!multi_manager.contains_key("reconnect_interval_ms"));
+        assert!(!multi_manager.contains_key("auto_reconnect_period_ms"));
+        assert_eq!(
+            Settings::load(&settings_path).unwrap().multi_manager,
+            updated
+        );
+    }
 }
