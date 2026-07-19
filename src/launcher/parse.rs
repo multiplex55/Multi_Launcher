@@ -14,6 +14,8 @@ pub(crate) enum ActionKind<'a> {
     ClipboardClear,
     ClipboardCopy(usize),
     ClipboardText(&'a str),
+    ClipboardModifyExecute,
+    ClipboardModifyUndo,
     Calc {
         result: &'a str,
         expr: Option<&'a str>,
@@ -163,6 +165,12 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             cmd,
             keep_open: false,
         };
+    }
+    if s == "clipboard_modify:execute" {
+        return ActionKind::ClipboardModifyExecute;
+    }
+    if s == "clipboard_modify:undo" {
+        return ActionKind::ClipboardModifyUndo;
     }
     if let Some(rest) = s.strip_prefix("clipboard:") {
         if rest == "clear" {
