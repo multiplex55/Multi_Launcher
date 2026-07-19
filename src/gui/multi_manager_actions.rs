@@ -32,10 +32,6 @@ impl LauncherApp {
                         result,
                     );
                 }
-                MultiManagerRuntimeEvent::BindingReconnected { .. } => {
-                    // The completed action event carries the same activation summary; avoid
-                    // duplicate toasts while still preserving this structured runtime event.
-                }
                 MultiManagerRuntimeEvent::MovementFailed {
                     workspace_id,
                     errors,

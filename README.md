@@ -652,8 +652,6 @@ MultiManager paths can be customized under the `multi_manager` settings object:
     "auto_save": true,
     "save_on_exit": true,
     "auto_reconnect_on_load": true,
-    "auto_reconnect_missing_windows": true,
-    "auto_reconnect_interval_ms": 3000,
     "ignore_launcher_window_on_capture": true
   }
 }
