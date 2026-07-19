@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const AUTO_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const BINDINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct MultiManagerState {
     pub dirty: bool,
+    pub bindings_dirty: bool,
     pub pending_capture: Option<PendingCaptureAction>,
     pub queued_capture: Option<PendingCaptureAction>,
     pub recapture_queue: VecDeque<RecaptureQueueItem>,
@@ -30,6 +32,9 @@ pub struct MultiManagerState {
     save_debounce: Duration,
     dirty_since: Option<Instant>,
     last_save_attempt: Option<Instant>,
+    binding_save_debounce: Duration,
+    pub bindings_dirty_since: Option<Instant>,
+    pub last_bindings_save_attempt: Option<Instant>,
 }
 
 impl MultiManagerState {
@@ -55,6 +60,7 @@ impl MultiManagerState {
 
         Self {
             dirty: false,
+            bindings_dirty: false,
             pending_capture: None,
             queued_capture: None,
             recapture_queue: VecDeque::new(),
@@ -72,6 +78,9 @@ impl MultiManagerState {
             save_debounce: AUTO_SAVE_DEBOUNCE,
             dirty_since: None,
             last_save_attempt: None,
+            binding_save_debounce: BINDINGS_SAVE_DEBOUNCE,
+            bindings_dirty_since: None,
+            last_bindings_save_attempt: None,
         }
     }
 
@@ -92,6 +101,27 @@ impl MultiManagerState {
         Ok(())
     }
 
+    pub fn save_bindings_now(&mut self) -> Result<()> {
+        let workspaces = self
+            .workspaces
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MultiManager workspace lock poisoned"))?;
+        bindings::save_bindings(&self.bindings_path, &workspaces).with_context(|| {
+            format!(
+                "failed to save MultiManager bindings to {}",
+                self.bindings_path.display()
+            )
+        })?;
+        self.bindings_dirty = false;
+        self.bindings_dirty_since = None;
+        self.runtime
+            .control
+            .bindings_dirty_signal
+            .store(false, Ordering::Relaxed);
+        self.last_bindings_save_attempt = Some(Instant::now());
+        Ok(())
+    }
+
     pub fn reload(&mut self) -> Result<()> {
         let mut loaded = store::load_workspaces(&self.workspace_path)?;
         restore_and_optionally_reconnect(
@@ -106,6 +136,12 @@ impl MultiManagerState {
         *workspaces = loaded;
         self.dirty = false;
         self.dirty_since = None;
+        self.bindings_dirty = false;
+        self.bindings_dirty_since = None;
+        self.runtime
+            .control
+            .bindings_dirty_signal
+            .store(false, Ordering::Relaxed);
         Ok(())
     }
 
@@ -116,12 +152,27 @@ impl MultiManagerState {
         }
     }
 
+    pub fn mark_bindings_dirty(&mut self) {
+        self.bindings_dirty = true;
+        if self.bindings_dirty_since.is_none() {
+            self.bindings_dirty_since = Some(Instant::now());
+        }
+    }
+
     pub fn save_debounced(&mut self) {
         self.mark_dirty();
         self.maybe_auto_save();
     }
 
     pub fn maybe_auto_save(&mut self) {
+        if self
+            .runtime
+            .control
+            .bindings_dirty_signal
+            .swap(false, Ordering::Relaxed)
+        {
+            self.mark_bindings_dirty();
+        }
         if !self.auto_save || !self.dirty {
             return;
         }
@@ -133,6 +184,43 @@ impl MultiManagerState {
             tracing::error!(error = %err, "failed to auto-save MultiManager workspaces");
             self.last_save_attempt = Some(Instant::now());
         }
+    }
+
+    pub fn maybe_auto_save_bindings(&mut self) {
+        if self
+            .runtime
+            .control
+            .bindings_dirty_signal
+            .swap(false, Ordering::Relaxed)
+        {
+            self.mark_bindings_dirty();
+        }
+        if !self.auto_save || !self.bindings_dirty {
+            return;
+        }
+        if self
+            .bindings_dirty_since
+            .is_some_and(|dirty_since| dirty_since.elapsed() >= self.binding_save_debounce)
+            && let Err(err) = self.save_bindings_now()
+        {
+            tracing::error!(error = %err, "failed to auto-save MultiManager bindings");
+            self.last_bindings_save_attempt = Some(Instant::now());
+        }
+    }
+
+    pub fn flush_bindings_if_dirty(&mut self) -> Result<()> {
+        if self
+            .runtime
+            .control
+            .bindings_dirty_signal
+            .swap(false, Ordering::Relaxed)
+        {
+            self.mark_bindings_dirty();
+        }
+        if self.bindings_dirty {
+            self.save_bindings_now()?;
+        }
+        Ok(())
     }
 
     pub fn validate_capture_state_debug(&self) {
@@ -188,6 +276,8 @@ impl MultiManagerState {
     #[cfg(test)]
     fn force_debounce_elapsed(&mut self) {
         self.dirty_since = Some(Instant::now() - self.save_debounce - Duration::from_millis(1));
+        self.bindings_dirty_since =
+            Some(Instant::now() - self.binding_save_debounce - Duration::from_millis(1));
     }
 }
 
@@ -536,5 +626,75 @@ mod tests {
         );
         state.shutdown();
         state.shutdown();
+    }
+    #[test]
+    fn capture_marks_bindings_dirty_without_workspace_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.mark_bindings_dirty();
+        assert!(state.bindings_dirty);
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn fallback_reconnect_signal_marks_bindings_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state
+            .runtime
+            .control
+            .bindings_dirty_signal
+            .store(true, Ordering::Relaxed);
+        state.maybe_auto_save_bindings();
+        assert!(state.bindings_dirty);
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn live_title_refresh_does_not_mark_bindings_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        assert!(!state.bindings_dirty);
+    }
+
+    #[test]
+    fn rapid_binding_changes_debounce_to_one_save_opportunity() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_save: true,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.mark_bindings_dirty();
+        let first_dirty_since = state.bindings_dirty_since;
+        state.mark_bindings_dirty();
+        assert_eq!(state.bindings_dirty_since, first_dirty_since);
+        state.maybe_auto_save_bindings();
+        assert!(state.last_bindings_save_attempt.is_none());
     }
 }

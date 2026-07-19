@@ -24,7 +24,7 @@ impl LauncherApp {
             match event {
                 MultiManagerRuntimeEvent::WorkspaceActionCompleted { result, .. } => {
                     if result.bindings_changed {
-                        self.multi_manager.mark_dirty();
+                        self.multi_manager.mark_bindings_dirty();
                     }
                     self.multi_manager_report_activation(
                         "MultiManager hotkey activated workspace",
@@ -113,7 +113,7 @@ impl LauncherApp {
             return;
         };
         if result.bindings_changed {
-            self.multi_manager.mark_dirty();
+            self.multi_manager.mark_bindings_dirty();
         }
         self.multi_manager_report_activation("Sent all MultiManager windows home", result);
     }
@@ -139,7 +139,9 @@ impl LauncherApp {
             }
         };
 
-        self.multi_manager.mark_dirty();
+        if summary.binding_snapshot_changed {
+            self.multi_manager.mark_bindings_dirty();
+        }
         self.add_success_toast(format_reconnect_summary(summary));
     }
 
@@ -172,14 +174,7 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_save_bindings(&mut self) {
-        let result = self
-            .multi_manager
-            .workspaces
-            .lock()
-            .map_err(|_| anyhow::anyhow!("MultiManager workspace lock poisoned"))
-            .and_then(|workspaces| {
-                bindings::save_bindings(&self.multi_manager.bindings_path, &workspaces)
-            });
+        let result = self.multi_manager.save_bindings_now();
         match result {
             Ok(()) => self.add_success_toast("Saved MultiManager window bindings"),
             Err(err) => self.report_error_message(
@@ -195,15 +190,18 @@ impl LauncherApp {
                 let restored = {
                     match self.multi_manager.workspaces.lock() {
                         Ok(mut workspaces) => {
+                            let before = binding_fingerprint(&workspaces);
                             bindings::restore_bindings(&mut workspaces, &snapshots);
-                            Ok(())
+                            Ok(before != binding_fingerprint(&workspaces))
                         }
                         Err(_) => Err(()),
                     }
                 };
                 match restored {
-                    Ok(()) => {
-                        self.multi_manager.mark_dirty();
+                    Ok(changed) => {
+                        if changed {
+                            self.multi_manager.mark_bindings_dirty();
+                        }
                         self.add_success_toast("Restored MultiManager window bindings");
                     }
                     Err(()) => self.report_error_message(
@@ -228,7 +226,6 @@ impl LauncherApp {
         };
         match changed {
             Ok(true) => {
-                self.multi_manager.mark_dirty();
                 self.add_success_toast("Refreshed MultiManager window titles");
             }
             Ok(false) => self.add_success_toast("MultiManager window titles already current"),
@@ -453,7 +450,7 @@ impl LauncherApp {
             return;
         };
         if result.bindings_changed {
-            self.multi_manager.mark_dirty();
+            self.multi_manager.mark_bindings_dirty();
         }
         self.multi_manager_report_activation(success_message, result);
     }
@@ -880,6 +877,7 @@ impl LauncherApp {
             ApplyCaptureResult::Applied => {
                 log_applied_capture(&action, &captured);
                 self.multi_manager.mark_dirty();
+                self.multi_manager.mark_bindings_dirty();
             }
             ApplyCaptureResult::MissingWorkspace => {
                 self.report_error_message(
@@ -1984,4 +1982,27 @@ mod tests {
 
         assert!(!app.is_launcher_capture(&captured(100, "Notepad")));
     }
+}
+
+fn binding_fingerprint(
+    workspaces: &[crate::multi_manager::model::MmWorkspace],
+) -> Vec<(usize, usize, usize, bool)> {
+    workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(workspace_index, workspace)| {
+            workspace
+                .windows
+                .iter()
+                .enumerate()
+                .map(move |(window_index, window)| {
+                    (
+                        workspace_index,
+                        window_index,
+                        window.hwnd,
+                        window.binding_verified,
+                    )
+                })
+        })
+        .collect()
 }

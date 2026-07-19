@@ -51,6 +51,7 @@ pub struct RuntimeControl {
     pub shutdown: AtomicBool,
     pub auto_reconnect_missing_windows: AtomicBool,
     pub auto_reconnect_interval_ms: AtomicU64,
+    pub bindings_dirty_signal: Arc<AtomicBool>,
 }
 
 impl RuntimeControl {
@@ -61,6 +62,7 @@ impl RuntimeControl {
             shutdown: AtomicBool::new(false),
             auto_reconnect_missing_windows: AtomicBool::new(true),
             auto_reconnect_interval_ms: AtomicU64::new(3000),
+            bindings_dirty_signal: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -120,6 +122,7 @@ impl MultiManagerRuntime {
         let event_queue = Arc::new(Mutex::new(VecDeque::new()));
         let thread_workspaces = Arc::clone(&workspaces);
         let thread_control = Arc::clone(&control);
+        let thread_bindings_dirty_signal = Arc::clone(&control.bindings_dirty_signal);
         let thread_last_hotkey_info = Arc::clone(&last_hotkey_info);
         let thread_event_queue = Arc::clone(&event_queue);
         let poll = Duration::from_millis(settings.hotkey_poll_ms);
@@ -132,14 +135,16 @@ impl MultiManagerRuntime {
             while !thread_control.shutdown.load(Ordering::Relaxed) {
                 thread::sleep(poll);
                 let now = Instant::now();
-                maybe_runtime_reconnect(
+                if maybe_runtime_reconnect(
                     &thread_workspaces,
                     &thread_control,
                     &mut last_reconnect,
                     now,
                     |hwnd| win::is_valid_window(hwnd),
                     || win::enumerate_top_level_windows().unwrap_or_default(),
-                );
+                ) {
+                    thread_bindings_dirty_signal.store(true, Ordering::Relaxed);
+                }
                 if let Ok(mut workspaces) = thread_workspaces.lock() {
                     runtime_tick(
                         &mut workspaces,
@@ -429,6 +434,9 @@ pub fn runtime_tick(
             &deps,
         )
         .unwrap_or_default();
+        if result.bindings_changed {
+            control.bindings_dirty_signal.store(true, Ordering::Relaxed);
+        }
         push_runtime_activation_events(
             event_queue,
             workspace_id.clone(),
