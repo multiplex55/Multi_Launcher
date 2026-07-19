@@ -344,7 +344,7 @@ fn preview(ui: &mut egui::Ui, scheme: &ColorScheme) {
     egui::Frame::none()
         .fill(to_egui(scheme.window_fill))
         .stroke(egui::Stroke::new(
-            1.0,
+            1.0_f32,
             to_egui(scheme.widget_inactive_stroke),
         ))
         .show(ui, |ui| {
@@ -395,7 +395,7 @@ fn swatch(ui: &mut egui::Ui, label: &str, fill: ThemeColor, stroke: ThemeColor) 
         rect,
         4.0,
         to_egui(fill),
-        egui::Stroke::new(1.0, to_egui(stroke)),
+        egui::Stroke::new(1.0_f32, to_egui(stroke)),
     );
     ui.painter().text(
         rect.center(),

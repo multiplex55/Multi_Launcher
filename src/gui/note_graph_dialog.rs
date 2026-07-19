@@ -634,7 +634,7 @@ impl NoteGraphDialog {
             let a = Pos2::new(edge.from[0], edge.from[1]);
             let b = Pos2::new(edge.to[0], edge.to[1]);
             if edge_is_visible(a, b, rect) {
-                painter.line_segment([a, b], Stroke::new(1.0, Color32::from_gray(90)));
+                painter.line_segment([a, b], Stroke::new(1.0_f32, Color32::from_gray(90)));
             }
         }
 

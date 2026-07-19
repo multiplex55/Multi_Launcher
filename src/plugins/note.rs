@@ -1078,21 +1078,24 @@ impl NotePlugin {
             },
             Config::default(),
         )
-        .ok()
-        .and_then(|mut w| {
-            if w.watch(&dir, RecursiveMode::NonRecursive)
-                .or_else(|_| {
-                    dir.parent()
-                        .map(|p| w.watch(p, RecursiveMode::NonRecursive))
-                        .unwrap_or(Ok(()))
-                })
-                .is_ok()
-            {
-                Some(w)
-            } else {
-                None
+        .ok();
+        let watcher = match watcher {
+            Some(mut w) => {
+                if w.watch(&dir, RecursiveMode::NonRecursive)
+                    .or_else(|_| {
+                        dir.parent()
+                            .map(|p| w.watch(p, RecursiveMode::NonRecursive))
+                            .unwrap_or(Ok(()))
+                    })
+                    .is_ok()
+                {
+                    Some(w)
+                } else {
+                    None
+                }
             }
-        });
+            None => None,
+        };
         Self {
             matcher: SkimMatcherV2::default(),
             data,

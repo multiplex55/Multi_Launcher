@@ -2290,7 +2290,7 @@ impl NotePanel {
     ) {
         let visuals = ui.visuals().clone();
         let fill = visuals.faint_bg_color;
-        let stroke = egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
+        let stroke = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
         egui::Frame::none()
             .fill(fill)
             .stroke(stroke)

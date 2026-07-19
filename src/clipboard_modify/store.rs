@@ -1,0 +1,39 @@
+use super::config::{self, LoadedConfig, VersionedClipboardModifiersFile};
+use super::model::ClipboardModifierCatalog;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+pub type SharedClipboardModifierCatalog = Arc<RwLock<Arc<ClipboardModifierCatalog>>>;
+
+#[derive(Clone)]
+pub struct ClipboardModifierStore {
+    pub path: PathBuf,
+    pub catalog: SharedClipboardModifierCatalog,
+    pub diagnostic: Arc<RwLock<Option<String>>>,
+}
+
+impl ClipboardModifierStore {
+    pub fn new(settings_path: &Path) -> (Self, LoadedConfig) {
+        let loaded = config::load_startup(settings_path);
+        let store = Self {
+            path: loaded.path.clone(),
+            catalog: Arc::new(RwLock::new(Arc::new(loaded.catalog.clone()))),
+            diagnostic: Arc::new(RwLock::new(None)),
+        };
+        (store, loaded)
+    }
+    pub fn replace_valid(&self, catalog: ClipboardModifierCatalog) {
+        *self.catalog.write().unwrap() = Arc::new(catalog);
+        *self.diagnostic.write().unwrap() = None;
+    }
+    pub fn retain_with_error(&self, msg: String) {
+        *self.diagnostic.write().unwrap() = Some(msg);
+    }
+    pub fn save(&self, model: &VersionedClipboardModifiersFile) -> anyhow::Result<()> {
+        config::save_model_atomic(&self.path, model)
+    }
+}
+
+pub fn shared_default_catalog() -> SharedClipboardModifierCatalog {
+    Arc::new(RwLock::new(Arc::new(super::defaults::default_catalog())))
+}

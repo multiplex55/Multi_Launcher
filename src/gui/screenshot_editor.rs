@@ -572,9 +572,9 @@ impl ScreenshotEditor {
                         let selected = self.color_index == idx;
                         let mut button = egui::Button::new(format!("{}", idx + 1))
                             .fill(*color)
-                            .stroke(Stroke::new(1.0, Color32::BLACK));
+                            .stroke(Stroke::new(1.0_f32, Color32::BLACK));
                         if selected {
-                            button = button.stroke(Stroke::new(2.0, Color32::WHITE));
+                            button = button.stroke(Stroke::new(2.0_f32, Color32::WHITE));
                         }
                         if ui.add(button).clicked() {
                             self.color_index = idx;
@@ -796,7 +796,7 @@ impl ScreenshotEditor {
                 }
                 if let Some(rect) = self.crop_rect {
                     let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
-                    painter.rect_stroke(draw, 0.0, Stroke::new(1.0, Color32::GREEN));
+                    painter.rect_stroke(draw, 0.0, Stroke::new(1.0_f32, Color32::GREEN));
                 }
                 for layer in self.history.layers() {
                     match layer {
