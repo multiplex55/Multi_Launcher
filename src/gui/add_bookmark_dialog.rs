@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::bookmarks::{append_bookmark, set_alias, BOOKMARKS_FILE};
+use crate::plugins::bookmarks::{BOOKMARKS_FILE, append_bookmark, set_alias};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
@@ -9,7 +9,6 @@ pub struct AddBookmarkDialog {
     url: String,
     alias: String,
 }
-
 
 impl AddBookmarkDialog {
     pub fn open(&mut self) {

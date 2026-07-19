@@ -251,7 +251,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        load_pins, recompute_pins, remove_pin, save_pins, toggle_pin, upsert_pin, HistoryPin,
+        HistoryPin, load_pins, recompute_pins, remove_pin, save_pins, toggle_pin, upsert_pin,
     };
     use crate::actions::Action;
     use tempfile::tempdir;

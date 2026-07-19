@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 pub struct EmojiPlugin {
     matcher: SkimMatcherV2,

@@ -1,14 +1,14 @@
 use crate::dashboard::DashboardDataCache;
 use crate::graph::note_graph::{
-    build_draw_primitives, project_world_to_screen, DrawNode, LayoutConfig, NoteGraphEngine,
-    NoteGraphFilter, RenderSurface,
+    DrawNode, LayoutConfig, NoteGraphEngine, NoteGraphFilter, RenderSurface, build_draw_primitives,
+    project_world_to_screen,
 };
 use crate::gui::LauncherApp;
 use crate::plugins::note::Note;
 use crate::settings::{NoteGraphSettings, Settings};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
@@ -34,14 +34,12 @@ struct NoteGraphDialogArgs {
     local_mode: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum GraphMode {
     #[default]
     Global,
     Local,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 struct CameraTransform {
@@ -379,11 +377,13 @@ impl NoteGraphDialog {
             if response.changed() {
                 self.search.selected_idx = 0;
             }
-            if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                && let Some(result) = self.search.results.get(self.search.selected_idx) {
-                    self.selected_node_id = Some(result.slug.clone());
-                    self.center_request = Some(result.slug.clone());
-                }
+            if response.has_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && let Some(result) = self.search.results.get(self.search.selected_idx)
+            {
+                self.selected_node_id = Some(result.slug.clone());
+                self.center_request = Some(result.slug.clone());
+            }
 
             ui.separator();
             changed |= ui
@@ -409,9 +409,10 @@ impl NoteGraphDialog {
                 }
             }
             if ui.button("Open selected").clicked()
-                && let Some(slug) = self.selected_node_id.clone() {
-                    app.open_note_panel(&slug, None);
-                }
+                && let Some(slug) = self.selected_node_id.clone()
+            {
+                app.open_note_panel(&slug, None);
+            }
             ui.toggle_value(&mut self.show_details_panel, "Details");
         });
 
@@ -594,24 +595,27 @@ impl NoteGraphDialog {
         }
 
         if let Some(slug) = self.center_request.clone()
-            && let Some(node) = self.engine.layout.nodes.get(&slug) {
-                let at = self.camera.world_to_screen(node.position, rect);
-                self.camera.pan += rect.center() - at;
-                self.center_request = None;
-            }
+            && let Some(node) = self.engine.layout.nodes.get(&slug)
+        {
+            let at = self.camera.world_to_screen(node.position, rect);
+            self.camera.pan += rect.center() - at;
+            self.center_request = None;
+        }
 
         if response.dragged() {
             if self.dragged_node.is_none()
-                && let Some(pointer) = response.interact_pointer_pos() {
-                    self.dragged_node = hit_test_node(pointer, &screen_positions, 12.0);
-                }
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                self.dragged_node = hit_test_node(pointer, &screen_positions, 12.0);
+            }
             if let Some(dragged) = self.dragged_node.clone() {
                 if let Some(pointer) = response.interact_pointer_pos()
-                    && let Some(node) = self.engine.layout.nodes.get_mut(&dragged) {
-                        node.position = self.camera.screen_to_world(pointer, rect);
-                        node.pinned = true;
-                        node.velocity = [0.0, 0.0];
-                    }
+                    && let Some(node) = self.engine.layout.nodes.get_mut(&dragged)
+                {
+                    node.position = self.camera.screen_to_world(pointer, rect);
+                    node.pinned = true;
+                    node.velocity = [0.0, 0.0];
+                }
             } else {
                 self.camera.pan += response.drag_delta();
             }
@@ -621,14 +625,16 @@ impl NoteGraphDialog {
         }
 
         if response.clicked()
-            && let Some(pointer) = response.interact_pointer_pos() {
-                self.selected_node_id = hit_test_node(pointer, &screen_positions, 12.0);
-            }
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            self.selected_node_id = hit_test_node(pointer, &screen_positions, 12.0);
+        }
 
         if (response.double_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
-            && let Some(slug) = self.selected_node_id.clone() {
-                app.open_note_panel(&slug, None);
-            }
+            && let Some(slug) = self.selected_node_id.clone()
+        {
+            app.open_note_panel(&slug, None);
+        }
 
         for edge in &draw.edges {
             let a = Pos2::new(edge.from[0], edge.from[1]);

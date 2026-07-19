@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use multi_launcher::plugins::macros::search_first_action;
 
 /// Benchmark the cached `PluginManager` lookup used by `search_first_action`.

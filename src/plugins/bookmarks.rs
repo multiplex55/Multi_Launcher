@@ -1,8 +1,8 @@
 use crate::actions::Action;
 use crate::common::lru::LruCache;
 use crate::plugin::Plugin;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -53,14 +53,15 @@ impl BookmarksPlugin {
                             event.kind,
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                         )
-                            && let Ok(list) = load_bookmarks(&path) {
-                                if let Ok(mut lock) = data_clone.lock() {
-                                    *lock = list;
-                                }
-                                if let Ok(mut c) = cache_clone.lock() {
-                                    c.clear();
-                                }
-                            }
+                        && let Ok(list) = load_bookmarks(&path)
+                    {
+                        if let Ok(mut lock) = data_clone.lock() {
+                            *lock = list;
+                        }
+                        if let Ok(mut c) = cache_clone.lock() {
+                            c.clear();
+                        }
+                    }
                 }
             },
             Config::default(),
@@ -83,14 +84,15 @@ impl BookmarksPlugin {
 
     fn search_internal(&self, trimmed: &str) -> Vec<Action> {
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "bm")
-            && (rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add")) {
-                return vec![Action {
-                    label: "bm: add bookmark".into(),
-                    desc: "Bookmark".into(),
-                    action: "bookmark:dialog".into(),
-                    args: None,
-                }];
-            }
+            && (rest.trim().is_empty() || rest.trim().eq_ignore_ascii_case("add"))
+        {
+            return vec![Action {
+                label: "bm: add bookmark".into(),
+                desc: "Bookmark".into(),
+                action: "bookmark:dialog".into(),
+                args: None,
+            }];
+        }
 
         const ADD_PREFIX: &str = "bm add ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
@@ -296,9 +298,10 @@ impl Plugin for BookmarksPlugin {
         let trimmed = query.trim();
         let key = trimmed.to_string();
         if let Ok(mut cache) = self.cache.lock()
-            && let Some(res) = cache.get(&key).cloned() {
-                return res;
-            }
+            && let Some(res) = cache.get(&key).cloned()
+        {
+            return res;
+        }
 
         let result = self.search_internal(trimmed);
 

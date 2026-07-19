@@ -1,12 +1,12 @@
 use super::{
+    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
-};
-use crate::actions::system::{
-    get_main_display_brightness, get_power_plans, get_system_mute, get_system_volume, PowerPlan,
+    run_refresh_schedule,
 };
 use crate::actions::Action;
+use crate::actions::system::{
+    PowerPlan, get_main_display_brightness, get_power_plans, get_system_mute, get_system_volume,
+};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -79,13 +79,13 @@ impl SystemControlsWidget {
             ctx,
             |ui, cfg: &mut SystemControlsConfig, _ctx| {
                 refresh_settings_ui(
-                ui,
-                &mut cfg.refresh_interval_secs,
-                &mut cfg.refresh_mode,
-                &mut cfg.refresh_throttle_secs,
-                Some(&mut cfg.manual_refresh_only),
-                "System control data is cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
-            )
+                    ui,
+                    &mut cfg.refresh_interval_secs,
+                    &mut cfg.refresh_mode,
+                    &mut cfg.refresh_throttle_secs,
+                    Some(&mut cfg.manual_refresh_only),
+                    "System control data is cached. The widget will skip refreshing until this many seconds have passed. Use Refresh to update immediately.",
+                )
             },
         )
     }

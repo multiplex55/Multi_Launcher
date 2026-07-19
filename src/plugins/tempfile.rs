@@ -137,14 +137,15 @@ impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "tmp: create".into(),
-                    desc: "Tempfile".into(),
-                    action: "tempfile:dialog".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "tmp: create".into(),
+                desc: "Tempfile".into(),
+                action: "tempfile:dialog".into(),
+                args: None,
+            }];
+        }
         const NEW_PREFIX: &str = "tmp new ";
         const CREATE_PREFIX: &str = "tmp create ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, NEW_PREFIX)
@@ -161,32 +162,35 @@ impl Plugin for TempfilePlugin {
             }
         } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new")
             .or_else(|| crate::common::strip_prefix_ci(trimmed, "tmp create"))
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "Create temp file".into(),
-                    desc: "Tempfile".into(),
-                    action: "tempfile:new".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "Create temp file".into(),
+                desc: "Tempfile".into(),
+                action: "tempfile:new".into(),
+                args: None,
+            }];
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp open")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "Open temp directory".into(),
-                    desc: "Tempfile".into(),
-                    action: "tempfile:open".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "Open temp directory".into(),
+                desc: "Tempfile".into(),
+                action: "tempfile:open".into(),
+                args: None,
+            }];
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp clear")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "Clear temp files".into(),
-                    desc: "Tempfile".into(),
-                    action: "tempfile:clear".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "Clear temp files".into(),
+                desc: "Tempfile".into(),
+                action: "tempfile:clear".into(),
+                args: None,
+            }];
+        }
         const RM_PREFIX: &str = "tmp rm";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
             let filter = rest.trim().to_lowercase();

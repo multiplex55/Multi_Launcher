@@ -10,16 +10,15 @@
 //!
 //! Flags are comma-separated (`,`) and values use `key=value`, for example:
 //! `layout:load:Work|dry_run,only_active_monitor,filter=chrome`.
-use crate::common::config_files::{ensure_config_file, ConfigFileResult};
+use crate::common::config_files::{ConfigFileResult, ensure_config_file};
 use crate::plugins::layouts_storage::{
-    self, layouts_config_path, list_layouts as list_saved_layouts,
-    remove_layout as remove_saved_layout, Layout, LayoutCoordMode, LayoutOptions,
-    LayoutWindowLaunch, LAYOUTS_CONFIG,
+    self, LAYOUTS_CONFIG, Layout, LayoutCoordMode, LayoutOptions, LayoutWindowLaunch,
+    layouts_config_path, list_layouts as list_saved_layouts, remove_layout as remove_saved_layout,
 };
 use crate::settings;
 use crate::windows_layout::{
-    apply_layout_restore_plan, collect_layout_windows, plan_layout_restore, LayoutMatchResult,
-    LayoutRestoreSummary, LayoutWindowOptions,
+    LayoutMatchResult, LayoutRestoreSummary, LayoutWindowOptions, apply_layout_restore_plan,
+    collect_layout_windows, plan_layout_restore,
 };
 use std::collections::HashSet;
 use std::time::{Duration, Instant};

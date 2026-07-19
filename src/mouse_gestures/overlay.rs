@@ -209,18 +209,18 @@ impl HintOverlaySurface {
     fn new() -> Option<Self> {
         use std::sync::Once;
         use std::{mem, ptr};
-        use windows::core::PCWSTR;
         use windows::Win32::Foundation::{COLORREF, HWND};
         use windows::Win32::Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, SelectObject, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, SelectObject,
         };
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-            ShowWindow, GWLP_USERDATA, LWA_COLORKEY, SW_HIDE, WNDCLASSW, WS_EX_LAYERED,
+            CreateWindowExW, GWLP_USERDATA, LWA_COLORKEY, RegisterClassW, SW_HIDE,
+            SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         };
+        use windows::core::PCWSTR;
 
         static REGISTER: Once = Once::new();
         let class_name = widestring("MultiLauncherHintOverlay");
@@ -284,8 +284,7 @@ impl HintOverlaySurface {
 
         let mut bits: *mut core::ffi::c_void = ptr::null_mut();
         let dib =
-            unsafe { CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
-                .ok()?;
+            unsafe { CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
         if bits.is_null() {
             unsafe {
                 let _ = DeleteDC(mem_dc);
@@ -356,7 +355,7 @@ impl HintOverlaySurface {
         use windows::Win32::Foundation::COLORREF;
         use windows::Win32::Graphics::Gdi::{
             CreateFontW, DeleteObject, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
-            TextOutW, TRANSPARENT,
+            TRANSPARENT, TextOutW,
         };
 
         if text == self.last_text {
@@ -400,7 +399,7 @@ impl HintOverlaySurface {
     }
 
     fn hide(&mut self) {
-        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -452,19 +451,19 @@ impl TrailOverlaySurface {
         use std::mem;
         use std::ptr;
         use std::sync::Once;
-        use windows::core::PCWSTR;
         use windows::Win32::Foundation::{COLORREF, HWND};
         use windows::Win32::Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, SelectObject, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, SelectObject,
         };
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-            ShowWindow, GWLP_USERDATA, LWA_COLORKEY, SW_SHOW, WNDCLASSW, WS_EX_LAYERED,
+            CreateWindowExW, GWLP_USERDATA, LWA_COLORKEY, RegisterClassW, SW_SHOW,
+            SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         };
+        use windows::core::PCWSTR;
 
         static REGISTER: Once = Once::new();
         let class_name = widestring("MultiLauncherTrailOverlay");
@@ -533,8 +532,7 @@ impl TrailOverlaySurface {
         };
         let mut bits: *mut core::ffi::c_void = ptr::null_mut();
         let dib =
-            unsafe { CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
-                .ok()?;
+            unsafe { CreateDIBSection(mem_dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) }.ok()?;
         if bits.is_null() {
             unsafe {
                 let _ = DeleteDC(mem_dc);
@@ -679,7 +677,7 @@ impl OverlayBackend for DefaultOverlayBackend {
         use windows::Win32::Foundation::COLORREF;
         use windows::Win32::Graphics::Gdi::InvalidateRect;
         use windows::Win32::Graphics::Gdi::{
-            CreatePen, DeleteObject, LineTo, MoveToEx, SelectObject, PS_SOLID,
+            CreatePen, DeleteObject, LineTo, MoveToEx, PS_SOLID, SelectObject,
         };
 
         let needs_raise = self.trail_needs_raise;
@@ -694,7 +692,7 @@ impl OverlayBackend for DefaultOverlayBackend {
         if needs_raise {
             self.trail_needs_raise = false;
             use windows::Win32::UI::WindowsAndMessaging::{
-                SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+                HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
             };
             unsafe {
                 let _ = SetWindowPos(
@@ -799,17 +797,17 @@ unsafe impl Send for HintTooltip {}
 impl HintTooltip {
     fn new() -> Option<Self> {
         use std::mem;
-        use windows::core::PCWSTR;
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::Controls::{
-            InitCommonControlsEx, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, TOOLTIPS_CLASSW,
+            ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW,
             TTDT_AUTOPOP, TTDT_INITIAL, TTDT_RESHOW, TTF_ABSOLUTE, TTF_TRACK, TTM_ADDTOOLW,
             TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, GetDesktopWindow, SendMessageW, ShowWindow, SW_HIDE, WINDOW_STYLE,
+            CreateWindowExW, GetDesktopWindow, SW_HIDE, SendMessageW, ShowWindow, WINDOW_STYLE,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         };
+        use windows::core::PCWSTR;
 
         unsafe {
             let icc = INITCOMMONCONTROLSEX {

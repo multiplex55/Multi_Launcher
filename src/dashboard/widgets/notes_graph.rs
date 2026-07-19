@@ -1,10 +1,10 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::graph::note_graph::{
-    build_draw_primitives, LayoutConfig, NoteGraphEngine, NoteGraphFilter, RenderSurface,
+    LayoutConfig, NoteGraphEngine, NoteGraphFilter, RenderSurface, build_draw_primitives,
 };
 use crate::plugins::note::Note;
 use eframe::egui::{self, Color32, Pos2, Stroke};

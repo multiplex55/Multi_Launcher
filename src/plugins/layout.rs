@@ -1,6 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::plugins::layouts_storage::{get_layout, layouts_config_path, load_layouts, LayoutMatch};
+use crate::plugins::layouts_storage::{LayoutMatch, get_layout, layouts_config_path, load_layouts};
 
 #[derive(Default, Debug, Clone)]
 struct LayoutFlags {
@@ -259,43 +259,44 @@ impl Plugin for LayoutPlugin {
             let (name, flags) = parse_name_and_flags(rest.trim());
             if let Ok(store) = load_layouts(layouts_config_path()) {
                 if !name.is_empty()
-                    && let Some(layout) = get_layout(&store, &name) {
-                        let action = build_action(format!("layout:show:{}", layout.name), &flags);
-                        let layout_name = layout.name.as_str();
-                        return layout
-                            .windows
-                            .iter()
-                            .filter(|window| {
-                                matches_group_filter(window.group.as_deref(), &flags.only_groups)
-                            })
-                            .enumerate()
-                            .map(|(idx, window)| {
-                                let rect = window.placement.rect;
-                                let monitor =
-                                    window.placement.monitor.as_deref().unwrap_or("any monitor");
-                                let desktop = window.desktop.as_deref().unwrap_or("any desktop");
-                                let match_label = format_match(&window.matcher);
-                                let group_label = window.group.as_deref().unwrap_or("ungrouped");
-                                Action {
-                                    label: format!(
-                                        "Window {}: {} @ {} [{}] [{:.2}, {:.2}, {:.2}, {:.2}] ({})",
-                                        idx + 1,
-                                        match_label,
-                                        monitor,
-                                        desktop,
-                                        rect[0],
-                                        rect[1],
-                                        rect[2],
-                                        rect[3],
-                                        group_label
-                                    ),
-                                    desc: format!("Layout preview: {layout_name}"),
-                                    action: action.clone(),
-                                    args: None,
-                                }
-                            })
-                            .collect();
-                    }
+                    && let Some(layout) = get_layout(&store, &name)
+                {
+                    let action = build_action(format!("layout:show:{}", layout.name), &flags);
+                    let layout_name = layout.name.as_str();
+                    return layout
+                        .windows
+                        .iter()
+                        .filter(|window| {
+                            matches_group_filter(window.group.as_deref(), &flags.only_groups)
+                        })
+                        .enumerate()
+                        .map(|(idx, window)| {
+                            let rect = window.placement.rect;
+                            let monitor =
+                                window.placement.monitor.as_deref().unwrap_or("any monitor");
+                            let desktop = window.desktop.as_deref().unwrap_or("any desktop");
+                            let match_label = format_match(&window.matcher);
+                            let group_label = window.group.as_deref().unwrap_or("ungrouped");
+                            Action {
+                                label: format!(
+                                    "Window {}: {} @ {} [{}] [{:.2}, {:.2}, {:.2}, {:.2}] ({})",
+                                    idx + 1,
+                                    match_label,
+                                    monitor,
+                                    desktop,
+                                    rect[0],
+                                    rect[1],
+                                    rect[2],
+                                    rect[3],
+                                    group_label
+                                ),
+                                desc: format!("Layout preview: {layout_name}"),
+                                action: action.clone(),
+                                args: None,
+                            }
+                        })
+                        .collect();
+                }
 
                 let filter = name.to_lowercase();
                 return store
@@ -316,14 +317,15 @@ impl Plugin for LayoutPlugin {
         }
 
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "edit")
-            && rest.trim().is_empty() {
-                return vec![Action {
-                    label: format!("{config_label} ({config_desc})"),
-                    desc: "Layout config".into(),
-                    action: "layout:edit".into(),
-                    args: None,
-                }];
-            }
+            && rest.trim().is_empty()
+        {
+            return vec![Action {
+                label: format!("{config_label} ({config_desc})"),
+                desc: "Layout config".into(),
+                action: "layout:edit".into(),
+                args: None,
+            }];
+        }
 
         if let Some(rest) = crate::common::strip_prefix_ci(rest, "rm") {
             let (name, flags) = parse_name_and_flags(rest.trim());

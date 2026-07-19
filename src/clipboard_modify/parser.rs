@@ -1,4 +1,4 @@
-use super::catalog::{normalize_name, operation_lookup, operations, ArgumentRequirements};
+use super::catalog::{ArgumentRequirements, normalize_name, operation_lookup, operations};
 use super::model::{ClipboardModifierCatalog, OperationId, StageArguments, StageSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,9 +91,10 @@ pub fn parse(input: &str, catalog: &ClipboardModifierCatalog) -> ClipboardModify
         return ClipboardModifyParseResult::OpenSection(ModifySection::Modify);
     }
     if stages.len() == 1
-        && let Some(special) = parse_special(&stages[0], catalog) {
-            return special;
-        }
+        && let Some(special) = parse_special(&stages[0], catalog)
+    {
+        return special;
+    }
     let mut out = Vec::new();
     for (idx, stage) in stages.iter().enumerate() {
         match parse_stage(stage, idx) {
@@ -188,14 +189,15 @@ fn lex_stages(input: &str, offset: usize) -> Result<Vec<Stage>, ParserError> {
     }
     if let Some(last) = stages.last()
         && last.tokens.is_empty()
-        && stages.len() > 1 {
-            return Err(err(
-                Some(stages.len() - 1),
-                last.span.start.saturating_sub(1),
-                last.span.start,
-                ParserErrorKind::TrailingPipe,
-            ));
-        }
+        && stages.len() > 1
+    {
+        return Err(err(
+            Some(stages.len() - 1),
+            last.span.start.saturating_sub(1),
+            last.span.start,
+            ParserErrorKind::TrailingPipe,
+        ));
+    }
     Ok(stages)
 }
 fn lex_bare<I: Iterator<Item = (usize, char)>>(

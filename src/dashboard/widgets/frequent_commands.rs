@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -72,7 +72,6 @@ impl FrequentCommandsWidget {
     }
 }
 
-
 impl Widget for FrequentCommandsWidget {
     fn render(
         &mut self,
@@ -88,12 +87,13 @@ impl Widget for FrequentCommandsWidget {
                 break;
             }
             if let Some(action) = self.resolve_action(ctx.actions, action_id)
-                && ui.button(&action.label).clicked() {
-                    return Some(WidgetAction {
-                        query_override: Some(action.label.clone()),
-                        action,
-                    });
-                }
+                && ui.button(&action.label).clicked()
+            {
+                return Some(WidgetAction {
+                    query_override: Some(action.label.clone()),
+                    action,
+                });
+            }
         }
         None
     }

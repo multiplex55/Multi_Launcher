@@ -3,7 +3,7 @@ use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn new_app_with_plugins(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();

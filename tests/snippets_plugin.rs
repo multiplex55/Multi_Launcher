@@ -1,6 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::snippets::{
-    load_snippets, save_snippets, SnippetEntry, SnippetsPlugin, SNIPPETS_FILE,
+    SNIPPETS_FILE, SnippetEntry, SnippetsPlugin, load_snippets, save_snippets,
 };
 use multi_launcher::{actions::Action, launcher::launch_action};
 use once_cell::sync::Lazy;

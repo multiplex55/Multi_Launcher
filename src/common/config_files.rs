@@ -43,7 +43,7 @@ pub fn ensure_config_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_config_file, resolve_config_path, ConfigFileResult, ConfigFileSpec};
+    use super::{ConfigFileResult, ConfigFileSpec, ensure_config_file, resolve_config_path};
     use std::path::Path;
 
     #[test]

@@ -1,4 +1,4 @@
-use multi_launcher::sound::{play_sound, SOUND_NAMES};
+use multi_launcher::sound::{SOUND_NAMES, play_sound};
 
 #[test]
 fn sound_names_contains_expected() {

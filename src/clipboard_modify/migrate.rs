@@ -28,7 +28,11 @@ pub fn migrate_file(
     match version {
         0 => {
             let old: V0File = serde_json::from_slice(bytes)?;
-            anyhow::ensure!(old.schema_version == 0, "v0 migration received schema_version {}", old.schema_version);
+            anyhow::ensure!(
+                old.schema_version == 0,
+                "v0 migration received schema_version {}",
+                old.schema_version
+            );
             let model = VersionedClipboardModifiersFile {
                 schema_version: CURRENT_SCHEMA_VERSION,
                 templates: old.templates,

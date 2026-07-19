@@ -44,11 +44,7 @@ struct SplitPaneWidths {
     separator: f32,
 }
 
-fn split_pane_widths(
-    total_width: f32,
-    split_ratio: f32,
-    separator_width: f32,
-) -> SplitPaneWidths {
+fn split_pane_widths(total_width: f32, split_ratio: f32, separator_width: f32) -> SplitPaneWidths {
     let separator = separator_width.max(0.0);
     let usable_width = (total_width.max(0.0) - separator).max(0.0);
     let editor = usable_width * split_ratio.clamp(0.2, 0.8);
@@ -1238,10 +1234,9 @@ impl NotePanel {
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
         // about focused nodes missing from the accessibility tree.
-        if !open
-            && let Some(id) = self.last_textedit_id {
-                ctx.memory_mut(|m| m.surrender_focus(id));
-            }
+        if !open && let Some(id) = self.last_textedit_id {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
 
         if self.link_dialog_open {
             let mut open_link = true;
@@ -1664,12 +1659,13 @@ impl NotePanel {
             #[cfg(test)]
             {
                 let content_min = if has_outline {
-                    self.last_outline_rect.map_or(content.response.rect.min, |rect| {
-                        egui::pos2(
-                            rect.min.x + rect.width() + outline_separator_width,
-                            rect.min.y,
-                        )
-                    })
+                    self.last_outline_rect
+                        .map_or(content.response.rect.min, |rect| {
+                            egui::pos2(
+                                rect.min.x + rect.width() + outline_separator_width,
+                                rect.min.y,
+                            )
+                        })
                 } else {
                     content.response.rect.min
                 };
@@ -1701,12 +1697,8 @@ impl NotePanel {
         }
         match self.view_mode {
             NoteViewMode::Edit => {
-                let resp = self.render_bounded_editor(
-                    ui,
-                    app,
-                    text_id_source.clone(),
-                    available_size,
-                );
+                let resp =
+                    self.render_bounded_editor(ui, app, text_id_source.clone(), available_size);
                 self.handle_editor_response(resp, ctx, app, true);
             }
             NoteViewMode::Preview => {
@@ -1970,10 +1962,12 @@ impl NotePanel {
                             }
                         }
                     }
-                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some(slug) = &row.note_slug {
-                            app.open_note_panel(slug, None);
-                        }
+                    if resp.has_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && let Some(slug) = &row.note_slug
+                    {
+                        app.open_note_panel(slug, None);
+                    }
                     ui.horizontal_wrapped(|ui| {
                         ui.small(format!("[{}]", row.type_badge));
                         ui.small(format!("updated {}", row.updated));
@@ -2019,10 +2013,7 @@ impl NotePanel {
         id_source: impl std::hash::Hash + Clone,
         available_size: egui::Vec2,
     ) -> egui::Response {
-        let available_size = egui::vec2(
-            available_size.x.max(0.0),
-            available_size.y.max(0.0),
-        );
+        let available_size = egui::vec2(available_size.x.max(0.0), available_size.y.max(0.0));
 
         egui::ScrollArea::vertical()
             .max_width(available_size.x)
@@ -2092,26 +2083,26 @@ impl NotePanel {
                 .iter()
                 .find(|heading| heading.normalized_anchor == target)
                 .cloned()
-            {
-                if heading.byte_range.start > 0 {
-                    self.render_preview_range(ui, app, ctx, 0..heading.byte_range.start);
-                }
-                let resp = ui.scope(|ui| {
-                    let heading_text = self.note.content[heading.byte_range.clone()].to_string();
-                    self.show_markdown_fragment(ui, app, &heading_text, heading.byte_range.start);
-                });
-                ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
-                self.pending_scroll_target = None;
-                if heading.byte_range.end < self.note.content.len() {
-                    self.render_preview_range(
-                        ui,
-                        app,
-                        ctx,
-                        heading.byte_range.end..self.note.content.len(),
-                    );
-                }
-                return;
+        {
+            if heading.byte_range.start > 0 {
+                self.render_preview_range(ui, app, ctx, 0..heading.byte_range.start);
             }
+            let resp = ui.scope(|ui| {
+                let heading_text = self.note.content[heading.byte_range.clone()].to_string();
+                self.show_markdown_fragment(ui, app, &heading_text, heading.byte_range.start);
+            });
+            ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
+            self.pending_scroll_target = None;
+            if heading.byte_range.end < self.note.content.len() {
+                self.render_preview_range(
+                    ui,
+                    app,
+                    ctx,
+                    heading.byte_range.end..self.note.content.len(),
+                );
+            }
+            return;
+        }
         self.render_preview_range(ui, app, ctx, 0..self.note.content.len());
     }
 
@@ -2645,9 +2636,10 @@ impl NotePanel {
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
         if let Some(first) = self.note.content.lines().next()
-            && let Some(t) = first.strip_prefix("# ") {
-                self.note.title = t.to_string();
-            }
+            && let Some(t) = first.strip_prefix("# ")
+        {
+            self.note.title = t.to_string();
+        }
         match save_note(&mut self.note, app.note_always_overwrite) {
             Ok(true) => {
                 self.refresh_fast_derived();
@@ -2787,15 +2779,16 @@ impl NotePanel {
             }
 
             if let Some(rest) = text[cursor..].strip_prefix("[[")
-                && let Some(end) = rest.find("]]") {
-                    let link_text = &rest[..end];
-                    let (target, label) = link_text
-                        .split_once('|')
-                        .map(|(target, alias)| (target.trim(), alias.trim()))
-                        .unwrap_or_else(|| (link_text.trim(), link_text.trim()));
-                    let resp = ui.link(RichText::new(label).font(font.clone()));
-                    if resp.clicked() {
-                        match resolve_note_query(target) {
+                && let Some(end) = rest.find("]]")
+            {
+                let link_text = &rest[..end];
+                let (target, label) = link_text
+                    .split_once('|')
+                    .map(|(target, alias)| (target.trim(), alias.trim()))
+                    .unwrap_or_else(|| (link_text.trim(), link_text.trim()));
+                let resp = ui.link(RichText::new(label).font(font.clone()));
+                if resp.clicked() {
+                    match resolve_note_query(target) {
                             NoteTarget::Resolved(slug) => app.open_note_panel(&slug, None),
                             NoteTarget::Ambiguous(slugs) => app.report_error("ui operation", format!(
                                 "Ambiguous link [[{target}]]; use [[slug:<slug>]] or [[path:<file.md>]]. Candidates: {}",
@@ -2809,10 +2802,10 @@ impl NotePanel {
                                 app.open_note_panel(&slugify(target), None);
                             }
                         }
-                    }
-                    cursor += 2 + end + 2;
-                    continue;
                 }
+                cursor += 2 + end + 2;
+                continue;
+            }
 
             if text[cursor..].starts_with('[')
                 && let Some(label_end) = text[cursor + 1..].find("](")
@@ -3054,32 +3047,33 @@ impl NotePanel {
                 && let Some(path) = FileDialog::new()
                     .add_filter("Image", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
                     .pick_file()
-                    && let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                        let dest = assets_dir().join(fname);
-                        if let Err(e) = std::fs::copy(&path, &dest) {
-                            app.report_error("ui operation", format!("Failed to copy image: {e}"));
-                        } else {
-                            let insert = format!("![{0}](assets/{0})", fname);
-                            let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id)
-                                .unwrap_or_default();
-                            let idx = state
-                                .cursor
-                                .char_range()
-                                .map(|r| r.primary.index)
-                                .unwrap_or_else(|| self.note.content.chars().count());
-                            let idx_byte = char_to_byte_index(&self.note.content, idx);
-                            self.note.content.insert_str(idx_byte, &insert);
-                            self.mark_content_changed(ctx.input(|i| i.time));
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(
-                                    egui::text::CCursor::new(idx + insert.chars().count()),
-                                )));
-                            state.store(ctx, id);
-                            self.image_search.clear();
-                            ui.close_menu();
-                        }
-                    }
+                && let Some(fname) = path.file_name().and_then(|s| s.to_str())
+            {
+                let dest = assets_dir().join(fname);
+                if let Err(e) = std::fs::copy(&path, &dest) {
+                    app.report_error("ui operation", format!("Failed to copy image: {e}"));
+                } else {
+                    let insert = format!("![{0}](assets/{0})", fname);
+                    let mut state =
+                        egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+                    let idx = state
+                        .cursor
+                        .char_range()
+                        .map(|r| r.primary.index)
+                        .unwrap_or_else(|| self.note.content.chars().count());
+                    let idx_byte = char_to_byte_index(&self.note.content, idx);
+                    self.note.content.insert_str(idx_byte, &insert);
+                    self.mark_content_changed(ctx.input(|i| i.time));
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(idx + insert.chars().count()),
+                        )));
+                    state.store(ctx, id);
+                    self.image_search.clear();
+                    ui.close_menu();
+                }
+            }
             if ui.button("Screenshot...").clicked() {
                 match capture(ScreenshotMode::Region, true) {
                     Ok(path) => {
@@ -3789,17 +3783,18 @@ fn backlink_rows_for_note(
             })
         });
         if let Some((needle, reason)) = matched
-            && matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions) {
-                rows.push(BacklinkRow {
-                    title: todo.text.clone(),
-                    type_badge: "Todo".to_string(),
-                    updated: "n/a".to_string(),
-                    snippet: extract_snippet_around(&todo.text, &needle),
-                    reason,
-                    note_slug: None,
-                    todo_id: Some(todo.id.clone()),
-                });
-            }
+            && matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions)
+        {
+            rows.push(BacklinkRow {
+                title: todo.text.clone(),
+                type_badge: "Todo".to_string(),
+                updated: "n/a".to_string(),
+                snippet: extract_snippet_around(&todo.text, &needle),
+                reason,
+                note_slug: None,
+                todo_id: Some(todo.id.clone()),
+            });
+        }
     }
 
     for note in notes {

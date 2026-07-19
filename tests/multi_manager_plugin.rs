@@ -3,8 +3,8 @@ use multi_launcher::multi_manager::commands::search_mm_commands;
 use multi_launcher::plugin::{Plugin, PluginManager};
 use multi_launcher::plugins::multi_manager::MultiManagerPlugin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 struct CountingPlugin {

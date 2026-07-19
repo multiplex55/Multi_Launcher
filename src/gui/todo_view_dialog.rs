@@ -1,7 +1,7 @@
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::gui::LauncherApp;
 use crate::plugins::note::load_notes;
-use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, save_todos};
 use eframe::egui;
 use std::collections::HashMap;
 

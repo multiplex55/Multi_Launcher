@@ -1,6 +1,6 @@
 use crate::gui::Panel;
 use crate::hotkey::Key;
-use crate::hotkey::{parse_hotkey, Hotkey};
+use crate::hotkey::{Hotkey, parse_hotkey};
 use crate::settings::defaults::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;

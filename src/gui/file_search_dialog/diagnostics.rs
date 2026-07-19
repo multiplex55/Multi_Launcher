@@ -361,10 +361,12 @@ mod tests {
             },
         )));
         assert!(!diagnostics.copy_diagnostics_text().contains("secret_query"));
-        assert!(diagnostics
-            .full_command_text()
-            .unwrap()
-            .contains("secret_query"));
+        assert!(
+            diagnostics
+                .full_command_text()
+                .unwrap()
+                .contains("secret_query")
+        );
     }
 
     #[test]

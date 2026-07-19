@@ -1,9 +1,9 @@
 use crate::actions::Action;
 use crate::linking::{
-    resolve_link, EntityKey, LinkResolverCatalog, LinkTarget, TracingLinkTelemetry,
+    EntityKey, LinkResolverCatalog, LinkTarget, TracingLinkTelemetry, resolve_link,
 };
 use crate::plugin::Plugin;
-use crate::plugins::note::{load_notes, Note};
+use crate::plugins::note::{Note, load_notes};
 use crate::plugins::todo::load_todos;
 
 pub struct LinkPlugin;

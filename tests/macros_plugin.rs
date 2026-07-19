@@ -1,6 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::macros::{
-    run_macro, save_macros, take_step_messages, MacroEntry, MacroStep, MacrosPlugin, MACROS_FILE,
+    MACROS_FILE, MacroEntry, MacroStep, MacrosPlugin, run_macro, save_macros, take_step_messages,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;

@@ -11,17 +11,19 @@ fn open_action_missing_file_does_not_panic() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    assert!(std::panic::catch_unwind(|| {
-        if std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(TOAST_LOG_FILE)
-            .is_ok()
-        {
-            let _ = open::that(TOAST_LOG_FILE);
-        }
-    })
-    .is_ok());
+    assert!(
+        std::panic::catch_unwind(|| {
+            if std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(TOAST_LOG_FILE)
+                .is_ok()
+            {
+                let _ = open::that(TOAST_LOG_FILE);
+            }
+        })
+        .is_ok()
+    );
 }
 
 #[test]

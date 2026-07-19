@@ -1,8 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
 use eframe::egui;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,12 +19,10 @@ pub struct ShellCmdEntry {
     pub keep_open: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct ShellPluginSettings {
     pub open_in_wezterm: bool,
 }
-
 
 static USE_WEZTERM: AtomicBool = AtomicBool::new(false);
 
@@ -84,14 +82,15 @@ impl Plugin for ShellPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "sh")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "sh: edit saved commands".into(),
-                    desc: "Shell".into(),
-                    action: "shell:dialog".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "sh: edit saved commands".into(),
+                desc: "Shell".into(),
+                action: "shell:dialog".into(),
+                args: None,
+            }];
+        }
 
         const ADD_PREFIX: &str = "sh add ";
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ADD_PREFIX) {
@@ -165,9 +164,10 @@ impl Plugin for ShellPlugin {
                 let mut best: Option<(ShellCmdEntry, i64)> = None;
                 for entry in list.into_iter().filter(|e| e.autocomplete) {
                     if let Some(score) = matcher.fuzzy_match(&entry.name, arg)
-                        && best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
-                            best = Some((entry, score));
-                        }
+                        && best.as_ref().map(|(_, s)| score > *s).unwrap_or(true)
+                    {
+                        best = Some((entry, score));
+                    }
                 }
                 if let Some((entry, _)) = best {
                     let prefix = if entry.keep_open {

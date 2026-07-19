@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use eframe::egui;
 use std::time::Instant;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL};
+use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Default)]
 pub struct CpuListDialog {
@@ -21,15 +21,16 @@ impl CpuListDialog {
 
     fn refresh(&mut self) {
         if let Some(last) = self.last_refresh
-            && last.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL {
-                self.system.refresh_processes_specifics(
-                    ProcessesToUpdate::All,
-                    true,
-                    ProcessRefreshKind::everything(),
-                );
-                self.system.refresh_cpu_usage();
-                self.last_refresh = Some(Instant::now());
-            }
+            && last.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL
+        {
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::everything(),
+            );
+            self.system.refresh_cpu_usage();
+            self.last_refresh = Some(Instant::now());
+        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, _app: &mut LauncherApp) {

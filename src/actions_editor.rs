@@ -16,7 +16,6 @@ pub struct ActionsEditor {
     dialog: AddActionDialog,
 }
 
-
 impl ActionsEditor {
     /// Open the dialog for editing an existing app.
     pub fn open_edit(&mut self, idx: usize, act: &crate::actions::Action) {

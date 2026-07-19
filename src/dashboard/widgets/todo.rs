@@ -1,10 +1,10 @@
 use super::{
-    edit_typed_settings, query_suggestions, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    query_suggestions,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::todo::{mark_done, TodoEntry, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, mark_done};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +27,6 @@ pub enum TodoStatusFilter {
     Open,
     Done,
 }
-
-
 
 fn default_count() -> usize {
     5
@@ -148,10 +146,11 @@ impl TodoWidget {
             ui.heading("Open action");
             let suggestions = query_suggestions(ctx, &["todo"], &["todo", "todo list", "todo add"]);
             if cfg.query.is_none()
-                && let Some(s) = suggestions.first() {
-                    cfg.query = Some(s.clone());
-                    changed = true;
-                }
+                && let Some(s) = suggestions.first()
+            {
+                cfg.query = Some(s.clone());
+                changed = true;
+            }
             ui.horizontal(|ui| {
                 ui.label("Query override");
                 let mut query = cfg.query.clone().unwrap_or_default();
@@ -448,7 +447,6 @@ fn migrate_config(mut cfg: TodoWidgetConfig) -> TodoWidgetConfig {
     cfg.filter_tags = parse_tags(&cfg.filter_tags.join(","));
     cfg
 }
-
 
 impl Widget for TodoWidget {
     fn render(

@@ -1,7 +1,7 @@
 use super::{
+    RefreshMode, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule, RefreshMode, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -166,13 +166,14 @@ impl Widget for ProcessesWidget {
                             && ui
                                 .add(egui::Button::new(&action.label).wrap(false))
                                 .clicked()
-                            {
-                                clicked = Some(action.clone());
-                            }
+                        {
+                            clicked = Some(action.clone());
+                        }
                         if let Some(action) = kill
-                            && ui.small_button("Kill").clicked() {
-                                clicked = Some(action.clone());
-                            }
+                            && ui.small_button("Kill").clicked()
+                        {
+                            clicked = Some(action.clone());
+                        }
                         ui.add(egui::Label::new(egui::RichText::new(desc).small()).wrap(false));
                     });
                 }

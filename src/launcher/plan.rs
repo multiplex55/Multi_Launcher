@@ -1,6 +1,6 @@
 use crate::actions::Action;
 
-use super::parse::{parse_action_kind, ActionKind};
+use super::parse::{ActionKind, parse_action_kind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LaunchPlan<'a> {

@@ -3,7 +3,7 @@ use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::stopwatch::{refresh_rate, start_stopwatch_named, stop_stopwatch};
 use multi_launcher::settings::Settings;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
 fn new_app(ctx: &eframe::egui::Context) -> LauncherApp {

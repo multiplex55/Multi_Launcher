@@ -1,6 +1,6 @@
 use crate::actions::Action;
-use crate::gui::volume_data::{get_process_volumes, get_system_volume, ProcessVolume};
 use crate::gui::LauncherApp;
+use crate::gui::volume_data::{ProcessVolume, get_process_volumes, get_system_volume};
 use crate::launcher::launch_action;
 use eframe::egui;
 
@@ -59,14 +59,15 @@ impl VolumeDialog {
                         let resp =
                             ui.add(egui::Slider::new(&mut proc.value, 0..=100).text("Level"));
                         if resp.changed()
-                            && let Some(action) = proc.slider_changed() {
-                                let _ = launch_action(&Action {
-                                    label: String::new(),
-                                    desc: "Volume".into(),
-                                    action,
-                                    args: None,
-                                });
-                            }
+                            && let Some(action) = proc.slider_changed()
+                        {
+                            let _ = launch_action(&Action {
+                                label: String::new(),
+                                desc: "Volume".into(),
+                                action,
+                                args: None,
+                            });
+                        }
                         if ui.button("Set").clicked() {
                             let _ = launch_action(&Action {
                                 label: String::new(),

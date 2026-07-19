@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::clipboard::{load_history, save_history, CLIPBOARD_FILE};
+use crate::plugins::clipboard::{CLIPBOARD_FILE, load_history, save_history};
 use eframe::egui;
 use std::collections::VecDeque;
 

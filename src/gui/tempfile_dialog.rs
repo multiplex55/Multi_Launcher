@@ -10,7 +10,6 @@ pub struct TempfileDialog {
     text: String,
 }
 
-
 impl TempfileDialog {
     pub fn open(&mut self) {
         self.open = true;

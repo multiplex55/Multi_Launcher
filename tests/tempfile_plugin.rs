@@ -1,6 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::tempfile::{
-    clear_files, create_file, create_named_file, list_files, remove_file, set_alias, TempfilePlugin,
+    TempfilePlugin, clear_files, create_file, create_named_file, list_files, remove_file, set_alias,
 };
 use multi_launcher::{actions::Action, launcher::launch_action};
 use once_cell::sync::Lazy;
@@ -149,11 +149,12 @@ fn set_alias_renames_file() {
     let _dir = setup();
     let file = create_file().unwrap();
     let new = set_alias(&file, "alias").unwrap();
-    assert!(new
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .starts_with("temp_alias"));
+    assert!(
+        new.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("temp_alias")
+    );
     remove_file(&new).unwrap();
 }
 

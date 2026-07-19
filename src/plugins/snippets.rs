@@ -1,12 +1,12 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
@@ -91,12 +91,13 @@ impl SnippetsPlugin {
                             event.kind,
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                         )
-                            && let Ok(list) = load_snippets(&path) {
-                                if let Ok(mut lock) = data_clone.lock() {
-                                    *lock = list;
-                                }
-                                bump_snippets_version();
-                            }
+                        && let Ok(list) = load_snippets(&path)
+                    {
+                        if let Ok(mut lock) = data_clone.lock() {
+                            *lock = list;
+                        }
+                        bump_snippets_version();
+                    }
                 }
             },
             Config::default(),
@@ -127,14 +128,15 @@ impl Plugin for SnippetsPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "cs: edit snippets".into(),
-                    desc: "Snippet".into(),
-                    action: "snippet:dialog".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "cs: edit snippets".into(),
+                desc: "Snippet".into(),
+                action: "snippet:dialog".into(),
+                args: None,
+            }];
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
             let guard = match self.data.lock() {

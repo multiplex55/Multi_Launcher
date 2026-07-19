@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::clipboard_modify::catalog::{canonical_command, operation_lookup};
 use crate::clipboard_modify::parser::{
-    parse, ClipboardModifyIntent, ClipboardModifyParseResult, ModifySection, PartialQuery,
+    ClipboardModifyIntent, ClipboardModifyParseResult, ModifySection, PartialQuery, parse,
 };
 use crate::clipboard_modify::store::SharedClipboardModifierCatalog;
 use crate::plugin::Plugin;

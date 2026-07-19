@@ -20,7 +20,6 @@ pub enum BindingKind {
     ToggleLauncher,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BindingEntry {
     pub label: String,

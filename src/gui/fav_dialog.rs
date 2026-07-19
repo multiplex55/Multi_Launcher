@@ -1,6 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::plugins::fav::{
-    join_command_args, load_favs, resolve_with_plugin, save_favs, FavEntry, FAV_FILE,
+    FAV_FILE, FavEntry, join_command_args, load_favs, resolve_with_plugin, save_favs,
 };
 use eframe::egui;
 

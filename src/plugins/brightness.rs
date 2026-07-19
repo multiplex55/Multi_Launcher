@@ -1,5 +1,5 @@
 use crate::actions::Action;
-use crate::common::command::{parse_args, ParseArgsResult};
+use crate::common::command::{ParseArgsResult, parse_args};
 use crate::plugin::Plugin;
 
 pub struct BrightnessPlugin;

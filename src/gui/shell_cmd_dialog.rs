@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::shell::{load_shell_cmds, save_shell_cmds, ShellCmdEntry, SHELL_CMDS_FILE};
+use crate::plugins::shell::{SHELL_CMDS_FILE, ShellCmdEntry, load_shell_cmds, save_shell_cmds};
 use eframe::egui;
 
 #[derive(Default)]
@@ -138,7 +138,7 @@ mod tests {
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {

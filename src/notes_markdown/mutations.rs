@@ -123,15 +123,16 @@ pub fn remove_alias_metadata(content: &str, alias: &str) -> Result<String, Mutat
     let abs = start + alias_line.start..start + alias_line.end;
     let mut updated = replace_byte_range(content, abs, "")?;
     if let Some((s, _e, b)) = frontmatter(&updated)
-        && let Some(header) = aliases_line(b) {
-            let has_items = b[header.end..]
-                .lines()
-                .take_while(|line| line.starts_with("  - ") || line.trim().is_empty())
-                .any(|line| line.starts_with("  - "));
-            if !has_items {
-                updated = replace_byte_range(&updated, s + header.start..s + header.end, "")?;
-            }
+        && let Some(header) = aliases_line(b)
+    {
+        let has_items = b[header.end..]
+            .lines()
+            .take_while(|line| line.starts_with("  - ") || line.trim().is_empty())
+            .any(|line| line.starts_with("  - "));
+        if !has_items {
+            updated = replace_byte_range(&updated, s + header.start..s + header.end, "")?;
         }
+    }
     if let Some((_s, e, b)) = frontmatter(&updated) {
         if b.trim().is_empty() {
             updated = replace_byte_range(&updated, 0..e, "")?;

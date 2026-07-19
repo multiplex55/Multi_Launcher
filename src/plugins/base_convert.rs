@@ -124,15 +124,16 @@ impl Plugin for BaseConvertPlugin {
             return Vec::new();
         };
         if let Some((value, from, to)) = parse_query(rest)
-            && let Some(res) = convert(&value, &from, &to) {
-                let label = format!("{value} {from} = {res} {to}");
-                return vec![Action {
-                    label,
-                    desc: "Base Convert".into(),
-                    action: format!("clipboard:{res}"),
-                    args: None,
-                }];
-            }
+            && let Some(res) = convert(&value, &from, &to)
+        {
+            let label = format!("{value} {from} = {res} {to}");
+            return vec![Action {
+                label,
+                desc: "Base Convert".into(),
+                action: format!("clipboard:{res}"),
+                args: None,
+            }];
+        }
         Vec::new()
     }
 

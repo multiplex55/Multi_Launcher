@@ -5,7 +5,7 @@ use crate::file_search::model::{
 };
 use crate::file_search::settings::FileSearchSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 #[derive(Debug, Clone, Default)]
@@ -730,9 +730,11 @@ mod tests {
                 ..
             } if result.file_name == expected
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Completed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. }))
+        );
         assert_no_unwired_placeholder(&events);
     }
 
@@ -838,12 +840,16 @@ mod tests {
             }
         )));
         assert!(events.iter().any(|event| matches!(event, SearchEvent::Result { result: SearchResult::ContentFile(result), .. } if result.path == temp.path().join("haystack.txt"))));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Completed { .. })));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Failed { .. }))
+        );
         assert_no_unwired_placeholder(&events);
     }
 
@@ -924,12 +930,16 @@ mod tests {
 
         let events = drain_until_terminal(&mut coordinator);
         assert_eq!(coordinator.last_backend(), Some(SearchBackend::WalkDir));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Completed { .. })));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SearchEvent::Failed { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Completed { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SearchEvent::Failed { .. }))
+        );
         assert_no_unwired_placeholder(&events);
     }
 }

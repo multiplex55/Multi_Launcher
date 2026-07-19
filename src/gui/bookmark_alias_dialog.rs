@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::bookmarks::{load_bookmarks, set_alias, BOOKMARKS_FILE};
+use crate::plugins::bookmarks::{BOOKMARKS_FILE, load_bookmarks, set_alias};
 use eframe::egui;
 
 #[derive(Default)]
@@ -9,18 +9,18 @@ pub struct BookmarkAliasDialog {
     alias: String,
 }
 
-
 impl BookmarkAliasDialog {
     pub fn open(&mut self, url: &str) {
         self.url = url.to_string();
         if let Ok(list) = load_bookmarks(BOOKMARKS_FILE)
-            && let Some(entry) = list.into_iter().find(|b| b.url == self.url) {
-                if let Some(a) = entry.alias {
-                    self.alias = a;
-                } else {
-                    self.alias.clear();
-                }
+            && let Some(entry) = list.into_iter().find(|b| b.url == self.url)
+        {
+            if let Some(a) = entry.alias {
+                self.alias = a;
+            } else {
+                self.alias.clear();
             }
+        }
         self.open = true;
     }
 

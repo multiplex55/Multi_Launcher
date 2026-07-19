@@ -61,14 +61,15 @@ impl LauncherApp {
         }
         let mut focus_after_launcher = false;
         if a.action == "launcher:show"
-            && let Some(query) = a.args.as_ref() {
-                self.query = query.to_string();
-                self.last_timer_query =
-                    query.starts_with("timer list") || query.starts_with("alarm list");
-                self.search();
-                self.move_cursor_end = true;
-                focus_after_launcher = true;
-            }
+            && let Some(query) = a.args.as_ref()
+        {
+            self.query = query.to_string();
+            self.last_timer_query =
+                query.starts_with("timer list") || query.starts_with("alarm list");
+            self.search();
+            self.move_cursor_end = true;
+            focus_after_launcher = true;
+        }
         if self.handle_launcher_action(&a.action) {
             if focus_after_launcher {
                 self.focus_input();
@@ -668,17 +669,17 @@ impl LauncherApp {
                         .action
                         .strip_prefix("todo:add:")
                         .and_then(|r| r.split('|').next())
-                    {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Added todo {text}").into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
+                {
+                    push_toast(
+                        &mut self.toasts,
+                        Toast {
+                            text: format!("Added todo {text}").into(),
+                            kind: ToastKind::Success,
+                            options: ToastOptions::default()
+                                .duration_in_seconds(self.toast_duration as f64),
+                        },
+                    );
+                }
             } else if a.action.starts_with("todo:remove:") {
                 refresh = true;
                 set_focus = true;
@@ -840,8 +841,8 @@ impl LauncherApp {
 
     fn handle_file_search_action(&mut self, action: &str) -> bool {
         use crate::file_search::actions::{
-            decode_action_payload, FileSearchModePayload, FileSearchStartPayload, CANCEL_ACTION,
-            MODE_PREFIX, OPEN_ACTION, START_PREFIX,
+            CANCEL_ACTION, FileSearchModePayload, FileSearchStartPayload, MODE_PREFIX, OPEN_ACTION,
+            START_PREFIX, decode_action_payload,
         };
 
         if action == OPEN_ACTION {
@@ -965,7 +966,7 @@ mod tests {
         settings::Settings,
     };
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
@@ -1052,10 +1053,11 @@ mod tests {
             ActivationSource::Enter,
         );
 
-        assert!(app
-            .error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("injected failure")));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|msg| msg.contains("injected failure"))
+        );
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:launcher] Failed: injected failure"));
         assert!(log.contains("Failed: injected failure"));

@@ -124,11 +124,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -165,11 +166,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -214,11 +216,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -303,11 +306,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -341,11 +345,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -382,11 +387,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -424,9 +430,10 @@ impl LauncherApp {
                             &slug,
                             crate::plugins::note::load_notes,
                             |path| spawn_external(path, NoteExternalOpen::Wezterm),
-                        ) {
-                            ui.close_menu();
-                        }
+                        )
+                    {
+                        ui.close_menu();
+                    }
                     if ui.button("Remove Note").clicked() {
                         self.delete_note(&slug);
                         *refresh = true;
@@ -434,11 +441,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -475,11 +483,12 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -490,22 +499,24 @@ impl LauncherApp {
                         ui.close_menu();
                     }
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
             ResultContextMenuKind::Default => {
                 menu_resp.clone().context_menu(|ui| {
                     if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked() {
-                            self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                            self.show_editor = true;
-                            ui.close_menu();
-                        }
+                        && ui.button("Edit App").clicked()
+                    {
+                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
+                        self.show_editor = true;
+                        ui.close_menu();
+                    }
                     self.pin_result_menu(ui, action);
                 });
             }
@@ -661,10 +672,11 @@ impl eframe::App for LauncherApp {
         }
         self.maybe_run_note_search_debounce();
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref())
-            && t.elapsed().as_secs_f32() >= 3.0 {
-                self.error = None;
-                self.error_time = None;
-            }
+            && t.elapsed().as_secs_f32() >= 3.0
+        {
+            self.error = None;
+            self.error_time = None;
+        }
         if self
             .enabled_capabilities
             .as_ref()
@@ -1352,10 +1364,9 @@ impl eframe::App for LauncherApp {
         let multi_manager_save_on_exit = crate::settings::Settings::load(&self.settings_path)
             .map(|settings| settings.multi_manager.save_on_exit)
             .unwrap_or(true);
-        if multi_manager_save_on_exit
-            && let Err(err) = self.multi_manager.save() {
-                self.report_error("multi_manager.save_on_exit", err);
-            }
+        if multi_manager_save_on_exit && let Err(err) = self.multi_manager.save() {
+            self.report_error("multi_manager.save_on_exit", err);
+        }
         if let Err(err) = self.multi_manager.flush_bindings_if_dirty() {
             self.report_error("multi_manager.bindings.save_on_exit", err);
         }

@@ -2,7 +2,7 @@ use eframe::egui;
 use multi_launcher::{
     actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings,
 };
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn new_app(ctx: &egui::Context) -> LauncherApp {
     let actions: Vec<Action> = Vec::new();

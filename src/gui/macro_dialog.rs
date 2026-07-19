@@ -1,8 +1,8 @@
 use crate::gui::LauncherApp;
-use crate::plugins::macros::{load_macros, save_macros, MacroEntry, MacroStep, MACROS_FILE};
+use crate::plugins::macros::{MACROS_FILE, MacroEntry, MacroStep, load_macros, save_macros};
 use eframe::egui;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use log::debug;
 
 /// Dialog for creating and editing macros.
@@ -237,13 +237,15 @@ impl MacroDialog {
                     });
                 }
                 if let Some(i) = move_up
-                    && i > 0 {
-                        self.steps.swap(i, i - 1);
-                    }
+                    && i > 0
+                {
+                    self.steps.swap(i, i - 1);
+                }
                 if let Some(i) = move_down
-                    && i + 1 < self.steps.len() {
-                        self.steps.swap(i, i + 1);
-                    }
+                    && i + 1 < self.steps.len()
+                {
+                    self.steps.swap(i, i + 1);
+                }
                 if let Some(i) = remove_step {
                     self.steps.remove(i);
                 }
@@ -383,9 +385,10 @@ impl MacroDialog {
                         } else {
                             for step in &mut self.steps {
                                 if let Some(a) = &step.args
-                                    && a.trim().is_empty() {
-                                        step.args = None;
-                                    }
+                                    && a.trim().is_empty()
+                                {
+                                    step.args = None;
+                                }
                             }
                             if idx == self.entries.len() {
                                 self.entries.push(MacroEntry {

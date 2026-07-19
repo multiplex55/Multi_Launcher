@@ -4,8 +4,8 @@ use multi_launcher::history::HistoryEntry;
 use multi_launcher::history::{append_history, clear_history, get_history};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tempfile::tempdir;
 
 fn new_app(ctx: &eframe::egui::Context) -> LauncherApp {

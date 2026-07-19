@@ -1,6 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
+use crate::plugins::calc_history::{self, CALC_HISTORY_FILE, CalcHistoryEntry, MAX_ENTRIES};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use urlencoding::encode;

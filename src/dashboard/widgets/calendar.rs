@@ -1,9 +1,9 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::calendar::{add_months, parse_date_reference, CalendarSnapshot, EventInstance};
+use crate::plugins::calendar::{CalendarSnapshot, EventInstance, add_months, parse_date_reference};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,6 @@ pub enum CalendarWidgetMode {
     Week,
     Month,
 }
-
 
 fn default_range_days() -> u32 {
     7
@@ -168,10 +167,11 @@ impl CalendarWidget {
             self.selected_date = Some(self.resolve_default_date(now));
         }
         if self.view_month.is_none()
-            && let Some(date) = self.selected_date {
-                self.view_month =
-                    Some(NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date));
-            }
+            && let Some(date) = self.selected_date
+        {
+            self.view_month =
+                Some(NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date));
+        }
     }
 
     fn is_completed(&self, now: NaiveDateTime, instance: &EventInstance) -> bool {
@@ -378,10 +378,11 @@ impl CalendarWidget {
             }
             if self.cfg.show_tags
                 && let Some(tags) = calendar.event_tags.get(&instance.source_event_id)
-                    && !tags.is_empty() {
-                        let tag_label = format!("#{}", tags.join(" #"));
-                        ui.label(egui::RichText::new(tag_label).text_style(egui::TextStyle::Small));
-                    }
+                && !tags.is_empty()
+            {
+                let tag_label = format!("#{}", tags.join(" #"));
+                ui.label(egui::RichText::new(tag_label).text_style(egui::TextStyle::Small));
+            }
             ui.add_space(if self.cfg.compact { 2.0 } else { 6.0 });
         }
         action
@@ -419,7 +420,6 @@ impl Widget for CalendarWidget {
             ui.separator();
         }
 
-        
         self.render_event_list(ui, calendar, selected_date, now, today)
     }
 

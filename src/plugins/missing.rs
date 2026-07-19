@@ -1,8 +1,8 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use crate::plugins::bookmarks::{load_bookmarks, BOOKMARKS_FILE};
-use crate::plugins::fav::{load_favs, FAV_FILE};
-use crate::plugins::folders::{load_folders, FOLDERS_FILE};
+use crate::plugins::bookmarks::{BOOKMARKS_FILE, load_bookmarks};
+use crate::plugins::fav::{FAV_FILE, load_favs};
+use crate::plugins::folders::{FOLDERS_FILE, load_folders};
 use url::Url;
 
 pub struct MissingPlugin;

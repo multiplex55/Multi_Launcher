@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use multi_launcher::plugins::todo::TodoEntry;
 
 fn build_entries(count: usize) -> Vec<TodoEntry> {

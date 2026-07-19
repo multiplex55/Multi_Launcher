@@ -1,12 +1,12 @@
 use eframe::egui;
-use multi_launcher::actions::{save_actions, Action};
+use multi_launcher::actions::{Action, save_actions};
 use multi_launcher::gui::{LauncherApp, TestWatchEvent};
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
-use multi_launcher::plugins::folders::{save_folders, FolderEntry, FOLDERS_FILE};
+use multi_launcher::plugins::bookmarks::{BOOKMARKS_FILE, BookmarkEntry, save_bookmarks};
+use multi_launcher::plugins::folders::{FOLDERS_FILE, FolderEntry, save_folders};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::thread::sleep;
 use std::time::Duration;
 use tempfile::tempdir;

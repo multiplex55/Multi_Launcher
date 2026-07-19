@@ -1,7 +1,7 @@
 use super::{
+    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, find_plugin, plugin_names,
-    query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule, RefreshMode,
-    TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::common::query::{apply_action_filters, split_action_filters};
@@ -34,7 +34,6 @@ pub enum ClickBehavior {
     RunAction,
     FillQuery,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PinnedQueryResultsConfig {
@@ -292,14 +291,15 @@ impl PinnedQueryResultsWidget {
 
         let engine_name = self.cfg.engine.trim();
         if let Some(enabled) = ctx.enabled_plugins
-            && !enabled.contains(engine_name) {
-                return (
-                    Vec::new(),
-                    Some(format!(
-                        "Engine '{engine_name}' is disabled in plugin settings."
-                    )),
-                );
-            }
+            && !enabled.contains(engine_name)
+        {
+            return (
+                Vec::new(),
+                Some(format!(
+                    "Engine '{engine_name}' is disabled in plugin settings."
+                )),
+            );
+        }
         let Some(plugin) = find_plugin(ctx, engine_name) else {
             return (
                 Vec::new(),

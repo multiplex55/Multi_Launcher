@@ -96,15 +96,17 @@ pub fn format_link_id(link: &LinkRef) -> String {
         urlencoding::encode(&link.target_id)
     );
     if let Some(anchor) = &link.anchor
-        && !anchor.is_empty() {
-            out.push('#');
-            out.push_str(&urlencoding::encode(anchor));
-        }
+        && !anchor.is_empty()
+    {
+        out.push('#');
+        out.push_str(&urlencoding::encode(anchor));
+    }
     if let Some(text) = &link.display_text
-        && !text.is_empty() {
-            out.push_str("?text=");
-            out.push_str(&urlencoding::encode(text));
-        }
+        && !text.is_empty()
+    {
+        out.push_str("?text=");
+        out.push_str(&urlencoding::encode(text));
+    }
     out
 }
 

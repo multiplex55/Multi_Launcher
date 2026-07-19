@@ -5,7 +5,7 @@ use crate::file_search::model::{
 use crate::file_search::settings::{
     FileSearchColumn, FileSearchContentSort, FileSearchFilenameSort, FileSearchUiPreferences,
 };
-use eframe::egui::{self, text::LayoutJob, FontId, Stroke, TextFormat, WidgetText};
+use eframe::egui::{self, FontId, Stroke, TextFormat, WidgetText, text::LayoutJob};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -603,10 +603,11 @@ mod tests {
         );
 
         assert_eq!(job.text, "café needle");
-        assert!(job
-            .sections
-            .iter()
-            .any(|section| { section.byte_range.start == 6 && section.byte_range.end == 12 }));
+        assert!(
+            job.sections
+                .iter()
+                .any(|section| { section.byte_range.start == 6 && section.byte_range.end == 12 })
+        );
     }
 
     #[test]
@@ -655,10 +656,11 @@ mod tests {
         );
 
         assert_eq!(job.text, "café");
-        assert!(job
-            .sections
-            .iter()
-            .any(|section| { section.byte_range.start == 3 && section.byte_range.end == 5 }));
+        assert!(
+            job.sections
+                .iter()
+                .any(|section| { section.byte_range.start == 3 && section.byte_range.end == 5 })
+        );
     }
 
     #[test]

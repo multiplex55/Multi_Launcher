@@ -3,8 +3,8 @@ use anyhow::Context;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
 };
 
 /// Send a key specification string via Win32 `SendInput`.
@@ -215,11 +215,13 @@ fn parse_vk(token: &str) -> anyhow::Result<VIRTUAL_KEY> {
     }
 
     // function keys: F1..F24
-    if (t.len() == 2 || t.len() == 3) && (t.starts_with('F') || t.starts_with('f'))
+    if (t.len() == 2 || t.len() == 3)
+        && (t.starts_with('F') || t.starts_with('f'))
         && let Ok(n) = t[1..].parse::<u8>()
-            && (1..=24).contains(&n) {
-                return Ok(VIRTUAL_KEY(0x6F + n as u16)); // VK_F1=0x70
-            }
+        && (1..=24).contains(&n)
+    {
+        return Ok(VIRTUAL_KEY(0x6F + n as u16)); // VK_F1=0x70
+    }
 
     // single ASCII letter/digit
     if t.len() == 1 {

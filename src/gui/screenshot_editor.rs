@@ -251,7 +251,7 @@ fn draw_text(
     color: Color32,
     size: f32,
 ) {
-    use ab_glyph::{point, Font, ScaleFont};
+    use ab_glyph::{Font, ScaleFont, point};
     if text.is_empty() {
         return;
     }
@@ -468,14 +468,15 @@ impl ScreenshotEditor {
 
     fn commit_active_text(&mut self) {
         if let Some(active) = self.active_text.take()
-            && !active.text.is_empty() {
-                self.push_layer(MarkupLayer::Text(MarkupText {
-                    position: active.position,
-                    text: active.text,
-                    color: active.color,
-                    size: active.size,
-                }));
-            }
+            && !active.text.is_empty()
+        {
+            self.push_layer(MarkupLayer::Text(MarkupText {
+                position: active.position,
+                text: active.text,
+                color: active.color,
+                size: active.size,
+            }));
+        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -506,15 +507,15 @@ impl ScreenshotEditor {
                         match res {
                             Ok(()) => {
                                 if let Some(path) = saved_to
-                                    && app.enable_toasts {
-                                        app.add_toast(Toast {
-                                            text: format!("Saved screenshot {}", path.display())
-                                                .into(),
-                                            kind: ToastKind::Success,
-                                            options: ToastOptions::default()
-                                                .duration_in_seconds(app.toast_duration as f64),
-                                        });
-                                    }
+                                    && app.enable_toasts
+                                {
+                                    app.add_toast(Toast {
+                                        text: format!("Saved screenshot {}", path.display()).into(),
+                                        kind: ToastKind::Success,
+                                        options: ToastOptions::default()
+                                            .duration_in_seconds(app.toast_duration as f64),
+                                    });
+                                }
                             }
                             Err(e) => {
                                 app.report_error(
@@ -689,70 +690,75 @@ impl ScreenshotEditor {
                     Color32::WHITE,
                 );
                 if response.drag_started_by(PointerButton::Secondary)
-                    && let Some(pos) = response.interact_pointer_pos() {
-                        self.crop_start = Some(to_img(pos));
-                        self.crop_rect = None;
-                    }
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    self.crop_start = Some(to_img(pos));
+                    self.crop_rect = None;
+                }
                 if response.dragged_by(PointerButton::Secondary)
                     && let Some(start) = self.crop_start
-                        && let Some(pos) = response.interact_pointer_pos() {
-                            self.crop_rect = Some(Rect::from_two_pos(start, to_img(pos)));
-                        }
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    self.crop_rect = Some(Rect::from_two_pos(start, to_img(pos)));
+                }
                 if response.drag_stopped_by(PointerButton::Secondary) {
                     self.crop_start = None;
                 }
 
                 if response.drag_started_by(PointerButton::Primary)
-                    && let Some(pos) = response.interact_pointer_pos() {
-                        let start = to_img(pos);
-                        match self.tool {
-                            MarkupTool::Pen => {
-                                self.active_stroke = Some(MarkupStroke {
-                                    points: vec![start],
-                                    color: self.current_color(),
-                                    thickness: self.thickness,
-                                });
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    let start = to_img(pos);
+                    match self.tool {
+                        MarkupTool::Pen => {
+                            self.active_stroke = Some(MarkupStroke {
+                                points: vec![start],
+                                color: self.current_color(),
+                                thickness: self.thickness,
+                            });
+                        }
+                        MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
+                            self.active_start = Some(start);
+                            self.active_end = Some(start);
+                        }
+                        MarkupTool::Text => {
+                            // If a text instance is currently active, commit it and start a new one.
+                            if self.active_text.is_some() {
+                                self.commit_active_text();
                             }
-                            MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
-                                self.active_start = Some(start);
-                                self.active_end = Some(start);
-                            }
-                            MarkupTool::Text => {
-                                // If a text instance is currently active, commit it and start a new one.
-                                if self.active_text.is_some() {
-                                    self.commit_active_text();
-                                }
-                                self.active_text = Some(ActiveText {
-                                    position: start,
-                                    text: String::new(),
-                                    color: self.current_color(),
-                                    size: self.text_size,
-                                });
-                            }
+                            self.active_text = Some(ActiveText {
+                                position: start,
+                                text: String::new(),
+                                color: self.current_color(),
+                                size: self.text_size,
+                            });
                         }
                     }
+                }
                 if response.dragged_by(PointerButton::Primary)
-                    && let Some(pos) = response.interact_pointer_pos() {
-                        let current = to_img(pos);
-                        match self.tool {
-                            MarkupTool::Pen => {
-                                if let Some(stroke) = &mut self.active_stroke {
-                                    stroke.points.push(current);
-                                }
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    let current = to_img(pos);
+                    match self.tool {
+                        MarkupTool::Pen => {
+                            if let Some(stroke) = &mut self.active_stroke {
+                                stroke.points.push(current);
                             }
-                            MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
-                                self.active_end = Some(current);
-                            }
-                            MarkupTool::Text => {}
                         }
+                        MarkupTool::Arrow | MarkupTool::Rectangle | MarkupTool::Highlight => {
+                            self.active_end = Some(current);
+                        }
+                        MarkupTool::Text => {}
                     }
+                }
                 if response.drag_stopped_by(PointerButton::Primary) {
                     match self.tool {
                         MarkupTool::Pen => {
                             if let Some(stroke) = self.active_stroke.take()
-                                && stroke.points.len() > 1 {
-                                    self.push_layer(MarkupLayer::Stroke(stroke));
-                                }
+                                && stroke.points.len() > 1
+                            {
+                                self.push_layer(MarkupLayer::Stroke(stroke));
+                            }
                         }
                         MarkupTool::Arrow => {
                             if let (Some(start), Some(end)) =
@@ -889,15 +895,16 @@ impl ScreenshotEditor {
                     }
                 }
                 if let Some(active) = &self.active_text
-                    && !active.text.is_empty() {
-                        painter.text(
-                            to_screen(active.position),
-                            egui::Align2::LEFT_TOP,
-                            &active.text,
-                            egui::FontId::proportional(active.size),
-                            active.color,
-                        );
-                    }
+                    && !active.text.is_empty()
+                {
+                    painter.text(
+                        to_screen(active.position),
+                        egui::Align2::LEFT_TOP,
+                        &active.text,
+                        egui::FontId::proportional(active.size),
+                        active.color,
+                    );
+                }
             });
         self.open = open;
     }

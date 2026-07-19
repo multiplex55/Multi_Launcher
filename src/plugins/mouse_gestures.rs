@@ -2,17 +2,17 @@ use crate::actions::Action;
 use crate::common::json_watch::watch_json;
 use crate::common::strip_prefix_ci;
 use crate::mouse_gestures::db::{
-    format_gesture_label, format_search_result_label, load_gestures, BindingMatchContext,
-    SharedGestureDb, GESTURES_FILE,
+    BindingMatchContext, GESTURES_FILE, SharedGestureDb, format_gesture_label,
+    format_search_result_label, load_gestures,
 };
 use crate::mouse_gestures::service::{
-    with_service as with_gesture_service, CancelBehavior, MouseGestureConfig, NoMatchBehavior,
-    WheelCycleGate,
+    CancelBehavior, MouseGestureConfig, NoMatchBehavior, WheelCycleGate,
+    with_service as with_gesture_service,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -157,7 +157,7 @@ pub fn add_ignore_window_title(values: &mut Vec<String>, title: &str) -> bool {
 pub fn collect_visible_window_titles() -> anyhow::Result<Vec<String>> {
     #[cfg(windows)]
     {
-        use crate::windows_layout::{collect_layout_windows, LayoutWindowOptions};
+        use crate::windows_layout::{LayoutWindowOptions, collect_layout_windows};
         let windows = collect_layout_windows(LayoutWindowOptions::default())?;
         let mut seen = HashSet::new();
         let mut titles = Vec::new();
@@ -199,9 +199,10 @@ impl Default for MouseGestureRuntime {
 
         let watcher = watch_json(GESTURES_FILE, move || {
             if let Ok(new_db) = load_gestures(GESTURES_FILE)
-                && let Ok(mut guard) = db_for_watcher.lock() {
-                    *guard = new_db;
-                }
+                && let Ok(mut guard) = db_for_watcher.lock()
+            {
+                *guard = new_db;
+            }
         })
         .ok();
 
@@ -279,7 +280,6 @@ pub struct MouseGesturesPlugin {
     window_picker_titles: Vec<String>,
     window_picker_error: Option<String>,
 }
-
 
 impl MouseGesturesPlugin {
     fn command_actions() -> Vec<Action> {
@@ -452,11 +452,7 @@ impl Plugin for MouseGesturesPlugin {
                     }
                 };
                 for gesture in conflict.gestures {
-                    for binding in gesture
-                        .bindings
-                        .iter()
-                        .filter(|binding| binding.enabled)
-                    {
+                    for binding in gesture.bindings.iter().filter(|binding| binding.enabled) {
                         actions.push(Action {
                             label: format_search_result_label(&gesture, binding),
                             desc: conflict_desc.into(),
@@ -704,9 +700,10 @@ impl Plugin for MouseGesturesPlugin {
                                             && add_ignore_window_title(
                                                 &mut cfg.ignore_window_titles,
                                                 &title,
-                                            ) {
-                                                changed = true;
-                                            }
+                                            )
+                                        {
+                                            changed = true;
+                                        }
                                     });
                                 }
                             });

@@ -24,10 +24,10 @@ impl ProcessVolume {
 pub fn get_system_volume() -> Option<u8> {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+        IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
 
     unsafe {
@@ -36,24 +36,25 @@ pub fn get_system_volume() -> Option<u8> {
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
             && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
-                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
-                    && let Ok(val) = vol.GetMasterVolumeLevelScalar() {
-                        percent = Some((val * 100.0).round() as u8);
-                    }
+            && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            && let Ok(val) = vol.GetMasterVolumeLevelScalar()
+        {
+            percent = Some((val * 100.0).round() as u8);
+        }
         CoUninitialize();
         percent
     }
 }
 
 pub fn get_process_volumes() -> Vec<ProcessVolume> {
-    use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
-        ISimpleAudioVolume, MMDeviceEnumerator,
+        IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+        MMDeviceEnumerator, eMultimedia, eRender,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
     };
+    use windows::core::Interface;
 
     let mut entries = Vec::new();
     unsafe {
@@ -61,37 +62,37 @@ pub fn get_process_volumes() -> Vec<ProcessVolume> {
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
             && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
-                && let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
-                    && let Ok(list) = manager.GetSessionEnumerator() {
-                        let count = list.GetCount().unwrap_or(0);
-                        let sys = System::new_all();
-                        for i in 0..count {
-                            if let Ok(ctrl) = list.GetSession(i)
-                                && let Ok(c2) = ctrl.cast::<IAudioSessionControl2>()
-                                    && let Ok(pid) = c2.GetProcessId() {
-                                        if pid == 0 {
-                                            continue;
-                                        }
-                                        if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>()
-                                            && let Ok(val) = vol.GetMasterVolume() {
-                                                let name = sys
-                                                    .process(sysinfo::Pid::from_u32(pid))
-                                                    .map(|p| p.name().to_string_lossy().to_string())
-                                                    .unwrap_or_else(|| format!("PID {pid}"));
-                                                let muted = vol
-                                                    .GetMute()
-                                                    .map(|m| m.as_bool())
-                                                    .unwrap_or(false);
-                                                entries.push(ProcessVolume {
-                                                    pid,
-                                                    name,
-                                                    value: (val * 100.0).round() as u8,
-                                                    muted,
-                                                });
-                                            }
-                                    }
-                        }
+            && let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+            && let Ok(list) = manager.GetSessionEnumerator()
+        {
+            let count = list.GetCount().unwrap_or(0);
+            let sys = System::new_all();
+            for i in 0..count {
+                if let Ok(ctrl) = list.GetSession(i)
+                    && let Ok(c2) = ctrl.cast::<IAudioSessionControl2>()
+                    && let Ok(pid) = c2.GetProcessId()
+                {
+                    if pid == 0 {
+                        continue;
                     }
+                    if let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>()
+                        && let Ok(val) = vol.GetMasterVolume()
+                    {
+                        let name = sys
+                            .process(sysinfo::Pid::from_u32(pid))
+                            .map(|p| p.name().to_string_lossy().to_string())
+                            .unwrap_or_else(|| format!("PID {pid}"));
+                        let muted = vol.GetMute().map(|m| m.as_bool()).unwrap_or(false);
+                        entries.push(ProcessVolume {
+                            pid,
+                            name,
+                            value: (val * 100.0).round() as u8,
+                            muted,
+                        });
+                    }
+                }
+            }
+        }
         CoUninitialize();
     }
     entries

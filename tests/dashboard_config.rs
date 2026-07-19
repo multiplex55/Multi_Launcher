@@ -5,8 +5,8 @@ use multi_launcher::dashboard::widgets::WidgetRegistry;
 use multi_launcher::gui::{ActivationSource, LauncherApp};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 fn new_app(ctx: &eframe::egui::Context) -> LauncherApp {
     LauncherApp::new(

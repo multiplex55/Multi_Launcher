@@ -283,7 +283,11 @@ impl LauncherApp {
             if trimmed_lc == APP_PREFIX {
                 "".to_string()
             } else {
-                trimmed.split_once(' ').map(|x| x.1).unwrap_or("").to_string()
+                trimmed
+                    .split_once(' ')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .to_string()
             }
         } else {
             String::new()
@@ -497,7 +501,7 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -545,10 +549,11 @@ mod tests {
         app.query = "app mxd lbl".into();
         app.match_exact = false;
         app.search();
-        assert!(app
-            .results
-            .iter()
-            .any(|action| action.action == "Action:ID"));
+        assert!(
+            app.results
+                .iter()
+                .any(|action| action.action == "Action:ID")
+        );
 
         app.query = "app mxd lbl".into();
         app.match_exact = true;

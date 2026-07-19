@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -73,7 +73,6 @@ impl ActiveTimersWidget {
     }
 }
 
-
 impl Widget for ActiveTimersWidget {
     fn render(
         &mut self,
@@ -124,13 +123,14 @@ impl Widget for ActiveTimersWidget {
 
         if self.cfg.show_completed_recently
             && let Ok(list) = timer::FINISHED_MESSAGES.lock()
-                && !list.is_empty() {
-                    ui.separator();
-                    ui.label("Recently completed");
-                    for msg in list.iter().rev().take(self.cfg.count) {
-                        ui.label(egui::RichText::new(msg).small());
-                    }
-                }
+            && !list.is_empty()
+        {
+            ui.separator();
+            ui.label("Recently completed");
+            for msg in list.iter().rev().take(self.cfg.count) {
+                ui.label(egui::RichText::new(msg).small());
+            }
+        }
 
         clicked
     }

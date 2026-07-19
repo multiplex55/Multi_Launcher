@@ -80,10 +80,11 @@ pub fn get_system_volume() -> Option<u8> {
             if let Ok(enm) =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
                 && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
-                    && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
-                        && let Ok(val) = vol.GetMasterVolumeLevelScalar() {
-                            percent = Some((val * 100.0).round() as u8);
-                        }
+                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                && let Ok(val) = vol.GetMasterVolumeLevelScalar()
+            {
+                percent = Some((val * 100.0).round() as u8);
+            }
             CoUninitialize();
             percent
         }
@@ -112,10 +113,11 @@ pub fn get_system_mute() -> Option<bool> {
             if let Ok(enm) =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
                 && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
-                    && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
-                        && let Ok(val) = vol.GetMute() {
-                            muted = Some(val.as_bool());
-                        }
+                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                && let Ok(val) = vol.GetMute()
+            {
+                muted = Some(val.as_bool());
+            }
             CoUninitialize();
             muted
         }
@@ -346,159 +348,132 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
                 if let Ok(cond) = automation.CreatePropertyCondition(
                     UIA_ControlTypePropertyId,
                     &VARIANT::from(UIA_TabItemControlTypeId.0),
-                )
-                    && let Ok(root) = automation.GetRootElement()
-                        && let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond)
-                            && let Ok(count) = tabs.Length() {
-                                'outer: for i in 0..count {
-                                    if let Ok(elem) = tabs.GetElement(i)
-                                        && let Ok(elem_id) = elem.GetRuntimeId()
-                                            && !elem_id.is_null() {
-                                                if let Ok(same) = automation.CompareRuntimeIds(
-                                                    elem_id as *const _,
-                                                    psa as *const _,
-                                                )
-                                                    && same.as_bool() {
-                                                        let mut activated = false;
-                                                        if let Ok(sel) = elem
-                                                                .GetCurrentPatternAs::<
-                                                                    IUIAutomationSelectionItemPattern,
-                                                                >(UIA_SelectionItemPatternId)
-                                                            {
-                                                                activated = sel.Select().is_ok();
-                                                            } else if let Ok(inv) = elem
-                                                                .GetCurrentPatternAs::<
-                                                                    IUIAutomationInvokePattern,
-                                                                >(UIA_InvokePatternId)
-                                                            {
-                                                                activated = inv.Invoke().is_ok();
-                                                            } else if let Ok(acc) = elem
-                                                                .GetCurrentPatternAs::<
-                                                                    IUIAutomationLegacyIAccessiblePattern,
-                                                                >(UIA_LegacyIAccessiblePatternId)
-                                                            {
-                                                                activated = acc.DoDefaultAction().is_ok();
-                                                            }
-
-                                                        if activated {
-                                                            if let Ok(focused) =
-                                                                automation.GetFocusedElement()
-                                                            {
-                                                                if let Ok(fid) =
-                                                                    focused.GetRuntimeId()
-                                                                {
-                                                                    activated = automation
-                                                                        .CompareRuntimeIds(
-                                                                            fid as *const _,
-                                                                            psa as *const _,
-                                                                        )
-                                                                        .map(|b| b.as_bool())
-                                                                        .unwrap_or(false);
-                                                                    let _ = SafeArrayDestroy(
-                                                                        fid as *const _,
-                                                                    );
-                                                                } else {
-                                                                    activated = false;
-                                                                }
-                                                            } else {
-                                                                activated = false;
-                                                            }
-                                                        }
-
-                                                        if !activated
-                                                            && let Ok(rect) =
-                                                                elem.CurrentBoundingRectangle()
-                                                            {
-                                                                let x =
-                                                                    (rect.left + rect.right) / 2;
-                                                                let y =
-                                                                    (rect.top + rect.bottom) / 2;
-
-                                                                let mut hwnd = elem
-                                                                    .CurrentNativeWindowHandle()
-                                                                    .unwrap_or(HWND(
-                                                                        std::ptr::null_mut(),
-                                                                    ));
-                                                                if hwnd.0.is_null()
-                                                                    && let Ok(walker) =
-                                                                        automation.RawViewWalker()
-                                                                    {
-                                                                        let mut cur = elem.clone();
-                                                                        loop {
-                                                                            if let Ok(h) = cur
-                                                                                    .CurrentNativeWindowHandle()
-                                                                                    && !h.0.is_null() {
-                                                                                        hwnd = h;
-                                                                                        break;
-                                                                                    }
-                                                                            if let Ok(p) = walker
-                                                                                .GetParentElement(
-                                                                                    &cur,
-                                                                                )
-                                                                            {
-                                                                                cur = p;
-                                                                            } else {
-                                                                                break;
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                if !hwnd.0.is_null() {
-                                                                    super::super::window_manager::force_restore_and_foreground(hwnd);
-                                                                }
-
-                                                                let mut old = POINT::default();
-                                                                let _ = GetCursorPos(&mut old);
-                                                                let _ = SetCursorPos(x, y);
-                                                                let inputs = [
-                                                                        INPUT {
-                                                                            r#type: INPUT_MOUSE,
-                                                                            Anonymous: INPUT_0 {
-                                                                                mi: MOUSEINPUT {
-                                                                                    dx: 0,
-                                                                                    dy: 0,
-                                                                                    mouseData: 0,
-                                                                                    dwFlags:
-                                                                                        MOUSEEVENTF_LEFTDOWN,
-                                                                                    time: 0,
-                                                                                    dwExtraInfo: 0,
-                                                                                },
-                                                                            },
-                                                                        },
-                                                                        INPUT {
-                                                                            r#type: INPUT_MOUSE,
-                                                                            Anonymous: INPUT_0 {
-                                                                                mi: MOUSEINPUT {
-                                                                                    dx: 0,
-                                                                                    dy: 0,
-                                                                                    mouseData: 0,
-                                                                                    dwFlags:
-                                                                                        MOUSEEVENTF_LEFTUP,
-                                                                                    time: 0,
-                                                                                    dwExtraInfo: 0,
-                                                                                },
-                                                                            },
-                                                                        },
-                                                                    ];
-                                                                let _ = SendInput(
-                                                                    &inputs,
-                                                                    core::mem::size_of::<INPUT>()
-                                                                        as i32,
-                                                                );
-                                                                let _ = SetCursorPos(old.x, old.y);
-                                                                tracing::debug!(
-                                                                    "simulated click for browser tab"
-                                                                );
-                                                            }
-
-                                                        let _ = elem.SetFocus();
-                                                        let _ =
-                                                            SafeArrayDestroy(elem_id as *const _);
-                                                        break 'outer;
-                                                    }
-                                                let _ = SafeArrayDestroy(elem_id as *const _);
-                                            }
+                ) && let Ok(root) = automation.GetRootElement()
+                    && let Ok(tabs) = root.FindAll(TreeScope_Subtree, &cond)
+                    && let Ok(count) = tabs.Length()
+                {
+                    'outer: for i in 0..count {
+                        if let Ok(elem) = tabs.GetElement(i)
+                            && let Ok(elem_id) = elem.GetRuntimeId()
+                            && !elem_id.is_null()
+                        {
+                            if let Ok(same) =
+                                automation.CompareRuntimeIds(elem_id as *const _, psa as *const _)
+                                && same.as_bool()
+                            {
+                                let mut activated = false;
+                                if let Ok(sel) = elem
+                                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                                        UIA_SelectionItemPatternId,
+                                    )
+                                {
+                                    activated = sel.Select().is_ok();
+                                } else if let Ok(inv) = elem
+                                    .GetCurrentPatternAs::<IUIAutomationInvokePattern>(
+                                        UIA_InvokePatternId,
+                                    )
+                                {
+                                    activated = inv.Invoke().is_ok();
+                                } else if let Ok(acc) = elem
+                                    .GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(
+                                        UIA_LegacyIAccessiblePatternId,
+                                    )
+                                {
+                                    activated = acc.DoDefaultAction().is_ok();
                                 }
+
+                                if activated {
+                                    if let Ok(focused) = automation.GetFocusedElement() {
+                                        if let Ok(fid) = focused.GetRuntimeId() {
+                                            activated = automation
+                                                .CompareRuntimeIds(fid as *const _, psa as *const _)
+                                                .map(|b| b.as_bool())
+                                                .unwrap_or(false);
+                                            let _ = SafeArrayDestroy(fid as *const _);
+                                        } else {
+                                            activated = false;
+                                        }
+                                    } else {
+                                        activated = false;
+                                    }
+                                }
+
+                                if !activated && let Ok(rect) = elem.CurrentBoundingRectangle() {
+                                    let x = (rect.left + rect.right) / 2;
+                                    let y = (rect.top + rect.bottom) / 2;
+
+                                    let mut hwnd = elem
+                                        .CurrentNativeWindowHandle()
+                                        .unwrap_or(HWND(std::ptr::null_mut()));
+                                    if hwnd.0.is_null()
+                                        && let Ok(walker) = automation.RawViewWalker()
+                                    {
+                                        let mut cur = elem.clone();
+                                        loop {
+                                            if let Ok(h) = cur.CurrentNativeWindowHandle()
+                                                && !h.0.is_null()
+                                            {
+                                                hwnd = h;
+                                                break;
+                                            }
+                                            if let Ok(p) = walker.GetParentElement(&cur) {
+                                                cur = p;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if !hwnd.0.is_null() {
+                                        super::super::window_manager::force_restore_and_foreground(
+                                            hwnd,
+                                        );
+                                    }
+
+                                    let mut old = POINT::default();
+                                    let _ = GetCursorPos(&mut old);
+                                    let _ = SetCursorPos(x, y);
+                                    let inputs = [
+                                        INPUT {
+                                            r#type: INPUT_MOUSE,
+                                            Anonymous: INPUT_0 {
+                                                mi: MOUSEINPUT {
+                                                    dx: 0,
+                                                    dy: 0,
+                                                    mouseData: 0,
+                                                    dwFlags: MOUSEEVENTF_LEFTDOWN,
+                                                    time: 0,
+                                                    dwExtraInfo: 0,
+                                                },
+                                            },
+                                        },
+                                        INPUT {
+                                            r#type: INPUT_MOUSE,
+                                            Anonymous: INPUT_0 {
+                                                mi: MOUSEINPUT {
+                                                    dx: 0,
+                                                    dy: 0,
+                                                    mouseData: 0,
+                                                    dwFlags: MOUSEEVENTF_LEFTUP,
+                                                    time: 0,
+                                                    dwExtraInfo: 0,
+                                                },
+                                            },
+                                        },
+                                    ];
+                                    let _ =
+                                        SendInput(&inputs, core::mem::size_of::<INPUT>() as i32);
+                                    let _ = SetCursorPos(old.x, old.y);
+                                    tracing::debug!("simulated click for browser tab");
+                                }
+
+                                let _ = elem.SetFocus();
+                                let _ = SafeArrayDestroy(elem_id as *const _);
+                                break 'outer;
                             }
+                            let _ = SafeArrayDestroy(elem_id as *const _);
+                        }
+                    }
+                }
                 let _ = SafeArrayDestroy(psa as *const _);
             }
         }

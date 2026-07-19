@@ -1,18 +1,18 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use eframe::egui;
 use multi_launcher::gui::{
-    todo_view_layout_sizes, todo_view_window_constraints, LauncherApp, TodoDialog, TodoViewDialog,
+    LauncherApp, TodoDialog, TodoViewDialog, todo_view_layout_sizes, todo_view_window_constraints,
 };
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::plugins::todo::{
-    append_todo, load_todos, mark_done, remove_todo, set_priority, set_tags, TodoAddActionPayload,
-    TodoEntry, TodoPlugin, TodoTagActionPayload, TODO_FILE,
+    TODO_FILE, TodoAddActionPayload, TodoEntry, TodoPlugin, TodoTagActionPayload, append_todo,
+    load_todos, mark_done, remove_todo, set_priority, set_tags,
 };
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -108,9 +108,11 @@ fn search_add_without_text_opens_dialog() {
     let results = plugin.search("todo add");
     assert_eq!(results.len(), 2);
     assert!(results.iter().any(|action| action.action == "todo:dialog"));
-    assert!(results
-        .iter()
-        .any(|action| action.label.starts_with("Usage: todo add")));
+    assert!(
+        results
+            .iter()
+            .any(|action| action.label.starts_with("Usage: todo add"))
+    );
 }
 
 #[test]

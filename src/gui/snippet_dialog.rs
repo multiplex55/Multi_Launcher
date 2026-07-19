@@ -1,5 +1,5 @@
-use super::{push_toast, LauncherApp};
-use crate::plugins::snippets::{load_snippets, save_snippets, SnippetEntry, SNIPPETS_FILE};
+use super::{LauncherApp, push_toast};
+use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets, save_snippets};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 

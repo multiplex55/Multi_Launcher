@@ -22,10 +22,11 @@ fn run_quit_loop(
 
         if quit_requested {
             if let Ok(guard) = ctx_handle.lock()
-                && let Some(c) = &*guard {
-                    c.send_viewport_cmd(egui::ViewportCommand::Close);
-                    c.request_repaint();
-                }
+                && let Some(c) = &*guard
+            {
+                c.send_viewport_cmd(egui::ViewportCommand::Close);
+                c.request_repaint();
+            }
             let _ = handle.join();
             break;
         }

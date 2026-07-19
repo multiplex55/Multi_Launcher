@@ -8,7 +8,7 @@ use multi_launcher::{
     settings::Settings,
 };
 use once_cell::sync::Lazy;
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));

@@ -54,7 +54,9 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
-pub use file_search_dialog::{FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand};
+pub use file_search_dialog::{
+    FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
+};
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
@@ -224,9 +226,10 @@ pub fn set_execute_action_hook(
 
 fn execute_action(action: &Action) -> anyhow::Result<()> {
     if let Ok(guard) = EXECUTE_ACTION_HOOK.lock()
-        && let Some(ref hook) = *guard {
-            return hook(action);
-        }
+        && let Some(ref hook) = *guard
+    {
+        return hook(action);
+    }
     launch_action(action)
 }
 
@@ -645,13 +648,21 @@ impl LauncherApp {
                             .plugin_settings
                             .get("file_search")
                             .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                            .unwrap_or_else(
+                                crate::file_search::settings::FileSearchSettings::default,
+                            );
                         cfg.ui_preferences = self.file_search_dialog.ui_preferences.clone();
                         if let Ok(value) = serde_json::to_value(&cfg) {
-                            settings.plugin_settings.insert("file_search".to_owned(), value.clone());
-                            self.settings_editor.set_plugin_setting_value("file_search", value);
+                            settings
+                                .plugin_settings
+                                .insert("file_search".to_owned(), value.clone());
+                            self.settings_editor
+                                .set_plugin_setting_value("file_search", value);
                             if let Err(error) = settings.save(&self.settings_path) {
-                                self.report_error_message("file_search.preferences.save", format!("Failed to save file-search preferences: {error}"));
+                                self.report_error_message(
+                                    "file_search.preferences.save",
+                                    format!("Failed to save file-search preferences: {error}"),
+                                );
                             }
                         }
                     }
@@ -668,17 +679,21 @@ impl LauncherApp {
                             .plugin_settings
                             .get("file_search")
                             .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                            .unwrap_or_else(
+                                crate::file_search::settings::FileSearchSettings::default,
+                            );
                         cfg.ripgrep_executable_path = path;
                         if let Ok(value) = serde_json::to_value(&cfg) {
-                            settings.plugin_settings.insert("file_search".to_owned(), value.clone());
-                            self.settings_editor.set_plugin_setting_value("file_search", value);
+                            settings
+                                .plugin_settings
+                                .insert("file_search".to_owned(), value.clone());
+                            self.settings_editor
+                                .set_plugin_setting_value("file_search", value);
                             match settings.save(&self.settings_path) {
                                 Ok(()) => {
                                     self.apply_file_search_settings(cfg);
-                                    self.file_search_dialog.warning_error_message = Some(
-                                        "ripgrep path saved for future searches.".to_owned(),
-                                    );
+                                    self.file_search_dialog.warning_error_message =
+                                        Some("ripgrep path saved for future searches.".to_owned());
                                 }
                                 Err(error) => self.report_error_message(
                                     "file_search.ripgrep.save",
@@ -1389,13 +1404,15 @@ impl LauncherApp {
         {
             use crate::global_hotkey::Hotkey as WinHotkey;
             if let Some(ref seq) = settings.hotkey
-                && let Ok(mut hk) = WinHotkey::new(seq) {
-                    hk.register(&app, 1);
-                }
+                && let Ok(mut hk) = WinHotkey::new(seq)
+            {
+                hk.register(&app, 1);
+            }
             if let Some(ref seq) = settings.quit_hotkey
-                && let Ok(mut hk) = WinHotkey::new(seq) {
-                    hk.register(&app, 2);
-                }
+                && let Ok(mut hk) = WinHotkey::new(seq)
+            {
+                hk.register(&app, 2);
+            }
         }
 
         app.update_action_cache();
@@ -1445,18 +1462,19 @@ impl LauncherApp {
             self.suggestions.first().cloned()
         };
         if let Some(s) = suggestion
-            && s != self.query.to_lowercase() {
-                let old_suggestions = self.suggestions.clone();
-                let old_index = self.autocomplete_index;
-                self.query = s;
-                self.move_cursor_end = true;
-                self.search();
-                if tab && !old_suggestions.is_empty() {
-                    self.suggestions = old_suggestions;
-                    self.autocomplete_index = (old_index + 1) % self.suggestions.len();
-                }
-                return true;
+            && s != self.query.to_lowercase()
+        {
+            let old_suggestions = self.suggestions.clone();
+            let old_index = self.autocomplete_index;
+            self.query = s;
+            self.move_cursor_end = true;
+            self.search();
+            if tab && !old_suggestions.is_empty() {
+                self.suggestions = old_suggestions;
+                self.autocomplete_index = (old_index + 1) % self.suggestions.len();
             }
+            return true;
+        }
         false
     }
 
@@ -1484,9 +1502,10 @@ impl LauncherApp {
         let mut prefixed_matches = Vec::new();
         for plugin in self.plugins.iter() {
             if let Some(enabled) = self.enabled_plugins.as_ref()
-                && !enabled.contains(plugin.name()) {
-                    continue;
-                }
+                && !enabled.contains(plugin.name())
+            {
+                continue;
+            }
 
             let prefixes = plugin.query_prefixes();
             if prefixes.is_empty() {
@@ -1663,66 +1682,71 @@ impl LauncherApp {
         }
 
         if let Some(slug) = pin.action_id.strip_prefix("note:open:")
-            && let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug) {
-                return Some(Action {
-                    label: note.alias.as_ref().unwrap_or(&note.title).clone(),
-                    desc: "Note".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug)
+        {
+            return Some(Action {
+                label: note.alias.as_ref().unwrap_or(&note.title).clone(),
+                desc: "Note".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("clipboard:copy:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(entry) = snapshot.clipboard_history.get(idx) {
-                return Some(Action {
-                    label: entry.clone(),
-                    desc: "Clipboard".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && let Some(entry) = snapshot.clipboard_history.get(idx)
+        {
+            return Some(Action {
+                label: entry.clone(),
+                desc: "Clipboard".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("todo:done:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(todo) = snapshot.todos.get(idx) {
-                return Some(Action {
-                    label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
-                    desc: "Todo".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && let Some(todo) = snapshot.todos.get(idx)
+        {
+            return Some(Action {
+                label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+                desc: "Todo".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("todo:edit:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(todo) = snapshot.todos.get(idx) {
-                return Some(Action {
-                    label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
-                    desc: "Todo".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && let Some(todo) = snapshot.todos.get(idx)
+        {
+            return Some(Action {
+                label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
+                desc: "Todo".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         if let Some(idx) = pin
             .action_id
             .strip_prefix("todo:remove:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(todo) = snapshot.todos.get(idx) {
-                return Some(Action {
-                    label: format!("Remove todo {}", todo.text),
-                    desc: "Todo".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && let Some(todo) = snapshot.todos.get(idx)
+        {
+            return Some(Action {
+                label: format!("Remove todo {}", todo.text),
+                desc: "Todo".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         for snippet in snapshot.snippets.iter() {
             if pin.action_id == format!("clipboard:{}", snippet.text) {
@@ -1736,24 +1760,26 @@ impl LauncherApp {
         }
 
         if let Some(alias) = pin.action_id.strip_prefix("snippet:edit:")
-            && snapshot.snippets.iter().any(|s| s.alias == alias) {
-                return Some(Action {
-                    label: format!("Edit snippet {alias}"),
-                    desc: "Snippet".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && snapshot.snippets.iter().any(|s| s.alias == alias)
+        {
+            return Some(Action {
+                label: format!("Edit snippet {alias}"),
+                desc: "Snippet".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         if let Some(alias) = pin.action_id.strip_prefix("snippet:remove:")
-            && snapshot.snippets.iter().any(|s| s.alias == alias) {
-                return Some(Action {
-                    label: format!("Remove snippet {alias}"),
-                    desc: "Snippet".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
+            && snapshot.snippets.iter().any(|s| s.alias == alias)
+        {
+            return Some(Action {
+                label: format!("Remove snippet {alias}"),
+                desc: "Snippet".into(),
+                action: pin.action_id.clone(),
+                args: None,
+            });
+        }
 
         None
     }
@@ -2042,9 +2068,10 @@ impl LauncherApp {
             }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop()
-                    && self.note_save_on_close {
-                        panel.save(self);
-                    }
+                    && self.note_save_on_close
+                {
+                    panel.save(self);
+                }
                 self.panel_states.note_panel = false;
             }
             Panel::ImagePanel => {
@@ -2207,9 +2234,10 @@ impl LauncherApp {
             }
             Panel::NotePanel => {
                 if let Some(mut panel) = self.note_panels.pop()
-                    && self.note_save_on_close {
-                        panel.save(self);
-                    }
+                    && self.note_save_on_close
+                {
+                    panel.save(self);
+                }
                 self.panel_states.note_panel = false;
             }
             Panel::ImagePanel => {

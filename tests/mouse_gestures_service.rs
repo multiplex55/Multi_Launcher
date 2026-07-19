@@ -5,8 +5,9 @@ use multi_launcher::mouse_gestures::db::{
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::mouse_gestures::overlay::OverlayBackend;
 use multi_launcher::mouse_gestures::service::{
-    should_ignore_window_title, CancelBehavior, CursorPositionProvider, HookEvent, MockHookBackend,
-    MouseGestureConfig, MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
+    CancelBehavior, CursorPositionProvider, HookEvent, MockHookBackend, MouseGestureConfig,
+    MouseGestureService, NoMatchBehavior, OverlayFactory, RightClickBackend,
+    should_ignore_window_title,
 };
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -165,9 +166,10 @@ fn wait_for_hint_matching(
     let start = Instant::now();
     loop {
         if let Ok(guard) = state.hints.lock()
-            && let Some(hit) = guard.iter().rev().find(|hint| matches(hint)) {
-                return Some(hit.clone());
-            }
+            && let Some(hit) = guard.iter().rev().find(|hint| matches(hint))
+        {
+            return Some(hit.clone());
+        }
         if start.elapsed() >= timeout {
             return None;
         }

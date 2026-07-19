@@ -33,15 +33,16 @@ impl Plugin for AsciiArtPlugin {
             let text = rest.trim();
             if !text.is_empty()
                 && let Some(font) = &self.font
-                    && let Some(fig) = font.convert(text) {
-                        let art = fig.to_string();
-                        return vec![Action {
-                            label: art.clone(),
-                            desc: "AsciiArt".into(),
-                            action: format!("clipboard:{}", art),
-                            args: None,
-                        }];
-                    }
+                && let Some(fig) = font.convert(text)
+            {
+                let art = fig.to_string();
+                return vec![Action {
+                    label: art.clone(),
+                    desc: "AsciiArt".into(),
+                    action: format!("clipboard:{}", art),
+                    args: None,
+                }];
+            }
         }
         Vec::new()
     }

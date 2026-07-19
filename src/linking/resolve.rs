@@ -1,4 +1,4 @@
-use crate::linking::{format_link_id, parse_link_id, EntityKey, LinkRef};
+use crate::linking::{EntityKey, LinkRef, format_link_id, parse_link_id};
 use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
@@ -81,12 +81,13 @@ pub fn resolve_link(
         return Err(err);
     }
     if let Some(anchor) = &parsed.anchor
-        && !catalog.has_anchor(&key, anchor) {
-            telemetry.on_broken_anchor(&parsed, anchor);
-            let err = ResolveLinkError::InvalidAnchor;
-            telemetry.on_resolve_failure(link_id, &err);
-            return Err(err);
-        }
+        && !catalog.has_anchor(&key, anchor)
+    {
+        telemetry.on_broken_anchor(&parsed, anchor);
+        let err = ResolveLinkError::InvalidAnchor;
+        telemetry.on_resolve_failure(link_id, &err);
+        return Err(err);
+    }
     Ok(ResolvedLink {
         canonical: parsed.clone(),
         location: format_link_id(&parsed),

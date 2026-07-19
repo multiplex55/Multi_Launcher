@@ -1,10 +1,11 @@
 use crate::actions::Action;
 use crate::gui::{ActivationSource, LauncherApp};
 use crate::plugins::note::{
-    delete_template, get_template, list_templates, load_notes, note_backlinks, note_cache_snapshot,
-    reload_templates, save_notes, save_template, template_path, validate_template_name, Note,
+    Note, delete_template, get_template, list_templates, load_notes, note_backlinks,
+    note_cache_snapshot, reload_templates, save_notes, save_template, template_path,
+    validate_template_name,
 };
-use crate::plugins::todo::{load_todos, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, load_todos};
 use chrono::{DateTime, Local};
 use eframe::egui;
 

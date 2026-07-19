@@ -1,13 +1,13 @@
 use crate::actions::Action;
-use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::plugin::Plugin;
 use arboard::Clipboard;
 use eframe::egui;
 use serde_json;
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
@@ -172,39 +172,42 @@ impl Plugin for ClipboardPlugin {
 
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "cb: edit clipboard".into(),
-                    desc: "Clipboard".into(),
-                    action: "clipboard:dialog".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "cb: edit clipboard".into(),
+                desc: "Clipboard".into(),
+                action: "clipboard:dialog".into(),
+                args: None,
+            }];
+        }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb clear")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "Clear clipboard history".into(),
-                    desc: "Clipboard".into(),
-                    action: "clipboard:clear".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "Clear clipboard history".into(),
+                desc: "Clipboard".into(),
+                action: "clipboard:clear".into(),
+                args: None,
+            }];
+        }
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cb list")
-            && rest.is_empty() {
-                let history = self.update_history();
-                return history
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, entry)| Action {
-                        label: entry.clone(),
-                        desc: "Clipboard".into(),
-                        action: format!("clipboard:copy:{idx}"),
-                        args: None,
-                    })
-                    .collect();
-            }
+            && rest.is_empty()
+        {
+            let history = self.update_history();
+            return history
+                .iter()
+                .enumerate()
+                .map(|(idx, entry)| Action {
+                    label: entry.clone(),
+                    desc: "Clipboard".into(),
+                    action: format!("clipboard:copy:{idx}"),
+                    args: None,
+                })
+                .collect();
+        }
 
         let filter = trimmed[PREFIX.len()..].trim().to_lowercase();
         let history = self.update_history();

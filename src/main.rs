@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 #![allow(clippy::type_complexity)]
 
-use multi_launcher::actions::{load_actions, Action};
+use multi_launcher::actions::{Action, load_actions};
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::HotkeyTrigger;
 use multi_launcher::plugin::PluginManager;
@@ -12,9 +12,9 @@ use multi_launcher::{indexer, logging};
 use eframe::{egui, icon_data};
 use once_cell::sync::Lazy;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{channel, Sender},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{Sender, channel},
 };
 use std::thread;
 
@@ -59,9 +59,10 @@ pub fn request_hotkey_restart(settings: Settings) {
         }
     }
     if let Ok(guard) = EVENT_TX.lock()
-        && let Some(tx) = guard.as_ref() {
-            let _ = tx.send(());
-        }
+        && let Some(tx) = guard.as_ref()
+    {
+        let _ = tx.send(());
+    }
 }
 
 /// Spawn the GUI on a separate thread.
@@ -188,9 +189,9 @@ fn main() -> anyhow::Result<()> {
         && let Ok(cfg) = serde_json::from_value::<
             multi_launcher::plugins::mouse_gestures::MouseGestureSettings,
         >(value.clone())
-        {
-            multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
-        }
+    {
+        multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
+    }
     let mut actions_vec = load_actions("actions.json").unwrap_or_default();
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
@@ -262,27 +263,32 @@ fn main() -> anyhow::Result<()> {
         }
 
         if let Some(qt) = &quit_trigger
-            && qt.take() {
-                listener.stop();
+            && qt.take()
+        {
+            listener.stop();
 
-                if let Ok(guard) = ctx.lock()
-                    && let Some(c) = &*guard {
-                        c.send_viewport_cmd(egui::ViewportCommand::Close);
-                        c.request_repaint();
-                    }
-
-                let _ = handle.join();
-                break Ok(());
+            if let Ok(guard) = ctx.lock()
+                && let Some(c) = &*guard
+            {
+                c.send_viewport_cmd(egui::ViewportCommand::Close);
+                c.request_repaint();
             }
+
+            let _ = handle.join();
+            break Ok(());
+        }
 
         if let Some(ht) = &help_trigger
-            && ht.take() && visibility.load(Ordering::SeqCst) {
-                help_flag.store(true, Ordering::SeqCst);
-                if let Ok(guard) = ctx.lock()
-                    && let Some(c) = &*guard {
-                        c.request_repaint();
-                    }
+            && ht.take()
+            && visibility.load(Ordering::SeqCst)
+        {
+            help_flag.store(true, Ordering::SeqCst);
+            if let Ok(guard) = ctx.lock()
+                && let Some(c) = &*guard
+            {
+                c.request_repaint();
             }
+        }
 
         if let Ok(new_settings) = restart_rx.try_recv() {
             listener.stop();

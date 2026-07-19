@@ -1,8 +1,8 @@
-use crate::gui::calendar_event_details::RecurrenceScope;
 use crate::gui::LauncherApp;
+use crate::gui::calendar_event_details::RecurrenceScope;
 use crate::plugins::calendar::{
-    new_event_id, save_events, CalendarEvent, CustomRecurrenceUnit, RecurrenceEnd,
-    RecurrenceFrequency, RecurrenceRule, Reminder, CALENDAR_DATA, CALENDAR_EVENTS_FILE,
+    CALENDAR_DATA, CALENDAR_EVENTS_FILE, CalendarEvent, CustomRecurrenceUnit, RecurrenceEnd,
+    RecurrenceFrequency, RecurrenceRule, Reminder, new_event_id, save_events,
 };
 use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use eframe::egui;
@@ -156,9 +156,10 @@ impl CalendarEventEditor {
         self.errors.clear();
         self.split_from = split_scope;
         if let Some(split) = &self.split_from
-            && matches!(split.scope, RecurrenceScope::This) {
-                self.repeat_enabled = false;
-            }
+            && matches!(split.scope, RecurrenceScope::This)
+        {
+            self.repeat_enabled = false;
+        }
         if self.split_from.is_some() {
             self.current_event_id = None;
         } else {
@@ -469,10 +470,11 @@ impl CalendarEventEditor {
         };
 
         if let Some(end) = end
-            && end < start {
-                self.errors
-                    .insert("end_date", "End must be after start".into());
-            }
+            && end < start
+        {
+            self.errors
+                .insert("end_date", "End must be after start".into());
+        }
 
         let reminders = parse_reminders(&self.reminders).inspect_err(|err| {
             self.errors.insert("reminders", err.clone());

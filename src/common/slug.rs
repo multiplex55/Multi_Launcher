@@ -23,9 +23,10 @@ pub fn register_slug(slug: &str) {
 
 fn parse_slug(s: &str) -> (&str, usize) {
     if let Some((base, num)) = s.rsplit_once('-')
-        && let Ok(n) = num.parse::<usize>() {
-            return (base, n);
-        }
+        && let Ok(n) = num.parse::<usize>()
+    {
+        return (base, n);
+    }
     (s, 0)
 }
 

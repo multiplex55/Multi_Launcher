@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -31,15 +31,17 @@ impl WeatherSiteWidget {
             let mut changed = false;
             let default_location = ctx.default_location.map(str::to_string);
             if cfg.location.is_none()
-                && let Some(loc) = &default_location {
-                    cfg.location = Some(loc.clone());
-                    changed = true;
-                }
+                && let Some(loc) = &default_location
+            {
+                cfg.location = Some(loc.clone());
+                changed = true;
+            }
             if cfg.url.is_none()
-                && let Some(loc) = cfg.location.clone().or_else(|| default_location.clone()) {
-                    cfg.url = Some(format!("https://www.google.com/search?q=weather+{loc}"));
-                    changed = true;
-                }
+                && let Some(loc) = cfg.location.clone().or_else(|| default_location.clone())
+            {
+                cfg.url = Some(format!("https://www.google.com/search?q=weather+{loc}"));
+                changed = true;
+            }
             ui.horizontal(|ui| {
                 ui.label("Location");
                 let mut text = cfg.location.clone().unwrap_or_default();
@@ -79,13 +81,9 @@ impl WeatherSiteWidget {
     }
 
     fn effective_location<'a>(&'a self, ctx: &'a DashboardContext<'_>) -> Option<&'a str> {
-        self.cfg
-            .location
-            .as_deref()
-            .or(ctx.default_location)
+        self.cfg.location.as_deref().or(ctx.default_location)
     }
 }
-
 
 impl Widget for WeatherSiteWidget {
     fn render(

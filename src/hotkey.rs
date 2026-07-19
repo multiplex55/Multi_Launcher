@@ -1,5 +1,5 @@
 pub mod parse;
 pub mod runtime;
 
-pub use parse::{parse_hotkey, EventType, Hotkey, Key};
-pub use runtime::{process_test_events, HotkeyListener, HotkeyTrigger};
+pub use parse::{EventType, Hotkey, Key, parse_hotkey};
+pub use runtime::{HotkeyListener, HotkeyTrigger, process_test_events};

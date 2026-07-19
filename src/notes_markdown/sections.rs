@@ -1,6 +1,6 @@
 use super::{
-    parse::{line_spans, LineSpan},
     MarkdownHeading, MarkdownSection,
+    parse::{LineSpan, line_spans},
 };
 
 pub fn parse_sections(headings: &[MarkdownHeading], content: &str) -> Vec<MarkdownSection> {

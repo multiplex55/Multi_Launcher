@@ -1,8 +1,8 @@
 use crate::actions::Action;
-use crate::plugins::calc_history::{self, CalcHistoryEntry, CALC_HISTORY_FILE, MAX_ENTRIES};
+use crate::plugins::calc_history::{self, CALC_HISTORY_FILE, CalcHistoryEntry, MAX_ENTRIES};
 
 use super::parse::ActionKind;
-use super::plan::{plan_action, LaunchPlan};
+use super::plan::{LaunchPlan, plan_action};
 
 /// Launch an [`Action`], interpreting a variety of custom prefixes.
 ///

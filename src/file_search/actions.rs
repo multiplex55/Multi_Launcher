@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::file_search::model::SearchKind;
 use crate::file_search::settings::FileSearchSettings;

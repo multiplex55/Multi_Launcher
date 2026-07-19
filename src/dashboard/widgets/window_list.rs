@@ -1,7 +1,7 @@
 use super::{
+    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, find_plugin, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction,
-    WidgetSettingsContext, WidgetSettingsUiResult,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -185,13 +185,15 @@ impl Widget for WindowsWidget {
         for (title, switch, close) in self.grouped_actions() {
             ui.horizontal(|ui| {
                 if let Some(action) = &switch
-                    && ui.button(&action.label).clicked() {
-                        clicked = Some(action.clone());
-                    }
+                    && ui.button(&action.label).clicked()
+                {
+                    clicked = Some(action.clone());
+                }
                 if let Some(action) = &close
-                    && ui.small_button("Close").clicked() {
-                        clicked = Some(action.clone());
-                    }
+                    && ui.small_button("Close").clicked()
+                {
+                    clicked = Some(action.clone());
+                }
                 ui.label(egui::RichText::new(title).small());
             });
         }

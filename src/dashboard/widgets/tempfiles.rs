@@ -1,7 +1,7 @@
 use super::{
+    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -286,15 +286,15 @@ impl Widget for TempfilesWidget {
                         ui.add(egui::Label::new(display_name).wrap(false))
                             .on_hover_text(entry.path.to_string_lossy());
                         if let Some(alias) = &entry.alias
-                            && alias != &entry.file_name {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("({})", entry.file_name))
-                                            .small(),
-                                    )
-                                    .wrap(false),
-                                );
-                            }
+                            && alias != &entry.file_name
+                        {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("({})", entry.file_name)).small(),
+                                )
+                                .wrap(false),
+                            );
+                        }
                         if ui
                             .small_button("Open")
                             .on_hover_text("Open file (not folder)")

@@ -760,17 +760,18 @@ pub fn image_files() -> Vec<String> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
-                && let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    let ext = ext.to_ascii_lowercase();
-                    // Only allow formats supported by `egui`/`image` for rendering.
-                    if matches!(
-                        ext.as_str(),
-                        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
-                    )
-                        && let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                            files.push(name.to_string());
-                        }
+                && let Some(ext) = path.extension().and_then(|s| s.to_str())
+            {
+                let ext = ext.to_ascii_lowercase();
+                // Only allow formats supported by `egui`/`image` for rendering.
+                if matches!(
+                    ext.as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+                ) && let Some(name) = path.file_name().and_then(|s| s.to_str())
+                {
+                    files.push(name.to_string());
                 }
+            }
         }
     }
     files.sort();
@@ -794,9 +795,9 @@ pub fn unused_assets() -> Vec<String> {
                     && let Some(name) = std::path::Path::new(stripped)
                         .file_name()
                         .and_then(|s| s.to_str())
-                    {
-                        referenced.insert(name.to_string());
-                    }
+                {
+                    referenced.insert(name.to_string());
+                }
             }
         }
     }
@@ -947,17 +948,19 @@ pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
         format!("# {}\n\n{}", note.title, note.content)
     };
     if let Some(a) = &note.alias
-        && !content.lines().any(|l| l.starts_with("Alias:")) {
-            let mut lines = content.lines();
-            let first = lines.next().unwrap_or("");
-            let rest = lines.collect::<Vec<_>>().join("\n");
-            content = format!("{first}\nAlias: {a}\n{rest}");
-        }
+        && !content.lines().any(|l| l.starts_with("Alias:"))
+    {
+        let mut lines = content.lines();
+        let first = lines.next().unwrap_or("");
+        let rest = lines.collect::<Vec<_>>().join("\n");
+        content = format!("{first}\nAlias: {a}\n{rest}");
+    }
     note.aliases = extract_aliases(&content);
     if let Some(alias) = &note.alias
-        && !note.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias)) {
-            note.aliases.insert(0, alias.clone());
-        }
+        && !note.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias))
+    {
+        note.aliases.insert(0, alias.clone());
+    }
     note.aliases = dedup_aliases(note.aliases.clone());
     note.alias = note.aliases.first().cloned();
     note.tags = extract_tags(&content);
@@ -996,12 +999,13 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
             format!("# {}\n\n{}", note.title, note.content)
         };
         if let Some(a) = &note.alias
-            && !content.lines().any(|l| l.starts_with("Alias:")) {
-                let mut lines = content.lines();
-                let first = lines.next().unwrap_or("");
-                let rest = lines.collect::<Vec<_>>().join("\n");
-                content = format!("{first}\nAlias: {a}\n{rest}");
-            }
+            && !content.lines().any(|l| l.starts_with("Alias:"))
+        {
+            let mut lines = content.lines();
+            let first = lines.next().unwrap_or("");
+            let rest = lines.collect::<Vec<_>>().join("\n");
+            content = format!("{first}\nAlias: {a}\n{rest}");
+        }
         std::fs::write(path, content)?;
     }
     for entry in std::fs::read_dir(&dir)? {
@@ -1064,17 +1068,18 @@ impl NotePlugin {
                     && matches!(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    ) {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        let last = LAST_NOTE_REINDEX_MS.load(Ordering::SeqCst);
-                        if now.saturating_sub(last) >= NOTE_REINDEX_DEBOUNCE_MS {
-                            LAST_NOTE_REINDEX_MS.store(now, Ordering::SeqCst);
-                            let _ = refresh_cache();
-                        }
+                    )
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let last = LAST_NOTE_REINDEX_MS.load(Ordering::SeqCst);
+                    if now.saturating_sub(last) >= NOTE_REINDEX_DEBOUNCE_MS {
+                        LAST_NOTE_REINDEX_MS.store(now, Ordering::SeqCst);
+                        let _ = refresh_cache();
                     }
+                }
             },
             Config::default(),
         )
@@ -1534,40 +1539,38 @@ impl Plugin for NotePlugin {
             };
 
             match cmd.as_str() {
-                "reload"
-                    if args.is_empty() => {
+                "reload" if args.is_empty() => {
+                    return vec![Action {
+                        label: "Reload notes".into(),
+                        desc: "Note".into(),
+                        action: "note:reload".into(),
+                        args: None,
+                    }];
+                }
+                "new" | "add" | "create" if !args.is_empty() => {
+                    let mut title = args;
+                    let mut template = None;
+                    if let Some(idx) = args.to_ascii_lowercase().find("--template") {
+                        let (t, rest) = args.split_at(idx);
+                        title = t.trim();
+                        let name = rest["--template".len()..].trim();
+                        if !name.is_empty() {
+                            template = Some(name.to_string());
+                        }
+                    }
+                    if !title.is_empty() {
+                        let slug = slugify(title);
+                        if template.is_some() && !self.templates_enabled {
+                            return vec![templates_disabled_action()];
+                        }
+                        let mut action = encoded_note_new_action(&slug, template.as_deref());
+                        action.label = format!("New note {title}");
                         return vec![Action {
-                            label: "Reload notes".into(),
-                            desc: "Note".into(),
-                            action: "note:reload".into(),
-                            args: None,
+                            label: format!("New note {title}"),
+                            ..action
                         }];
                     }
-                "new" | "add" | "create"
-                    if !args.is_empty() => {
-                        let mut title = args;
-                        let mut template = None;
-                        if let Some(idx) = args.to_ascii_lowercase().find("--template") {
-                            let (t, rest) = args.split_at(idx);
-                            title = t.trim();
-                            let name = rest["--template".len()..].trim();
-                            if !name.is_empty() {
-                                template = Some(name.to_string());
-                            }
-                        }
-                        if !title.is_empty() {
-                            let slug = slugify(title);
-                            if template.is_some() && !self.templates_enabled {
-                                return vec![templates_disabled_action()];
-                            }
-                            let mut action = encoded_note_new_action(&slug, template.as_deref());
-                            action.label = format!("New note {title}");
-                            return vec![Action {
-                                label: format!("New note {title}"),
-                                ..action
-                            }];
-                        }
-                    }
+                }
                 "open" => {
                     let filter = args;
                     return guard
@@ -1668,9 +1671,7 @@ impl Plugin for NotePlugin {
                         }
                     }
 
-                    let mut tags: Vec<(String, usize)> = counts
-                        .into_values()
-                        .collect();
+                    let mut tags: Vec<(String, usize)> = counts.into_values().collect();
 
                     if !filter.is_empty() {
                         tags.retain(|(tag, _)| self.matcher.fuzzy_match(tag, filter).is_some());
@@ -1779,15 +1780,14 @@ impl Plugin for NotePlugin {
                         })
                         .collect();
                 }
-                "unused"
-                    if args.is_empty() => {
-                        return vec![Action {
-                            label: "notes unused".into(),
-                            desc: "Note".into(),
-                            action: "note:unused_assets".into(),
-                            args: None,
-                        }];
-                    }
+                "unused" if args.is_empty() => {
+                    return vec![Action {
+                        label: "notes unused".into(),
+                        desc: "Note".into(),
+                        action: "note:unused_assets".into(),
+                        args: None,
+                    }];
+                }
                 "templates" => {
                     if !self.templates_enabled {
                         return Vec::new();
@@ -2046,10 +2046,7 @@ mod tests {
         let content = "# Beta\n\n[[Alpha]] link://note/alpha";
         let mut beta_note = test_note("Beta", "beta", content);
         beta_note.entity_refs = extract_entity_refs(content);
-        let cache = NoteCache::from_notes(vec![
-            test_note("Alpha", "alpha", "# Alpha"),
-            beta_note,
-        ]);
+        let cache = NoteCache::from_notes(vec![test_note("Alpha", "alpha", "# Alpha"), beta_note]);
 
         let beta = cache
             .notes
@@ -2058,9 +2055,11 @@ mod tests {
             .expect("beta note");
 
         assert_eq!(beta.links, vec!["alpha"]);
-        assert!(beta.entity_refs.iter().any(|entity| {
-            entity.kind == EntityKind::Note && entity.id == "alpha"
-        }));
+        assert!(
+            beta.entity_refs
+                .iter()
+                .any(|entity| { entity.kind == EntityKind::Note && entity.id == "alpha" })
+        );
     }
 
     #[test]

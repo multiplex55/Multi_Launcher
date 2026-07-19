@@ -1,20 +1,20 @@
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 pub mod index;
 pub mod migrate;
 pub mod parse;
 pub mod resolve;
 
-pub use index::{build_index_from_notes_and_todos, BacklinkFilters, EntityKey, LinkIndex};
+pub use index::{BacklinkFilters, EntityKey, LinkIndex, build_index_from_notes_and_todos};
 pub use migrate::migrate_legacy_links;
 pub use parse::{
-    detect_link_trigger, format_inserted_link, format_link_id, parse_link_id, LinkParseError,
-    LinkRef, LinkTarget, LinkTrigger,
+    LinkParseError, LinkRef, LinkTarget, LinkTrigger, detect_link_trigger, format_inserted_link,
+    format_link_id, parse_link_id,
 };
 pub use resolve::{
-    resolve_link, LinkResolverCatalog, LinkTelemetry, ResolveLinkError, ResolvedLink,
-    TracingLinkTelemetry,
+    LinkResolverCatalog, LinkTelemetry, ResolveLinkError, ResolvedLink, TracingLinkTelemetry,
+    resolve_link,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,18 +186,22 @@ mod tests {
                 display_text: None,
             }],
         );
-        assert!(index
-            .get_backlinks(&target_a, BacklinkFilters::default())
-            .is_empty());
+        assert!(
+            index
+                .get_backlinks(&target_a, BacklinkFilters::default())
+                .is_empty()
+        );
         assert_eq!(
             index.get_backlinks(&target_b, BacklinkFilters::default()),
             vec![source.clone()]
         );
 
         index.remove_entity(&source);
-        assert!(index
-            .get_backlinks(&target_b, BacklinkFilters::default())
-            .is_empty());
+        assert!(
+            index
+                .get_backlinks(&target_b, BacklinkFilters::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -242,9 +246,11 @@ mod tests {
 
         let index = build_index_from_notes_and_todos(&notes, &todos);
         let todo_forward = index.get_forward_links(&EntityKey::new(LinkTarget::Todo, "todo-1"));
-        assert!(todo_forward
-            .iter()
-            .any(|l| l.target_type == LinkTarget::Note && l.target_id == "alpha"));
+        assert!(
+            todo_forward
+                .iter()
+                .any(|l| l.target_type == LinkTarget::Note && l.target_id == "alpha")
+        );
 
         let backlinks = index.get_backlinks(
             &EntityKey::new(LinkTarget::Note, "alpha"),

@@ -8,32 +8,35 @@ impl Plugin for SettingsPlugin {
         let q = query.trim();
         let mut actions = Vec::new();
         if let Some(rest) = crate::common::strip_prefix_ci(q, "settings")
-            && (rest.is_empty() || rest.starts_with(' ')) {
-                actions.push(Action {
-                    label: "Open settings".into(),
-                    desc: "Show settings panel".into(),
-                    action: "settings:dialog".into(),
-                    args: None,
-                });
-            }
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            actions.push(Action {
+                label: "Open settings".into(),
+                desc: "Show settings panel".into(),
+                action: "settings:dialog".into(),
+                args: None,
+            });
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(q, "dashboard")
-            && (rest.is_empty() || rest.starts_with(' ')) {
-                actions.push(Action {
-                    label: "Dashboard Settings".into(),
-                    desc: "Configure dashboard layout and widgets".into(),
-                    action: "dashboard:settings".into(),
-                    args: None,
-                });
-            }
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            actions.push(Action {
+                label: "Dashboard Settings".into(),
+                desc: "Configure dashboard layout and widgets".into(),
+                action: "dashboard:settings".into(),
+                args: None,
+            });
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(q, "theme")
-            && (rest.is_empty() || rest.starts_with(' ')) {
-                actions.push(Action {
-                    label: "Theme settings".into(),
-                    desc: "Configure launcher theme colors".into(),
-                    action: "theme:dialog".into(),
-                    args: None,
-                });
-            }
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            actions.push(Action {
+                label: "Theme settings".into(),
+                desc: "Configure launcher theme colors".into(),
+                action: "theme:dialog".into(),
+                args: None,
+            });
+        }
         actions
     }
 

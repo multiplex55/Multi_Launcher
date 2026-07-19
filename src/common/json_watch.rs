@@ -3,8 +3,8 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 /// Handle to a registered JSON file watcher.
@@ -28,15 +28,16 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 impl Drop for JsonWatcher {
     fn drop(&mut self) {
         if let Ok(mut map) = WATCHERS.lock()
-            && let Some(entry) = map.get_mut(&self.path) {
-                let mut cbs = entry.callbacks.lock().unwrap();
-                cbs.remove(&self.id);
-                let empty = cbs.is_empty();
-                drop(cbs);
-                if empty {
-                    map.remove(&self.path);
-                }
+            && let Some(entry) = map.get_mut(&self.path)
+        {
+            let mut cbs = entry.callbacks.lock().unwrap();
+            cbs.remove(&self.id);
+            let empty = cbs.is_empty();
+            drop(cbs);
+            if empty {
+                map.remove(&self.path);
             }
+        }
     }
 }
 

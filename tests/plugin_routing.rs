@@ -2,8 +2,8 @@ use multi_launcher::actions::Action;
 use multi_launcher::plugin::{Plugin, PluginManager};
 use multi_launcher::plugins::todo::TodoPlugin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 struct CountingPlugin {
@@ -217,9 +217,11 @@ fn builtin_search_filtered_routes_file_omni_and_folder_prefixes() {
     assert!(!folders.iter().any(|a| a.action.starts_with("file_search:")));
 
     let unrelated = pm.search_filtered("plain query", None, None);
-    assert!(!unrelated
-        .iter()
-        .any(|a| a.action.starts_with("file_search:")));
+    assert!(
+        !unrelated
+            .iter()
+            .any(|a| a.action.starts_with("file_search:"))
+    );
 }
 
 #[test]
@@ -335,14 +337,18 @@ fn clipboard_modify_baseline_builtin_queries_keep_current_routing_results() {
     }
 
     let file_search_unrelated = pm.search_filtered("plain query", None, None);
-    assert!(!file_search_unrelated
-        .iter()
-        .any(|result| result.action.starts_with("file_search:")));
+    assert!(
+        !file_search_unrelated
+            .iter()
+            .any(|result| result.action.starts_with("file_search:"))
+    );
 
     let omni_unrelated = pm.search_filtered("plan", None, None);
-    assert!(!omni_unrelated
-        .iter()
-        .any(|result| result.action == "app:plan"));
+    assert!(
+        !omni_unrelated
+            .iter()
+            .any(|result| result.action == "app:plan")
+    );
 }
 
 fn clipboard_modify_manager_with_catalog(
@@ -377,9 +383,11 @@ fn cm_prefix_routes_only_clipboard_modify_plugin() {
     pm.register(Box::new(ClipboardModifyPlugin::new(catalog)));
 
     let results = pm.search_filtered("cm", None, None);
-    assert!(results
-        .iter()
-        .any(|a| a.action == "clipboard_modify:open:modify"));
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action == "clipboard_modify:open:modify")
+    );
     assert!(!results.iter().any(|a| a.action == "app:plan"));
     assert!(!results.iter().any(|a| a.action.starts_with("file_search:")));
 }
@@ -428,20 +436,28 @@ fn cm_template_and_apply_suggestions_come_from_current_catalog() {
     let pm = clipboard_modify_manager_with_catalog(catalog);
 
     let templates = pm.search_filtered("cm template p", None, None);
-    assert!(templates
-        .iter()
-        .any(|a| a.label == "Use template prompt-context"));
-    assert!(templates
-        .iter()
-        .any(|a| a.action == "query:cm template prompt-context"));
+    assert!(
+        templates
+            .iter()
+            .any(|a| a.label == "Use template prompt-context")
+    );
+    assert!(
+        templates
+            .iter()
+            .any(|a| a.action == "query:cm template prompt-context")
+    );
 
     let pipelines = pm.search_filtered("cm apply c", None, None);
-    assert!(pipelines
-        .iter()
-        .any(|a| a.label == "Apply pipeline cleanup-code"));
-    assert!(pipelines
-        .iter()
-        .any(|a| a.action == "query:cm apply cleanup-code"));
+    assert!(
+        pipelines
+            .iter()
+            .any(|a| a.label == "Apply pipeline cleanup-code")
+    );
+    assert!(
+        pipelines
+            .iter()
+            .any(|a| a.action == "query:cm apply cleanup-code")
+    );
 }
 
 #[test]

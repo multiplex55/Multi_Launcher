@@ -44,7 +44,11 @@ fn default_case_rust_test_results_are_frozen_in_order() {
         ("Ehfg Grfg", "Text Case-ROT13", "clipboard:Ehfg Grfg"),
         ("rust 👏 test", "Text Case-Clap", "clipboard:rust 👏 test"),
         ("Rust Test", "Text Case-Emoji", "clipboard:Rust Test"),
-        ("R-u-s-t T-e-s-t", "Text Case-Custom", "clipboard:R-u-s-t T-e-s-t"),
+        (
+            "R-u-s-t T-e-s-t",
+            "Text Case-Custom",
+            "clipboard:R-u-s-t T-e-s-t",
+        ),
         (
             ".-. ..- ... - / - . ... -",
             "Text Case-Morse",

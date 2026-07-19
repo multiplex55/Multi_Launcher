@@ -303,14 +303,12 @@ fn run_everything_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_background_command(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "failed to start Everything search '{}': {e}",
-                spec.executable.display()
-            )
-        })?;
+    let mut child = command.spawn().map_err(|e| {
+        format!(
+            "failed to start Everything search '{}': {e}",
+            spec.executable.display()
+        )
+    })?;
     let stdout = child
         .stdout
         .take()

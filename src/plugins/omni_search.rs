@@ -5,7 +5,7 @@ use crate::plugins::calendar::CalendarPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::todo::TodoPlugin;
-use fst::{automaton::Subsequence, IntoStreamer, Map, MapBuilder, Streamer};
+use fst::{IntoStreamer, Map, MapBuilder, Streamer, automaton::Subsequence};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -323,9 +323,10 @@ impl OmniSearchPlugin {
                 let mut seen = HashSet::new();
                 while let Some((_, idx)) = stream.next() {
                     if seen.insert(idx)
-                        && let Some(a) = self.actions.get(idx as usize) {
-                            out.push(a.clone());
-                        }
+                        && let Some(a) = self.actions.get(idx as usize)
+                    {
+                        out.push(a.clone());
+                    }
                 }
             } else {
                 for action in self.actions.iter() {

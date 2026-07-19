@@ -1,9 +1,9 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::fav::{load_favs, FavEntry, FAV_FILE};
+use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +19,6 @@ pub enum PinnedLayout {
     #[default]
     List,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PinnedCommandsConfig {
@@ -121,14 +120,14 @@ impl PinnedCommandsWidget {
             && let Some(f) = favorites
                 .iter()
                 .find(|f| f.label.eq_ignore_ascii_case(label))
-            {
-                return Some(Action {
-                    label: f.label.clone(),
-                    desc: "Fav".into(),
-                    action: f.action.clone(),
-                    args: f.args.clone(),
-                });
-            }
+        {
+            return Some(Action {
+                label: f.label.clone(),
+                desc: "Fav".into(),
+                action: f.action.clone(),
+                args: f.args.clone(),
+            });
+        }
 
         actions_by_id.get(id).cloned().or_else(|| {
             favorites.iter().find(|f| f.action == id).map(|fav| Action {

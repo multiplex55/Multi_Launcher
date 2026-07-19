@@ -1,8 +1,8 @@
-use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::gui::LauncherApp;
+use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mouse_gestures::db::{
-    format_gesture_label, load_gestures, save_gestures, BindingEntry, BindingKind, GestureDb,
-    GestureEntry, GESTURES_FILE,
+    BindingEntry, BindingKind, GESTURES_FILE, GestureDb, GestureEntry, format_gesture_label,
+    load_gestures, save_gestures,
 };
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::service::MouseGestureConfig;
@@ -68,9 +68,10 @@ fn normalize_stroke_points(points: &[egui::Pos2], max_points: usize) -> Vec<[i16
     let step = (points.len() / max_points).max(1);
     let mut sampled: Vec<egui::Pos2> = points.iter().copied().step_by(step).collect();
     if sampled.last().copied() != points.last().copied()
-        && let Some(last) = points.last().copied() {
-            sampled.push(last);
-        }
+        && let Some(last) = points.last().copied()
+    {
+        sampled.push(last);
+    }
 
     let mut min = sampled[0];
     let mut max = sampled[0];
@@ -228,9 +229,10 @@ fn apply_recording_to_entry(
     entry.stroke = normalized_stroke;
 
     if is_default_generated_label(&entry.label)
-        && let Some(auto_label) = label_from_recorded_tokens(recorded_tokens) {
-            entry.label = auto_label;
-        }
+        && let Some(auto_label) = label_from_recorded_tokens(recorded_tokens)
+    {
+        entry.label = auto_label;
+    }
 }
 
 fn apply_action_pick(editor: &mut BindingEditor, act: &crate::actions::Action, add_args: &str) {
@@ -506,10 +508,11 @@ impl MgGesturesDialog {
             self.selected_idx = self.sorted_gesture_indices().into_iter().next();
         }
         if let Some(idx) = self.selected_idx
-            && let Some(gesture) = self.db.gestures.get(idx) {
-                self.recorder.set_dir_mode(gesture.dir_mode);
-                self.token_buffer = gesture.tokens.clone();
-            }
+            && let Some(gesture) = self.db.gestures.get(idx)
+        {
+            self.recorder.set_dir_mode(gesture.dir_mode);
+            self.token_buffer = gesture.tokens.clone();
+        }
     }
 
     fn add_gesture(&mut self) {
@@ -676,10 +679,12 @@ impl MgGesturesDialog {
         }
 
         if let Some((from, to)) = reorder_request
-            && from < entry.bindings.len() && to < entry.bindings.len() {
-                entry.bindings.swap(from, to);
-                *save_now = true;
-            }
+            && from < entry.bindings.len()
+            && to < entry.bindings.len()
+        {
+            entry.bindings.swap(from, to);
+            *save_now = true;
+        }
 
         if let Some((idx, binding)) = edit_request {
             binding_dialog.open_edit(gesture_idx, &binding, idx);
@@ -1016,12 +1021,12 @@ impl MgGesturesDialog {
                                         );
                                         ui.horizontal(|ui| {
                                             if ui.button("Save").clicked()
-                                                && !self.rename_label.trim().is_empty() {
-                                                    entry.label =
-                                                        self.rename_label.trim().to_string();
-                                                    self.rename_idx = None;
-                                                    save_now = true;
-                                                }
+                                                && !self.rename_label.trim().is_empty()
+                                            {
+                                                entry.label = self.rename_label.trim().to_string();
+                                                self.rename_idx = None;
+                                                save_now = true;
+                                            }
                                             if ui.button("Cancel").clicked() {
                                                 self.rename_idx = None;
                                             }
@@ -1142,9 +1147,10 @@ impl MgGesturesDialog {
                                         }
                                     }
                                     if response.dragged()
-                                        && let Some(pos) = response.interact_pointer_pos() {
-                                            self.recorder.push_point(pos);
-                                        }
+                                        && let Some(pos) = response.interact_pointer_pos()
+                                    {
+                                        self.recorder.push_point(pos);
+                                    }
                                     if response.drag_stopped() {
                                         let recorded_tokens = self.recorder.tokens_string();
                                         if !recorded_tokens.is_empty() {

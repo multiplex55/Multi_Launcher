@@ -1,9 +1,9 @@
 use eframe::egui;
 use multi_launcher::actions::Action;
-use multi_launcher::gui::{LauncherApp, APP_PREFIX};
+use multi_launcher::gui::{APP_PREFIX, LauncherApp};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();

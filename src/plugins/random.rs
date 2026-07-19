@@ -152,7 +152,7 @@ impl Plugin for RandomPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
     fn poisoned_rng_lock_falls_back_without_panic() {

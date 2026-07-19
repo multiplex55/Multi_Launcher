@@ -2,12 +2,12 @@ use eframe::egui;
 use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
+use multi_launcher::plugins::bookmarks::{BOOKMARKS_FILE, BookmarkEntry, save_bookmarks};
 use multi_launcher::plugins::note::{append_note, save_notes};
-use multi_launcher::plugins::snippets::{save_snippets, SnippetEntry, SNIPPETS_FILE};
+use multi_launcher::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, save_snippets};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -131,14 +131,16 @@ fn note_today_returns_resolved_note_action_when_exact_match_enabled() {
     app.search();
 
     assert!(!app.results.is_empty());
-    assert!(app
-        .results
-        .iter()
-        .any(|result| result.action.starts_with("note:new:")));
-    assert!(app
-        .results
-        .iter()
-        .all(|result| !result.action.starts_with("query:")));
+    assert!(
+        app.results
+            .iter()
+            .any(|result| result.action.starts_with("note:new:"))
+    );
+    assert!(
+        app.results
+            .iter()
+            .all(|result| !result.action.starts_with("query:"))
+    );
 }
 
 #[test]
@@ -159,14 +161,16 @@ fn note_search_matches_note_content_when_exact_match_enabled() {
     app.search();
 
     assert!(!app.results.is_empty());
-    assert!(app
-        .results
-        .iter()
-        .any(|result| result.action == "note:open:beta"));
-    assert!(app
-        .results
-        .iter()
-        .all(|result| !result.action.starts_with("query:")));
+    assert!(
+        app.results
+            .iter()
+            .any(|result| result.action == "note:open:beta")
+    );
+    assert!(
+        app.results
+            .iter()
+            .all(|result| !result.action.starts_with("query:"))
+    );
 }
 
 #[test]
@@ -185,12 +189,14 @@ fn note_new_generates_slugged_action_when_exact_match_enabled() {
     app.search();
 
     assert!(!app.results.is_empty());
-    assert!(app
-        .results
-        .iter()
-        .any(|result| result.action == "note:new:hello-world"));
-    assert!(app
-        .results
-        .iter()
-        .all(|result| !result.action.starts_with("query:")));
+    assert!(
+        app.results
+            .iter()
+            .any(|result| result.action == "note:new:hello-world")
+    );
+    assert!(
+        app.results
+            .iter()
+            .all(|result| !result.action.starts_with("query:"))
+    );
 }

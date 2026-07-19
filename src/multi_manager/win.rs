@@ -1,5 +1,5 @@
 use crate::multi_manager::model::MmRect;
-use anyhow::{anyhow, Error};
+use anyhow::{Error, anyhow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedWindow {
@@ -213,13 +213,13 @@ pub fn window_process_path(hwnd: usize) -> Option<String> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
 
-    use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    use windows::core::PWSTR;
 
     let mut pid = 0u32;
     unsafe {
@@ -318,8 +318,8 @@ pub fn is_valid_window(_hwnd: usize) -> bool {
 pub fn enumerate_top_level_windows() -> anyhow::Result<Vec<EnumeratedWindow>> {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindow, GetWindowLongPtrW, IsWindow, IsWindowVisible, GWL_EXSTYLE,
-        GW_OWNER, WS_EX_TOOLWINDOW,
+        EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongPtrW, IsWindow,
+        IsWindowVisible, WS_EX_TOOLWINDOW,
     };
 
     struct Ctx {
@@ -388,8 +388,8 @@ pub fn enumerate_top_level_windows() -> anyhow::Result<Vec<EnumeratedWindow>> {
 #[cfg(windows)]
 pub fn move_window_to_rect(hwnd: usize, rect: MmRect) -> Result<(), MmWindowError> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindowAsync,
-        HWND_NOTOPMOST, HWND_TOPMOST, SWP_SHOWWINDOW, SW_RESTORE,
+        BringWindowToTop, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, SW_RESTORE, SWP_SHOWWINDOW,
+        SetForegroundWindow, SetWindowPos, ShowWindowAsync,
     };
 
     if !is_valid_window(hwnd) {
@@ -526,9 +526,11 @@ mod tests {
     #[test]
     fn non_windows_capture_and_query_stubs_are_safe() {
         assert!(active_window().is_none());
-        assert!(enumerate_top_level_windows()
-            .expect("non-Windows enumeration stub must succeed")
-            .is_empty());
+        assert!(
+            enumerate_top_level_windows()
+                .expect("non-Windows enumeration stub must succeed")
+                .is_empty()
+        );
         assert!(window_rect(1).is_none());
         assert!(window_title(1).is_none());
         assert!(!is_valid_window(1));

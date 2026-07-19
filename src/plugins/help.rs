@@ -7,14 +7,15 @@ impl Plugin for HelpPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let q = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(q, "help")
-            && (rest.is_empty() || rest.starts_with(' ')) {
-                return vec![Action {
-                    label: "Show command list".into(),
-                    desc: "Display available command prefixes".into(),
-                    action: "help:show".into(),
-                    args: None,
-                }];
-            }
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            return vec![Action {
+                label: "Show command list".into(),
+                desc: "Display available command prefixes".into(),
+                action: "help:show".into(),
+                args: None,
+            }];
+        }
         Vec::new()
     }
 

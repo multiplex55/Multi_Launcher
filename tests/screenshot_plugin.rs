@@ -1,7 +1,7 @@
 use eframe::egui::{Color32, Pos2, Rect};
 use image::RgbaImage;
 use multi_launcher::gui::{
-    render_markup_layers, MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke,
+    MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke, render_markup_layers,
 };
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::screenshot::ScreenshotPlugin;

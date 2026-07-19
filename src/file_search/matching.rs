@@ -273,10 +273,11 @@ pub fn fuzzy_char_indices_to_byte_ranges(
         if let Ok(char_pos) = original_starts.binary_search(&start) {
             let end = original_starts[char_pos + 1];
             if let Some(last) = ranges.last_mut()
-                && last.byte_end == start {
-                    last.byte_end = end;
-                    continue;
-                }
+                && last.byte_end == start
+            {
+                last.byte_end = end;
+                continue;
+            }
             ranges.push(TextMatchRange {
                 byte_start: start,
                 byte_end: end,

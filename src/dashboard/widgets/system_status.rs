@@ -1,7 +1,7 @@
 use super::{
+    RefreshMode, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule, RefreshMode, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    run_refresh_schedule,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;

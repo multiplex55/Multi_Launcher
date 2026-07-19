@@ -1,7 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use fst::{automaton::Subsequence, IntoStreamer, Map, MapBuilder, Streamer};
-use fuzzy_matcher::skim::SkimMatcherV2;
+use criterion::{Criterion, criterion_group, criterion_main};
+use fst::{IntoStreamer, Map, MapBuilder, Streamer, automaton::Subsequence};
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use multi_launcher::actions::Action;
 use std::collections::HashSet;
 

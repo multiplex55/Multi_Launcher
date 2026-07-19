@@ -6,26 +6,26 @@
 //! tests synchronized with the latest on-disk data.
 
 use crate::actions::Action;
-use crate::common::command::{parse_args, ParseArgsResult};
+use crate::common::command::{ParseArgsResult, parse_args};
 use crate::common::entity_ref::{EntityKind, EntityRef};
-use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::lru::LruCache;
 use crate::common::query::parse_query_filters;
 use crate::linking::{
-    build_index_from_notes_and_todos, format_link_id, EntityKey, LinkIndex, LinkRef, LinkTarget,
+    EntityKey, LinkIndex, LinkRef, LinkTarget, build_index_from_notes_and_todos, format_link_id,
 };
 use crate::plugin::Plugin;
-use crate::plugins::note::{load_notes, note_version, Note};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use crate::plugins::note::{Note, load_notes, note_version};
 use base64::Engine;
-use fuzzy_matcher::skim::SkimMatcherV2;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, RwLock,
+    atomic::{AtomicU64, Ordering},
 };
 
 pub const TODO_FILE: &str = "todo.json";
@@ -236,9 +236,11 @@ fn get_todo_links_index(notes_todos: &[TodoEntry]) -> (Vec<Note>, LinkIndex) {
     let note_ver = note_version();
     if let Ok(cache) = TODO_LINKS_INDEX_CACHE.read()
         && let Some(entry) = cache.as_ref()
-            && entry.todo_version == todo_ver && entry.note_version == note_ver {
-                return (entry.notes.clone(), entry.index.clone());
-            }
+        && entry.todo_version == todo_ver
+        && entry.note_version == note_ver
+    {
+        return (entry.notes.clone(), entry.index.clone());
+    }
 
     let notes = load_notes().unwrap_or_default();
     let todos = notes_todos.to_vec();
@@ -763,9 +765,7 @@ impl TodoPlugin {
                 }
             }
 
-            let mut tags: Vec<(String, usize)> = counts
-                .into_values()
-                .collect();
+            let mut tags: Vec<(String, usize)> = counts.into_values().collect();
 
             if let Some(filter) = filter {
                 tags.retain(|(tag, _)| self.matcher.fuzzy_match(tag, filter).is_some());
@@ -996,9 +996,10 @@ impl Plugin for TodoPlugin {
         let trimmed = query.trim_start();
         let key = trimmed.to_string();
         if let Ok(mut cache) = self.cache.write()
-            && let Some(res) = cache.get(&key).cloned() {
-                return res;
-            }
+            && let Some(res) = cache.get(&key).cloned()
+        {
+            return res;
+        }
 
         let result = self.search_internal(trimmed);
 
@@ -1374,12 +1375,16 @@ mod tests {
 
         let ambiguous = plugin.search_internal("todo links ship release");
         assert!(ambiguous[0].label.starts_with("Ambiguous todo query"));
-        assert!(ambiguous
-            .iter()
-            .any(|a| a.action == "query:todo links id:t-1"));
-        assert!(ambiguous
-            .iter()
-            .any(|a| a.action == "query:todo links id:t-2"));
+        assert!(
+            ambiguous
+                .iter()
+                .any(|a| a.action == "query:todo links id:t-1")
+        );
+        assert!(
+            ambiguous
+                .iter()
+                .any(|a| a.action == "query:todo links id:t-2")
+        );
         if let Ok(mut guard) = TODO_DATA.write() {
             *guard = original;
         }

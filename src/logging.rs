@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
@@ -22,18 +22,19 @@ pub fn init(debug: bool, log_file: Option<PathBuf>) {
     let console_layer = fmt::layer().with_writer(std::io::stderr);
 
     if let Some(path) = log_file
-        && let (Some(dir), Some(file)) = (path.parent(), path.file_name()) {
-            let file_appender = tracing_appender::rolling::never(dir, file);
-            let (nb, guard) = tracing_appender::non_blocking(file_appender);
-            let _ = LOG_GUARD.set(guard);
-            let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
-            let _ = tracing_subscriber::registry()
-                .with(filter)
-                .with(console_layer)
-                .with(file_layer)
-                .try_init();
-            return;
-        }
+        && let (Some(dir), Some(file)) = (path.parent(), path.file_name())
+    {
+        let file_appender = tracing_appender::rolling::never(dir, file);
+        let (nb, guard) = tracing_appender::non_blocking(file_appender);
+        let _ = LOG_GUARD.set(guard);
+        let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(console_layer)
+            .with(file_layer)
+            .try_init();
+        return;
+    }
 
     let _ = tracing_subscriber::registry()
         .with(filter)

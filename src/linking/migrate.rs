@@ -1,4 +1,4 @@
-use crate::linking::{index::dedupe_links, LinkRef, LinkTarget};
+use crate::linking::{LinkRef, LinkTarget, index::dedupe_links};
 
 pub fn migrate_legacy_links(metadata: &serde_json::Value) -> Vec<LinkRef> {
     let mut links = Vec::new();
@@ -33,14 +33,15 @@ pub fn migrate_legacy_links(metadata: &serde_json::Value) -> Vec<LinkRef> {
         for entry in raw_refs.iter().filter_map(|v| v.as_str()) {
             if let Some((kind, id)) = entry.trim_start_matches('@').split_once(':')
                 && let Some(target_type) = LinkTarget::parse(kind)
-                    && !id.trim().is_empty() {
-                        links.push(LinkRef {
-                            target_type,
-                            target_id: id.trim().to_string(),
-                            anchor: None,
-                            display_text: None,
-                        });
-                    }
+                && !id.trim().is_empty()
+            {
+                links.push(LinkRef {
+                    target_type,
+                    target_id: id.trim().to_string(),
+                    anchor: None,
+                    display_text: None,
+                });
+            }
         }
     }
     dedupe_links(links)

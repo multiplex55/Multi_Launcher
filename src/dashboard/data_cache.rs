@@ -543,10 +543,11 @@ fn get_system_volume() -> Option<u8> {
         if let Ok(enm) =
             CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
             && let Ok(device) = enm.GetDefaultAudioEndpoint(eRender, eMultimedia)
-                && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
-                    && let Ok(val) = vol.GetMasterVolumeLevelScalar() {
-                        percent = Some((val * 100.0).round() as u8);
-                    }
+            && let Ok(vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            && let Ok(val) = vol.GetMasterVolumeLevelScalar()
+        {
+            percent = Some((val * 100.0).round() as u8);
+        }
         CoUninitialize();
         percent
     }

@@ -23,17 +23,18 @@ impl Plugin for IpPlugin {
             }
         }
         if let Ok(resp) = reqwest::blocking::get("https://api.ipify.org")
-            && let Ok(text) = resp.text() {
-                let ip = text.trim();
-                if !ip.is_empty() {
-                    out.push(Action {
-                        label: format!("Public: {ip}"),
-                        desc: "IP".into(),
-                        action: format!("clipboard:{ip}"),
-                        args: None,
-                    });
-                }
+            && let Ok(text) = resp.text()
+        {
+            let ip = text.trim();
+            if !ip.is_empty() {
+                out.push(Action {
+                    label: format!("Public: {ip}"),
+                    desc: "IP".into(),
+                    action: format!("clipboard:{ip}"),
+                    args: None,
+                });
             }
+        }
         out
     }
 

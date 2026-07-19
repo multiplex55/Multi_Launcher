@@ -1,7 +1,7 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode};
 use crate::dashboard::data_cache::DashboardDataCache;
 use crate::dashboard::diagnostics::{DashboardDiagnostics, DashboardDiagnosticsSnapshot};
-use crate::dashboard::layout::{normalize_slots, NormalizedSlot};
+use crate::dashboard::layout::{NormalizedSlot, normalize_slots};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
@@ -449,8 +449,8 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default, Serialize, Deserialize)]
     struct RecordingConfig;

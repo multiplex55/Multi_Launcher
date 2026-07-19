@@ -1,12 +1,12 @@
 use chrono::{Local, NaiveDate};
 use multi_launcher::actions::Action;
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::bookmarks::{save_bookmarks, BookmarkEntry, BOOKMARKS_FILE};
-use multi_launcher::plugins::calendar::{save_events, CalendarEvent, CALENDAR_EVENTS_FILE};
-use multi_launcher::plugins::folders::{save_folders, FolderEntry, FOLDERS_FILE};
-use multi_launcher::plugins::note::{save_notes, Note};
+use multi_launcher::plugins::bookmarks::{BOOKMARKS_FILE, BookmarkEntry, save_bookmarks};
+use multi_launcher::plugins::calendar::{CALENDAR_EVENTS_FILE, CalendarEvent, save_events};
+use multi_launcher::plugins::folders::{FOLDERS_FILE, FolderEntry, save_folders};
+use multi_launcher::plugins::note::{Note, save_notes};
 use multi_launcher::plugins::omni_search::{OmniSearchPlugin, OmniSearchSettings};
-use multi_launcher::plugins::todo::{save_todos, TodoEntry, TODO_FILE};
+use multi_launcher::plugins::todo::{TODO_FILE, TodoEntry, save_todos};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::path::PathBuf;
@@ -127,9 +127,11 @@ fn o_list_includes_notes_and_todos() {
     let results = plugin.search("o list");
 
     assert!(results.iter().any(|a| a.action == "app:plan"));
-    assert!(results
-        .iter()
-        .any(|a| a.action == "https://plan.example.com"));
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action == "https://plan.example.com")
+    );
     assert!(results.iter().any(|a| a.action == "/workspace/plan"));
     assert!(results.iter().any(|a| a.action == "note:open:project-plan"));
     assert!(results.iter().any(|a| a.action == "todo:done:0"));
@@ -144,9 +146,11 @@ fn o_list_query_includes_calendar_search_action() {
     let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
     let results = plugin.search("o list planning");
 
-    assert!(results
-        .iter()
-        .any(|a| a.action == "calendar:search:planning"));
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action == "calendar:search:planning")
+    );
 }
 
 #[test]
@@ -243,9 +247,11 @@ fn o_list_query_finds_note_and_todo_independently() {
     let plugin = OmniSearchPlugin::new(Arc::new(Vec::new()));
 
     let note_results = plugin.search("o list project");
-    assert!(note_results
-        .iter()
-        .any(|a| a.action == "note:open:project-plan"));
+    assert!(
+        note_results
+            .iter()
+            .any(|a| a.action == "note:open:project-plan")
+    );
 
     let todo_results = plugin.search("o list sprint");
     assert!(todo_results.iter().any(|a| a.action == "todo:done:0"));

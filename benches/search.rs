@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use eframe::egui;
 use multi_launcher::{
     actions::Action, gui::LauncherApp, plugin::PluginManager, settings::Settings,

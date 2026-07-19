@@ -13,9 +13,10 @@ use std::path::PathBuf;
 /// directory is used.
 pub fn screenshot_dir() -> PathBuf {
     if let Ok(s) = Settings::load("settings.json")
-        && let Some(dir) = s.screenshot_dir {
-            return PathBuf::from(dir);
-        }
+        && let Some(dir) = s.screenshot_dir
+    {
+        return PathBuf::from(dir);
+    }
     std::env::current_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("MultiLauncher_Screenshots")
@@ -196,9 +197,10 @@ impl Plugin for ScreenshotPlugin {
             ui.label("Screenshot directory");
             ui.text_edit_singleline(&mut cfg.screenshot_dir);
             if ui.button("Browse").clicked()
-                && let Some(dir) = FileDialog::new().pick_folder() {
-                    cfg.screenshot_dir = dir.display().to_string();
-                }
+                && let Some(dir) = FileDialog::new().pick_folder()
+            {
+                cfg.screenshot_dir = dir.display().to_string();
+            }
         });
         ui.checkbox(
             &mut cfg.screenshot_save_file,

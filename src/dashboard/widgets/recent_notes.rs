@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -17,7 +17,6 @@ pub enum NoteOpenMode {
     Dialog,
     Query,
 }
-
 
 fn default_count() -> usize {
     5

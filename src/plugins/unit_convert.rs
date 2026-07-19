@@ -361,16 +361,17 @@ impl Plugin for UnitConvertPlugin {
         };
 
         if let Some((value, from, to)) = parse_query(rest)
-            && let Some(result) = convert(value, &from, &to) {
-                let label = format!("{} {} = {:.4} {}", value, from, result, to);
-                let action = format!("clipboard:{:.4}", result);
-                return vec![Action {
-                    label,
-                    desc: "Unit convert".into(),
-                    action,
-                    args: None,
-                }];
-            }
+            && let Some(result) = convert(value, &from, &to)
+        {
+            let label = format!("{} {} = {:.4} {}", value, from, result, to);
+            let action = format!("clipboard:{:.4}", result);
+            return vec![Action {
+                label,
+                desc: "Unit convert".into(),
+                action,
+                args: None,
+            }];
+        }
         Vec::new()
     }
 

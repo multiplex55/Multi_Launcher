@@ -4,8 +4,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Condvar, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -125,10 +125,9 @@ impl TimerHeap {
         }
         let removed = self.entries.pop().unwrap();
         self.positions.remove(&removed.id);
-        if idx < self.entries.len()
-            && !self.sift_down(idx) {
-                self.sift_up(idx);
-            }
+        if idx < self.entries.len() && !self.sift_down(idx) {
+            self.sift_up(idx);
+        }
     }
 
     fn sift_up(&mut self, mut idx: usize) {
@@ -234,23 +233,25 @@ impl TimerManager {
             None => return,
         };
         if let Some(entry) = list.get(&id)
-            && entry.generation == generation && !entry.paused
-                && let Some(entry) = list.remove(&id) {
-                    if entry.persist {
-                        save_persistent_alarms_locked(&list);
-                    }
-                    drop(list);
-                    let msg = if entry.persist {
-                        format!("Alarm triggered: {}", entry.label)
-                    } else {
-                        format!("Timer finished: {}", entry.label)
-                    };
-                    crate::sound::play_sound(&entry.sound);
-                    notify(&msg);
-                    if let Ok(mut msgs) = FINISHED_MESSAGES.lock() {
-                        msgs.push(msg);
-                    }
-                }
+            && entry.generation == generation
+            && !entry.paused
+            && let Some(entry) = list.remove(&id)
+        {
+            if entry.persist {
+                save_persistent_alarms_locked(&list);
+            }
+            drop(list);
+            let msg = if entry.persist {
+                format!("Alarm triggered: {}", entry.label)
+            } else {
+                format!("Timer finished: {}", entry.label)
+            };
+            crate::sound::play_sound(&entry.sound);
+            notify(&msg);
+            if let Ok(mut msgs) = FINISHED_MESSAGES.lock() {
+                msgs.push(msg);
+            }
+        }
     }
 
     fn register(&self, deadline: Instant, id: u64, generation: u64) {
@@ -391,35 +392,33 @@ pub fn parse_hhmm(input: &str) -> Option<(u32, u32, Option<chrono::NaiveDate>)> 
         }
         let h: u32 = parts[0].parse().ok()?;
         let m: u32 = parts[1].parse().ok()?;
-        if h < 24 && m < 60 {
-            Some((h, m))
-        } else {
-            None
-        }
+        if h < 24 && m < 60 { Some((h, m)) } else { None }
     }
 
     let trimmed = input.trim();
     if let Some((first, rest)) = trimmed.split_once(' ')
-        && let Some((h, m)) = parse_time(rest.trim()) {
-            if let Some(days_str) = first.strip_suffix(['d', 'D'])
-                && let Ok(offset) = days_str.parse::<i64>() {
-                    let today = Local::now().date_naive();
-                    let max_off = chrono::NaiveDate::MAX
-                        .signed_duration_since(today)
-                        .num_days();
-                    let min_off = chrono::NaiveDate::MIN
-                        .signed_duration_since(today)
-                        .num_days();
-                    if offset > max_off || offset < min_off {
-                        return None;
-                    }
-                    let date = today + ChronoDuration::days(offset);
-                    return Some((h, m, Some(date)));
-                }
-            if let Ok(date) = NaiveDate::parse_from_str(first, "%Y-%m-%d") {
-                return Some((h, m, Some(date)));
+        && let Some((h, m)) = parse_time(rest.trim())
+    {
+        if let Some(days_str) = first.strip_suffix(['d', 'D'])
+            && let Ok(offset) = days_str.parse::<i64>()
+        {
+            let today = Local::now().date_naive();
+            let max_off = chrono::NaiveDate::MAX
+                .signed_duration_since(today)
+                .num_days();
+            let min_off = chrono::NaiveDate::MIN
+                .signed_duration_since(today)
+                .num_days();
+            if offset > max_off || offset < min_off {
+                return None;
             }
+            let date = today + ChronoDuration::days(offset);
+            return Some((h, m, Some(date)));
         }
+        if let Ok(date) = NaiveDate::parse_from_str(first, "%Y-%m-%d") {
+            return Some((h, m, Some(date)));
+        }
+    }
 
     parse_time(trimmed).map(|(h, m)| (h, m, None))
 }
@@ -486,44 +485,47 @@ pub fn timer_start_ts(id: u64) -> Option<u64> {
 /// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
-        && let Some(entry) = timers.remove(&id) {
-            if entry.persist {
-                save_persistent_alarms_locked(&timers);
-            }
-            TIMER_MANAGER.remove(id);
+        && let Some(entry) = timers.remove(&id)
+    {
+        if entry.persist {
+            save_persistent_alarms_locked(&timers);
         }
+        TIMER_MANAGER.remove(id);
+    }
 }
 
 /// Pause the timer with the given `id` if it exists.
 pub fn pause_timer(id: u64) {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
         && let Some(t) = timers.get_mut(&id)
-            && !t.paused {
-                t.remaining = t.deadline.saturating_duration_since(Instant::now());
-                t.paused = true;
-                t.generation = t.generation.wrapping_add(1);
-                if t.persist {
-                    save_persistent_alarms_locked(&timers);
-                }
-                TIMER_MANAGER.remove(id);
-                TIMER_MANAGER.wakeup();
-            }
+        && !t.paused
+    {
+        t.remaining = t.deadline.saturating_duration_since(Instant::now());
+        t.paused = true;
+        t.generation = t.generation.wrapping_add(1);
+        if t.persist {
+            save_persistent_alarms_locked(&timers);
+        }
+        TIMER_MANAGER.remove(id);
+        TIMER_MANAGER.wakeup();
+    }
 }
 
 /// Resume the timer with the given `id` if it is paused.
 pub fn resume_timer(id: u64) {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
         && let Some(t) = timers.get_mut(&id)
-            && t.paused {
-                t.paused = false;
-                t.deadline = Instant::now() + t.remaining;
-                t.generation = t.generation.wrapping_add(1);
-                TIMER_MANAGER.register(t.deadline, t.id, t.generation);
-                if t.persist {
-                    save_persistent_alarms_locked(&timers);
-                }
-                TIMER_MANAGER.wakeup();
-            }
+        && t.paused
+    {
+        t.paused = false;
+        t.deadline = Instant::now() + t.remaining;
+        t.generation = t.generation.wrapping_add(1);
+        TIMER_MANAGER.register(t.deadline, t.id, t.generation);
+        if t.persist {
+            save_persistent_alarms_locked(&timers);
+        }
+        TIMER_MANAGER.wakeup();
+    }
 }
 
 fn notify(_msg: &str) {}
@@ -652,23 +654,25 @@ impl Plugin for TimerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "timer")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "Open timer dialog".into(),
-                    desc: "Timer".into(),
-                    action: "timer:dialog:timer".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "Open timer dialog".into(),
+                desc: "Timer".into(),
+                action: "timer:dialog:timer".into(),
+                args: None,
+            }];
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "alarm")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "Open alarm dialog".into(),
-                    desc: "Timer".into(),
-                    action: "timer:dialog:alarm".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "Open alarm dialog".into(),
+                desc: "Timer".into(),
+                action: "timer:dialog:alarm".into(),
+                args: None,
+            }];
+        }
         if crate::common::strip_prefix_ci(trimmed, "timer list").is_some()
             || crate::common::strip_prefix_ci(trimmed, "alarm list").is_some()
         {

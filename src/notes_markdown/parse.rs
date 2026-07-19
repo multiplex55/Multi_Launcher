@@ -1,4 +1,4 @@
-use super::{callouts, headings, sections, task_list, MarkdownAnalysis, OutlineRow};
+use super::{MarkdownAnalysis, OutlineRow, callouts, headings, sections, task_list};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LineSpan<'a> {
@@ -51,14 +51,13 @@ pub(crate) fn line_spans(content: &str) -> Vec<LineSpan<'_>> {
         spans.push(LineSpan { text, start, end });
         start = end;
     }
-    if (start < content.len() || content.is_empty())
-        && !content.is_empty() {
-            spans.push(LineSpan {
-                text: &content[start..],
-                start,
-                end: content.len(),
-            });
-        }
+    if (start < content.len() || content.is_empty()) && !content.is_empty() {
+        spans.push(LineSpan {
+            text: &content[start..],
+            start,
+            end: content.len(),
+        });
+    }
     spans
 }
 
@@ -79,9 +78,11 @@ fn code_line_mask(lines: &[LineSpan<'_>]) -> Vec<bool> {
         if in_fence {
             mask[idx] = true;
             if let Some((marker, len)) = fence
-                && marker == fence_marker && len >= fence_len {
-                    in_fence = false;
-                }
+                && marker == fence_marker
+                && len >= fence_len
+            {
+                in_fence = false;
+            }
             continue;
         }
 

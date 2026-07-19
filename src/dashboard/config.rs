@@ -1,4 +1,4 @@
-use crate::dashboard::widgets::{merge_json, WidgetRegistry};
+use crate::dashboard::widgets::{WidgetRegistry, merge_json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,6 @@ pub enum OverflowMode {
     Clip,
     Auto,
 }
-
 
 impl OverflowMode {
     pub fn as_str(&self) -> &'static str {

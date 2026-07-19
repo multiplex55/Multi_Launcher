@@ -145,7 +145,7 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{atomic::AtomicBool, mpsc::channel, Arc};
+    use std::sync::{Arc, atomic::AtomicBool, mpsc::channel};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {

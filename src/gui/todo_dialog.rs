@@ -1,7 +1,7 @@
 use crate::common::entity_ref::EntityRef;
 use crate::gui::LauncherApp;
 use crate::plugins::note::load_notes;
-use crate::plugins::todo::{load_todos, save_todos, TodoEntry, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, save_todos};
 use eframe::egui;
 
 #[derive(Default)]
@@ -54,19 +54,11 @@ impl TodoDialog {
                 } else if filter.starts_with('#') {
                     let tag = filter.trim_start_matches('#');
                     let has_tag = e.tags.iter().any(|t| t.to_lowercase().contains(tag));
-                    if negative {
-                        !has_tag
-                    } else {
-                        has_tag
-                    }
+                    if negative { !has_tag } else { has_tag }
                 } else {
                     let text_match = e.text.to_lowercase().contains(&filter)
                         || e.tags.iter().any(|t| t.to_lowercase().contains(&filter));
-                    if negative {
-                        !text_match
-                    } else {
-                        text_match
-                    }
+                    if negative { !text_match } else { text_match }
                 }
             })
             .map(|(i, _)| i)
@@ -333,7 +325,7 @@ mod tests {
     use super::*;
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tempfile::tempdir;
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {

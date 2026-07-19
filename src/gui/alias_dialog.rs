@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::folders::{load_folders, set_alias, FOLDERS_FILE};
+use crate::plugins::folders::{FOLDERS_FILE, load_folders, set_alias};
 use eframe::egui;
 
 #[derive(Default)]
@@ -9,19 +9,19 @@ pub struct AliasDialog {
     alias: String,
 }
 
-
 impl AliasDialog {
     pub fn open(&mut self, path: &str) {
         self.path = path.to_string();
         // pre-fill alias with current value if exists
         if let Ok(list) = load_folders(FOLDERS_FILE)
-            && let Some(entry) = list.into_iter().find(|f| f.path == self.path) {
-                if let Some(a) = entry.alias {
-                    self.alias = a;
-                } else {
-                    self.alias = String::new();
-                }
+            && let Some(entry) = list.into_iter().find(|f| f.path == self.path)
+        {
+            if let Some(a) = entry.alias {
+                self.alias = a;
+            } else {
+                self.alias = String::new();
             }
+        }
         self.open = true;
     }
 

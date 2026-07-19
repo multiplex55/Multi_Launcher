@@ -1,9 +1,9 @@
 use super::{
-    edit_typed_settings, gesture_focus_action, gesture_toggle_action, Widget, WidgetAction,
-    WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    gesture_focus_action, gesture_toggle_action,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::mouse_gestures::db::{format_tokens, BindingEntry, GestureEntry};
+use crate::mouse_gestures::db::{BindingEntry, GestureEntry, format_tokens};
 use crate::mouse_gestures::engine::DirMode;
 use eframe::egui;
 use serde::{Deserialize, Serialize};

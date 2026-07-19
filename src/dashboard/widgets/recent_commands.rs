@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
@@ -55,7 +55,6 @@ impl RecentCommandsWidget {
         )
     }
 }
-
 
 impl Widget for RecentCommandsWidget {
     fn render(

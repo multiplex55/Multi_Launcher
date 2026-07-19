@@ -1,10 +1,10 @@
-use crate::actions::{load_actions, Action};
-use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::actions::{Action, load_actions};
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::launcher::launch_action;
 use crate::plugin::{Plugin, PluginManager};
 use crate::settings::Settings;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -125,17 +125,18 @@ pub fn search_first_action(query: &str) -> Option<Action> {
     let mut pm = pm_cell.lock().ok()?;
     let hash_cell = SETTINGS_HASH.get_or_init(|| Mutex::new(0));
     if let Ok(mut cached_hash) = hash_cell.lock()
-        && *cached_hash != settings_hash {
-            pm.reload_from_dirs(
-                &dirs,
-                settings.clipboard_limit,
-                settings.net_unit,
-                false,
-                &settings.plugin_settings,
-                actions_arc,
-            );
-            *cached_hash = settings_hash;
-        }
+        && *cached_hash != settings_hash
+    {
+        pm.reload_from_dirs(
+            &dirs,
+            settings.clipboard_limit,
+            settings.net_unit,
+            false,
+            &settings.plugin_settings,
+            actions_arc,
+        );
+        *cached_hash = settings_hash;
+    }
 
     pm.search_filtered(
         query,
@@ -153,9 +154,10 @@ pub fn run_macro(name: &str) -> anyhow::Result<()> {
             let mut command = step.command.trim().to_string();
             let mut args = step.args.clone();
             if let Some(ref s) = args
-                && s.trim().is_empty() {
-                    args = None;
-                }
+                && s.trim().is_empty()
+            {
+                args = None;
+            }
 
             let mut query = if let Some(q) = command.strip_prefix("query:") {
                 q.to_string()
@@ -227,9 +229,10 @@ impl MacrosPlugin {
             let watch_path = watch_path.clone();
             move || {
                 if let Ok(list) = load_macros(&watch_path)
-                    && let Ok(mut lock) = data_clone.lock() {
-                        *lock = list;
-                    }
+                    && let Ok(mut lock) = data_clone.lock()
+                {
+                    *lock = list;
+                }
             }
         })
         .ok();

@@ -1,8 +1,8 @@
 use eframe::egui::Pos2;
 use multi_launcher::gui::{GestureRecorder, RecorderConfig};
 use multi_launcher::mouse_gestures::db::{
-    format_gesture_label, load_gestures, save_gestures, BindingEntry, BindingKind, GestureDb,
-    GestureEntry, SCHEMA_VERSION,
+    BindingEntry, BindingKind, GestureDb, GestureEntry, SCHEMA_VERSION, format_gesture_label,
+    load_gestures, save_gestures,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use tempfile::tempdir;

@@ -1,14 +1,14 @@
 use super::{
+    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugins::layouts_storage::{
-    self, layouts_config_path, Layout, LayoutMatch, LayoutStore,
+    self, Layout, LayoutMatch, LayoutStore, layouts_config_path,
 };
-use crate::windows_layout::{collect_layout_windows, LayoutWindowOptions};
+use crate::windows_layout::{LayoutWindowOptions, collect_layout_windows};
 use chrono::Utc;
 use eframe::egui;
 use rfd::FileDialog;
@@ -482,16 +482,18 @@ impl Widget for LayoutsWidget {
             .collect();
         if self.active_layout_name.is_none() {
             if let Some(first) = layout_names.first()
-                && let Err(err) = self.load_active_layout(first) {
-                    self.error = Some(err);
-                }
-        } else if let Some(active) = &self.active_layout_name
-            && !layout_names.iter().any(|name| name == active) {
-                self.active_layout_name = None;
-                self.active_layout = None;
-                self.last_saved_layout = None;
-                self.dirty = false;
+                && let Err(err) = self.load_active_layout(first)
+            {
+                self.error = Some(err);
             }
+        } else if let Some(active) = &self.active_layout_name
+            && !layout_names.iter().any(|name| name == active)
+        {
+            self.active_layout_name = None;
+            self.active_layout = None;
+            self.last_saved_layout = None;
+            self.dirty = false;
+        }
 
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -508,9 +510,10 @@ impl Widget for LayoutsWidget {
                     });
                 if !selected.is_empty()
                     && self.active_layout_name.as_deref() != Some(selected.as_str())
-                    && let Err(err) = self.load_active_layout(&selected) {
-                        self.error = Some(err);
-                    }
+                    && let Err(err) = self.load_active_layout(&selected)
+                {
+                    self.error = Some(err);
+                }
                 if self.dirty {
                     ui.colored_label(egui::Color32::YELLOW, "Unsaved changes");
                 }
@@ -519,13 +522,14 @@ impl Widget for LayoutsWidget {
                 let has_active = self.active_layout.is_some();
                 ui.add_enabled_ui(has_active, |ui| {
                     if ui.button("Update layout").clicked()
-                        && let Some(layout) = self.active_layout.clone() {
-                            if let Err(err) = self.save_layout(layout) {
-                                self.set_status(err, egui::Color32::YELLOW);
-                            } else {
-                                self.set_status("Layout updated.", egui::Color32::GREEN);
-                            }
+                        && let Some(layout) = self.active_layout.clone()
+                    {
+                        if let Err(err) = self.save_layout(layout) {
+                            self.set_status(err, egui::Color32::YELLOW);
+                        } else {
+                            self.set_status("Layout updated.", egui::Color32::GREEN);
                         }
+                    }
                     if ui.button("Duplicate layout").clicked() {
                         match self.duplicate_active_layout() {
                             Ok(name) => {
@@ -554,17 +558,18 @@ impl Widget for LayoutsWidget {
                         }
                     }
                     if ui.button("Import layout").clicked()
-                        && let Some(path) = FileDialog::new().pick_file() {
-                            match self.begin_import(path) {
-                                Ok(()) => {
-                                    self.set_status(
-                                        "Layout loaded. Choose how to import.",
-                                        egui::Color32::YELLOW,
-                                    );
-                                }
-                                Err(err) => self.set_status(err, egui::Color32::YELLOW),
+                        && let Some(path) = FileDialog::new().pick_file()
+                    {
+                        match self.begin_import(path) {
+                            Ok(()) => {
+                                self.set_status(
+                                    "Layout loaded. Choose how to import.",
+                                    egui::Color32::YELLOW,
+                                );
                             }
+                            Err(err) => self.set_status(err, egui::Color32::YELLOW),
                         }
+                    }
                 });
             });
             if let Some(pending) = self.pending_import.clone() {
@@ -840,21 +845,25 @@ fn match_score(saved: &LayoutMatch, candidate: &LayoutMatch) -> Option<u8> {
         return None;
     }
     if let (Some(saved), Some(candidate)) = (&saved.app_id, &candidate.app_id)
-        && saved.eq_ignore_ascii_case(candidate) {
-            return Some(4);
-        }
+        && saved.eq_ignore_ascii_case(candidate)
+    {
+        return Some(4);
+    }
     if let (Some(saved), Some(candidate)) = (&saved.process, &candidate.process)
-        && saved.eq_ignore_ascii_case(candidate) {
-            return Some(3);
-        }
+        && saved.eq_ignore_ascii_case(candidate)
+    {
+        return Some(3);
+    }
     if let (Some(saved), Some(candidate)) = (&saved.class, &candidate.class)
-        && saved.eq_ignore_ascii_case(candidate) {
-            return Some(2);
-        }
+        && saved.eq_ignore_ascii_case(candidate)
+    {
+        return Some(2);
+    }
     if let (Some(saved), Some(candidate)) = (&saved.title, &candidate.title)
-        && matches_title_regex(saved, candidate) {
-            return Some(1);
-        }
+        && matches_title_regex(saved, candidate)
+    {
+        return Some(1);
+    }
     None
 }
 
@@ -881,10 +890,11 @@ fn layout_health(layout: &Layout, candidates: &[LayoutMatch]) -> Option<LayoutHe
                 continue;
             }
             if let Some(score) = match_score(&saved.matcher, candidate)
-                && score > best_score {
-                    best_score = score;
-                    best_idx = Some(idx);
-                }
+                && score > best_score
+            {
+                best_score = score;
+                best_idx = Some(idx);
+            }
         }
         if let Some(idx) = best_idx {
             used[idx] = true;

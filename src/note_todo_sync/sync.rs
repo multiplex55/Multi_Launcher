@@ -168,23 +168,24 @@ pub fn sync_note_todos(
             },
             SyncMode::TodoSourceOfTruth => {
                 if let Some(id) = mapped_id
-                    && let Some(todo) = todo_map.get(&id) {
-                        preview.push(PreviewAction::UpdateNote {
-                            todo_id: id.clone(),
-                            line_index: item.line_index,
-                        });
-                        if let Some(line) = lines.get_mut(item.line_index) {
-                            *line = render_checklist_line(
-                                line,
-                                todo.done,
-                                &todo.text,
-                                &todo.tags,
-                                todo.priority,
-                                todo.due,
-                                &id,
-                            );
-                        }
+                    && let Some(todo) = todo_map.get(&id)
+                {
+                    preview.push(PreviewAction::UpdateNote {
+                        todo_id: id.clone(),
+                        line_index: item.line_index,
+                    });
+                    if let Some(line) = lines.get_mut(item.line_index) {
+                        *line = render_checklist_line(
+                            line,
+                            todo.done,
+                            &todo.text,
+                            &todo.tags,
+                            todo.priority,
+                            todo.due,
+                            &id,
+                        );
                     }
+                }
             }
         }
     }
@@ -264,9 +265,11 @@ mod tests {
                 todo_rev: 5,
             },
         );
-        assert!(result
-            .note_content
-            .contains("- [x] new text p3 @due 2026-01-01 #ops <!-- ml:todo:t-1 -->"));
+        assert!(
+            result
+                .note_content
+                .contains("- [x] new text p3 @due 2026-01-01 #ops <!-- ml:todo:t-1 -->")
+        );
     }
 
     #[test]

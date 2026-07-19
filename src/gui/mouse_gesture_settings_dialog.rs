@@ -1,6 +1,6 @@
 use crate::plugins::mouse_gestures::{
-    add_ignore_window_title, apply_runtime_settings, collect_visible_window_titles,
-    normalize_ignore_window_titles, MouseGestureSettings,
+    MouseGestureSettings, add_ignore_window_title, apply_runtime_settings,
+    collect_visible_window_titles, normalize_ignore_window_titles,
 };
 use crate::settings::Settings;
 use eframe::egui;

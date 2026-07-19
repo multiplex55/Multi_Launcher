@@ -14,14 +14,15 @@ impl Plugin for VolumePlugin {
         const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol")
-            && rest.is_empty() {
-                return vec![Action {
-                    label: "vol: edit volume".into(),
-                    desc: "Volume".into(),
-                    action: "volume:dialog".into(),
-                    args: None,
-                }];
-            }
+            && rest.is_empty()
+        {
+            return vec![Action {
+                label: "vol: edit volume".into(),
+                desc: "Volume".into(),
+                action: "volume:dialog".into(),
+                args: None,
+            }];
+        }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol ") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             match parts.as_slice() {
@@ -35,57 +36,60 @@ impl Plugin for VolumePlugin {
                 }
                 [level] => {
                     if let Ok(val) = level.parse::<u8>()
-                        && val <= 100 {
-                            return vec![Action {
-                                label: format!("Set volume to {val}%"),
-                                desc: "Volume".into(),
-                                action: format!("volume:set:{val}"),
-                                args: None,
-                            }];
-                        }
+                        && val <= 100
+                    {
+                        return vec![Action {
+                            label: format!("Set volume to {val}%"),
+                            desc: "Volume".into(),
+                            action: format!("volume:set:{val}"),
+                            args: None,
+                        }];
+                    }
                 }
                 ["pid", pid_str, level_str] => {
                     if let (Ok(pid), Ok(level)) = (pid_str.parse::<u32>(), level_str.parse::<u32>())
-                        && level <= 100 {
+                        && level <= 100
+                    {
+                        return vec![Action {
+                            label: format!("Set PID {pid} volume to {level}%"),
+                            desc: "Volume".into(),
+                            action: format!("volume:pid:{pid}:{level}"),
+                            args: None,
+                        }];
+                    }
+                }
+                ["name", exe, level_str] => {
+                    if let Ok(level) = level_str.parse::<u32>()
+                        && level <= 100
+                    {
+                        let pid_opt = {
+                            let mut guard = match SYSTEM_CACHE.lock() {
+                                Ok(guard) => guard,
+                                Err(err) => {
+                                    tracing::error!(?err, "volume system cache lock poisoned");
+                                    return Vec::new();
+                                }
+                            };
+                            if guard.1.elapsed() > CACHE_TIMEOUT {
+                                guard.0.refresh_processes(ProcessesToUpdate::All, true);
+                                guard.1 = Instant::now();
+                            }
+                            guard
+                                .0
+                                .processes()
+                                .values()
+                                .find(|p| p.name().to_string_lossy().eq_ignore_ascii_case(exe))
+                                .map(|p| p.pid().as_u32())
+                        };
+                        if let Some(pid) = pid_opt {
                             return vec![Action {
-                                label: format!("Set PID {pid} volume to {level}%"),
-                                desc: "Volume".into(),
+                                label: format!("Set {exe} volume to {level}%"),
+                                desc: format!("PID {pid}"),
                                 action: format!("volume:pid:{pid}:{level}"),
                                 args: None,
                             }];
                         }
-                }
-                ["name", exe, level_str] => {
-                    if let Ok(level) = level_str.parse::<u32>()
-                        && level <= 100 {
-                            let pid_opt = {
-                                let mut guard = match SYSTEM_CACHE.lock() {
-                                    Ok(guard) => guard,
-                                    Err(err) => {
-                                        tracing::error!(?err, "volume system cache lock poisoned");
-                                        return Vec::new();
-                                    }
-                                };
-                                if guard.1.elapsed() > CACHE_TIMEOUT {
-                                    guard.0.refresh_processes(ProcessesToUpdate::All, true);
-                                    guard.1 = Instant::now();
-                                }
-                                guard
-                                    .0
-                                    .processes()
-                                    .values()
-                                    .find(|p| p.name().to_string_lossy().eq_ignore_ascii_case(exe))
-                                    .map(|p| p.pid().as_u32())
-                            };
-                            if let Some(pid) = pid_opt {
-                                return vec![Action {
-                                    label: format!("Set {exe} volume to {level}%"),
-                                    desc: format!("PID {pid}"),
-                                    action: format!("volume:pid:{pid}:{level}"),
-                                    args: None,
-                                }];
-                            }
-                        }
+                    }
                 }
                 _ => {}
             }

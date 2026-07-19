@@ -1,4 +1,4 @@
-use crate::common::config_files::{resolve_config_path, ConfigFileSpec};
+use crate::common::config_files::{ConfigFileSpec, resolve_config_path};
 use crate::settings;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -23,7 +23,6 @@ pub enum LayoutCoordMode {
     MonitorWorkareaRelative,
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -33,7 +32,6 @@ pub enum LayoutWindowState {
     Maximized,
     Minimized,
 }
-
 
 impl std::fmt::Display for LayoutWindowState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

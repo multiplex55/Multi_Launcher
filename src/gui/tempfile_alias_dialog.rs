@@ -10,7 +10,6 @@ pub struct TempfileAliasDialog {
     alias: String,
 }
 
-
 impl TempfileAliasDialog {
     pub fn open(&mut self, path: &str) {
         self.path = path.to_string();

@@ -1,7 +1,7 @@
 use crate::actions::Action;
 use crate::plugin::Plugin;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -138,12 +138,13 @@ impl FoldersPlugin {
                         && matches!(
                             event.kind,
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        ) {
-                            let list = load_folders(&path).unwrap_or_else(|_| default_folders());
-                            if let Ok(mut lock) = data_clone.lock() {
-                                *lock = list;
-                            }
+                        )
+                    {
+                        let list = load_folders(&path).unwrap_or_else(|_| default_folders());
+                        if let Ok(mut lock) = data_clone.lock() {
+                            *lock = list;
                         }
+                    }
                 }
             },
             Config::default(),

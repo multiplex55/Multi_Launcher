@@ -4,7 +4,7 @@ use multi_launcher::gui::{ActivationSource, LauncherApp};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::{MultiManagerSettings, Settings};
 use std::path::Path;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn action(id: &str) -> Action {
     Action {
@@ -101,10 +101,11 @@ fn activating_mm_save_reports_error_without_panicking() {
 
     app.activate_action(action("mm:save"), None, ActivationSource::Enter);
 
-    assert!(app
-        .error
-        .as_deref()
-        .is_some_and(|msg| msg.contains("Failed to save MultiManager workspaces")));
+    assert!(
+        app.error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("Failed to save MultiManager workspaces"))
+    );
 }
 
 #[test]

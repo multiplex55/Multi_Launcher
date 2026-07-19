@@ -1,20 +1,20 @@
 use eframe::egui;
-use multi_launcher::actions::{save_actions, Action};
+use multi_launcher::actions::{Action, save_actions};
 use multi_launcher::gui::{
-    send_event, set_execute_action_hook, ActivationSource, LauncherApp, WatchEvent,
+    ActivationSource, LauncherApp, WatchEvent, send_event, set_execute_action_hook,
 };
 use multi_launcher::mouse_gestures::db::{
-    load_gestures, save_gestures, BindingEntry, BindingKind, BindingMatchField, GestureCandidate,
-    GestureConflict, GestureConflictKind, GestureDb, GestureEntry, GestureMatchType,
-    SCHEMA_VERSION,
+    BindingEntry, BindingKind, BindingMatchField, GestureCandidate, GestureConflict,
+    GestureConflictKind, GestureDb, GestureEntry, GestureMatchType, SCHEMA_VERSION, load_gestures,
+    save_gestures,
 };
 use multi_launcher::mouse_gestures::engine::DirMode;
 use multi_launcher::plugin::PluginManager;
-use multi_launcher::plugins::bookmarks::{save_bookmarks, BOOKMARKS_FILE};
-use multi_launcher::plugins::folders::{save_folders, FOLDERS_FILE};
+use multi_launcher::plugins::bookmarks::{BOOKMARKS_FILE, save_bookmarks};
+use multi_launcher::plugins::folders::{FOLDERS_FILE, save_folders};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
-use std::sync::{atomic::Ordering, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -346,10 +346,12 @@ fn search_bindings_matches_across_fields() {
 
     let token_results = db.search_bindings("UR");
     assert_eq!(token_results.len(), 1);
-    assert!(token_results[0]
-        .2
-        .fields
-        .contains(&BindingMatchField::Tokens));
+    assert!(
+        token_results[0]
+            .2
+            .fields
+            .contains(&BindingMatchField::Tokens)
+    );
 
     let args_results = db.search_bindings("work");
     assert_eq!(args_results.len(), 1);

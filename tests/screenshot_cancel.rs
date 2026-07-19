@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use multi_launcher::actions::screenshot::{
-    is_cancel_or_timeout, wait_for_new_clipboard_image, ClipboardSnapshot, ScreenshotCaptureError,
+    ClipboardSnapshot, ScreenshotCaptureError, is_cancel_or_timeout, wait_for_new_clipboard_image,
 };
 
 #[test]

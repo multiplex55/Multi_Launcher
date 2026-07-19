@@ -1,6 +1,6 @@
 use super::{
-    edit_typed_settings, gesture_focus_action, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    gesture_focus_action,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::mouse_gestures::db::format_tokens;

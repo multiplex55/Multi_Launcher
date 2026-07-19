@@ -1,11 +1,11 @@
 use super::{
+    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
-    WidgetSettingsUiResult,
+    run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::gui::volume_data::{get_process_volumes, get_system_volume, ProcessVolume};
+use crate::gui::volume_data::{ProcessVolume, get_process_volumes, get_system_volume};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

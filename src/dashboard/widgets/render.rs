@@ -4,8 +4,8 @@ use crate::dashboard::dashboard::DashboardContext;
 use crate::mouse_gestures::engine::DirMode;
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use eframe::egui;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {

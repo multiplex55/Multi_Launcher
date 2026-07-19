@@ -1,7 +1,7 @@
 use crate::gui::LauncherApp;
 use crate::plugins::calendar::{
-    new_event_id, save_events, snooze_event, CalendarEvent, EventInstance, RecurrenceEnd,
-    RecurrenceRule, CALENDAR_DATA, CALENDAR_EVENTS_FILE,
+    CALENDAR_DATA, CALENDAR_EVENTS_FILE, CalendarEvent, EventInstance, RecurrenceEnd,
+    RecurrenceRule, new_event_id, save_events, snooze_event,
 };
 use chrono::{Duration, Local, NaiveDateTime};
 use eframe::egui;

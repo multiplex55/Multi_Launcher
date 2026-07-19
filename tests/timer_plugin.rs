@@ -1,7 +1,7 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timer::{
-    cancel_timer, load_saved_alarms, reset_alarms_loaded, TimerEntry, TimerPlugin, ACTIVE_TIMERS,
-    ALARMS_FILE,
+    ACTIVE_TIMERS, ALARMS_FILE, TimerEntry, TimerPlugin, cancel_timer, load_saved_alarms,
+    reset_alarms_loaded,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -70,9 +70,11 @@ fn search_cancel_lists_timers() {
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer cancel");
-    assert!(results
-        .iter()
-        .any(|a| a.action.starts_with("timer:cancel:")));
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action.starts_with("timer:cancel:"))
+    );
     // clear list
     ACTIVE_TIMERS.lock().unwrap().clear();
 }
@@ -127,9 +129,11 @@ fn search_rm_lists_timers() {
     }
     let plugin = TimerPlugin;
     let results = plugin.search("timer rm");
-    assert!(results
-        .iter()
-        .any(|a| a.action.starts_with("timer:cancel:")));
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action.starts_with("timer:cancel:"))
+    );
     ACTIVE_TIMERS.lock().unwrap().clear();
 }
 
@@ -208,7 +212,7 @@ fn search_resume_lists_paused_timers() {
 #[test]
 fn take_finished_returns_messages() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    use multi_launcher::plugins::timer::{take_finished_messages, FINISHED_MESSAGES};
+    use multi_launcher::plugins::timer::{FINISHED_MESSAGES, take_finished_messages};
     FINISHED_MESSAGES.lock().unwrap().push("done".to_string());
     let msgs = take_finished_messages();
     assert_eq!(msgs, vec!["done".to_string()]);
@@ -285,7 +289,7 @@ fn format_ts_invalid_timestamp() {
 #[test]
 fn pause_resume_does_not_grow_heap() {
     use multi_launcher::plugins::timer::{
-        cancel_timer, heap_len, pause_timer, resume_timer, start_timer, ACTIVE_TIMERS,
+        ACTIVE_TIMERS, cancel_timer, heap_len, pause_timer, resume_timer, start_timer,
     };
     let _lock = TEST_MUTEX.lock().unwrap();
     ACTIVE_TIMERS.lock().unwrap().clear();
@@ -340,7 +344,7 @@ fn parse_hhmm_large_day_offset() {
 #[test]
 fn start_alarm_multi_day() {
     use chrono::{Duration as ChronoDuration, Local, Timelike};
-    use multi_launcher::plugins::timer::{cancel_timer, start_alarm_named, ACTIVE_TIMERS};
+    use multi_launcher::plugins::timer::{ACTIVE_TIMERS, cancel_timer, start_alarm_named};
     let _lock = TEST_MUTEX.lock().unwrap();
     ACTIVE_TIMERS.lock().unwrap().clear();
 

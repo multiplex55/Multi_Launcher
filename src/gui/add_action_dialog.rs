@@ -1,4 +1,4 @@
-use crate::actions::{save_actions, Action};
+use crate::actions::{Action, save_actions};
 use crate::gui::LauncherApp;
 use eframe::egui;
 use rfd::FileDialog;
@@ -34,7 +34,6 @@ enum DialogMode {
     /// Edit the command at the given index when confirmed.
     Edit(usize),
 }
-
 
 impl Default for AddActionDialog {
     fn default() -> Self {
@@ -109,13 +108,14 @@ impl AddActionDialog {
                         ui.label("Path");
                         ui.text_edit_singleline(&mut self.path);
                         if ui.button("Browse").clicked()
-                            && let Some(file) = FileDialog::new().pick_file() {
-                                if let Some(p) = file.to_str() {
-                                    self.path = p.to_owned();
-                                } else {
-                                    self.path = file.display().to_string();
-                                }
+                            && let Some(file) = FileDialog::new().pick_file()
+                        {
+                            if let Some(p) = file.to_str() {
+                                self.path = p.to_owned();
+                            } else {
+                                self.path = file.display().to_string();
                             }
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.show_args, "Add arguments");

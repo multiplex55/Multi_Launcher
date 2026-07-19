@@ -26,7 +26,6 @@ pub struct BrowserTabsPlugin {
     recalc_each_query: bool,
 }
 
-
 mod imp {
     use super::*;
     use once_cell::sync::Lazy;
@@ -89,12 +88,12 @@ mod imp {
 
     #[cfg(not(test))]
     fn enumerate_tabs() -> Vec<TabInfo> {
-        use windows::core::{BSTR, VARIANT};
         use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-            COINIT_APARTMENTTHREADED,
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+            CoUninitialize,
         };
         use windows::Win32::UI::Accessibility::*;
+        use windows::core::{BSTR, VARIANT};
 
         let mut out = Vec::new();
         unsafe {
@@ -501,13 +500,11 @@ impl Plugin for BrowserTabsPlugin {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct BrowserTabsPluginSettings {
     #[serde(default)]
     pub recalc_each_query: bool,
 }
-
 
 pub fn take_cache_messages() -> Vec<String> {
     imp::take_messages()

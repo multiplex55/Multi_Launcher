@@ -1,9 +1,9 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::todo::{mark_done, TodoEntry, TODO_FILE};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, mark_done};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,6 @@ pub enum TodoFocusStatusFilter {
     Open,
     Done,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoFocusConfig {

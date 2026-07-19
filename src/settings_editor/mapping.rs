@@ -160,29 +160,32 @@ impl SettingsEditor {
             && let Ok(cfg) = serde_json::from_value::<
                 crate::plugins::clipboard::ClipboardPluginSettings,
             >(val.clone())
-            {
-                self.clipboard_limit = cfg.max_entries;
-            }
+        {
+            self.clipboard_limit = cfg.max_entries;
+        }
         if let Some(val) = self.plugin_settings.get("network")
             && let Ok(cfg) = serde_json::from_value::<crate::plugins::network::NetworkPluginSettings>(
                 val.clone(),
-            ) {
-                self.net_refresh = cfg.refresh_rate;
-                self.net_unit = cfg.unit;
-            }
+            )
+        {
+            self.net_refresh = cfg.refresh_rate;
+            self.net_unit = cfg.unit;
+        }
         if let Some(val) = self.plugin_settings.get("history")
             && let Ok(cfg) = serde_json::from_value::<crate::plugins::history::HistoryPluginSettings>(
                 val.clone(),
-            ) {
-                self.history_limit = cfg.max_entries;
-            }
+            )
+        {
+            self.history_limit = cfg.max_entries;
+        }
         if let Some(val) = self.plugin_settings.get("screenshot")
-            && let Ok(cfg) = serde_json::from_value::<ScreenshotPluginSettings>(val.clone()) {
-                self.screenshot_dir = cfg.screenshot_dir;
-                self.screenshot_save_file = cfg.screenshot_save_file;
-                self.screenshot_auto_save = cfg.screenshot_auto_save;
-                self.screenshot_use_editor = cfg.screenshot_use_editor;
-            }
+            && let Ok(cfg) = serde_json::from_value::<ScreenshotPluginSettings>(val.clone())
+        {
+            self.screenshot_dir = cfg.screenshot_dir;
+            self.screenshot_save_file = cfg.screenshot_save_file;
+            self.screenshot_auto_save = cfg.screenshot_auto_save;
+            self.screenshot_use_editor = cfg.screenshot_use_editor;
+        }
     }
 
     pub fn get_plugin_setting_value(&self, name: &str) -> Option<&serde_json::Value> {

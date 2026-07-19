@@ -4,7 +4,7 @@ use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::{Plugin, PluginManager};
 use multi_launcher::settings::Settings;
 use serde_json::json;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>) -> LauncherApp {
     let custom_len = actions.len();

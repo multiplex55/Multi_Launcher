@@ -2,7 +2,7 @@ use multi_launcher::actions::Action;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
 fn new_app(ctx: &eframe::egui::Context) -> LauncherApp {

@@ -1,5 +1,5 @@
 use super::{
-    edit_typed_settings, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::common::query::{apply_action_filters, split_action_filters};
@@ -140,7 +140,6 @@ impl PluginHomeWidget {
         })
     }
 }
-
 
 impl Widget for PluginHomeWidget {
     fn render(

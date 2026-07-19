@@ -1,6 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::shell::{
-    load_shell_cmds, save_shell_cmds, ShellCmdEntry, ShellPlugin, SHELL_CMDS_FILE,
+    SHELL_CMDS_FILE, ShellCmdEntry, ShellPlugin, load_shell_cmds, save_shell_cmds,
 };
 use multi_launcher::{actions::Action, launcher::launch_action};
 use once_cell::sync::Lazy;

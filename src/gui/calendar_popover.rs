@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::calendar::{add_months, expand_instances, CalendarSnapshot, CALENDAR_DATA};
+use crate::plugins::calendar::{CALENDAR_DATA, CalendarSnapshot, add_months, expand_instances};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};

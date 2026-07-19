@@ -3,7 +3,7 @@ use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, RegisterHotKey,
 };
 
 #[derive(Clone, Serialize, Deserialize)]

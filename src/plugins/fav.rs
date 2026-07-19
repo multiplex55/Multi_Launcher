@@ -1,13 +1,13 @@
 use crate::actions::Action;
-use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::launcher::launch_action;
 use crate::plugin::Plugin;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 pub const FAV_FILE: &str = "fav.json";

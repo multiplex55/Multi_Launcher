@@ -124,14 +124,15 @@ pub fn discover_ripgrep(
 
     for name in ["rg.exe", "rg"] {
         if let Some(path) = find_on_path(Path::new(name), context.path_directories.clone())
-            && let CandidateValidation::Valid { version } = validate_ripgrep_candidate(&path) {
-                return Some(RipgrepResolution {
-                    path,
-                    source: ExecutableResolutionSource::ProcessPath,
-                    version,
-                    warnings,
-                });
-            }
+            && let CandidateValidation::Valid { version } = validate_ripgrep_candidate(&path)
+        {
+            return Some(RipgrepResolution {
+                path,
+                source: ExecutableResolutionSource::ProcessPath,
+                version,
+                warnings,
+            });
+        }
     }
 
     if warnings.is_empty() {
@@ -342,10 +343,12 @@ mod tests {
             resolve_ripgrep_with_context(&configured, &ctx(temp.path(), &path_dir)).unwrap();
         assert_eq!(resolution.path, path_rg);
         assert_eq!(resolution.source, ExecutableResolutionSource::ProcessPath);
-        assert!(resolution
-            .warnings
-            .iter()
-            .any(|w| w.contains(&configured.display().to_string())));
+        assert!(
+            resolution
+                .warnings
+                .iter()
+                .any(|w| w.contains(&configured.display().to_string()))
+        );
     }
 
     #[test]

@@ -88,9 +88,10 @@ pub fn play_sound(name: &str) {
     std::thread::spawn(move || {
         if let Ok((_stream, handle)) = rodio::OutputStream::try_default()
             && let Ok(source) = rodio::Decoder::new(Cursor::new(bytes))
-                && let Ok(sink) = rodio::Sink::try_new(&handle) {
-                    sink.append(source);
-                    sink.sleep_until_end();
-                }
+            && let Ok(sink) = rodio::Sink::try_new(&handle)
+        {
+            sink.append(source);
+            sink.sleep_until_end();
+        }
     });
 }

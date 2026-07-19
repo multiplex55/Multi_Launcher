@@ -1,8 +1,8 @@
 use super::{EventType, Hotkey, Key};
 use std::sync::{
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
     mpsc::Sender,
-    Arc, Mutex,
 };
 use std::thread;
 use std::time::Duration;

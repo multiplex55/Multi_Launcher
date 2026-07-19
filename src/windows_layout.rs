@@ -48,15 +48,13 @@ pub struct LayoutRestoreSummary {
     pub missing_windows: usize,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LayoutRestorePlan {
     pub summary: LayoutRestoreSummary,
     pub missing_windows: usize,
     #[cfg(windows)]
     actions: Vec<LayoutRestoreAction>,
 }
-
 
 #[cfg(windows)]
 struct EnumeratedWindow {
@@ -197,9 +195,10 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
             None => return BOOL(1),
         };
         if let Some(active) = ctx.active_monitor
-            && active != monitor {
-                return BOOL(1);
-            }
+            && active != monitor
+        {
+            return BOOL(1);
+        }
 
         let mut placement = WINDOWPLACEMENT::default();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
@@ -425,21 +424,25 @@ fn match_score(saved: &LayoutMatch, candidate: &LayoutMatch) -> Option<u8> {
         return None;
     }
     if let (Some(saved), Some(candidate)) = (&saved.app_id, &candidate.app_id)
-        && saved.eq_ignore_ascii_case(candidate) {
-            return Some(4);
-        }
+        && saved.eq_ignore_ascii_case(candidate)
+    {
+        return Some(4);
+    }
     if let (Some(saved), Some(candidate)) = (&saved.process, &candidate.process)
-        && saved.eq_ignore_ascii_case(candidate) {
-            return Some(3);
-        }
+        && saved.eq_ignore_ascii_case(candidate)
+    {
+        return Some(3);
+    }
     if let (Some(saved), Some(candidate)) = (&saved.class, &candidate.class)
-        && saved.eq_ignore_ascii_case(candidate) {
-            return Some(2);
-        }
+        && saved.eq_ignore_ascii_case(candidate)
+    {
+        return Some(2);
+    }
     if let (Some(saved), Some(candidate)) = (&saved.title, &candidate.title)
-        && matches_title_regex(saved, candidate) {
-            return Some(1);
-        }
+        && matches_title_regex(saved, candidate)
+    {
+        return Some(1);
+    }
     None
 }
 
@@ -519,10 +522,11 @@ pub fn plan_layout_restore(
                 continue;
             }
             if let Some(score) = match_score(&saved.matcher, &candidate.matcher)
-                && score > best_score {
-                    best_score = score;
-                    best_idx = Some(idx);
-                }
+                && score > best_score
+            {
+                best_score = score;
+                best_idx = Some(idx);
+            }
         }
 
         if let Some(idx) = best_idx {

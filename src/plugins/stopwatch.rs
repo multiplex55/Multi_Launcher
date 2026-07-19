@@ -5,8 +5,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
     Mutex,
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -68,22 +68,24 @@ pub fn start_stopwatch_named(name: Option<String>) -> u64 {
 pub fn pause_stopwatch(id: u64) {
     if let Ok(mut guard) = STOPWATCHES.lock()
         && let Some(sw) = guard.get_mut(&id)
-            && !sw.paused {
-                let now = Instant::now();
-                sw.elapsed += now.saturating_duration_since(sw.start);
-                sw.paused = true;
-                sw.generation += 1;
-            }
+        && !sw.paused
+    {
+        let now = Instant::now();
+        sw.elapsed += now.saturating_duration_since(sw.start);
+        sw.paused = true;
+        sw.generation += 1;
+    }
 }
 
 pub fn resume_stopwatch(id: u64) {
     if let Ok(mut guard) = STOPWATCHES.lock()
         && let Some(sw) = guard.get_mut(&id)
-            && sw.paused {
-                sw.start = Instant::now();
-                sw.paused = false;
-                sw.generation += 1;
-            }
+        && sw.paused
+    {
+        sw.start = Instant::now();
+        sw.paused = false;
+        sw.generation += 1;
+    }
 }
 
 pub fn stop_stopwatch(id: u64) {
@@ -325,14 +327,15 @@ impl Plugin for StopwatchPlugin {
                     })
                     .collect();
             } else if let Ok(id) = tail.parse::<u64>()
-                && let Some(time) = format_elapsed(id) {
-                    return vec![Action {
-                        label: format!("Stopwatch {id}: {time}"),
-                        desc: "Stopwatch".into(),
-                        action: format!("stopwatch:show:{id}"),
-                        args: None,
-                    }];
-                }
+                && let Some(time) = format_elapsed(id)
+            {
+                return vec![Action {
+                    label: format!("Stopwatch {id}: {time}"),
+                    desc: "Stopwatch".into(),
+                    action: format!("stopwatch:show:{id}"),
+                    args: None,
+                }];
+            }
         }
         Vec::new()
     }

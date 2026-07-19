@@ -42,10 +42,11 @@ fn prefers_powershell7_then_powershell_then_cmd() {
         env::set_var("PATH", dir.path());
     }
     let (cmd, _) = build_nvim_command(note);
-    assert!(cmd
-        .get_program()
-        .to_string_lossy()
-        .ends_with("powershell.exe"));
+    assert!(
+        cmd.get_program()
+            .to_string_lossy()
+            .ends_with("powershell.exe")
+    );
 
     // Fallback to cmd.exe
     unsafe {

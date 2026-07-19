@@ -305,19 +305,21 @@ pub fn build_note_graph(notes: &[Note], filter: &NoteGraphFilter) -> NoteGraphMo
     }
 
     if let Some(max_nodes) = filter.max_nodes
-        && max_nodes > 0 && kept_nodes.len() > max_nodes {
-            let mut ranked: Vec<_> = kept_nodes.iter().cloned().collect();
-            let degree_map = compute_degrees_for_nodes(&edges, &kept_nodes);
-            ranked.sort_by(|a, b| {
-                degree_map
-                    .get(b)
-                    .copied()
-                    .unwrap_or(0)
-                    .cmp(&degree_map.get(a).copied().unwrap_or(0))
-                    .then_with(|| a.cmp(b))
-            });
-            kept_nodes = ranked.into_iter().take(max_nodes).collect();
-        }
+        && max_nodes > 0
+        && kept_nodes.len() > max_nodes
+    {
+        let mut ranked: Vec<_> = kept_nodes.iter().cloned().collect();
+        let degree_map = compute_degrees_for_nodes(&edges, &kept_nodes);
+        ranked.sort_by(|a, b| {
+            degree_map
+                .get(b)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&degree_map.get(a).copied().unwrap_or(0))
+                .then_with(|| a.cmp(b))
+        });
+        kept_nodes = ranked.into_iter().take(max_nodes).collect();
+    }
 
     edges.retain(|e| kept_nodes.contains(&e.from) && kept_nodes.contains(&e.to));
 
@@ -609,18 +611,24 @@ mod tests {
 
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.edges.len(), 3);
-        assert!(graph
-            .edges
-            .iter()
-            .any(|e| e.from == "alpha" && e.to == "beta"));
-        assert!(graph
-            .edges
-            .iter()
-            .any(|e| e.from == "alpha" && e.to == "gamma"));
-        assert!(graph
-            .edges
-            .iter()
-            .any(|e| e.from == "beta" && e.to == "gamma"));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "alpha" && e.to == "beta")
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "alpha" && e.to == "gamma")
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == "beta" && e.to == "gamma")
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Calendar data models and utilities.
 use crate::actions::Action;
 use crate::common::entity_ref::{EntityKind, EntityRef};
-use crate::common::json_watch::{watch_json, JsonWatcher};
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::query::parse_query_filters;
 use crate::common::strip_prefix_ci;
 use crate::plugin::Plugin;
@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, RwLock,
+    atomic::{AtomicU64, Ordering},
 };
 
 pub const CALENDAR_EVENTS_FILE: &str = "calendar/events.json";
@@ -50,8 +50,7 @@ pub struct NthWeekday {
     pub weekday: Weekday,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum RecurrenceEnd {
     #[default]
     Never,
@@ -63,7 +62,6 @@ pub enum RecurrenceEnd {
         count: u32,
     },
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum RecurrenceFrequency {
@@ -270,9 +268,10 @@ pub fn save_state(path: &str, state: &CalendarState) -> anyhow::Result<()> {
 
 fn ensure_parent_dir(path: &str) -> anyhow::Result<()> {
     if let Some(parent) = Path::new(path).parent()
-        && !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     Ok(())
 }
 
@@ -847,9 +846,10 @@ pub fn parse_date_reference(input: &str, now: NaiveDate) -> Option<NaiveDate> {
         return Some(now + Duration::days(1));
     }
     if let Some(rest) = lower.strip_prefix("next ")
-        && let Some(target) = parse_weekday(rest) {
-            return Some(next_weekday(now, target));
-        }
+        && let Some(target) = parse_weekday(rest)
+    {
+        return Some(next_weekday(now, target));
+    }
     NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()
 }
 
@@ -872,17 +872,18 @@ pub fn parse_calendar_add(input: &str, now: NaiveDateTime) -> Result<CalendarAdd
     let mut tokens = Vec::new();
     for token in raw_tokens {
         if let Some(stripped) = token.strip_prefix('@')
-            && let Some((kind, id)) = stripped.split_once(':') {
-                let kind = match kind.to_ascii_lowercase().as_str() {
-                    "todo" => Some(EntityKind::Todo),
-                    "note" => Some(EntityKind::Note),
-                    _ => None,
-                };
-                if let Some(kind) = kind {
-                    refs.push(EntityRef::new(kind, id.trim().to_string(), None));
-                    continue;
-                }
+            && let Some((kind, id)) = stripped.split_once(':')
+        {
+            let kind = match kind.to_ascii_lowercase().as_str() {
+                "todo" => Some(EntityKind::Todo),
+                "note" => Some(EntityKind::Note),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                refs.push(EntityRef::new(kind, id.trim().to_string(), None));
+                continue;
             }
+        }
         tokens.push(token);
     }
     let (date, consumed) = parse_date_tokens(&tokens, now.date())
@@ -982,9 +983,10 @@ pub fn search_events(request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
         .into_iter()
         .filter(|event| {
             if let Some(after) = request.after
-                && event.start.date() < after {
-                    return false;
-                }
+                && event.start.date() < after
+            {
+                return false;
+            }
             if !request.tags.is_empty() || !request.exclude_tags.is_empty() {
                 let tags = event
                     .tags
@@ -1016,9 +1018,10 @@ fn parse_date_tokens(tokens: &[&str], now: NaiveDate) -> Option<(NaiveDate, usiz
     }
     if tokens[0].eq_ignore_ascii_case("next")
         && let Some(next) = tokens.get(1)
-            && let Some(day) = parse_weekday(next) {
-                return Some((next_weekday(now, day), 2));
-            }
+        && let Some(day) = parse_weekday(next)
+    {
+        return Some((next_weekday(now, day), 2));
+    }
     parse_date_reference(tokens[0], now).map(|date| (date, 1))
 }
 

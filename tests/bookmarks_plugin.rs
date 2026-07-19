@@ -1,6 +1,6 @@
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::bookmarks::{
-    load_bookmarks, save_bookmarks, BookmarkEntry, BookmarksPlugin, BOOKMARKS_FILE,
+    BOOKMARKS_FILE, BookmarkEntry, BookmarksPlugin, load_bookmarks, save_bookmarks,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -113,10 +113,14 @@ fn bm_rm_lists_bookmarks_without_filter() {
     let plugin = BookmarksPlugin::default();
     let results = plugin.search("bm rm");
     assert_eq!(results.len(), 2);
-    assert!(results
-        .iter()
-        .any(|a| a.action == "bookmark:remove:https://example.com"));
-    assert!(results
-        .iter()
-        .any(|a| a.action == "bookmark:remove:https://rust-lang.org"));
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action == "bookmark:remove:https://example.com")
+    );
+    assert!(
+        results
+            .iter()
+            .any(|a| a.action == "bookmark:remove:https://rust-lang.org")
+    );
 }

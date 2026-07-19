@@ -1,8 +1,8 @@
 use crate::file_search::actions::{execute_explorer_action, resolve_explorer_action};
 use crate::file_search::model::ContentMatch;
 use crate::file_search::preview::{
-    preview_file, FilePreview, PreviewCoverage, PreviewKind, PreviewLoadOutcome,
-    PreviewLoadStateMachine, PreviewLoadingState, PreviewRequest,
+    FilePreview, PreviewCoverage, PreviewKind, PreviewLoadOutcome, PreviewLoadStateMachine,
+    PreviewLoadingState, PreviewRequest, preview_file,
 };
 use crate::file_search::settings::FileSearchSettings;
 use eframe::egui;
