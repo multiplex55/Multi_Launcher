@@ -5,11 +5,10 @@ pub use super::store::{
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
-use serde::Deserialize;
+use super::actions::{ClipboardModifyActionPayload, decode_action_payload};
 
 use super::clipboard::{ClipboardError, ProductionClipboardService, production_clipboard_service};
 use super::executor::Cancellation;
-use super::model::StageSpec;
 use super::parser::ClipboardModifyIntent;
 use super::pipeline::find_pipeline;
 
@@ -21,26 +20,35 @@ pub fn clipboard_service() -> Arc<ProductionClipboardService> {
         .clone()
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "intent", rename_all = "kebab-case")]
-enum ExecutePayload {
-    Stages { stages: Vec<StageSpec> },
-    SavedPipeline { name: String },
-}
-
 pub fn execute_action_args(
     args: Option<&str>,
     catalog: &SharedClipboardModifierCatalog,
 ) -> Result<(), ClipboardError> {
-    let payload: ExecutePayload = serde_json::from_str(args.unwrap_or(""))
+    let encoded = args.unwrap_or("");
+    let payload: ClipboardModifyActionPayload = decode_action_payload(encoded)
         .map_err(|e| ClipboardError::Config(format!("invalid clipboard modify action: {e}")))?;
     let snapshot = catalog.read().unwrap().clone();
     let cancel = AtomicBool::new(false);
     match payload {
-        ExecutePayload::Stages { stages } => {
+        ClipboardModifyActionPayload::ExecuteAdHocStages { stages } => {
             clipboard_service().apply_stages(&stages, snapshot.as_ref(), "cm execute", &cancel)?;
         }
-        ExecutePayload::SavedPipeline { name } => {
+        ClipboardModifyActionPayload::ExecuteTemplate { name } => {
+            let stages = vec![super::model::StageSpec {
+                operation: super::model::OperationId::Template,
+                arguments: super::model::StageArguments {
+                    name: Some(name.clone()),
+                    ..Default::default()
+                },
+            }];
+            clipboard_service().apply_stages(
+                &stages,
+                snapshot.as_ref(),
+                &format!("cm template {name}"),
+                &cancel,
+            )?;
+        }
+        ClipboardModifyActionPayload::ExecuteSavedPipeline { name } => {
             if find_pipeline(snapshot.as_ref(), &name).is_none() {
                 return Err(ClipboardError::Config(format!("unknown pipeline {name}")));
             }
@@ -50,6 +58,14 @@ pub fn execute_action_args(
                 &format!("cm apply {name}"),
                 &cancel,
             )?;
+        }
+        ClipboardModifyActionPayload::Undo => {
+            clipboard_service().undo()?;
+        }
+        ClipboardModifyActionPayload::OpenDialogSection { .. } => {
+            return Err(ClipboardError::Config(
+                "open-dialog payload cannot be executed".into(),
+            ));
         }
     }
     Ok(())
@@ -70,6 +86,21 @@ pub fn execute_intent<C: Cancellation + ?Sized>(
                 cancellation,
             )?;
         }
+        ClipboardModifyIntent::ApplyTemplate { name } => {
+            let stages = vec![super::model::StageSpec {
+                operation: super::model::OperationId::Template,
+                arguments: super::model::StageArguments {
+                    name: Some(name.clone()),
+                    ..Default::default()
+                },
+            }];
+            clipboard_service().apply_stages(
+                &stages,
+                snapshot.as_ref(),
+                &format!("cm template {name}"),
+                cancellation,
+            )?;
+        }
         ClipboardModifyIntent::ApplySavedPipeline { name } => {
             clipboard_service().apply_pipeline(
                 &name,
@@ -77,6 +108,9 @@ pub fn execute_intent<C: Cancellation + ?Sized>(
                 &format!("cm apply {name}"),
                 cancellation,
             )?;
+        }
+        ClipboardModifyIntent::Undo => {
+            clipboard_service().undo()?;
         }
     }
     Ok(())

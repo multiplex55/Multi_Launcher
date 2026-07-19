@@ -83,7 +83,7 @@ impl LauncherApp {
         // explicit plugin command whose plugin already returned resolved outputs.
         // Example: `note today` / `note search <term>` yielding `note:new:*` or
         // `note:open:*` actions; re-filtering those by label text can hide valid results.
-        matches!(head.as_str(), "note" | "notes")
+        let note_resolved = matches!(head.as_str(), "note" | "notes")
             && matches!(
                 subcommand.as_str(),
                 "today"
@@ -100,7 +100,15 @@ impl LauncherApp {
                     | "tag"
                     | "rm"
             )
-            && action.starts_with("note:")
+            && action.starts_with("note:");
+
+        let clipboard_modify_resolved = head == "cm"
+            && !action.starts_with("query:")
+            && (action.starts_with("clipboard_modify:execute:")
+                || action.starts_with("clipboard_modify:open:")
+                || action.starts_with("clipboard_modify:undo:"));
+
+        note_resolved || clipboard_modify_resolved
     }
 
     pub(crate) fn has_diagnostics_widget(&self) -> bool {
@@ -618,6 +626,27 @@ mod tests {
             Some(start),
             start + NOTE_SEARCH_DEBOUNCE,
             NOTE_SEARCH_DEBOUNCE,
+        ));
+    }
+}
+
+#[cfg(test)]
+mod clipboard_modify_exact_filter_tests {
+    use super::*;
+
+    #[test]
+    fn exact_match_filter_keeps_complete_clipboard_modify_actions() {
+        assert!(LauncherApp::should_bypass_exact_post_filter(
+            "cm upper",
+            "clipboard_modify:execute:abc"
+        ));
+        assert!(LauncherApp::should_bypass_exact_post_filter(
+            "cm undo",
+            "clipboard_modify:undo:abc"
+        ));
+        assert!(!LauncherApp::should_bypass_exact_post_filter(
+            "cm upper",
+            "query:cm uppercase"
         ));
     }
 }

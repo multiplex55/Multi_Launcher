@@ -1,5 +1,10 @@
 use crate::actions::Action;
-use crate::clipboard_modify::catalog::{canonical_command, operation_lookup};
+use crate::clipboard_modify::actions::{
+    EXECUTE_PREFIX, OPEN_PREFIX, UNDO_PREFIX, encode_action_payload,
+    execute_saved_pipeline_payload, execute_stages_payload, execute_template_payload,
+    open_dialog_payload, undo_payload,
+};
+use crate::clipboard_modify::catalog::{canonical_command, normalize_name, operation_lookup};
 use crate::clipboard_modify::parser::{
     ClipboardModifyIntent, ClipboardModifyParseResult, ModifySection, PartialQuery, parse,
 };
@@ -21,18 +26,9 @@ impl ClipboardModifyPlugin {
         self.catalog.read().unwrap().clone()
     }
 }
-
 impl Plugin for ClipboardModifyPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let catalog = self.catalog_snapshot();
-        if query.trim() == "cm undo" {
-            return vec![Action {
-                label: "Undo Clipboard Modify".into(),
-                desc: "Clipboard Modify".into(),
-                action: "clipboard_modify:undo".into(),
-                args: None,
-            }];
-        }
         match parse(query, catalog.as_ref()) {
             ClipboardModifyParseResult::NotClipboardModify => Vec::new(),
             ClipboardModifyParseResult::OpenSection(section) => vec![section_action(section)],
@@ -60,12 +56,16 @@ impl Plugin for ClipboardModifyPlugin {
     }
 
     fn commands(&self) -> Vec<Action> {
-        vec![Action {
-            label: "cm".into(),
-            desc: "Clipboard Modify".into(),
-            action: "query:cm".into(),
-            args: None,
-        }]
+        vec![
+            command_action("cm", "Open Clipboard Modify"),
+            command_action("cm template", "Open Clipboard Modify templates"),
+            command_action("cm apply", "Open Clipboard Modify saved pipelines"),
+            command_action("cm undo", "Undo last Clipboard Modify"),
+            command_action("cm upper", "Clipboard Modify uppercase text"),
+            command_action("cm trim", "Clipboard Modify trim text"),
+            command_action("cm wrap", "Clipboard Modify wrap text"),
+            command_action("cm sort", "Clipboard Modify sort lines"),
+        ]
     }
 
     fn query_prefixes(&self) -> &[&str] {
@@ -75,11 +75,16 @@ impl Plugin for ClipboardModifyPlugin {
 
 fn section_action(section: ModifySection) -> Action {
     let section_name = section_name(section);
+    let payload = open_dialog_payload(section);
+    let encoded = encode_action_payload(&payload).ok();
     Action {
         label: format!("Open Clipboard Modify {section_name}"),
         desc: "Clipboard Modify".into(),
-        action: format!("clipboard_modify:open:{section_name}"),
-        args: serde_json::to_string(&serde_json::json!({ "section": section_name })).ok(),
+        action: encoded
+            .as_ref()
+            .map(|e| format!("{OPEN_PREFIX}{e}"))
+            .unwrap_or_default(),
+        args: encoded,
     }
 }
 
@@ -117,26 +122,72 @@ fn suggestion_label(section: ModifySection, suggestion: &str) -> String {
     }
 }
 
+fn command_action(query: &str, desc: &str) -> Action {
+    Action {
+        label: query.into(),
+        desc: desc.into(),
+        action: format!("query:{query}"),
+        args: None,
+    }
+}
+
 fn execution_action(intent: ClipboardModifyIntent) -> Action {
     match intent {
-        ClipboardModifyIntent::Stages(stages) => Action {
-            label: "Run Clipboard Modify pipeline".into(),
-            desc: format!("Clipboard Modify: {} stage(s)", stages.len()),
-            action: "clipboard_modify:execute".into(),
-            args: serde_json::to_string(
-                &serde_json::json!({ "intent": "stages", "stages": stages }),
-            )
-            .ok(),
-        },
-        ClipboardModifyIntent::ApplySavedPipeline { name } => Action {
-            label: format!("Run Clipboard Modify pipeline {name}"),
-            desc: "Clipboard Modify".into(),
-            action: "clipboard_modify:execute".into(),
-            args: serde_json::to_string(
-                &serde_json::json!({ "intent": "saved-pipeline", "name": name }),
-            )
-            .ok(),
-        },
+        ClipboardModifyIntent::Stages(stages) => {
+            let stage_count = stages.len();
+            let payload = execute_stages_payload(stages);
+            let encoded = encode_action_payload(&payload).ok();
+            Action {
+                label: "Run Clipboard Modify pipeline".into(),
+                desc: format!("Clipboard Modify: {stage_count} stage(s)"),
+                action: encoded
+                    .as_ref()
+                    .map(|e| format!("{EXECUTE_PREFIX}{e}"))
+                    .unwrap_or_default(),
+                args: encoded,
+            }
+        }
+        ClipboardModifyIntent::ApplyTemplate { name } => {
+            let normalized = normalize_name(&name);
+            let payload = execute_template_payload(normalized);
+            let encoded = encode_action_payload(&payload).ok();
+            Action {
+                label: format!("Apply Clipboard Modify template {name}"),
+                desc: "Clipboard Modify".into(),
+                action: encoded
+                    .as_ref()
+                    .map(|e| format!("{EXECUTE_PREFIX}{e}"))
+                    .unwrap_or_default(),
+                args: encoded,
+            }
+        }
+        ClipboardModifyIntent::ApplySavedPipeline { name } => {
+            let normalized = normalize_name(&name);
+            let payload = execute_saved_pipeline_payload(normalized);
+            let encoded = encode_action_payload(&payload).ok();
+            Action {
+                label: format!("Run Clipboard Modify pipeline {name}"),
+                desc: "Clipboard Modify".into(),
+                action: encoded
+                    .as_ref()
+                    .map(|e| format!("{EXECUTE_PREFIX}{e}"))
+                    .unwrap_or_default(),
+                args: encoded,
+            }
+        }
+        ClipboardModifyIntent::Undo => {
+            let payload = undo_payload();
+            let encoded = encode_action_payload(&payload).ok();
+            Action {
+                label: "Undo Clipboard Modify".into(),
+                desc: "Clipboard Modify".into(),
+                action: encoded
+                    .as_ref()
+                    .map(|e| format!("{UNDO_PREFIX}{e}"))
+                    .unwrap_or_default(),
+                args: encoded,
+            }
+        }
     }
 }
 
@@ -145,5 +196,66 @@ fn section_name(section: ModifySection) -> &'static str {
         ModifySection::Modify => "modify",
         ModifySection::Templates => "templates",
         ModifySection::SavedPipelines => "saved-pipelines",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clipboard_modify::actions::{
+        ClipboardModifyActionPayload, ClipboardModifySectionPayload, decode_action_payload,
+    };
+    use crate::clipboard_modify::store::shared_default_catalog;
+
+    fn plugin() -> ClipboardModifyPlugin {
+        ClipboardModifyPlugin::new(shared_default_catalog())
+    }
+
+    fn payload(action: &Action) -> ClipboardModifyActionPayload {
+        let encoded = action.action.rsplit_once(':').unwrap().1;
+        decode_action_payload(encoded).unwrap()
+    }
+
+    #[test]
+    fn bare_category_commands_open_targeted_sections() {
+        assert_eq!(
+            payload(&plugin().search("cm").remove(0)),
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::Modify
+            }
+        );
+        assert_eq!(
+            payload(&plugin().search("cm template").remove(0)),
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::Templates
+            }
+        );
+        assert_eq!(
+            payload(&plugin().search("cm apply").remove(0)),
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::SavedPipelines
+            }
+        );
+    }
+
+    #[test]
+    fn undo_emits_typed_payload() {
+        assert_eq!(
+            payload(&plugin().search("cm undo").remove(0)),
+            ClipboardModifyActionPayload::Undo
+        );
+    }
+
+    #[test]
+    fn syntax_errors_are_non_executing_error_actions() {
+        let result = plugin().search("cm |");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].action, "clipboard_modify:error");
+        assert!(result[0].args.is_none());
+    }
+
+    #[test]
+    fn search_does_not_touch_clipboard_services() {
+        let _ = plugin().search("cm upper");
     }
 }

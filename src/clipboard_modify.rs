@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod catalog;
 pub mod clipboard;
 pub mod defaults;
@@ -7,6 +8,7 @@ pub mod model;
 pub mod parser;
 pub mod pipeline;
 
+pub use actions::*;
 pub use catalog::*;
 pub use clipboard::*;
 pub use defaults::*;

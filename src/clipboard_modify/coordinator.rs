@@ -294,9 +294,22 @@ fn run_intent<C: Cancellation + ?Sized>(
 ) -> Result<String, ExecuteError> {
     match intent {
         ClipboardModifyIntent::Stages(stages) => execute_stages(source, stages, catalog, c),
+        ClipboardModifyIntent::ApplyTemplate { name } => execute_stages(
+            source,
+            &[crate::clipboard_modify::model::StageSpec {
+                operation: crate::clipboard_modify::model::OperationId::Template,
+                arguments: crate::clipboard_modify::model::StageArguments {
+                    name: Some(name.clone()),
+                    ..Default::default()
+                },
+            }],
+            catalog,
+            c,
+        ),
         ClipboardModifyIntent::ApplySavedPipeline { name } => {
             execute_pipeline(source, name, catalog, c)
         }
+        ClipboardModifyIntent::Undo => Ok(source.to_string()),
     }
 }
 
