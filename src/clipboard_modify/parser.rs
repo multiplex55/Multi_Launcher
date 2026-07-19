@@ -351,9 +351,11 @@ fn parse_special(
     }
     if stage.tokens.len() == 1 && !stage.tokens[0].quoted {
         let q = normalize_name(&stage.tokens[0].text);
-        let sug = suggestions(&q);
-        if !sug.is_empty() {
-            return Some(partial(0, ModifySection::Modify, q, sug));
+        if operation_lookup(&q).is_none() {
+            let sug = suggestions(&q);
+            if !sug.is_empty() {
+                return Some(partial(0, ModifySection::Modify, q, sug));
+            }
         }
     }
     None
