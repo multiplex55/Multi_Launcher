@@ -2,11 +2,11 @@ use crate::multi_manager::activation::{
     self, ActivationDeps, ActivationOperation, ActivationResult,
 };
 use crate::multi_manager::model::{MmHotkey, MmRect, MmWorkspace};
-use crate::multi_manager::{reconnect, win};
+use crate::multi_manager::win;
 use crate::settings::MultiManagerSettings;
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -49,8 +49,6 @@ pub struct RuntimeControl {
     pub enabled: AtomicBool,
     pub capture_pending: AtomicBool,
     pub shutdown: AtomicBool,
-    pub auto_reconnect_missing_windows: AtomicBool,
-    pub auto_reconnect_interval_ms: AtomicU64,
     pub bindings_dirty_signal: Arc<AtomicBool>,
 }
 
@@ -60,8 +58,6 @@ impl RuntimeControl {
             enabled: AtomicBool::new(enabled),
             capture_pending: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
-            auto_reconnect_missing_windows: AtomicBool::new(true),
-            auto_reconnect_interval_ms: AtomicU64::new(3000),
             bindings_dirty_signal: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -112,39 +108,20 @@ impl MultiManagerRuntime {
 
     pub fn start(workspaces: Arc<Mutex<Vec<MmWorkspace>>>, settings: MultiManagerSettings) -> Self {
         let control = Arc::new(RuntimeControl::new(settings.enabled));
-        control
-            .auto_reconnect_missing_windows
-            .store(settings.auto_reconnect_missing_windows, Ordering::Relaxed);
-        control
-            .auto_reconnect_interval_ms
-            .store(settings.auto_reconnect_interval_ms, Ordering::Relaxed);
         let last_hotkey_info = Arc::new(Mutex::new(None));
         let event_queue = Arc::new(Mutex::new(VecDeque::new()));
         let thread_workspaces = Arc::clone(&workspaces);
         let thread_control = Arc::clone(&control);
-        let thread_bindings_dirty_signal = Arc::clone(&control.bindings_dirty_signal);
         let thread_last_hotkey_info = Arc::clone(&last_hotkey_info);
         let thread_event_queue = Arc::clone(&event_queue);
         let poll = Duration::from_millis(settings.hotkey_poll_ms);
-        let reconnect_interval = Duration::from_millis(settings.auto_reconnect_interval_ms);
         let join_handle = thread::spawn(move || {
             let mut debounce = HashMap::new();
-            let mut last_reconnect = Instant::now() - reconnect_interval;
             let win_ops = WinWindowOps;
             let hotkey_ops = WinHotkeyOps;
             while !thread_control.shutdown.load(Ordering::Relaxed) {
                 thread::sleep(poll);
                 let now = Instant::now();
-                if maybe_runtime_reconnect(
-                    &thread_workspaces,
-                    &thread_control,
-                    &mut last_reconnect,
-                    now,
-                    |hwnd| win::is_valid_window(hwnd),
-                    || win::enumerate_top_level_windows().unwrap_or_default(),
-                ) {
-                    thread_bindings_dirty_signal.store(true, Ordering::Relaxed);
-                }
                 if let Ok(mut workspaces) = thread_workspaces.lock() {
                     runtime_tick(
                         &mut workspaces,
@@ -336,61 +313,6 @@ fn hotkey_sequence(hotkey: &MmHotkey) -> Option<String> {
     Some(parts.join("+"))
 }
 
-pub fn maybe_runtime_reconnect(
-    workspaces: &Arc<Mutex<Vec<MmWorkspace>>>,
-    control: &RuntimeControl,
-    last_reconnect: &mut Instant,
-    now: Instant,
-    is_window: impl Fn(usize) -> bool,
-    enumerate: impl FnOnce() -> Vec<win::EnumeratedWindow>,
-) -> bool {
-    let reconnect_interval =
-        Duration::from_millis(control.auto_reconnect_interval_ms.load(Ordering::Relaxed));
-    if !control.enabled.load(Ordering::Relaxed)
-        || !control
-            .auto_reconnect_missing_windows
-            .load(Ordering::Relaxed)
-        || control.capture_pending.load(Ordering::Relaxed)
-        || now.duration_since(*last_reconnect) < reconnect_interval
-    {
-        return false;
-    }
-
-    let Ok(mut workspaces) = workspaces.lock() else {
-        return false;
-    };
-
-    let mut hwnd_changed = false;
-    for window in workspaces
-        .iter_mut()
-        .filter(|workspace| !workspace.disabled)
-        .flat_map(|workspace| &mut workspace.windows)
-        .filter(|window| !window.disabled && window.hwnd != 0)
-    {
-        if is_window(window.hwnd) {
-            continue;
-        }
-        window.mark_closed();
-        hwnd_changed = true;
-    }
-
-    let has_unresolved = workspaces
-        .iter()
-        .filter(|workspace| !workspace.disabled)
-        .flat_map(|workspace| &workspace.windows)
-        .any(|window| !window.disabled && (window.hwnd == 0 || !window.valid));
-
-    if has_unresolved {
-        let live = enumerate();
-        let summary =
-            reconnect::reconnect_unresolved_workspaces_with_windows(&mut workspaces, &live);
-        hwnd_changed |= summary.binding_snapshot_changed;
-    }
-
-    *last_reconnect = now;
-    hwnd_changed
-}
-
 pub fn runtime_tick(
     workspaces: &mut [MmWorkspace],
     control: &RuntimeControl,
@@ -476,7 +398,7 @@ mod tests {
     use super::*;
     use crate::multi_manager::model::{MmHotkey, MmWindow};
     use crate::multi_manager::win::EnumeratedWindow;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
 
     fn rect(x: i32) -> MmRect {
         MmRect {
@@ -666,203 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_reconnect_skipped_during_capture() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        workspaces.lock().unwrap()[0].windows[0].hwnd = 0;
-        let control = RuntimeControl::new(true);
-        control.capture_pending.store(true, Ordering::Relaxed);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-        let enumerated = RefCell::new(false);
-
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |_| true,
-            || {
-                *enumerated.borrow_mut() = true;
-                vec![live(10, "anything")]
-            },
-        );
-
-        assert!(!reconnected);
-        assert!(!*enumerated.borrow());
-    }
-
-    #[test]
-    fn runtime_reconnect_does_not_enumerate_when_all_windows_are_valid() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-        let is_window_calls = Cell::new(0);
-        let enumerations = Cell::new(0);
-
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |_| {
-                is_window_calls.set(is_window_calls.get() + 1);
-                true
-            },
-            || {
-                enumerations.set(enumerations.get() + 1);
-                Vec::new()
-            },
-        );
-
-        assert!(!reconnected);
-        assert_eq!(is_window_calls.get(), 2);
-        assert_eq!(enumerations.get(), 0);
-    }
-
-    #[test]
-    fn runtime_reconnect_enumerates_once_when_one_hwnd_is_invalid() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-        let enumerations = Cell::new(0);
-
-        let changed = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |hwnd| hwnd != 1,
-            || {
-                enumerations.set(enumerations.get() + 1);
-                Vec::new()
-            },
-        );
-
-        assert!(changed);
-        assert_eq!(enumerations.get(), 1);
-        assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 0);
-    }
-
-    #[test]
-    fn runtime_reconnect_clears_closed_hwnd_even_when_previously_valid() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-
-        let changed = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |hwnd| hwnd != 1,
-            || Vec::new(),
-        );
-
-        let locked = workspaces.lock().unwrap();
-        assert!(changed);
-        assert_eq!(locked[0].windows[0].hwnd, 0);
-        assert!(!locked[0].windows[0].valid);
-        assert_eq!(locked[0].windows[1].hwnd, 2);
-        assert!(locked[0].windows[1].valid);
-    }
-
-    #[test]
-    fn runtime_reconnect_leaves_unresolved_window_disconnected_without_affecting_valid_bindings() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        {
-            let mut locked = workspaces.lock().unwrap();
-            locked[0].windows[0].hwnd = 0;
-            locked[0].windows[0].valid = false;
-            locked[0].windows[0].captured_title = "Missing".into();
-        }
-        let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-
-        let changed = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |_| true,
-            || vec![live(99, "Other")],
-        );
-
-        let locked = workspaces.lock().unwrap();
-        assert!(!changed);
-        assert_eq!(locked[0].windows[0].hwnd, 0);
-        assert!(!locked[0].windows[0].valid);
-        assert_eq!(locked[0].windows[1].hwnd, 2);
-        assert!(locked[0].windows[1].valid);
-    }
-
-    #[test]
-    fn runtime_reconnect_assigns_missing_window_from_unique_candidate() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        {
-            let mut locked = workspaces.lock().unwrap();
-            locked[0].windows[0].hwnd = 0;
-            locked[0].windows[0].captured_title = "Notes".into();
-            locked[0].windows[0].executable = "app.exe".into();
-            locked[0].windows[0].class_name = "AppClass".into();
-            locked[0].windows[0].process_path = "C:/app.exe".into();
-        }
-        let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |_| true,
-            || vec![live(42, "Notes")],
-        );
-
-        assert!(reconnected);
-        assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 42);
-    }
-
-    #[test]
-    fn runtime_reconnect_runs_when_existing_hwnd_is_stale() {
-        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
-        {
-            let mut locked = workspaces.lock().unwrap();
-            locked[0].windows[0].hwnd = 7;
-            locked[0].windows[0].valid = false;
-            locked[0].windows[0].captured_title = "Notes".into();
-            locked[0].windows[0].executable = "app.exe".into();
-            locked[0].windows[0].class_name = "AppClass".into();
-            locked[0].windows[0].process_path = "C:/app.exe".into();
-        }
-        let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-        let enumerated = RefCell::new(false);
-
-        let reconnected = maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |_| true,
-            || {
-                *enumerated.borrow_mut() = true;
-                vec![live(42, "Notes")]
-            },
-        );
-
-        assert!(reconnected);
-        assert!(*enumerated.borrow());
-        assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 42);
-    }
-
-    #[test]
-    fn runtime_hotkey_toggle_works_after_reconnect_assigns_hwnd() {
+    fn runtime_hotkey_toggle_works_with_assigned_hwnd() {
         let workspaces = Arc::new(Mutex::new(vec![workspace()]));
         {
             let mut locked = workspaces.lock().unwrap();
@@ -873,16 +599,7 @@ mod tests {
             locked[0].windows[0].process_path = "C:/app.exe".into();
         }
         let control = RuntimeControl::new(true);
-        let now = Instant::now();
-        let mut last = now - Duration::from_secs(10);
-        assert!(maybe_runtime_reconnect(
-            &workspaces,
-            &control,
-            &mut last,
-            now,
-            |_| true,
-            || vec![live(42, "Notes")],
-        ));
+        workspaces.lock().unwrap()[0].windows[0].hwnd = 42;
 
         let info = Arc::new(Mutex::new(None));
         let mut debounce = HashMap::new();
@@ -899,7 +616,7 @@ mod tests {
             &FakeHotkeyOps(true),
             &|hwnd| hwnd != 0,
             &|| Vec::new(),
-            now + Duration::from_secs(1),
+            Instant::now(),
         );
 
         assert_eq!(*ops.moves.borrow(), vec![(42, rect(11))]);

@@ -373,10 +373,6 @@ pub struct MultiManagerSettings {
     pub hotkey_poll_ms: u64,
     #[serde(default = "default_true")]
     pub auto_reconnect_on_load: bool,
-    #[serde(default = "default_true")]
-    pub auto_reconnect_missing_windows: bool,
-    #[serde(default = "default_multi_manager_reconnect_interval_ms")]
-    pub auto_reconnect_interval_ms: u64,
     #[serde(default)]
     pub hide_launcher_before_toggle: bool,
     #[serde(default = "default_true")]
@@ -395,8 +391,6 @@ impl Default for MultiManagerSettings {
             show_force_recapture_prompt: false,
             hotkey_poll_ms: default_multi_manager_hotkey_poll_ms(),
             auto_reconnect_on_load: true,
-            auto_reconnect_missing_windows: true,
-            auto_reconnect_interval_ms: default_multi_manager_reconnect_interval_ms(),
             hide_launcher_before_toggle: false,
             ignore_launcher_window_on_capture: true,
         }
@@ -772,18 +766,23 @@ mod tests {
     }
 
     #[test]
-    fn multi_manager_reconnect_settings_round_trip_serialization() {
+    fn multi_manager_auto_reconnect_on_load_defaults_true() {
+        let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+        assert!(parsed.multi_manager.auto_reconnect_on_load);
+    }
+
+    #[test]
+    fn multi_manager_auto_reconnect_on_load_round_trip_serialization() {
         let mut settings = Settings::default();
         settings.multi_manager.auto_reconnect_on_load = false;
-        settings.multi_manager.auto_reconnect_missing_windows = false;
-        settings.multi_manager.auto_reconnect_interval_ms = 7500;
         let json = serde_json::to_string(&settings).expect("serialize settings");
         let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert!(!restored.multi_manager.auto_reconnect_on_load);
         assert_eq!(restored.multi_manager, settings.multi_manager);
     }
 
     #[test]
-    fn old_multi_manager_settings_default_reconnect_fields() {
+    fn old_multi_manager_settings_with_periodic_reconnect_fields_deserializes() {
         let parsed: Settings = serde_json::from_str(
             r#"{
                 "multi_manager": {
@@ -792,6 +791,8 @@ mod tests {
                     "bindings_path": "legacy_bindings.json",
                     "auto_save": false,
                     "save_on_exit": false,
+                    "auto_reconnect_missing_windows": false,
+                    "auto_reconnect_interval_ms": 7500,
                     "developer_debugging": true,
                     "show_force_recapture_prompt": true,
                     "hotkey_poll_ms": 100,
@@ -803,8 +804,14 @@ mod tests {
         .expect("legacy settings should deserialize");
 
         assert!(parsed.multi_manager.auto_reconnect_on_load);
-        assert!(parsed.multi_manager.auto_reconnect_missing_windows);
-        assert_eq!(parsed.multi_manager.auto_reconnect_interval_ms, 3000);
+
+        let reserialized = serde_json::to_value(&parsed).expect("serialize parsed settings");
+        let multi_manager = reserialized
+            .get("multi_manager")
+            .and_then(serde_json::Value::as_object)
+            .expect("multi_manager object");
+        assert!(!multi_manager.contains_key("auto_reconnect_missing_windows"));
+        assert!(!multi_manager.contains_key("auto_reconnect_interval_ms"));
     }
 
     #[test]
@@ -846,8 +853,6 @@ mod tests {
                 "show_force_recapture_prompt": parsed.multi_manager.show_force_recapture_prompt,
                 "hotkey_poll_ms": parsed.multi_manager.hotkey_poll_ms,
                 "auto_reconnect_on_load": parsed.multi_manager.auto_reconnect_on_load,
-                "auto_reconnect_missing_windows": parsed.multi_manager.auto_reconnect_missing_windows,
-                "auto_reconnect_interval_ms": parsed.multi_manager.auto_reconnect_interval_ms,
                 "hide_launcher_before_toggle": parsed.multi_manager.hide_launcher_before_toggle,
                 "ignore_launcher_window_on_capture": parsed.multi_manager.ignore_launcher_window_on_capture,
             },
@@ -861,7 +866,7 @@ mod tests {
         });
         assert_eq!(
             serde_json::to_string_pretty(&snapshot).unwrap(),
-            "{\n  \"multi_manager\": {\n    \"auto_reconnect_interval_ms\": 3000,\n    \"auto_reconnect_missing_windows\": true,\n    \"auto_reconnect_on_load\": true,\n    \"auto_save\": true,\n    \"bindings_path\": \"multi_manager_bindings.json\",\n    \"developer_debugging\": false,\n    \"enabled\": true,\n    \"hide_launcher_before_toggle\": false,\n    \"hotkey_poll_ms\": 50,\n    \"ignore_launcher_window_on_capture\": true,\n    \"save_on_exit\": true,\n    \"show_force_recapture_prompt\": false,\n    \"workspaces_path\": \"multi_manager_workspaces.json\"\n  },\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
+            "{\n  \"multi_manager\": {\n    \"auto_reconnect_on_load\": true,\n    \"auto_save\": true,\n    \"bindings_path\": \"multi_manager_bindings.json\",\n    \"developer_debugging\": false,\n    \"enabled\": true,\n    \"hide_launcher_before_toggle\": false,\n    \"hotkey_poll_ms\": 50,\n    \"ignore_launcher_window_on_capture\": true,\n    \"save_on_exit\": true,\n    \"show_force_recapture_prompt\": false,\n    \"workspaces_path\": \"multi_manager_workspaces.json\"\n  },\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
         );
     }
 }
