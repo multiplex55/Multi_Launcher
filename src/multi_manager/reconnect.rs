@@ -110,8 +110,8 @@ pub struct ReconnectSummary {
     pub reconnected: usize,
     pub missing: usize,
     pub ambiguous: usize,
-    pub invalidated: usize,
     pub metadata_mismatch: usize,
+    pub stale_results_discarded: usize,
     pub binding_snapshot_changed: bool,
 }
 
@@ -421,6 +421,22 @@ fn patch_for(
     }
 }
 
+fn already_valid_current_patch(window: &ReconnectSnapshotWindow, hwnd: usize) -> ReconnectPatch {
+    ReconnectPatch {
+        workspace_id: window.workspace_id.clone(),
+        window_index: window.window_index,
+        original: window.fingerprint.clone(),
+        outcome: ReconnectOutcome::AlreadyValid,
+        binding: ReconnectBindingPatch {
+            hwnd,
+            valid: window.fingerprint.valid,
+            binding_status: window.fingerprint.binding_status,
+            binding_verified: window.fingerprint.binding_verified,
+            live_title: String::new(),
+        },
+    }
+}
+
 pub fn build_reconnect_patches(
     snapshot: &ReconnectSnapshot,
     deps: ReconnectDeps<'_>,
@@ -440,21 +456,9 @@ pub fn build_reconnect_patches(
             if (deps.is_window)(fingerprint.hwnd) {
                 summary.already_valid += 1;
                 assigned.insert(fingerprint.hwnd);
-                patches.push(patch_for(
-                    window,
-                    ReconnectOutcome::AlreadyValid,
-                    fingerprint.hwnd,
-                    String::new(),
-                ));
+                patches.push(already_valid_current_patch(window, fingerprint.hwnd));
                 continue;
             }
-            summary.invalidated += 1;
-            patches.push(patch_for(
-                window,
-                ReconnectOutcome::Closed,
-                0,
-                String::new(),
-            ));
         } else if fingerprint.hwnd != 0 {
             let (outcome, hwnd) = match_restored_hwnd(fingerprint, &deps);
             match outcome {
@@ -470,15 +474,7 @@ pub fn build_reconnect_patches(
                     ));
                     continue;
                 }
-                ReconnectOutcome::Closed => {
-                    summary.invalidated += 1;
-                    patches.push(patch_for(
-                        window,
-                        ReconnectOutcome::Closed,
-                        0,
-                        String::new(),
-                    ));
-                }
+                ReconnectOutcome::Closed => {}
                 ReconnectOutcome::MetadataMismatch => {
                     summary.metadata_mismatch += 1;
                     patches.push(patch_for(
@@ -530,20 +526,90 @@ pub fn build_reconnect_patches(
     (summary, patches)
 }
 
-pub fn apply_reconnect_patches(workspaces: &mut [MmWorkspace], patches: &[ReconnectPatch]) {
-    for patch in patches {
-        if let Some(window) = workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == patch.workspace_id)
-            .and_then(|workspace| workspace.windows.get_mut(patch.window_index))
-        {
-            window.hwnd = patch.binding.hwnd;
-            window.valid = patch.binding.valid;
-            window.binding_status = patch.binding.binding_status;
-            window.binding_verified = patch.binding.binding_verified;
-            window.live_title = patch.binding.live_title.clone();
+fn count_applied_outcome(summary: &mut ReconnectSummary, outcome: ReconnectOutcome) {
+    match outcome {
+        ReconnectOutcome::AlreadyValid => summary.already_valid += 1,
+        ReconnectOutcome::Reconnected => summary.reconnected += 1,
+        ReconnectOutcome::Missing | ReconnectOutcome::Closed | ReconnectOutcome::Invalidated => {
+            summary.missing += 1;
         }
+        ReconnectOutcome::Ambiguous => summary.ambiguous += 1,
+        ReconnectOutcome::MetadataMismatch => summary.metadata_mismatch += 1,
     }
+}
+
+fn binding_fields_changed(window: &MmWindow, binding: &ReconnectBindingPatch) -> bool {
+    window.hwnd != binding.hwnd
+        || window.valid != binding.valid
+        || window.binding_status != binding.binding_status
+        || window.binding_verified != binding.binding_verified
+        || window.live_title != binding.live_title
+}
+
+fn current_assigned_hwnds(workspaces: &[MmWorkspace]) -> HashSet<usize> {
+    workspaces
+        .iter()
+        .filter(|workspace| !workspace.disabled)
+        .flat_map(|workspace| &workspace.windows)
+        .filter(|window| !window.disabled && window.hwnd != 0 && window.valid)
+        .map(|window| window.hwnd)
+        .collect()
+}
+
+pub fn apply_reconnect_patches(
+    workspaces: &mut [MmWorkspace],
+    patches: &[ReconnectPatch],
+) -> ReconnectSummary {
+    let mut summary = ReconnectSummary::default();
+    let mut assigned = current_assigned_hwnds(workspaces);
+
+    for patch in patches {
+        let Some(workspace_index) = workspaces
+            .iter()
+            .position(|workspace| workspace.id == patch.workspace_id)
+        else {
+            summary.stale_results_discarded += 1;
+            continue;
+        };
+
+        let Some(window) = workspaces[workspace_index]
+            .windows
+            .get_mut(patch.window_index)
+        else {
+            summary.stale_results_discarded += 1;
+            continue;
+        };
+
+        let current = ReconnectFingerprint::from(&*window);
+        if current != patch.original {
+            summary.stale_results_discarded += 1;
+            continue;
+        }
+
+        if patch.outcome == ReconnectOutcome::Reconnected {
+            let candidate = patch.binding.hwnd;
+            if candidate != 0 && assigned.contains(&candidate) {
+                summary.stale_results_discarded += 1;
+                continue;
+            }
+        }
+
+        if binding_fields_changed(window, &patch.binding) {
+            summary.binding_snapshot_changed = true;
+        }
+        window.hwnd = patch.binding.hwnd;
+        window.valid = patch.binding.valid;
+        window.binding_status = patch.binding.binding_status;
+        window.binding_verified = patch.binding.binding_verified;
+        window.live_title = patch.binding.live_title.clone();
+
+        if patch.binding.hwnd != 0 && patch.binding.valid {
+            assigned.insert(patch.binding.hwnd);
+        }
+        count_applied_outcome(&mut summary, patch.outcome);
+    }
+
+    summary
 }
 
 pub fn reconnect_workspaces_with_deps(
@@ -551,9 +617,8 @@ pub fn reconnect_workspaces_with_deps(
     deps: ReconnectDeps<'_>,
 ) -> ReconnectSummary {
     let snapshot = collect_reconnect_snapshot(workspaces);
-    let (summary, patches) = build_reconnect_patches(&snapshot, deps);
-    apply_reconnect_patches(workspaces, &patches);
-    summary
+    let (_worker_summary, patches) = build_reconnect_patches(&snapshot, deps);
+    apply_reconnect_patches(workspaces, &patches)
 }
 
 pub fn reconnect_shared_workspaces_with_deps(
@@ -561,10 +626,9 @@ pub fn reconnect_shared_workspaces_with_deps(
     deps: ReconnectDeps<'_>,
 ) -> ReconnectSummary {
     let snapshot = collect_reconnect_snapshot_from_mutex(workspaces);
-    let (summary, patches) = build_reconnect_patches(&snapshot, deps);
+    let (_worker_summary, patches) = build_reconnect_patches(&snapshot, deps);
     let mut guard = workspaces.lock().unwrap();
-    apply_reconnect_patches(&mut guard, &patches);
-    summary
+    apply_reconnect_patches(&mut guard, &patches)
 }
 
 /// Runs exact-title reconnect fallback only for unresolved enabled windows, preserving
@@ -748,7 +812,6 @@ mod tests {
                 enumerate_top_level_windows: &|| Vec::new(),
             },
         );
-        assert_eq!(summary.invalidated, 1);
         assert_eq!(summary.missing, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
         assert!(!workspaces[0].windows[0].binding_verified);
@@ -772,7 +835,7 @@ mod tests {
                 enumerate_top_level_windows: &|| vec![candidate.clone()],
             },
         );
-        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.missing, 0);
         assert_eq!(summary.reconnected, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 9);
         assert!(workspaces[0].windows[0].binding_verified);
@@ -799,7 +862,7 @@ mod tests {
                 enumerate_top_level_windows: &|| vec![candidate.clone()],
             },
         );
-        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.missing, 0);
         assert_eq!(summary.reconnected, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 42);
         assert!(workspaces[0].windows[0].binding_verified);
@@ -975,7 +1038,7 @@ mod tests {
                 enumerate_top_level_windows: &|| vec![candidate.clone()],
             },
         );
-        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.missing, 0);
         assert_eq!(summary.reconnected, 1);
         assert!(summary.binding_snapshot_changed);
         assert_eq!(workspaces[0].windows[0].hwnd, 42);
@@ -1002,21 +1065,21 @@ mod tests {
             },
         );
 
-        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.missing, 0);
         assert_eq!(summary.reconnected, 1);
-        assert_eq!(patches.len(), 2);
+        assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].workspace_id, "workspace-a");
         assert_eq!(patches[0].window_index, 0);
         assert_eq!(patches[0].original.hwnd, 5);
-        assert_eq!(patches[0].outcome, ReconnectOutcome::Closed);
-        assert_eq!(patches[1].outcome, ReconnectOutcome::Reconnected);
-        assert_eq!(patches[1].binding.hwnd, 9);
+        assert_eq!(patches[0].outcome, ReconnectOutcome::Reconnected);
+        assert_eq!(patches[0].binding.hwnd, 9);
         assert_eq!(
-            patches[1].binding.binding_status,
+            patches[0].binding.binding_status,
             MmBindingStatus::Reconnected
         );
 
-        apply_reconnect_patches(&mut workspaces, &patches);
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+        assert_eq!(applied.reconnected, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 9);
         assert_eq!(workspaces[0].windows[0].live_title, "Doc");
         assert!(workspaces[0].windows[0].binding_verified);
@@ -1071,5 +1134,218 @@ mod tests {
         assert_eq!(summary.already_valid, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 5);
         assert!(workspaces[0].windows[0].binding_verified);
+    }
+
+    #[test]
+    fn recapture_during_reconnect_discards_stale_patch() {
+        let mut workspaces = workspace(MmWindow {
+            captured_title: "Doc".into(),
+            executable: "old.exe".into(),
+            alias: "keep".into(),
+            ..MmWindow::default()
+        });
+        workspaces[0].id = "workspace-a".into();
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (_worker, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| vec![live(10, "Doc", "old.exe", "", "")],
+            },
+        );
+
+        workspaces[0].windows[0].captured_title = "New Doc".into();
+        workspaces[0].windows[0].executable = "new.exe".into();
+        workspaces[0].windows[0].mark_bound(55);
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+
+        assert_eq!(applied.stale_results_discarded, 1);
+        assert_eq!(applied.reconnected, 0);
+        assert_eq!(workspaces[0].windows[0].hwnd, 55);
+        assert_eq!(workspaces[0].windows[0].captured_title, "New Doc");
+        assert_eq!(workspaces[0].windows[0].executable, "new.exe");
+    }
+
+    #[test]
+    fn deleted_workspace_discards_stale_patch_safely() {
+        let mut workspaces = workspace(MmWindow {
+            captured_title: "Doc".into(),
+            ..MmWindow::default()
+        });
+        workspaces[0].id = "workspace-a".into();
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (_worker, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| vec![live(10, "Doc", "", "", "")],
+            },
+        );
+        workspaces.clear();
+
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+
+        assert_eq!(applied.stale_results_discarded, 1);
+        assert!(workspaces.is_empty());
+    }
+
+    #[test]
+    fn reordered_windows_do_not_receive_incorrect_patches() {
+        let mut workspaces = vec![MmWorkspace {
+            id: "workspace-a".into(),
+            windows: vec![
+                MmWindow {
+                    captured_title: "One".into(),
+                    ..MmWindow::default()
+                },
+                MmWindow {
+                    captured_title: "Two".into(),
+                    ..MmWindow::default()
+                },
+            ],
+            ..MmWorkspace::default()
+        }];
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (_worker, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| {
+                    vec![live(11, "One", "", "", ""), live(22, "Two", "", "", "")]
+                },
+            },
+        );
+        workspaces[0].windows.swap(0, 1);
+
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+
+        assert_eq!(applied.stale_results_discarded, 2);
+        assert_eq!(workspaces[0].windows[0].captured_title, "Two");
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert_eq!(workspaces[0].windows[1].captured_title, "One");
+        assert_eq!(workspaces[0].windows[1].hwnd, 0);
+    }
+
+    #[test]
+    fn candidate_hwnd_already_assigned_elsewhere_is_rejected_at_apply() {
+        let mut workspaces = vec![MmWorkspace {
+            id: "workspace-a".into(),
+            windows: vec![MmWindow {
+                captured_title: "Doc".into(),
+                ..MmWindow::default()
+            }],
+            ..MmWorkspace::default()
+        }];
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (_worker, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| vec![live(77, "Doc", "", "", "")],
+            },
+        );
+        workspaces.push(MmWorkspace {
+            id: "workspace-b".into(),
+            windows: vec![MmWindow {
+                captured_title: "Other".into(),
+                hwnd: 77,
+                valid: true,
+                binding_status: MmBindingStatus::Bound,
+                binding_verified: true,
+                ..MmWindow::default()
+            }],
+            ..MmWorkspace::default()
+        });
+
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+
+        assert_eq!(applied.stale_results_discarded, 1);
+        assert_eq!(applied.reconnected, 0);
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert_eq!(workspaces[1].windows[0].hwnd, 77);
+    }
+
+    #[test]
+    fn final_summary_counts_applied_patches_not_discarded_worker_results() {
+        let mut workspaces = workspace(MmWindow {
+            captured_title: "Doc".into(),
+            ..MmWindow::default()
+        });
+        workspaces[0].id = "workspace-a".into();
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (worker, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| vec![live(10, "Doc", "", "", "")],
+            },
+        );
+        assert_eq!(worker.reconnected, 1);
+        workspaces[0].windows[0].captured_title = "Changed".into();
+
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+
+        assert_eq!(applied.reconnected, 0);
+        assert_eq!(applied.stale_results_discarded, 1);
+        assert!(!applied.binding_snapshot_changed);
+    }
+
+    #[test]
+    fn patching_only_updates_binding_fields() {
+        let mut workspaces = workspace(MmWindow {
+            alias: "Alias".into(),
+            captured_title: "Doc".into(),
+            executable: "app.exe".into(),
+            class_name: "Class".into(),
+            process_path: "C:/app.exe".into(),
+            home_rect: Some(rect()),
+            target_rect: Some(MmRect {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            }),
+            disabled: false,
+            ..MmWindow::default()
+        });
+        workspaces[0].id = "workspace-a".into();
+        workspaces[0].name = "Workspace".into();
+        workspaces[0].disabled = false;
+        let before_window = workspaces[0].windows[0].clone();
+        let before_workspace_name = workspaces[0].name.clone();
+        let before_workspace_disabled = workspaces[0].disabled;
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (_worker, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| {
+                    vec![live(88, "Doc", "app.exe", "Class", "C:/app.exe")]
+                },
+            },
+        );
+
+        let applied = apply_reconnect_patches(&mut workspaces, &patches);
+
+        assert_eq!(applied.reconnected, 1);
+        assert!(applied.binding_snapshot_changed);
+        let window = &workspaces[0].windows[0];
+        assert_eq!(window.alias, before_window.alias);
+        assert_eq!(window.home_rect, before_window.home_rect);
+        assert_eq!(window.target_rect, before_window.target_rect);
+        assert_eq!(window.captured_title, before_window.captured_title);
+        assert_eq!(window.executable, before_window.executable);
+        assert_eq!(window.class_name, before_window.class_name);
+        assert_eq!(window.process_path, before_window.process_path);
+        assert_eq!(window.disabled, before_window.disabled);
+        assert_eq!(workspaces[0].name, before_workspace_name);
+        assert_eq!(workspaces[0].disabled, before_workspace_disabled);
+        assert_eq!(window.hwnd, 88);
     }
 }
