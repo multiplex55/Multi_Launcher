@@ -6,11 +6,13 @@ use crate::multi_manager::capture;
 use crate::multi_manager::model::MmBindingStatus;
 use crate::multi_manager::model::{PendingCaptureAction, RecaptureQueueItem};
 use crate::multi_manager::runtime::MultiManagerRuntimeEvent;
+use crate::multi_manager::state::{ReconnectStartResult, ReconnectTrigger};
 use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
 use std::sync::atomic::Ordering;
 
 impl LauncherApp {
     pub(crate) fn multi_manager_drain_runtime_events(&mut self) {
+        self.multi_manager.reap_reconnect_worker();
         let events = if let Ok(mut queue) = self.multi_manager.runtime.event_queue.lock() {
             queue.drain(..).collect::<Vec<_>>()
         } else {
@@ -54,6 +56,18 @@ impl LauncherApp {
                     self.report_error_message(
                         "multi_manager.runtime",
                         format!("Failed to enumerate MultiManager windows for {context}: {error}"),
+                    );
+                }
+                MultiManagerRuntimeEvent::ReconnectCompleted { summary, .. } => {
+                    if summary.binding_snapshot_changed {
+                        self.multi_manager.mark_bindings_dirty();
+                    }
+                    self.add_success_toast(format_reconnect_summary(summary));
+                }
+                MultiManagerRuntimeEvent::ReconnectFailed { error, .. } => {
+                    self.report_error_message(
+                        "multi_manager.reconnect",
+                        format!("Failed to reconnect MultiManager windows: {error}"),
                     );
                 }
             }
@@ -116,30 +130,23 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_reconnect_windows(&mut self) {
-        let reconnect_result = self
-            .multi_manager
-            .workspaces
-            .lock()
-            .map(|mut workspaces| {
-                crate::multi_manager::reconnect::reconnect_workspaces(&mut workspaces)
-            })
-            .map_err(|_| ());
-
-        let summary = match reconnect_result {
-            Ok(summary) => summary,
-            Err(()) => {
+        match self.multi_manager.start_reconnect(ReconnectTrigger::Manual) {
+            ReconnectStartResult::Started => {
+                self.add_success_toast("Started MultiManager window reconnect".to_string());
+            }
+            ReconnectStartResult::AlreadyRunning => {
+                self.report_error_message(
+                    "multi_manager.reconnect",
+                    "A MultiManager reconnect is already running",
+                );
+            }
+            ReconnectStartResult::SnapshotLockFailed => {
                 self.report_error_message(
                     "multi_manager.reconnect",
                     "Failed to lock MultiManager workspaces to reconnect windows",
                 );
-                return;
             }
-        };
-
-        if summary.binding_snapshot_changed {
-            self.multi_manager.mark_bindings_dirty();
         }
-        self.add_success_toast(format_reconnect_summary(summary));
     }
 
     pub fn multi_manager_start_recapture_all(&mut self) {

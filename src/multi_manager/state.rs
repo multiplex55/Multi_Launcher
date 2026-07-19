@@ -1,17 +1,43 @@
 use crate::multi_manager::model::{MmWorkspace, PendingCaptureAction, RecaptureQueueItem};
-use crate::multi_manager::runtime::MultiManagerRuntime;
+use crate::multi_manager::runtime::{MultiManagerRuntime, MultiManagerRuntimeEvent};
 use crate::multi_manager::{bindings, reconnect, store, win};
 use crate::settings::MultiManagerSettings;
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const AUTO_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const BINDINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 pub const LIVE_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectTrigger {
+    Startup,
+    Reload,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectStartResult {
+    Started,
+    AlreadyRunning,
+    SnapshotLockFailed,
+}
+
+struct ReconnectInProgressGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for ReconnectInProgressGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
 
 pub struct MultiManagerState {
     pub dirty: bool,
@@ -35,6 +61,10 @@ pub struct MultiManagerState {
     pub bindings_dirty_since: Option<Instant>,
     pub last_bindings_save_attempt: Option<Instant>,
     pub last_live_title_refresh: Option<Instant>,
+    pub reconnect_in_progress: Arc<AtomicBool>,
+    pub reconnect_job: Option<JoinHandle<()>>,
+    pub pending_automatic_reconnect: bool,
+    pub shutdown_started: bool,
 }
 
 impl MultiManagerState {
@@ -57,7 +87,7 @@ impl MultiManagerState {
         let runtime = start_runtime_after_restore(Arc::clone(&workspaces), settings);
         let last_hotkey_info = Arc::clone(&runtime.last_hotkey_info);
 
-        Self {
+        let mut state = Self {
             dirty: false,
             bindings_dirty: false,
             pending_capture: None,
@@ -79,7 +109,15 @@ impl MultiManagerState {
             bindings_dirty_since: None,
             last_bindings_save_attempt: None,
             last_live_title_refresh: None,
+            reconnect_in_progress: Arc::new(AtomicBool::new(false)),
+            reconnect_job: None,
+            pending_automatic_reconnect: false,
+            shutdown_started: false,
+        };
+        if settings.auto_reconnect_on_load {
+            let _ = state.start_reconnect(ReconnectTrigger::Startup);
         }
+        state
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -122,16 +160,14 @@ impl MultiManagerState {
 
     pub fn reload(&mut self) -> Result<()> {
         let mut loaded = store::load_workspaces(&self.workspace_path)?;
-        restore_and_optionally_reconnect(
-            &mut loaded,
-            &self.bindings_path,
-            self.auto_reconnect_on_load,
-        );
-        let mut workspaces = self
-            .workspaces
-            .lock()
-            .map_err(|_| anyhow::anyhow!("MultiManager workspace lock poisoned"))?;
-        *workspaces = loaded;
+        restore_bindings_for_load(&mut loaded, &self.bindings_path);
+        {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MultiManager workspace lock poisoned"))?;
+            *workspaces = loaded;
+        }
         self.dirty = false;
         self.dirty_since = None;
         self.bindings_dirty = false;
@@ -140,7 +176,98 @@ impl MultiManagerState {
             .control
             .bindings_dirty_signal
             .store(false, Ordering::Relaxed);
+        if self.auto_reconnect_on_load {
+            let _ = self.start_reconnect(ReconnectTrigger::Reload);
+        }
         Ok(())
+    }
+
+    pub fn start_reconnect(&mut self, trigger: ReconnectTrigger) -> ReconnectStartResult {
+        self.reap_reconnect_worker();
+        if self.shutdown_started || self.runtime.control.shutdown.load(Ordering::Acquire) {
+            return ReconnectStartResult::AlreadyRunning;
+        }
+        if self
+            .reconnect_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            if trigger != ReconnectTrigger::Manual {
+                self.pending_automatic_reconnect = true;
+            }
+            return ReconnectStartResult::AlreadyRunning;
+        }
+        match self.workspaces.try_lock() {
+            Ok(_) => {}
+            Err(TryLockError::Poisoned(_)) | Err(TryLockError::WouldBlock) => {
+                self.reconnect_in_progress.store(false, Ordering::Release);
+                return ReconnectStartResult::SnapshotLockFailed;
+            }
+        }
+        let workspaces = Arc::clone(&self.workspaces);
+        let events = Arc::clone(&self.runtime.event_queue);
+        let bindings_dirty = Arc::clone(&self.runtime.control.bindings_dirty_signal);
+        let in_progress = Arc::clone(&self.reconnect_in_progress);
+        self.reconnect_job = Some(thread::spawn(move || {
+            let _guard = ReconnectInProgressGuard { flag: in_progress };
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                let snapshot = {
+                    let guard = workspaces.lock().map_err(|_| {
+                        "workspace lock poisoned during reconnect snapshot".to_string()
+                    })?;
+                    reconnect::collect_reconnect_snapshot(&guard)
+                };
+                let is_window = |hwnd| win::is_valid_window(hwnd);
+                let query_identity = |hwnd| Some(win::query_hwnd_identity(hwnd));
+                let enumerate = || win::enumerate_top_level_windows().unwrap_or_default();
+                let (_worker_summary, patches) = reconnect::build_reconnect_patches(
+                    &snapshot,
+                    reconnect::ReconnectDeps {
+                        is_window: &is_window,
+                        query_identity: &query_identity,
+                        enumerate_top_level_windows: &enumerate,
+                    },
+                );
+                let mut guard = workspaces
+                    .lock()
+                    .map_err(|_| "workspace lock poisoned during reconnect apply".to_string())?;
+                let summary = reconnect::apply_reconnect_patches(&mut guard, &patches);
+                if summary.binding_snapshot_changed {
+                    bindings_dirty.store(true, Ordering::Relaxed);
+                }
+                Ok::<_, String>(summary)
+            }));
+            let event = match result {
+                Ok(Ok(summary)) => {
+                    MultiManagerRuntimeEvent::ReconnectCompleted { trigger, summary }
+                }
+                Ok(Err(error)) => MultiManagerRuntimeEvent::ReconnectFailed { trigger, error },
+                Err(_) => MultiManagerRuntimeEvent::ReconnectFailed {
+                    trigger,
+                    error: "reconnect worker panicked".to_string(),
+                },
+            };
+            if let Ok(mut queue) = events.lock() {
+                queue.push_back(event);
+            }
+        }));
+        ReconnectStartResult::Started
+    }
+
+    pub fn reap_reconnect_worker(&mut self) {
+        if self
+            .reconnect_job
+            .as_ref()
+            .is_some_and(|job| job.is_finished())
+        {
+            if let Some(job) = self.reconnect_job.take() {
+                let _ = job.join();
+            }
+            if self.pending_automatic_reconnect && !self.shutdown_started {
+                self.pending_automatic_reconnect = false;
+                let _ = self.start_reconnect(ReconnectTrigger::Reload);
+            }
+        }
     }
 
     pub fn mark_dirty(&mut self) {
@@ -251,9 +378,14 @@ impl MultiManagerState {
     }
 
     pub fn shutdown(&mut self) {
+        self.shutdown_started = true;
+        self.pending_automatic_reconnect = false;
         self.capture_session = None;
         self.pending_capture = None;
         self.queued_capture = None;
+        if let Some(job) = self.reconnect_job.take() {
+            let _ = job.join();
+        }
         self.runtime.shutdown();
     }
 
@@ -319,17 +451,13 @@ fn capture_action_target(action: &PendingCaptureAction) -> (&str, Option<usize>)
 fn prepare_workspaces_for_startup(
     mut workspaces: Vec<MmWorkspace>,
     bindings_path: &Path,
-    auto_reconnect_on_load: bool,
+    _auto_reconnect_on_load: bool,
 ) -> Vec<MmWorkspace> {
-    restore_and_optionally_reconnect(&mut workspaces, bindings_path, auto_reconnect_on_load);
+    restore_bindings_for_load(&mut workspaces, bindings_path);
     workspaces
 }
 
-fn restore_and_optionally_reconnect(
-    workspaces: &mut [MmWorkspace],
-    bindings_path: &Path,
-    auto_reconnect_on_load: bool,
-) {
+fn restore_bindings_for_load(workspaces: &mut [MmWorkspace], bindings_path: &Path) {
     let snapshots_loaded = match bindings::load_bindings_if_exists(bindings_path) {
         Ok(Some(snapshots)) => {
             bindings::restore_bindings(workspaces, &snapshots);
@@ -345,10 +473,7 @@ fn restore_and_optionally_reconnect(
         }
     };
 
-    if snapshots_loaded && auto_reconnect_on_load {
-        let live = win::enumerate_top_level_windows().unwrap_or_default();
-        reconnect::reconnect_unresolved_workspaces_with_windows(workspaces, &live);
-    }
+    let _ = snapshots_loaded;
 }
 
 fn start_runtime_after_restore(
@@ -443,6 +568,7 @@ mod tests {
         let state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -561,6 +687,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -603,6 +730,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -618,6 +746,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -632,6 +761,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -648,6 +778,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -663,12 +794,151 @@ mod tests {
     }
 
     #[test]
+    fn only_one_reconnect_job_can_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.reconnect_in_progress.store(true, Ordering::Relaxed);
+
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Manual),
+            ReconnectStartResult::AlreadyRunning
+        );
+        assert!(state.reconnect_job.is_none());
+    }
+
+    #[test]
+    fn concurrent_automatic_reconnect_keeps_one_pending_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.reconnect_in_progress.store(true, Ordering::Relaxed);
+
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Reload),
+            ReconnectStartResult::AlreadyRunning
+        );
+        assert!(state.pending_automatic_reconnect);
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Startup),
+            ReconnectStartResult::AlreadyRunning
+        );
+        assert!(state.pending_automatic_reconnect);
+    }
+
+    #[test]
+    fn failed_manual_reconnect_can_be_retried_successfully() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        let workspaces = Arc::clone(&state.workspaces);
+        let held = workspaces.lock().unwrap();
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Manual),
+            ReconnectStartResult::SnapshotLockFailed
+        );
+        drop(held);
+
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Manual),
+            ReconnectStartResult::Started
+        );
+        state.shutdown();
+    }
+
+    #[test]
+    fn in_progress_flag_resets_on_snapshot_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        let workspaces = Arc::clone(&state.workspaces);
+        let held = workspaces.lock().unwrap();
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Manual),
+            ReconnectStartResult::SnapshotLockFailed
+        );
+        assert!(!state.reconnect_in_progress.load(Ordering::Relaxed));
+        drop(held);
+    }
+
+    #[test]
+    fn reconnect_worker_is_joined_by_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Manual),
+            ReconnectStartResult::Started
+        );
+        state.shutdown();
+        assert!(state.reconnect_job.is_none());
+        assert!(!state.reconnect_in_progress.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn no_new_reconnect_starts_after_shutdown_begins() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_reconnect_on_load: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state.shutdown_started = true;
+
+        assert_eq!(
+            state.start_reconnect(ReconnectTrigger::Manual),
+            ReconnectStartResult::AlreadyRunning
+        );
+        assert!(state.reconnect_job.is_none());
+    }
+
+    #[test]
     fn live_title_refresh_does_not_mark_bindings_dirty() {
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.json");
         let state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
