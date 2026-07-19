@@ -18,6 +18,7 @@
 pub mod actions;
 pub mod actions_editor;
 
+pub mod clipboard_modify;
 pub mod common;
 pub mod dashboard;
 pub mod file_search;
