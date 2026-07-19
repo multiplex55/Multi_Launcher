@@ -232,7 +232,7 @@ fn folded_bytes_with_original_offsets(text: &str) -> (String, Vec<usize>) {
     for (start, ch) in text.char_indices() {
         for lower in ch.to_lowercase() {
             let s = lower.to_string();
-            map.extend(std::iter::repeat(start).take(s.len()));
+            map.extend(std::iter::repeat_n(start, s.len()));
             folded.push(lower);
         }
     }
@@ -272,12 +272,11 @@ pub fn fuzzy_char_indices_to_byte_ranges(
     for start in byte_indices {
         if let Ok(char_pos) = original_starts.binary_search(&start) {
             let end = original_starts[char_pos + 1];
-            if let Some(last) = ranges.last_mut() {
-                if last.byte_end == start {
+            if let Some(last) = ranges.last_mut()
+                && last.byte_end == start {
                     last.byte_end = end;
                     continue;
                 }
-            }
             ranges.push(TextMatchRange {
                 byte_start: start,
                 byte_end: end,

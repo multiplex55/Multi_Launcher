@@ -305,7 +305,7 @@ fn default_highlight_formats() -> (TextFormat, TextFormat) {
     };
     let highlight = TextFormat {
         font_id: FontId::proportional(14.0),
-        underline: Stroke::new(1.0, egui::Color32::PLACEHOLDER),
+        underline: Stroke::new(1.0_f32, egui::Color32::PLACEHOLDER),
         ..Default::default()
     };
     (normal, highlight)
@@ -337,7 +337,7 @@ fn visual_highlight_formats(ui: &egui::Ui, selected: bool) -> (TextFormat, TextF
         font_id: FontId::proportional(14.0),
         color: highlight_color,
         background: highlight_bg,
-        underline: Stroke::new(1.0, highlight_color),
+        underline: Stroke::new(1.0_f32, highlight_color),
         ..Default::default()
     };
     (normal, highlight)
@@ -377,11 +377,11 @@ fn normalized_highlight_ranges(text: &str, ranges: &[(usize, usize)]) -> Vec<(us
     out.sort_unstable();
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (start, end) in out {
-        if let Some(last) = merged.last_mut() {
-            if start <= last.1 {
-                last.1 = last.1.max(end);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            continue;
         }
         merged.push((start, end));
     }
@@ -465,7 +465,7 @@ pub fn row_matches_refinement(
             match_quality,
             ..
         } => {
-            let fields = vec![
+            let fields = [
                 display_filename.clone(),
                 parent_directory_display.clone(),
                 path.display().to_string(),
@@ -481,7 +481,7 @@ pub fn row_matches_refinement(
             content_match,
             ..
         } => {
-            let fields = vec![
+            let fields = [
                 path.display().to_string(),
                 content_match.line_number.to_string(),
                 content_match.line.clone(),

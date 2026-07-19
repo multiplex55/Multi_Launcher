@@ -10,6 +10,7 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct V0File {
+    schema_version: u32,
     #[serde(default)]
     templates: Vec<ClipboardTemplate>,
     #[serde(default)]
@@ -27,6 +28,7 @@ pub fn migrate_file(
     match version {
         0 => {
             let old: V0File = serde_json::from_slice(bytes)?;
+            anyhow::ensure!(old.schema_version == 0, "v0 migration received schema_version {}", old.schema_version);
             let model = VersionedClipboardModifiersFile {
                 schema_version: CURRENT_SCHEMA_VERSION,
                 templates: old.templates,

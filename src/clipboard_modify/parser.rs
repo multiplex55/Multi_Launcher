@@ -90,11 +90,10 @@ pub fn parse(input: &str, catalog: &ClipboardModifierCatalog) -> ClipboardModify
     if stages.is_empty() {
         return ClipboardModifyParseResult::OpenSection(ModifySection::Modify);
     }
-    if stages.len() == 1 {
-        if let Some(special) = parse_special(&stages[0], catalog) {
+    if stages.len() == 1
+        && let Some(special) = parse_special(&stages[0], catalog) {
             return special;
         }
-    }
     let mut out = Vec::new();
     for (idx, stage) in stages.iter().enumerate() {
         match parse_stage(stage, idx) {
@@ -187,8 +186,9 @@ fn lex_stages(input: &str, offset: usize) -> Result<Vec<Stage>, ParserError> {
         cur.span.end = tok.span.end;
         cur.tokens.push(tok);
     }
-    if let Some(last) = stages.last() {
-        if last.tokens.is_empty() && stages.len() > 1 {
+    if let Some(last) = stages.last()
+        && last.tokens.is_empty()
+        && stages.len() > 1 {
             return Err(err(
                 Some(stages.len() - 1),
                 last.span.start.saturating_sub(1),
@@ -196,7 +196,6 @@ fn lex_stages(input: &str, offset: usize) -> Result<Vec<Stage>, ParserError> {
                 ParserErrorKind::TrailingPipe,
             ));
         }
-    }
     Ok(stages)
 }
 fn lex_bare<I: Iterator<Item = (usize, char)>>(

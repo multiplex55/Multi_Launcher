@@ -430,7 +430,7 @@ impl DashboardDataCache {
 
         let mut total_rx = 0u64;
         let mut total_tx = 0u64;
-        for (_, data) in nets.iter() {
+        for data in nets.values() {
             total_rx += data.total_received();
             total_tx += data.total_transmitted();
         }

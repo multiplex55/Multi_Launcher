@@ -1128,7 +1128,7 @@ impl MgGesturesDialog {
                                     painter.rect_stroke(
                                         rect,
                                         0.0,
-                                        egui::Stroke::new(1.0, egui::Color32::GRAY),
+                                        egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
                                     );
                                     if response.drag_started() {
                                         // Starting a new recording replaces any existing saved preview stroke.
@@ -1170,7 +1170,7 @@ impl MgGesturesDialog {
                                             painter.add(egui::Shape::line(
                                                 pts,
                                                 egui::Stroke::new(
-                                                    2.0,
+                                                    2.0_f32,
                                                     egui::Color32::from_gray(140),
                                                 ),
                                             ));
@@ -1179,7 +1179,7 @@ impl MgGesturesDialog {
                                     if self.recorder.points().len() >= 2 {
                                         painter.add(egui::Shape::line(
                                             self.recorder.points().to_vec(),
-                                            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                                            egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
                                         ));
                                     }
                                     ui.separator();

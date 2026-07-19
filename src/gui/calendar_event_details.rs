@@ -163,7 +163,7 @@ impl CalendarEventDetails {
                             id: new_event_id(),
                             title: event.title.clone(),
                             start,
-                            end: Some(start + duration).filter(|_| event.end.is_some()),
+                            end: event.end.is_some().then_some(start + duration),
                             duration_minutes: event.duration_minutes,
                             all_day: event.all_day,
                             notes: event.notes.clone(),

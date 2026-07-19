@@ -239,11 +239,11 @@ fn ripgrep_settings_ui_with_probe(
             .automatic_result
             .as_ref()
             .filter(|detected| ripgrep_resolution_has_valid_path_and_version(detected))
+            && detected.path != *path
+            && ui.button("Use detected path").clicked()
         {
-            if detected.path != *path && ui.button("Use detected path").clicked() {
-                *path = detected.path.clone();
-                invalidate_configured_result(state);
-            }
+            *path = detected.path.clone();
+            invalidate_configured_result(state);
         }
     });
 

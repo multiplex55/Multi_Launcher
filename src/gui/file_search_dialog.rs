@@ -962,7 +962,7 @@ impl FileSearchDialogState {
             FileSearchMode::Filename => counts.filename_rows,
             FileSearchMode::Content => counts.content_displayed_match_rows,
         };
-        let prefix = if self.refinement_text.trim().is_empty() {
+        if self.refinement_text.trim().is_empty() {
             match self.selected_mode {
                 FileSearchMode::Filename => format!("Results: {total}"),
                 FileSearchMode::Content => format!(
@@ -972,8 +972,7 @@ impl FileSearchDialogState {
             }
         } else {
             format!("Showing {visible} of {total} results")
-        };
-        prefix
+        }
     }
 
     pub fn ui(
@@ -1430,15 +1429,14 @@ impl FileSearchDialogState {
                             results::column_label(*column),
                             results::filename_sort_indicator(self.ui_preferences.filename_sort, *column)
                         );
-                        if ui.button(label).clicked() {
-                            if let Some(sort) = results::filename_sort_after_header_click(
+                        if ui.button(label).clicked()
+                            && let Some(sort) = results::filename_sort_after_header_click(
                                 self.ui_preferences.filename_sort,
                                 *column,
                             ) {
                                 self.ui_preferences.filename_sort = sort;
                                 self.ui_preferences_dirty = true;
                                 self.pending_sort_change = true;
-                            }
                         }
                     });
                 }

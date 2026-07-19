@@ -1390,7 +1390,7 @@ mod tests {
     fn live_title_refresh_helper_does_not_mark_workspace_or_bindings_dirty() {
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.json");
-        let mut state = crate::multi_manager::state::MultiManagerState::load_or_default(
+        let state = crate::multi_manager::state::MultiManagerState::load_or_default(
             &crate::settings::MultiManagerSettings {
                 enabled: false,
                 ..Default::default()
