@@ -2,6 +2,8 @@ use crate::multi_manager::activation::{
     self, ActivationDeps, ActivationOperation, ActivationResult,
 };
 use crate::multi_manager::model::{MmHotkey, MmRect, MmWorkspace};
+use crate::multi_manager::reconnect::ReconnectSummary;
+use crate::multi_manager::state::ReconnectTrigger;
 use crate::multi_manager::win;
 use crate::settings::MultiManagerSettings;
 use anyhow::Result;
@@ -79,6 +81,14 @@ pub enum MultiManagerRuntimeEvent {
     },
     EnumerationFailed {
         context: String,
+        error: String,
+    },
+    ReconnectCompleted {
+        trigger: ReconnectTrigger,
+        summary: ReconnectSummary,
+    },
+    ReconnectFailed {
+        trigger: ReconnectTrigger,
         error: String,
     },
 }
