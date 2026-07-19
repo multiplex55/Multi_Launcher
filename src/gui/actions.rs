@@ -543,7 +543,7 @@ impl LauncherApp {
         } else if a.action == "mm:send-all-home" {
             self.multi_manager_send_all_home();
         } else if a.action == "mm:reconnect" {
-            self.multi_manager_reconnect_windows();
+            self.multi_manager_start_manual_reconnect();
         } else if a.action == "mm:save-bindings" {
             self.multi_manager_save_bindings();
         } else if a.action == "mm:restore-bindings" {

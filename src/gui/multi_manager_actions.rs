@@ -147,15 +147,14 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_reconnect_windows(&mut self) {
+        self.multi_manager_start_manual_reconnect();
+    }
+
+    pub(crate) fn multi_manager_start_manual_reconnect(&mut self) {
         match self.multi_manager.start_reconnect(ReconnectTrigger::Manual) {
-            ReconnectStartResult::Started => {
-                self.add_success_toast("Started MultiManager window reconnect".to_string());
-            }
+            ReconnectStartResult::Started => {}
             ReconnectStartResult::AlreadyRunning => {
-                self.report_error_message(
-                    "multi_manager.reconnect",
-                    "A MultiManager reconnect is already running",
-                );
+                self.add_error_toast("MultiManager reconnect is already running.");
             }
             ReconnectStartResult::SnapshotLockFailed => {
                 self.report_error_message(
@@ -1011,10 +1010,21 @@ fn log_applied_capture(action: &PendingCaptureAction, captured: &CapturedWindow)
 pub(crate) fn format_reconnect_summary(
     summary: crate::multi_manager::reconnect::ReconnectSummary,
 ) -> String {
-    format!(
-        "Reconnected MultiManager windows: {} reconnected, {} missing, {} ambiguous, {} metadata mismatches",
-        summary.reconnected, summary.missing, summary.ambiguous, summary.metadata_mismatch
-    )
+    let mut text = format!(
+        "MultiManager reconnect complete: {} already valid, {} reconnected, {} missing, {} ambiguous, {} metadata mismatches",
+        summary.already_valid,
+        summary.reconnected,
+        summary.missing,
+        summary.ambiguous,
+        summary.metadata_mismatch
+    );
+    if summary.stale_results_discarded > 0 {
+        text.push_str(&format!(
+            ", {} stale-result discards",
+            summary.stale_results_discarded
+        ));
+    }
+    text
 }
 
 pub(crate) fn build_recapture_queue(
@@ -1054,11 +1064,16 @@ pub(crate) fn build_recapture_queue(
 #[cfg(test)]
 mod tests {
     use super::{build_recapture_queue, format_reconnect_summary};
+    use crate::actions::Action;
     use crate::gui::LauncherApp;
+    use crate::gui::state::ActivationSource;
     use crate::multi_manager::capture::CaptureEvent;
     use crate::multi_manager::model::{
         MmRect, MmWindow, MmWorkspace, PendingCaptureAction, RecaptureQueueItem,
     };
+    use crate::multi_manager::reconnect::ReconnectSummary;
+    use crate::multi_manager::runtime::MultiManagerRuntimeEvent;
+    use crate::multi_manager::state::ReconnectTrigger;
     use crate::multi_manager::win::{CaptureKeyAction, CapturedWindow};
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
@@ -1068,20 +1083,161 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
+    fn action_mm_reconnect() -> Action {
+        Action {
+            label: "mm reconnect".into(),
+            desc: "Reconnect MultiManager windows".into(),
+            action: "mm:reconnect".into(),
+            args: None,
+        }
+    }
+
+    fn clear_toast_log() {
+        let _ = std::fs::remove_file(crate::toast_log::TOAST_LOG_FILE);
+    }
+
+    fn toast_log_contents() -> String {
+        std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap_or_default()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn button_and_mm_reconnect_command_use_same_manual_start_path() {
+        let mut button_app = test_app();
+        clear_toast_log();
+        button_app.multi_manager.pending_automatic_reconnect = false;
+        button_app
+            .multi_manager
+            .reconnect_in_progress
+            .store(true, Ordering::Relaxed);
+        button_app.multi_manager_start_manual_reconnect();
+
+        let mut command_app = test_app();
+        clear_toast_log();
+        command_app.multi_manager.pending_automatic_reconnect = false;
+        command_app
+            .multi_manager
+            .reconnect_in_progress
+            .store(true, Ordering::Relaxed);
+        command_app.activate_action_confirmed(action_mm_reconnect(), None, ActivationSource::Enter);
+
+        assert_eq!(button_app.error, command_app.error);
+        assert_eq!(command_app.error.as_deref(), None);
+        assert_eq!(
+            toast_log_contents()
+                .matches("MultiManager reconnect is already running.")
+                .count(),
+            1
+        );
+        button_app
+            .multi_manager
+            .reconnect_in_progress
+            .store(false, Ordering::Relaxed);
+        command_app
+            .multi_manager
+            .reconnect_in_progress
+            .store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn duplicate_manual_reconnect_shows_already_running_message() {
+        let mut app = test_app();
+        clear_toast_log();
+        app.multi_manager.pending_automatic_reconnect = false;
+        app.multi_manager
+            .reconnect_in_progress
+            .store(true, Ordering::Relaxed);
+
+        app.multi_manager_start_manual_reconnect();
+
+        assert_eq!(
+            toast_log_contents()
+                .matches("MultiManager reconnect is already running.")
+                .count(),
+            1
+        );
+        assert!(app.multi_manager.reconnect_job.is_none());
+        assert!(!app.multi_manager.pending_automatic_reconnect);
+        app.multi_manager
+            .reconnect_in_progress
+            .store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn manual_reconnect_completion_produces_one_terminal_toast() {
+        let mut app = test_app();
+        clear_toast_log();
+        app.multi_manager.runtime.event_queue.lock().unwrap().push_back(
+            MultiManagerRuntimeEvent::ReconnectCompleted {
+                trigger: ReconnectTrigger::Manual,
+                summary: ReconnectSummary {
+                    already_valid: 4,
+                    reconnected: 2,
+                    missing: 1,
+                    metadata_mismatch: 3,
+                    stale_results_discarded: 5,
+                    binding_snapshot_changed: true,
+                    ..Default::default()
+                },
+            },
+        );
+
+        app.multi_manager_drain_runtime_events();
+
+        let log = toast_log_contents();
+        assert_eq!(log.matches("MultiManager reconnect complete:").count(), 1);
+        assert!(log.contains(
+            "4 already valid, 2 reconnected, 1 missing, 0 ambiguous, 3 metadata mismatches, 5 stale-result discards"
+        ));
+        assert!(app.multi_manager.bindings_dirty);
+    }
+
+    #[test]
+    fn failed_manual_reconnect_reports_error_and_retry_can_start() {
+        let mut app = test_app();
+        app.multi_manager.runtime.event_queue.lock().unwrap().push_back(
+            MultiManagerRuntimeEvent::ReconnectFailed {
+                trigger: ReconnectTrigger::Manual,
+                error: "boom".into(),
+            },
+        );
+
+        app.multi_manager_drain_runtime_events();
+
+        assert_eq!(
+            app.error.as_deref(),
+            Some("Failed to reconnect MultiManager windows: boom")
+        );
+        app.multi_manager
+            .reconnect_in_progress
+            .store(false, Ordering::Relaxed);
+        app.multi_manager_start_manual_reconnect();
+        assert!(app.multi_manager.reconnect_job.is_some());
+        app.multi_manager.shutdown();
+    }
+
     #[test]
     fn reconnect_summary_format_includes_action_counts() {
-        let summary = crate::multi_manager::reconnect::ReconnectSummary {
+        let summary = ReconnectSummary {
+            already_valid: 1,
             reconnected: 2,
             missing: 3,
             ambiguous: 4,
+            metadata_mismatch: 5,
+            stale_results_discarded: 6,
             ..Default::default()
         };
 
         let text = format_reconnect_summary(summary);
 
+        assert!(text.contains("1 already valid"));
         assert!(text.contains("2 reconnected"));
         assert!(text.contains("3 missing"));
         assert!(text.contains("4 ambiguous"));
+        assert!(text.contains("5 metadata mismatches"));
+        assert!(text.contains("6 stale-result discards"));
     }
 
     fn test_app() -> LauncherApp {
