@@ -461,14 +461,14 @@ Layouts let you capture and restore a **window arrangement** (great for “work 
 
 MultiManager is a **Windows-oriented embedded window workspace manager** for keeping groups of real application windows organized inside named workspaces. It is designed for day-to-day window orchestration: capture the windows you care about, define where they should live, assign shortcuts, and quickly move or recover them later.
 
-MultiManager is separate from saved `layout` commands. A saved `layout` is a named window arrangement that can be loaded from `layouts.json`; a MultiManager workspace tracks windows as workspace members, including their current Win32 window bindings and per-window home/target rectangles. Use `layout ...` for simple saved arrangements, and use `mm ...` when you want an interactive workspace manager that can keep reconnecting and recapturing tracked windows.
+MultiManager is separate from saved `layout` commands. A saved `layout` is a named window arrangement that can be loaded from `layouts.json`; a MultiManager workspace tracks windows as workspace members, including their current Win32 window bindings and per-window home/target rectangles. Use `layout ...` for simple saved arrangements, and use `mm ...` when you want an interactive workspace manager for explicitly reconnecting or recapturing tracked windows.
 
 Because MultiManager works with live Windows desktop windows, it uses Win32 concepts such as:
 
 - **HWNDs** as the native identifiers for tracked windows.
 - **Foreground-window capture** to add the currently active window to a workspace.
 - **Top-level window enumeration** to find candidate windows and recover missing entries.
-- **Reconnecting stale window handles** when a previously captured window was closed, relaunched, or received a new HWND.
+- **Explicitly reconnecting stale window handles** when a previously captured window was closed, relaunched, or received a new HWND.
 
 ### Commands
 
@@ -489,7 +489,19 @@ Because MultiManager works with live Windows desktop windows, it uses Win32 conc
 3. Capture windows into that workspace.
 4. Set each window's home and target rectangles.
 5. Assign a hotkey for quick workspace actions.
-6. Toggle, send home, send target, rotate, reconnect, or recapture windows as your session changes.
+6. Toggle, send home, send target, rotate, reconnect, or recapture windows explicitly as your session changes.
+
+
+### Reconnect behavior
+
+MultiManager reconnect is intentionally explicit and bounded:
+
+- When workspaces load or reload, MultiManager can perform **one optional reconnect pass** if `auto_reconnect_on_load` is enabled. This pass enumerates visible top-level windows once and tries to match missing or stale entries.
+- Failed automatic matches remain disconnected. MultiManager does not retry after that pass.
+- Applications opened after the load/reload reconnect pass require manual reconnect. Use **Reconnect Windows** in the UI or run `mm reconnect`.
+- **Reconnect Windows** and `mm reconnect` explicitly enumerate current windows and apply the same matching rules used by the load/reload reconnect pass.
+- Toggle, home, target, and rotate actions validate existing HWNDs and clear invalid HWNDs before acting, but they do not search for replacement windows.
+- Exact-title and stable-metadata matching rules are unchanged: exact-title candidates still need compatible stable metadata, duplicate exact-title candidates are ambiguous, and incompatible metadata remains a mismatch.
 
 ### Capture and recapture controls
 
@@ -657,7 +669,7 @@ MultiManager paths can be customized under the `multi_manager` settings object:
 }
 ```
 
-`workspaces_path` controls where MultiManager stores workspace state, and `bindings_path` controls the optional live-window binding snapshot location. `ignore_launcher_window_on_capture` is a safety setting that helps prevent capture flows from saving the launcher window instead of the intended target window.
+`workspaces_path` controls where MultiManager stores workspace state, and `bindings_path` controls the optional live-window binding snapshot location. `auto_reconnect_on_load` enables the single load/reload reconnect pass described above. `ignore_launcher_window_on_capture` is a safety setting that helps prevent capture flows from saving the launcher window instead of the intended target window.
 
 Disable the default hotkey entirely (useful if you bind your own trigger elsewhere):
 
@@ -755,7 +767,7 @@ cargo run
 
 ### MultiManager cannot find or move a window
 
-* Run `mm reconnect` after restarting apps or the launcher so MultiManager can refresh stale window handles.
+* Run `mm reconnect` after restarting apps or the launcher so MultiManager can explicitly enumerate windows and refresh stale window handles. Apps opened after workspace load/reload remain disconnected until this manual reconnect succeeds.
 * Use `mm recapture all` when a window is missing, closed and reopened, or ambiguous.
 * Ensure the target app is not running elevated while Multi Launcher is running non-elevated.
 * Check whether the workspace or window is disabled before sending, restoring, or moving it.
