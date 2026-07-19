@@ -1011,7 +1011,7 @@ pub(crate) fn format_reconnect_summary(
     summary: crate::multi_manager::reconnect::ReconnectSummary,
 ) -> String {
     let mut text = format!(
-        "MultiManager reconnect complete: {} already valid, {} reconnected, {} missing, {} ambiguous, {} metadata mismatches",
+        "MultiManager reconnect complete — valid: {}, reconnected: {}, needs recapture: {} missing / {} ambiguous / {} metadata mismatches",
         summary.already_valid,
         summary.reconnected,
         summary.missing,
@@ -1020,7 +1020,7 @@ pub(crate) fn format_reconnect_summary(
     );
     if summary.stale_results_discarded > 0 {
         text.push_str(&format!(
-            ", {} stale-result discards",
+            ", stale results ignored: {}",
             summary.stale_results_discarded
         ));
     }
@@ -1169,8 +1169,12 @@ mod tests {
     fn manual_reconnect_completion_produces_one_terminal_toast() {
         let mut app = test_app();
         clear_toast_log();
-        app.multi_manager.runtime.event_queue.lock().unwrap().push_back(
-            MultiManagerRuntimeEvent::ReconnectCompleted {
+        app.multi_manager
+            .runtime
+            .event_queue
+            .lock()
+            .unwrap()
+            .push_back(MultiManagerRuntimeEvent::ReconnectCompleted {
                 trigger: ReconnectTrigger::Manual,
                 summary: ReconnectSummary {
                     already_valid: 4,
@@ -1181,15 +1185,14 @@ mod tests {
                     binding_snapshot_changed: true,
                     ..Default::default()
                 },
-            },
-        );
+            });
 
         app.multi_manager_drain_runtime_events();
 
         let log = toast_log_contents();
-        assert_eq!(log.matches("MultiManager reconnect complete:").count(), 1);
+        assert_eq!(log.matches("MultiManager reconnect complete").count(), 1);
         assert!(log.contains(
-            "4 already valid, 2 reconnected, 1 missing, 0 ambiguous, 3 metadata mismatches, 5 stale-result discards"
+            "valid: 4, reconnected: 2, needs recapture: 1 missing / 0 ambiguous / 3 metadata mismatches, stale results ignored: 5"
         ));
         assert!(app.multi_manager.bindings_dirty);
     }
@@ -1197,12 +1200,15 @@ mod tests {
     #[test]
     fn failed_manual_reconnect_reports_error_and_retry_can_start() {
         let mut app = test_app();
-        app.multi_manager.runtime.event_queue.lock().unwrap().push_back(
-            MultiManagerRuntimeEvent::ReconnectFailed {
+        app.multi_manager
+            .runtime
+            .event_queue
+            .lock()
+            .unwrap()
+            .push_back(MultiManagerRuntimeEvent::ReconnectFailed {
                 trigger: ReconnectTrigger::Manual,
                 error: "boom".into(),
-            },
-        );
+            });
 
         app.multi_manager_drain_runtime_events();
 
@@ -1232,12 +1238,10 @@ mod tests {
 
         let text = format_reconnect_summary(summary);
 
-        assert!(text.contains("1 already valid"));
-        assert!(text.contains("2 reconnected"));
-        assert!(text.contains("3 missing"));
-        assert!(text.contains("4 ambiguous"));
-        assert!(text.contains("5 metadata mismatches"));
-        assert!(text.contains("6 stale-result discards"));
+        assert!(text.contains("valid: 1"));
+        assert!(text.contains("reconnected: 2"));
+        assert!(text.contains("needs recapture: 3 missing / 4 ambiguous / 5 metadata mismatches"));
+        assert!(text.contains("stale results ignored: 6"));
     }
 
     fn test_app() -> LauncherApp {

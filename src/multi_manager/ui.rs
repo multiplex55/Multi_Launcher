@@ -78,7 +78,17 @@ impl MultiManagerDialog {
                         if ui.button("Restore HWND Snapshot").clicked() {
                             app.multi_manager_restore_bindings();
                         }
-                        if ui.button("Reconnect Windows").clicked() {
+                        let reconnect_active = app
+                            .multi_manager
+                            .reconnect_in_progress
+                            .load(Ordering::Acquire);
+                        if ui
+                            .add_enabled(
+                                reconnect_button_enabled(reconnect_active),
+                                egui::Button::new(reconnect_button_text(reconnect_active)),
+                            )
+                            .clicked()
+                        {
                             app.multi_manager_start_manual_reconnect();
                         }
                         if ui.button("Refresh Titles").clicked() {
@@ -481,6 +491,18 @@ pub(crate) fn refresh_live_titles_throttled_with(
     }
     *last_refresh = Some(now);
     bindings::refresh_live_titles_with(workspaces, is_valid, window_title)
+}
+
+fn reconnect_button_text(active: bool) -> &'static str {
+    if active {
+        "Reconnecting…"
+    } else {
+        "Reconnect Windows"
+    }
+}
+
+fn reconnect_button_enabled(active: bool) -> bool {
+    !active
 }
 
 fn capture_banner_text(action: &PendingCaptureAction) -> &'static str {
@@ -938,6 +960,22 @@ mod tests {
             capture_banner_text(&action),
             "Recapture active: focus the replacement window and press Enter. Press S to skip this item. Escape cancels the queue."
         );
+    }
+
+    #[test]
+    fn reconnect_button_text_reflects_idle_state() {
+        assert_eq!(reconnect_button_text(false), "Reconnect Windows");
+    }
+
+    #[test]
+    fn reconnect_button_text_reflects_active_state() {
+        assert_eq!(reconnect_button_text(true), "Reconnecting…");
+    }
+
+    #[test]
+    fn reconnect_button_is_disabled_while_active() {
+        assert!(reconnect_button_enabled(false));
+        assert!(!reconnect_button_enabled(true));
     }
 
     #[test]

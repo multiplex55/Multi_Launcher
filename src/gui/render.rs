@@ -641,6 +641,13 @@ impl eframe::App for LauncherApp {
         }
         self.multi_manager_drain_runtime_events();
         let _ = self.multi_manager.start_pending_automatic_reconnect();
+        if self
+            .multi_manager
+            .reconnect_in_progress
+            .load(Ordering::Acquire)
+        {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
         self.multi_manager.maybe_auto_save_bindings();
         if self.enable_toasts {
             self.toasts.show(ctx);
