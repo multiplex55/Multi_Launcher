@@ -218,3 +218,36 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
         );
     }
 }
+
+#[test]
+fn cm_command_is_visible_without_hiding_existing_commands() {
+    let actions = Arc::new(Vec::new());
+    let mut plugins = PluginManager::new();
+    plugins.reload_from_dirs(
+        &[],
+        Settings::default().clipboard_limit,
+        Settings::default().net_unit,
+        false,
+        &std::collections::HashMap::new(),
+        Arc::clone(&actions),
+    );
+
+    let commands: std::collections::HashSet<_> = plugins
+        .commands()
+        .into_iter()
+        .map(|a| (a.label, a.desc, a.action))
+        .collect();
+
+    for expected in [
+        ("cm", "Clipboard Modify", "query:cm"),
+        ("cb", "Clipboard", "query:cb"),
+        ("cs", "Snippet", "query:cs"),
+        ("fs", "Open local file search", "query:fs"),
+        ("o", "Omni", "query:o "),
+    ] {
+        assert!(
+            commands.contains(&(expected.0.into(), expected.1.into(), expected.2.into())),
+            "missing command {expected:?}"
+        );
+    }
+}

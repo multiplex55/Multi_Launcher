@@ -6,6 +6,7 @@ pub mod browser_tabs;
 pub mod calc_history;
 pub mod calendar;
 pub mod clipboard;
+pub mod clipboard_modify;
 pub mod color_picker;
 pub mod convert_panel;
 pub mod dropcalc;
