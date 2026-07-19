@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod clipboard;
 pub mod defaults;
 pub mod error;
 pub mod executor;
@@ -7,6 +8,7 @@ pub mod parser;
 pub mod pipeline;
 
 pub use catalog::*;
+pub use clipboard::*;
 pub use defaults::*;
 pub use error::*;
 pub use executor::*;

@@ -25,6 +25,14 @@ impl ClipboardModifyPlugin {
 impl Plugin for ClipboardModifyPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let catalog = self.catalog_snapshot();
+        if query.trim() == "cm undo" {
+            return vec![Action {
+                label: "Undo Clipboard Modify".into(),
+                desc: "Clipboard Modify".into(),
+                action: "clipboard_modify:undo".into(),
+                args: None,
+            }];
+        }
         match parse(query, catalog.as_ref()) {
             ClipboardModifyParseResult::NotClipboardModify => Vec::new(),
             ClipboardModifyParseResult::OpenSection(section) => vec![section_action(section)],

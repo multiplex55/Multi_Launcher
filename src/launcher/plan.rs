@@ -5,11 +5,13 @@ use super::parse::{ActionKind, parse_action_kind};
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LaunchPlan<'a> {
     pub action: ActionKind<'a>,
+    pub args: Option<&'a str>,
 }
 
 pub(crate) fn plan_action<'a>(action: &'a Action) -> LaunchPlan<'a> {
     LaunchPlan {
         action: parse_action_kind(action),
+        args: action.args.as_deref(),
     }
 }
 

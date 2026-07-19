@@ -25,6 +25,17 @@ pub(crate) fn execute_plan(plan: LaunchPlan<'_>) -> anyhow::Result<()> {
         ActionKind::ClipboardClear => clipboard::clear_history(),
         ActionKind::ClipboardCopy(i) => clipboard::copy_entry(i),
         ActionKind::ClipboardText(text) => clipboard::set_text(text),
+        ActionKind::ClipboardModifyExecute => {
+            crate::clipboard_modify::runtime::execute_action_args(
+                plan.args,
+                &crate::clipboard_modify::store::shared_default_catalog(),
+            )?;
+            Ok(())
+        }
+        ActionKind::ClipboardModifyUndo => {
+            crate::clipboard_modify::runtime::undo()?;
+            Ok(())
+        }
         ActionKind::Calc { result, expr } => {
             if let Some(e) = expr {
                 let entry = CalcHistoryEntry {
