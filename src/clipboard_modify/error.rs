@@ -22,6 +22,14 @@ pub enum ClipboardModifyError {
     UnknownOperation {
         operation: String,
     },
+    UnknownTemplate {
+        name: String,
+    },
+    NestedPipeline {
+        name: String,
+    },
+    Transform(String),
+    Cancelled,
 }
 
 impl fmt::Display for ClipboardModifyError {
@@ -41,6 +49,12 @@ impl fmt::Display for ClipboardModifyError {
             Self::ReservedName { name } => write!(f, "{name} is reserved"),
             Self::DuplicateName { name } => write!(f, "{name} is duplicated"),
             Self::UnknownOperation { operation } => write!(f, "unknown operation {operation}"),
+            Self::UnknownTemplate { name } => write!(f, "unknown template {name}"),
+            Self::NestedPipeline { name } => {
+                write!(f, "nested saved pipeline {name} is not supported")
+            }
+            Self::Transform(reason) => write!(f, "{reason}"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
