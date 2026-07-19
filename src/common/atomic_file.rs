@@ -95,13 +95,22 @@ fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
     }
     let s = wide(src);
     let d = wide(dst);
-    unsafe {
+    let replaced = unsafe {
         MoveFileExW(
             PCWSTR(s.as_ptr()),
             PCWSTR(d.as_ptr()),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
-        .ok()?;
+    };
+    if replaced.as_bool() {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "replace {} with {} using MoveFileExW",
+                dst.display(),
+                src.display()
+            )
+        })
     }
-    Ok(())
 }
