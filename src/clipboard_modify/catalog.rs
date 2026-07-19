@@ -174,7 +174,7 @@ pub static OPERATIONS: Lazy<Vec<OperationInfo>> = Lazy::new(|| {
             "Code block",
             "Wrap in a Markdown code block",
             OperationCategory::Wrap,
-            &["code", "fence"],
+            &["fence"],
             ArgumentRequirements::CodeBlock,
             &["code-block rust"],
         ),
