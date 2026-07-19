@@ -355,13 +355,6 @@ pub fn reconnect_unresolved_workspaces_with_windows(
     summary
 }
 
-pub fn needs_reconnect(workspaces: &[MmWorkspace]) -> bool {
-    workspaces
-        .iter()
-        .flat_map(|workspace| &workspace.windows)
-        .any(|window| window.hwnd == 0 || !window.valid)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

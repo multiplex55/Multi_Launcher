@@ -782,39 +782,6 @@ mod tests {
     }
 
     #[test]
-    fn old_multi_manager_settings_with_periodic_reconnect_fields_deserializes() {
-        let parsed: Settings = serde_json::from_str(
-            r#"{
-                "multi_manager": {
-                    "enabled": true,
-                    "workspaces_path": "legacy_workspaces.json",
-                    "bindings_path": "legacy_bindings.json",
-                    "auto_save": false,
-                    "save_on_exit": false,
-                    "auto_reconnect_missing_windows": false,
-                    "auto_reconnect_interval_ms": 7500,
-                    "developer_debugging": true,
-                    "show_force_recapture_prompt": true,
-                    "hotkey_poll_ms": 100,
-                    "hide_launcher_before_toggle": true,
-                    "ignore_launcher_window_on_capture": false
-                }
-            }"#,
-        )
-        .expect("legacy settings should deserialize");
-
-        assert!(parsed.multi_manager.auto_reconnect_on_load);
-
-        let reserialized = serde_json::to_value(&parsed).expect("serialize parsed settings");
-        let multi_manager = reserialized
-            .get("multi_manager")
-            .and_then(serde_json::Value::as_object)
-            .expect("multi_manager object");
-        assert!(!multi_manager.contains_key("auto_reconnect_missing_windows"));
-        assert!(!multi_manager.contains_key("auto_reconnect_interval_ms"));
-    }
-
-    #[test]
     fn query_results_layout_defaults_are_backward_compatible() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(

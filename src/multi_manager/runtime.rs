@@ -70,10 +70,6 @@ pub enum MultiManagerRuntimeEvent {
         operation: ActivationOperation,
         result: ActivationResult,
     },
-    BindingReconnected {
-        workspace_id: String,
-        result: ActivationResult,
-    },
     MovementFailed {
         workspace_id: String,
         errors: Vec<String>,
@@ -380,12 +376,6 @@ fn push_runtime_activation_events(
     let Ok(mut events) = event_queue.lock() else {
         return;
     };
-    if result.reconnected > 0 {
-        events.push_back(MultiManagerRuntimeEvent::BindingReconnected {
-            workspace_id: workspace_id.clone(),
-            result: result.clone(),
-        });
-    }
     events.push_back(MultiManagerRuntimeEvent::WorkspaceActionCompleted {
         workspace_id,
         operation,
@@ -398,7 +388,7 @@ mod tests {
     use super::*;
     use crate::multi_manager::model::{MmHotkey, MmWindow};
     use crate::multi_manager::win::EnumeratedWindow;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn rect(x: i32) -> MmRect {
         MmRect {
@@ -585,6 +575,43 @@ mod tests {
         );
         assert!(ops.moves.borrow().is_empty());
         assert!(info.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn repeated_runtime_ticks_do_not_periodically_reconnect_unresolved_windows() {
+        let mut workspaces = vec![workspace()];
+        workspaces[0].windows = vec![window(0, false, rect(1), rect(11))];
+        workspaces[0].windows[0].captured_title = "Notes".into();
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
+        let mut debounce = HashMap::new();
+        let ops = FakeWindowOps::default();
+        let enumerations = Cell::new(0);
+        let now = Instant::now();
+
+        for offset_ms in [0, 500, 1_000, 5_000, 10_000, 60_000] {
+            runtime_tick(
+                &mut workspaces,
+                &control,
+                &info,
+                &events,
+                &mut debounce,
+                DEFAULT_DEBOUNCE,
+                &ops,
+                &FakeHotkeyOps(false),
+                &|hwnd| hwnd == 42,
+                &|| {
+                    enumerations.set(enumerations.get() + 1);
+                    vec![live(42, "Notes")]
+                },
+                now + Duration::from_millis(offset_ms),
+            );
+        }
+
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(enumerations.get(), 0);
     }
 
     #[test]
