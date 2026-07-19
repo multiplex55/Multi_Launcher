@@ -1,7 +1,7 @@
 use crate::multi_manager::identity;
 use crate::multi_manager::model::{MmWindow, MmWorkspace};
 use crate::multi_manager::reconnect;
-use crate::multi_manager::win::{self, EnumeratedWindow};
+use crate::multi_manager::win::{self, WindowIdentitySnapshot};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,14 +20,21 @@ pub struct WorkspaceBindingSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WindowBindingSnapshot {
+    #[serde(default)]
     pub window_id: usize,
+    #[serde(default)]
     pub window_index: usize,
     #[serde(rename = "title")]
     pub captured_title: String,
+    #[serde(default)]
     pub alias: Option<String>,
+    #[serde(default)]
     pub hwnd: usize,
+    #[serde(default)]
     pub executable: Option<String>,
+    #[serde(default)]
     pub class_name: Option<String>,
+    #[serde(default)]
     pub process_path: Option<String>,
 }
 
@@ -84,7 +91,7 @@ fn binding_snapshots_with_validator(
                 .windows
                 .iter()
                 .enumerate()
-                .filter(|(_, window)| window.hwnd != 0 && is_valid_window(window.hwnd))
+                .filter(|(_, window)| window.has_bound_hwnd() && is_valid_window(window.hwnd))
                 .map(|(index, window)| WindowBindingSnapshot {
                     window_id: index,
                     window_index: index,
@@ -125,41 +132,13 @@ pub fn load_bindings_if_exists(path: &Path) -> Result<Option<Vec<WorkspaceBindin
 }
 
 pub fn restore_bindings(workspaces: &mut [MmWorkspace], snapshots: &[WorkspaceBindingSnapshot]) {
-    let mut live = win::enumerate_top_level_windows().unwrap_or_default();
-    for window_snapshot in snapshots.iter().flat_map(|snapshot| &snapshot.windows) {
-        if window_snapshot.hwnd == 0
-            || live
-                .iter()
-                .any(|window| window.hwnd == window_snapshot.hwnd)
-        {
-            continue;
-        }
-        let direct = win::query_hwnd_identity(window_snapshot.hwnd);
-        if direct.is_window {
-            live.push(EnumeratedWindow {
-                hwnd: direct.hwnd,
-                title: direct.live_title,
-                executable: direct.executable,
-                class_name: direct.class_name,
-                process_path: direct.process_path,
-                rect: win::window_rect(window_snapshot.hwnd).unwrap_or(
-                    crate::multi_manager::model::MmRect {
-                        x: 0,
-                        y: 0,
-                        w: 0,
-                        h: 0,
-                    },
-                ),
-            });
-        }
-    }
-    restore_bindings_with_windows(workspaces, snapshots, &live);
+    restore_bindings_with_query(workspaces, snapshots, win::query_hwnd_identity);
 }
 
-fn restore_bindings_with_windows(
+fn restore_bindings_with_query(
     workspaces: &mut [MmWorkspace],
     snapshots: &[WorkspaceBindingSnapshot],
-    live: &[EnumeratedWindow],
+    query_hwnd_identity: impl Fn(usize) -> WindowIdentitySnapshot,
 ) {
     for snapshot in snapshots {
         let workspace_index = snapshot
@@ -181,20 +160,35 @@ fn restore_bindings_with_windows(
                 continue;
             };
             let saved_window = window_from_snapshot(window_snapshot);
-            let direct_match = live.iter().find(|candidate| {
-                candidate.hwnd == window_snapshot.hwnd
-                    && identity::stable_identity_matches_enumerated(&saved_window, candidate)
-            });
-            if let Some(candidate) = direct_match {
-                workspace.windows[window_index].mark_reconnected(candidate.hwnd);
-                workspace.windows[window_index].live_title = candidate.title.clone();
-            } else if workspace.windows[window_index].hwnd == window_snapshot.hwnd {
-                if identity::has_stable_metadata(&saved_window) {
-                    workspace.windows[window_index].mark_metadata_mismatch();
-                } else {
-                    workspace.windows[window_index].mark_missing();
+            let window = &mut workspace.windows[window_index];
+
+            if !identity::has_stable_metadata(&saved_window) {
+                if window.hwnd == window_snapshot.hwnd || window_snapshot.hwnd != 0 {
+                    window.mark_missing();
+                    window.live_title.clear();
                 }
-                workspace.windows[window_index].live_title.clear();
+                continue;
+            }
+
+            if window_snapshot.hwnd == 0 {
+                window.mark_missing();
+                window.live_title.clear();
+                continue;
+            }
+
+            let direct = query_hwnd_identity(window_snapshot.hwnd);
+            if !direct.is_window {
+                window.mark_closed();
+                window.live_title.clear();
+                continue;
+            }
+
+            if identity::stable_identity_matches(&saved_window, &direct) {
+                window.mark_bound(direct.hwnd);
+                window.live_title = direct.live_title;
+            } else {
+                window.mark_metadata_mismatch();
+                window.live_title.clear();
             }
         }
     }
@@ -319,10 +313,50 @@ mod tests {
         executable: &str,
         class_name: &str,
         process_path: &str,
-    ) -> EnumeratedWindow {
-        EnumeratedWindow {
+    ) -> WindowIdentitySnapshot {
+        WindowIdentitySnapshot {
             hwnd,
-            title: captured_title.into(),
+            live_title: captured_title.into(),
+            executable: executable.into(),
+            class_name: class_name.into(),
+            process_path: process_path.into(),
+            is_window: true,
+        }
+    }
+
+    fn missing_identity(hwnd: usize) -> WindowIdentitySnapshot {
+        WindowIdentitySnapshot {
+            hwnd,
+            is_window: false,
+            live_title: String::new(),
+            executable: String::new(),
+            class_name: String::new(),
+            process_path: String::new(),
+        }
+    }
+
+    fn query_from(
+        live_windows: Vec<WindowIdentitySnapshot>,
+    ) -> impl Fn(usize) -> WindowIdentitySnapshot {
+        move |hwnd| {
+            live_windows
+                .iter()
+                .find(|window| window.hwnd == hwnd)
+                .cloned()
+                .unwrap_or_else(|| missing_identity(hwnd))
+        }
+    }
+
+    fn enumerated(
+        hwnd: usize,
+        title: &str,
+        executable: &str,
+        class_name: &str,
+        process_path: &str,
+    ) -> win::EnumeratedWindow {
+        win::EnumeratedWindow {
+            hwnd,
+            title: title.into(),
             executable: executable.into(),
             class_name: class_name.into(),
             process_path: process_path.into(),
@@ -335,6 +369,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn saved_snapshot_uses_captured_title_and_omits_live_title() {
+        let mut window = win("alias", "Captured Fallback", 123);
+        window.live_title = "Live Runtime Title".into();
+        window.executable = "app.exe".into();
+        window.class_name = "AppWindow".into();
+        window.process_path = "C:/Apps/app.exe".into();
+
+        let snapshots =
+            binding_snapshots_with_validator(&[ws("id", "name", vec![window])], |_| true);
+        let json = serde_json::to_string(&snapshots).unwrap();
+
+        assert!(json.contains("Captured Fallback"));
+        assert!(!json.contains("Live Runtime Title"));
+        assert!(!json.contains("live_title"));
+        assert_eq!(snapshots[0].windows[0].captured_title, "Captured Fallback");
+    }
+
+    #[test]
+    fn invalid_or_cleared_hwnds_are_omitted_from_snapshot() {
+        let mut invalid = win("invalid", "Invalid", 11);
+        invalid.valid = false;
+        let cleared = win("cleared", "Cleared", 0);
+        let valid = win("valid", "Valid", 12);
+
+        let snapshots = binding_snapshots_with_validator(
+            &[ws("id", "name", vec![invalid, cleared, valid])],
+            |hwnd| hwnd == 12,
+        );
+
+        assert_eq!(snapshots[0].windows.len(), 1);
+        assert_eq!(snapshots[0].windows[0].hwnd, 12);
+        assert_eq!(snapshots[0].windows[0].alias.as_deref(), Some("valid"));
+    }
     #[test]
     fn binding_save_omits_invalid_hwnds() {
         let dir = tempfile::tempdir().unwrap();
@@ -362,10 +430,16 @@ mod tests {
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_windows(
+        restore_bindings_with_query(
             &mut workspaces,
             &snapshots,
-            &[live(7, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe")],
+            query_from(vec![live(
+                7,
+                "Doc",
+                "editor.exe",
+                "Editor",
+                "C:/Apps/editor.exe",
+            )]),
         );
         assert_eq!(workspaces[0].windows[0].hwnd, 7);
         assert_eq!(workspaces[1].windows[0].hwnd, 0);
@@ -386,10 +460,16 @@ mod tests {
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_windows(
+        restore_bindings_with_query(
             &mut workspaces,
             &snapshots,
-            &[live(8, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe")],
+            query_from(vec![live(
+                8,
+                "Doc",
+                "editor.exe",
+                "Editor",
+                "C:/Apps/editor.exe",
+            )]),
         );
         assert_eq!(workspaces[0].windows[0].hwnd, 8);
     }
@@ -405,7 +485,7 @@ mod tests {
                 ..Default::default()
             }],
         }];
-        restore_bindings_with_windows(&mut workspaces, &snapshots, &[]);
+        restore_bindings_with_query(&mut workspaces, &snapshots, missing_identity);
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
     }
 
@@ -431,6 +511,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_title_only_snapshots_load_and_do_not_trust_saved_hwnd() {
+        let json = r#"[{
+            "workspace_name": "name",
+            "windows": [{
+                "title": "Legacy",
+                "hwnd": 42
+            }]
+        }]"#;
+        let snapshots: Vec<WorkspaceBindingSnapshot> = serde_json::from_str(json).unwrap();
+        let mut workspaces = vec![ws("id", "name", vec![win("", "Legacy", 42)])];
+
+        restore_bindings_with_query(
+            &mut workspaces,
+            &snapshots,
+            query_from(vec![live(
+                42,
+                "Legacy",
+                "app.exe",
+                "Class",
+                "C:/Apps/app.exe",
+            )]),
+        );
+
+        assert_eq!(snapshots[0].windows[0].captured_title, "Legacy");
+        assert_eq!(workspaces[0].windows[0].hwnd, 0);
+        assert_eq!(workspaces[0].windows[0].captured_title, "Legacy");
+        assert_eq!(
+            workspaces[0].windows[0].binding_status,
+            crate::multi_manager::model::MmBindingStatus::Missing
+        );
+    }
+    #[test]
     fn reused_hwnd_with_mismatched_metadata_is_not_restored() {
         let mut workspaces = vec![ws("id", "name", vec![win("", "Doc", 44)])];
         let snapshots = vec![WorkspaceBindingSnapshot {
@@ -446,10 +558,16 @@ mod tests {
             }],
         }];
 
-        restore_bindings_with_windows(
+        restore_bindings_with_query(
             &mut workspaces,
             &snapshots,
-            &[live(44, "Other", "other.exe", "Other", "C:/Other.exe")],
+            query_from(vec![live(
+                44,
+                "Other",
+                "other.exe",
+                "Other",
+                "C:/Other.exe",
+            )]),
         );
 
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
@@ -476,16 +594,16 @@ mod tests {
             }],
         }];
 
-        restore_bindings_with_windows(
+        restore_bindings_with_query(
             &mut workspaces,
             &snapshots,
-            &[live(
+            query_from(vec![live(
                 44,
                 "Renamed",
                 "editor.exe",
                 "Editor",
                 "C:/Apps/editor.exe",
-            )],
+            )]),
         );
 
         assert_eq!(workspaces[0].windows[0].hwnd, 44);
@@ -530,10 +648,12 @@ mod tests {
         }];
 
         let live_windows = [
-            live(44, "Other", "other.exe", "Other", "C:/Other.exe"),
-            live(55, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe"),
+            enumerated(44, "Other", "other.exe", "Other", "C:/Other.exe"),
+            enumerated(55, "Doc", "editor.exe", "Editor", "C:/Apps/editor.exe"),
         ];
-        restore_bindings_with_windows(&mut workspaces, &snapshots, &live_windows);
+        restore_bindings_with_query(&mut workspaces, &snapshots, |_| {
+            live(44, "Other", "other.exe", "Other", "C:/Other.exe")
+        });
         reconnect::reconnect_unresolved_workspaces_with_windows(&mut workspaces, &live_windows);
 
         assert_eq!(workspaces[0].windows[0].hwnd, 55);
