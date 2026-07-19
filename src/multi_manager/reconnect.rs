@@ -1,10 +1,102 @@
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
-use crate::multi_manager::identity;
-use crate::multi_manager::model::{MmWindow, MmWorkspace};
+use crate::multi_manager::model::{MmBindingStatus, MmWindow, MmWorkspace};
 use crate::multi_manager::win::{self, EnumeratedWindow, WindowIdentitySnapshot};
 
 pub type DirectHwndIdentity = WindowIdentitySnapshot;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectFingerprint {
+    pub captured_title: String,
+    pub executable: String,
+    pub class_name: String,
+    pub process_path: String,
+    pub disabled: bool,
+    pub hwnd: usize,
+    pub valid: bool,
+    pub binding_status: MmBindingStatus,
+    pub binding_verified: bool,
+}
+
+impl From<&MmWindow> for ReconnectFingerprint {
+    fn from(window: &MmWindow) -> Self {
+        Self {
+            captured_title: window.captured_title.clone(),
+            executable: window.executable.clone(),
+            class_name: window.class_name.clone(),
+            process_path: window.process_path.clone(),
+            disabled: window.disabled,
+            hwnd: window.hwnd,
+            valid: window.valid,
+            binding_status: window.binding_status,
+            binding_verified: window.binding_verified,
+        }
+    }
+}
+
+impl ReconnectFingerprint {
+    fn fallback_title(&self) -> &str {
+        self.captured_title.trim()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectSnapshotWindow {
+    pub workspace_id: String,
+    pub window_index: usize,
+    pub fingerprint: ReconnectFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectSnapshot {
+    pub windows: Vec<ReconnectSnapshotWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectBindingPatch {
+    pub hwnd: usize,
+    pub valid: bool,
+    pub binding_status: MmBindingStatus,
+    pub binding_verified: bool,
+    pub live_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectPatch {
+    pub workspace_id: String,
+    pub window_index: usize,
+    pub original: ReconnectFingerprint,
+    pub outcome: ReconnectOutcome,
+    pub binding: ReconnectBindingPatch,
+}
+
+pub fn collect_reconnect_snapshot(workspaces: &[MmWorkspace]) -> ReconnectSnapshot {
+    ReconnectSnapshot {
+        windows: workspaces
+            .iter()
+            .filter(|workspace| !workspace.disabled)
+            .flat_map(|workspace| {
+                workspace
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .map(|(window_index, window)| ReconnectSnapshotWindow {
+                        workspace_id: workspace.id.clone(),
+                        window_index,
+                        fingerprint: ReconnectFingerprint::from(window),
+                    })
+            })
+            .collect(),
+    }
+}
+
+pub fn collect_reconnect_snapshot_from_mutex(
+    workspaces: &Arc<Mutex<Vec<MmWorkspace>>>,
+) -> ReconnectSnapshot {
+    let guard = workspaces.lock().unwrap();
+    collect_reconnect_snapshot(&guard)
+}
 
 pub struct ReconnectDeps<'a> {
     pub is_window: &'a (dyn Fn(usize) -> bool + 'a),
@@ -43,21 +135,85 @@ fn normalized(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+fn normalized_path(value: &str) -> String {
+    value.trim().replace('/', "\\").to_ascii_lowercase()
+}
+
 fn same_title(value: &str, live: &str) -> bool {
     let stored = normalized(value);
     !stored.is_empty() && stored == normalized(live)
 }
 
-fn can_validate_stable_metadata(window: &MmWindow, live: &EnumeratedWindow) -> bool {
-    identity::stable_identity_matches_enumerated(window, live)
+fn can_validate_stable_metadata(window: &ReconnectFingerprint, live: &EnumeratedWindow) -> bool {
+    stable_identity_matches_enumerated(window, live)
 }
 
-fn direct_identity_matches(window: &MmWindow, live: &DirectHwndIdentity) -> bool {
-    identity::stable_identity_matches(window, live)
+fn direct_identity_matches(window: &ReconnectFingerprint, live: &DirectHwndIdentity) -> bool {
+    stable_identity_matches(window, live)
+}
+
+fn has_stable_metadata(window: &ReconnectFingerprint) -> bool {
+    !window.process_path.trim().is_empty()
+        || !window.executable.trim().is_empty()
+        || !window.class_name.trim().is_empty()
+}
+
+fn stable_identity_matches(window: &ReconnectFingerprint, live: &DirectHwndIdentity) -> bool {
+    let live = EnumeratedWindow {
+        hwnd: live.hwnd,
+        title: live.live_title.clone(),
+        executable: live.executable.clone(),
+        class_name: live.class_name.clone(),
+        process_path: live.process_path.clone(),
+        rect: crate::multi_manager::model::MmRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+    };
+    stable_identity_matches_enumerated(window, &live)
+}
+
+fn stable_identity_matches_enumerated(
+    window: &ReconnectFingerprint,
+    live: &EnumeratedWindow,
+) -> bool {
+    let stored_process_path = window.process_path.trim();
+    let stored_class_name = window.class_name.trim();
+    let stored_executable = window.executable.trim();
+
+    if stored_process_path.is_empty()
+        && stored_class_name.is_empty()
+        && stored_executable.is_empty()
+    {
+        return false;
+    }
+
+    if !stored_process_path.is_empty()
+        && normalized_path(stored_process_path) != normalized_path(&live.process_path)
+    {
+        return false;
+    }
+
+    if !stored_class_name.is_empty()
+        && normalized(stored_class_name) != normalized(&live.class_name)
+    {
+        return false;
+    }
+
+    if stored_process_path.is_empty()
+        && !stored_executable.is_empty()
+        && normalized(stored_executable) != normalized(&live.executable)
+    {
+        return false;
+    }
+
+    true
 }
 
 fn viable_exact_title_candidates(
-    window: &MmWindow,
+    window: &ReconnectFingerprint,
     live: &[EnumeratedWindow],
     assigned: &HashSet<usize>,
 ) -> (usize, Vec<MatchCandidate>) {
@@ -69,7 +225,7 @@ fn viable_exact_title_candidates(
         .collect();
 
     let exact_count = exact_title.len();
-    if identity::has_stable_metadata(window) {
+    if has_stable_metadata(window) {
         let viable = exact_title
             .into_iter()
             .filter(|(_, candidate)| can_validate_stable_metadata(window, candidate))
@@ -86,7 +242,7 @@ fn viable_exact_title_candidates(
 }
 
 fn match_unbound_fallback(
-    window: &MmWindow,
+    window: &ReconnectFingerprint,
     live: &[EnumeratedWindow],
     assigned: &HashSet<usize>,
 ) -> (ReconnectOutcome, Option<usize>) {
@@ -107,7 +263,7 @@ fn match_unbound_fallback(
 }
 
 fn match_restored_hwnd(
-    window: &MmWindow,
+    window: &ReconnectFingerprint,
     deps: &ReconnectDeps<'_>,
 ) -> (ReconnectOutcome, Option<usize>) {
     if !(deps.is_window)(window.hwnd) {
@@ -123,7 +279,7 @@ fn match_restored_hwnd(
 }
 
 pub fn match_saved_window_against_candidates(
-    window: &MmWindow,
+    window: &ReconnectFingerprint,
     live: &[EnumeratedWindow],
 ) -> (ReconnectOutcome, Option<usize>) {
     match_unbound_fallback(window, live, &HashSet::new())
@@ -138,7 +294,8 @@ pub fn match_saved_workspace_against_candidates(
         .windows
         .iter()
         .map(|window| {
-            let result = match_unbound_fallback(window, live, &assigned);
+            let fingerprint = ReconnectFingerprint::from(window);
+            let result = match_unbound_fallback(&fingerprint, live, &assigned);
             if let Some(hwnd) = result.1 {
                 assigned.insert(hwnd);
             }
@@ -189,54 +346,147 @@ pub fn reconnect_workspaces_with_windows(
     )
 }
 
-pub fn reconnect_workspaces_with_deps(
-    workspaces: &mut [MmWorkspace],
+fn patch_for(
+    window: &ReconnectSnapshotWindow,
+    outcome: ReconnectOutcome,
+    hwnd: usize,
+    live_title: String,
+) -> ReconnectPatch {
+    let binding = match outcome {
+        ReconnectOutcome::AlreadyValid => ReconnectBindingPatch {
+            hwnd,
+            valid: hwnd != 0,
+            binding_status: if hwnd == 0 {
+                MmBindingStatus::Missing
+            } else {
+                MmBindingStatus::Bound
+            },
+            binding_verified: hwnd != 0,
+            live_title,
+        },
+        ReconnectOutcome::Reconnected => ReconnectBindingPatch {
+            hwnd,
+            valid: hwnd != 0,
+            binding_status: if hwnd == 0 {
+                MmBindingStatus::Missing
+            } else {
+                MmBindingStatus::Reconnected
+            },
+            binding_verified: hwnd != 0,
+            live_title,
+        },
+        ReconnectOutcome::Closed => ReconnectBindingPatch {
+            hwnd: 0,
+            valid: false,
+            binding_status: MmBindingStatus::Closed,
+            binding_verified: false,
+            live_title: String::new(),
+        },
+        ReconnectOutcome::Missing => ReconnectBindingPatch {
+            hwnd: 0,
+            valid: false,
+            binding_status: MmBindingStatus::Missing,
+            binding_verified: false,
+            live_title: String::new(),
+        },
+        ReconnectOutcome::Ambiguous => ReconnectBindingPatch {
+            hwnd: 0,
+            valid: false,
+            binding_status: MmBindingStatus::Ambiguous,
+            binding_verified: false,
+            live_title: String::new(),
+        },
+        ReconnectOutcome::MetadataMismatch => ReconnectBindingPatch {
+            hwnd: 0,
+            valid: false,
+            binding_status: MmBindingStatus::MetadataMismatch,
+            binding_verified: false,
+            live_title: String::new(),
+        },
+        ReconnectOutcome::Invalidated => ReconnectBindingPatch {
+            hwnd: 0,
+            valid: false,
+            binding_status: MmBindingStatus::Closed,
+            binding_verified: false,
+            live_title: String::new(),
+        },
+    };
+
+    ReconnectPatch {
+        workspace_id: window.workspace_id.clone(),
+        window_index: window.window_index,
+        original: window.fingerprint.clone(),
+        outcome,
+        binding,
+    }
+}
+
+pub fn build_reconnect_patches(
+    snapshot: &ReconnectSnapshot,
     deps: ReconnectDeps<'_>,
-) -> ReconnectSummary {
-    let before: Vec<(usize, bool)> = workspaces
-        .iter()
-        .flat_map(|workspace| &workspace.windows)
-        .map(|window| (window.hwnd, window.binding_verified))
-        .collect();
+) -> (ReconnectSummary, Vec<ReconnectPatch>) {
     let mut summary = ReconnectSummary::default();
+    let mut patches = Vec::new();
     let mut assigned = HashSet::new();
     let mut live_cache: Option<Vec<EnumeratedWindow>> = None;
 
-    for window in workspaces
-        .iter_mut()
-        .flat_map(|workspace| &mut workspace.windows)
-    {
-        if window.disabled {
+    for window in &snapshot.windows {
+        let fingerprint = &window.fingerprint;
+        if fingerprint.disabled {
             continue;
         }
 
-        if window.hwnd != 0 && window.binding_verified {
-            if (deps.is_window)(window.hwnd) {
+        if fingerprint.hwnd != 0 && fingerprint.binding_verified {
+            if (deps.is_window)(fingerprint.hwnd) {
                 summary.already_valid += 1;
-                assigned.insert(window.hwnd);
+                assigned.insert(fingerprint.hwnd);
+                patches.push(patch_for(
+                    window,
+                    ReconnectOutcome::AlreadyValid,
+                    fingerprint.hwnd,
+                    String::new(),
+                ));
                 continue;
             }
             summary.invalidated += 1;
-            window.mark_closed();
-            window.live_title.clear();
-        } else if window.hwnd != 0 {
-            let (outcome, hwnd) = match_restored_hwnd(window, &deps);
+            patches.push(patch_for(
+                window,
+                ReconnectOutcome::Closed,
+                0,
+                String::new(),
+            ));
+        } else if fingerprint.hwnd != 0 {
+            let (outcome, hwnd) = match_restored_hwnd(fingerprint, &deps);
             match outcome {
                 ReconnectOutcome::AlreadyValid => {
+                    let hwnd = hwnd.unwrap_or(fingerprint.hwnd);
                     summary.already_valid += 1;
-                    window.mark_bound(hwnd.unwrap_or(window.hwnd));
-                    assigned.insert(window.hwnd);
+                    assigned.insert(hwnd);
+                    patches.push(patch_for(
+                        window,
+                        ReconnectOutcome::AlreadyValid,
+                        hwnd,
+                        String::new(),
+                    ));
                     continue;
                 }
                 ReconnectOutcome::Closed => {
                     summary.invalidated += 1;
-                    window.mark_closed();
-                    window.live_title.clear();
+                    patches.push(patch_for(
+                        window,
+                        ReconnectOutcome::Closed,
+                        0,
+                        String::new(),
+                    ));
                 }
                 ReconnectOutcome::MetadataMismatch => {
                     summary.metadata_mismatch += 1;
-                    window.mark_metadata_mismatch();
-                    window.live_title.clear();
+                    patches.push(patch_for(
+                        window,
+                        ReconnectOutcome::MetadataMismatch,
+                        0,
+                        String::new(),
+                    ));
                     continue;
                 }
                 _ => unreachable!(),
@@ -244,44 +494,76 @@ pub fn reconnect_workspaces_with_deps(
         }
 
         let live = live_cache.get_or_insert_with(|| (deps.enumerate_top_level_windows)());
-        let (outcome, hwnd) = match_unbound_fallback(window, live, &assigned);
+        let (outcome, hwnd) = match_unbound_fallback(fingerprint, live, &assigned);
         match outcome {
             ReconnectOutcome::Reconnected => {
                 summary.reconnected += 1;
-                if let Some(hwnd) = hwnd {
-                    window.mark_reconnected(hwnd);
-                    if let Some(live_window) = live.iter().find(|candidate| candidate.hwnd == hwnd)
-                    {
-                        window.live_title = live_window.title.clone();
-                    }
-                    assigned.insert(hwnd);
-                }
+                let hwnd = hwnd.unwrap_or_default();
+                let live_title = live
+                    .iter()
+                    .find(|candidate| candidate.hwnd == hwnd)
+                    .map(|candidate| candidate.title.clone())
+                    .unwrap_or_default();
+                assigned.insert(hwnd);
+                patches.push(patch_for(window, outcome, hwnd, live_title));
             }
             ReconnectOutcome::Ambiguous => {
                 summary.ambiguous += 1;
-                window.mark_ambiguous();
-                window.live_title.clear();
+                patches.push(patch_for(window, outcome, 0, String::new()));
             }
             ReconnectOutcome::MetadataMismatch => {
                 summary.metadata_mismatch += 1;
-                window.mark_metadata_mismatch();
-                window.live_title.clear();
+                patches.push(patch_for(window, outcome, 0, String::new()));
             }
             ReconnectOutcome::Missing => {
                 summary.missing += 1;
-                window.mark_missing();
-                window.live_title.clear();
+                patches.push(patch_for(window, outcome, 0, String::new()));
             }
             _ => unreachable!(),
         }
     }
 
-    let after: Vec<(usize, bool)> = workspaces
-        .iter()
-        .flat_map(|workspace| &workspace.windows)
-        .map(|window| (window.hwnd, window.binding_verified))
-        .collect();
-    summary.binding_snapshot_changed = before != after;
+    summary.binding_snapshot_changed = patches.iter().any(|patch| {
+        patch.original.hwnd != patch.binding.hwnd
+            || patch.original.binding_verified != patch.binding.binding_verified
+    });
+    (summary, patches)
+}
+
+pub fn apply_reconnect_patches(workspaces: &mut [MmWorkspace], patches: &[ReconnectPatch]) {
+    for patch in patches {
+        if let Some(window) = workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == patch.workspace_id)
+            .and_then(|workspace| workspace.windows.get_mut(patch.window_index))
+        {
+            window.hwnd = patch.binding.hwnd;
+            window.valid = patch.binding.valid;
+            window.binding_status = patch.binding.binding_status;
+            window.binding_verified = patch.binding.binding_verified;
+            window.live_title = patch.binding.live_title.clone();
+        }
+    }
+}
+
+pub fn reconnect_workspaces_with_deps(
+    workspaces: &mut [MmWorkspace],
+    deps: ReconnectDeps<'_>,
+) -> ReconnectSummary {
+    let snapshot = collect_reconnect_snapshot(workspaces);
+    let (summary, patches) = build_reconnect_patches(&snapshot, deps);
+    apply_reconnect_patches(workspaces, &patches);
+    summary
+}
+
+pub fn reconnect_shared_workspaces_with_deps(
+    workspaces: &Arc<Mutex<Vec<MmWorkspace>>>,
+    deps: ReconnectDeps<'_>,
+) -> ReconnectSummary {
+    let snapshot = collect_reconnect_snapshot_from_mutex(workspaces);
+    let (summary, patches) = build_reconnect_patches(&snapshot, deps);
+    let mut guard = workspaces.lock().unwrap();
+    apply_reconnect_patches(&mut guard, &patches);
     summary
 }
 
@@ -314,7 +596,8 @@ pub fn reconnect_unresolved_workspaces_with_windows(
             continue;
         }
 
-        let (outcome, hwnd) = match_unbound_fallback(window, live, &assigned);
+        let fingerprint = ReconnectFingerprint::from(&*window);
+        let (outcome, hwnd) = match_unbound_fallback(&fingerprint, live, &assigned);
         match outcome {
             ReconnectOutcome::Reconnected => {
                 summary.reconnected += 1;
@@ -360,6 +643,7 @@ mod tests {
     use super::*;
     use crate::multi_manager::model::MmRect;
     use std::cell::Cell;
+    use std::sync::{Arc, Mutex};
 
     fn rect() -> MmRect {
         MmRect {
@@ -695,6 +979,74 @@ mod tests {
         assert_eq!(summary.reconnected, 1);
         assert!(summary.binding_snapshot_changed);
         assert_eq!(workspaces[0].windows[0].hwnd, 42);
+    }
+
+    #[test]
+    fn reconnect_builds_and_applies_patch_for_exact_title_reconnect() {
+        let candidate = live(9, "Doc", "edit.exe", "Editor", "C:/Apps/edit.exe");
+        let mut workspaces = workspace(MmWindow {
+            hwnd: 5,
+            binding_verified: true,
+            captured_title: "Doc".into(),
+            executable: "edit.exe".into(),
+            ..MmWindow::default()
+        });
+        workspaces[0].id = "workspace-a".into();
+        let snapshot = collect_reconnect_snapshot(&workspaces);
+        let (summary, patches) = build_reconnect_patches(
+            &snapshot,
+            ReconnectDeps {
+                is_window: &|hwnd| hwnd == 9,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| vec![candidate.clone()],
+            },
+        );
+
+        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.reconnected, 1);
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches[0].workspace_id, "workspace-a");
+        assert_eq!(patches[0].window_index, 0);
+        assert_eq!(patches[0].original.hwnd, 5);
+        assert_eq!(patches[0].outcome, ReconnectOutcome::Closed);
+        assert_eq!(patches[1].outcome, ReconnectOutcome::Reconnected);
+        assert_eq!(patches[1].binding.hwnd, 9);
+        assert_eq!(
+            patches[1].binding.binding_status,
+            MmBindingStatus::Reconnected
+        );
+
+        apply_reconnect_patches(&mut workspaces, &patches);
+        assert_eq!(workspaces[0].windows[0].hwnd, 9);
+        assert_eq!(workspaces[0].windows[0].live_title, "Doc");
+        assert!(workspaces[0].windows[0].binding_verified);
+    }
+
+    #[test]
+    fn shared_reconnect_releases_workspace_mutex_before_enumeration() {
+        let workspaces = Arc::new(Mutex::new(workspace(MmWindow {
+            captured_title: "Doc".into(),
+            ..MmWindow::default()
+        })));
+        workspaces.lock().unwrap()[0].id = "workspace-a".into();
+        let observed_unlocked = Cell::new(false);
+        let observed_workspaces = Arc::clone(&workspaces);
+
+        let summary = reconnect_shared_workspaces_with_deps(
+            &workspaces,
+            ReconnectDeps {
+                is_window: &|_| false,
+                query_identity: &|_| None,
+                enumerate_top_level_windows: &|| {
+                    observed_unlocked.set(observed_workspaces.try_lock().is_ok());
+                    vec![live(7, "Doc", "", "", "")]
+                },
+            },
+        );
+
+        assert!(observed_unlocked.get());
+        assert_eq!(summary.reconnected, 1);
+        assert_eq!(workspaces.lock().unwrap()[0].windows[0].hwnd, 7);
     }
 
     #[test]
