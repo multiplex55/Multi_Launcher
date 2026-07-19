@@ -104,7 +104,9 @@ impl LauncherApp {
 
         let clipboard_modify_resolved = head == "cm"
             && !action.starts_with("query:")
-            && (action.starts_with("clipboard_modify:execute:")
+            && (action == "clipboard_modify:execute"
+                || action == "clipboard_modify:undo"
+                || action.starts_with("clipboard_modify:execute:")
                 || action.starts_with("clipboard_modify:open:")
                 || action.starts_with("clipboard_modify:undo:"));
 

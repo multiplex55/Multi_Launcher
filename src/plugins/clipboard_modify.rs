@@ -1,8 +1,7 @@
 use crate::actions::Action;
 use crate::clipboard_modify::actions::{
-    EXECUTE_PREFIX, OPEN_PREFIX, UNDO_PREFIX, encode_action_payload,
-    execute_saved_pipeline_payload, execute_stages_payload, execute_template_payload,
-    open_dialog_payload, undo_payload,
+    OPEN_PREFIX, encode_action_payload, execute_saved_pipeline_payload, execute_stages_payload,
+    execute_template_payload, open_dialog_payload, undo_payload,
 };
 use crate::clipboard_modify::catalog::{canonical_command, normalize_name, operation_lookup};
 use crate::clipboard_modify::parser::{
@@ -57,7 +56,7 @@ impl Plugin for ClipboardModifyPlugin {
 
     fn commands(&self) -> Vec<Action> {
         vec![
-            command_action("cm", "Open Clipboard Modify"),
+            command_action("cm", "Clipboard Modify"),
             command_action("cm template", "Open Clipboard Modify templates"),
             command_action("cm apply", "Open Clipboard Modify saved pipelines"),
             command_action("cm undo", "Undo last Clipboard Modify"),
@@ -80,10 +79,7 @@ fn section_action(section: ModifySection) -> Action {
     Action {
         label: format!("Open Clipboard Modify {section_name}"),
         desc: "Clipboard Modify".into(),
-        action: encoded
-            .as_ref()
-            .map(|e| format!("{OPEN_PREFIX}{e}"))
-            .unwrap_or_default(),
+        action: format!("clipboard_modify:open:{section_name}"),
         args: encoded,
     }
 }
@@ -136,43 +132,43 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
         ClipboardModifyIntent::Stages(stages) => {
             let stage_count = stages.len();
             let payload = execute_stages_payload(stages);
-            let encoded = encode_action_payload(&payload).ok();
             Action {
                 label: "Run Clipboard Modify pipeline".into(),
                 desc: format!("Clipboard Modify: {stage_count} stage(s)"),
-                action: encoded
-                    .as_ref()
-                    .map(|e| format!("{EXECUTE_PREFIX}{e}"))
-                    .unwrap_or_default(),
-                args: encoded,
+                action: "clipboard_modify:execute".into(),
+                args: serde_json::to_string(&serde_json::json!({
+                    "intent": "stages",
+                    "stages": payload,
+                }))
+                .ok(),
             }
         }
         ClipboardModifyIntent::ApplyTemplate { name } => {
             let normalized = normalize_name(&name);
             let payload = execute_template_payload(normalized);
-            let encoded = encode_action_payload(&payload).ok();
             Action {
                 label: format!("Apply Clipboard Modify template {name}"),
                 desc: "Clipboard Modify".into(),
-                action: encoded
-                    .as_ref()
-                    .map(|e| format!("{EXECUTE_PREFIX}{e}"))
-                    .unwrap_or_default(),
-                args: encoded,
+                action: "clipboard_modify:execute".into(),
+                args: serde_json::to_string(&serde_json::json!({
+                    "intent": "template",
+                    "payload": payload,
+                }))
+                .ok(),
             }
         }
         ClipboardModifyIntent::ApplySavedPipeline { name } => {
             let normalized = normalize_name(&name);
             let payload = execute_saved_pipeline_payload(normalized);
-            let encoded = encode_action_payload(&payload).ok();
             Action {
                 label: format!("Run Clipboard Modify pipeline {name}"),
                 desc: "Clipboard Modify".into(),
-                action: encoded
-                    .as_ref()
-                    .map(|e| format!("{EXECUTE_PREFIX}{e}"))
-                    .unwrap_or_default(),
-                args: encoded,
+                action: "clipboard_modify:execute".into(),
+                args: serde_json::to_string(&serde_json::json!({
+                    "intent": "saved-pipeline",
+                    "payload": payload,
+                }))
+                .ok(),
             }
         }
         ClipboardModifyIntent::Undo => {
@@ -181,10 +177,7 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             Action {
                 label: "Undo Clipboard Modify".into(),
                 desc: "Clipboard Modify".into(),
-                action: encoded
-                    .as_ref()
-                    .map(|e| format!("{UNDO_PREFIX}{e}"))
-                    .unwrap_or_default(),
+                action: "clipboard_modify:undo".into(),
                 args: encoded,
             }
         }
@@ -212,8 +205,8 @@ mod tests {
     }
 
     fn payload(action: &Action) -> ClipboardModifyActionPayload {
-        let encoded = action.action.rsplit_once(':').unwrap().1;
-        decode_action_payload(encoded).unwrap()
+        let args = action.args.as_deref().expect("payload args");
+        decode_action_payload(args).unwrap()
     }
 
     #[test]

@@ -5,6 +5,8 @@ pub use super::store::{
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
+use serde::Deserialize;
+
 use super::actions::{ClipboardModifyActionPayload, decode_action_payload};
 
 use super::clipboard::{ClipboardError, ProductionClipboardService, production_clipboard_service};
@@ -20,13 +22,39 @@ pub fn clipboard_service() -> Arc<ProductionClipboardService> {
         .clone()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "intent", rename_all = "kebab-case")]
+enum LegacyExecutePayload {
+    Stages {
+        stages: ClipboardModifyActionPayload,
+    },
+    Template {
+        payload: ClipboardModifyActionPayload,
+    },
+    SavedPipeline {
+        payload: ClipboardModifyActionPayload,
+    },
+}
+
+fn decode_execute_payload(encoded_or_json: &str) -> Result<ClipboardModifyActionPayload, String> {
+    if let Ok(payload) = decode_action_payload(encoded_or_json) {
+        return Ok(payload);
+    }
+    match serde_json::from_str::<LegacyExecutePayload>(encoded_or_json)
+        .map_err(|err| format!("invalid clipboard modify action: {err}"))?
+    {
+        LegacyExecutePayload::Stages { stages }
+        | LegacyExecutePayload::Template { payload: stages }
+        | LegacyExecutePayload::SavedPipeline { payload: stages } => Ok(stages),
+    }
+}
+
 pub fn execute_action_args(
     args: Option<&str>,
     catalog: &SharedClipboardModifierCatalog,
 ) -> Result<(), ClipboardError> {
     let encoded = args.unwrap_or("");
-    let payload: ClipboardModifyActionPayload = decode_action_payload(encoded)
-        .map_err(|e| ClipboardError::Config(format!("invalid clipboard modify action: {e}")))?;
+    let payload = decode_execute_payload(encoded).map_err(ClipboardError::Config)?;
     let snapshot = catalog.read().unwrap().clone();
     let cancel = AtomicBool::new(false);
     match payload {
