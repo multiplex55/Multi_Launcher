@@ -79,7 +79,7 @@ impl MultiManagerDialog {
                             app.multi_manager_restore_bindings();
                         }
                         if ui.button("Reconnect Windows").clicked() {
-                            app.multi_manager_reconnect_windows();
+                            app.multi_manager_start_manual_reconnect();
                         }
                         if ui.button("Refresh Titles").clicked() {
                             app.multi_manager_refresh_titles();
