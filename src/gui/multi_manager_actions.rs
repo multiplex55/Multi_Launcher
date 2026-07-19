@@ -3,6 +3,7 @@ use crate::multi_manager::activation::{self, ActivationOperation, ActivationResu
 use crate::multi_manager::apply_capture::{self, ApplyCaptureResult};
 use crate::multi_manager::bindings;
 use crate::multi_manager::capture;
+use crate::multi_manager::model::MmBindingStatus;
 use crate::multi_manager::model::{PendingCaptureAction, RecaptureQueueItem};
 use crate::multi_manager::runtime::MultiManagerRuntimeEvent;
 use crate::multi_manager::win::{self, CaptureKeyAction, CapturedWindow};
@@ -1001,13 +1002,25 @@ pub(crate) fn build_recapture_queue(
 ) -> Vec<RecaptureQueueItem> {
     workspaces
         .iter()
+        .filter(|workspace| !workspace.disabled)
         .flat_map(|workspace| {
             workspace
                 .windows
                 .iter()
                 .enumerate()
                 .filter(|&(_window_index, window)| {
-                    window.hwnd == 0 || !win::is_valid_window(window.hwnd)
+                    !window.disabled
+                        && (matches!(
+                            window.binding_status,
+                            MmBindingStatus::Missing
+                                | MmBindingStatus::Closed
+                                | MmBindingStatus::Ambiguous
+                                | MmBindingStatus::MetadataMismatch
+                        ) || (window.hwnd == 0 || !win::is_valid_window(window.hwnd))
+                            && !matches!(
+                                window.binding_status,
+                                MmBindingStatus::Bound | MmBindingStatus::Reconnected
+                            ))
                 })
                 .map(|(window_index, _window)| RecaptureQueueItem {
                     workspace_id: workspace.id.clone(),
@@ -1238,6 +1251,60 @@ mod tests {
         assert_eq!(queue.pop_front().unwrap().window_index, 1); // queue advanced
         queue.clear(); // Escape cancels remaining queue
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn recapture_all_includes_unresolved_statuses_and_excludes_bound_reconnected() {
+        use crate::multi_manager::model::MmBindingStatus;
+
+        let mut bound = MmWindow {
+            hwnd: 1,
+            binding_status: MmBindingStatus::Bound,
+            ..Default::default()
+        };
+        bound.valid = true;
+        let mut reconnected = MmWindow {
+            hwnd: 2,
+            binding_status: MmBindingStatus::Reconnected,
+            ..Default::default()
+        };
+        reconnected.valid = true;
+        let unresolved = [
+            MmBindingStatus::Missing,
+            MmBindingStatus::Closed,
+            MmBindingStatus::Ambiguous,
+            MmBindingStatus::MetadataMismatch,
+        ]
+        .into_iter()
+        .map(|status| MmWindow {
+            hwnd: 99,
+            binding_status: status,
+            ..Default::default()
+        });
+        let disabled_unresolved = MmWindow {
+            disabled: true,
+            binding_status: MmBindingStatus::Missing,
+            ..Default::default()
+        };
+        let workspaces = vec![MmWorkspace {
+            id: "w".into(),
+            windows: std::iter::once(bound)
+                .chain(std::iter::once(reconnected))
+                .chain(unresolved)
+                .chain(std::iter::once(disabled_unresolved))
+                .collect(),
+            ..Default::default()
+        }];
+
+        let queue = build_recapture_queue(&workspaces);
+
+        assert_eq!(
+            queue
+                .iter()
+                .map(|item| item.window_index)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 5]
+        );
     }
 
     fn set_workspaces(app: &mut LauncherApp, workspaces: Vec<MmWorkspace>) {
