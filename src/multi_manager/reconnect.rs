@@ -421,6 +421,22 @@ fn patch_for(
     }
 }
 
+fn already_valid_current_patch(window: &ReconnectSnapshotWindow, hwnd: usize) -> ReconnectPatch {
+    ReconnectPatch {
+        workspace_id: window.workspace_id.clone(),
+        window_index: window.window_index,
+        original: window.fingerprint.clone(),
+        outcome: ReconnectOutcome::AlreadyValid,
+        binding: ReconnectBindingPatch {
+            hwnd,
+            valid: window.fingerprint.valid,
+            binding_status: window.fingerprint.binding_status,
+            binding_verified: window.fingerprint.binding_verified,
+            live_title: String::new(),
+        },
+    }
+}
+
 pub fn build_reconnect_patches(
     snapshot: &ReconnectSnapshot,
     deps: ReconnectDeps<'_>,
@@ -440,12 +456,7 @@ pub fn build_reconnect_patches(
             if (deps.is_window)(fingerprint.hwnd) {
                 summary.already_valid += 1;
                 assigned.insert(fingerprint.hwnd);
-                patches.push(patch_for(
-                    window,
-                    ReconnectOutcome::AlreadyValid,
-                    fingerprint.hwnd,
-                    String::new(),
-                ));
+                patches.push(already_valid_current_patch(window, fingerprint.hwnd));
                 continue;
             }
         } else if fingerprint.hwnd != 0 {
@@ -1222,16 +1233,10 @@ mod tests {
     fn candidate_hwnd_already_assigned_elsewhere_is_rejected_at_apply() {
         let mut workspaces = vec![MmWorkspace {
             id: "workspace-a".into(),
-            windows: vec![
-                MmWindow {
-                    captured_title: "Doc".into(),
-                    ..MmWindow::default()
-                },
-                MmWindow {
-                    captured_title: "Other".into(),
-                    ..MmWindow::default()
-                },
-            ],
+            windows: vec![MmWindow {
+                captured_title: "Doc".into(),
+                ..MmWindow::default()
+            }],
             ..MmWorkspace::default()
         }];
         let snapshot = collect_reconnect_snapshot(&workspaces);
@@ -1243,14 +1248,25 @@ mod tests {
                 enumerate_top_level_windows: &|| vec![live(77, "Doc", "", "", "")],
             },
         );
-        workspaces[0].windows[1].mark_bound(77);
+        workspaces.push(MmWorkspace {
+            id: "workspace-b".into(),
+            windows: vec![MmWindow {
+                captured_title: "Other".into(),
+                hwnd: 77,
+                valid: true,
+                binding_status: MmBindingStatus::Bound,
+                binding_verified: true,
+                ..MmWindow::default()
+            }],
+            ..MmWorkspace::default()
+        });
 
         let applied = apply_reconnect_patches(&mut workspaces, &patches);
 
         assert_eq!(applied.stale_results_discarded, 1);
         assert_eq!(applied.reconnected, 0);
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
-        assert_eq!(workspaces[0].windows[1].hwnd, 77);
+        assert_eq!(workspaces[1].windows[0].hwnd, 77);
     }
 
     #[test]
