@@ -267,7 +267,8 @@ pub mod fake {
     impl ClipboardBackend for FakeClipboardBackend {
         fn read_text(&self) -> Result<String, ClipboardError> {
             loop {
-                match self.ops.lock().unwrap().pop_front() {
+                let op = self.ops.lock().unwrap().pop_front();
+                match op {
                     Some(Op::Read(r)) => return r,
                     Some(Op::Delay(d)) => sleep(d),
                     Some(Op::External(s)) => *self.text.lock().unwrap() = Some(s),
@@ -286,7 +287,8 @@ pub mod fake {
         }
         fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
             loop {
-                match self.ops.lock().unwrap().pop_front() {
+                let op = self.ops.lock().unwrap().pop_front();
+                match op {
                     Some(Op::Write(r)) => {
                         r?;
                         break;
