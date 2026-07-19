@@ -119,6 +119,15 @@ impl<B: ClipboardBackend> ClipboardService<B> {
         self.undo.lock().unwrap().clone()
     }
 
+    pub fn read_text_for_modify(&self) -> Result<String, ClipboardError> {
+        self.read_retry()
+    }
+
+    #[cfg(test)]
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
     pub fn apply_stages<C: Cancellation + ?Sized>(
         &self,
         stages: &[StageSpec],

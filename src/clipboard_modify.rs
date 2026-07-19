@@ -16,6 +16,7 @@ pub use model::*;
 pub use parser::*;
 pub use pipeline::*;
 pub mod config;
+pub mod coordinator;
 pub mod migrate;
 pub mod runtime;
 pub mod store;
