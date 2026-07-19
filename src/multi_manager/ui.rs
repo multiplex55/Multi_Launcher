@@ -7,6 +7,7 @@ use crate::multi_manager::model::{
 use crate::multi_manager::win;
 use eframe::egui;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 #[derive(Debug, Default)]
 pub struct MultiManagerDialog {
@@ -53,6 +54,7 @@ impl MultiManagerDialog {
         if !self.open {
             return;
         }
+        refresh_live_titles_if_due(app, ctx, false);
         let mut open = self.open;
         egui::Window::new("MultiManager")
             .open(&mut open)
@@ -445,6 +447,44 @@ impl MultiManagerDialog {
             });
         });
     }
+}
+
+fn refresh_live_titles_if_due(app: &mut LauncherApp, ctx: &egui::Context, force: bool) -> bool {
+    let now = Instant::now();
+    let Ok(mut workspaces) = app.multi_manager.workspaces.lock() else {
+        return false;
+    };
+    let changed = refresh_live_titles_throttled_with(
+        &mut workspaces,
+        &mut app.multi_manager.last_live_title_refresh,
+        now,
+        force,
+        crate::multi_manager::state::LIVE_TITLE_REFRESH_INTERVAL,
+        win::is_valid_window,
+        win::window_title,
+    );
+    if changed {
+        ctx.request_repaint();
+    }
+    changed
+}
+
+pub(crate) fn refresh_live_titles_throttled_with(
+    workspaces: &mut [MmWorkspace],
+    last_refresh: &mut Option<Instant>,
+    now: Instant,
+    force: bool,
+    interval: std::time::Duration,
+    is_valid: impl FnMut(usize) -> bool,
+    window_title: impl FnMut(usize) -> Option<String>,
+) -> bool {
+    if !force
+        && last_refresh.is_some_and(|last_refresh| now.duration_since(last_refresh) < interval)
+    {
+        return false;
+    }
+    *last_refresh = Some(now);
+    bindings::refresh_live_titles_with(workspaces, is_valid, window_title)
 }
 
 fn capture_banner_text(action: &PendingCaptureAction) -> &'static str {
@@ -1305,6 +1345,100 @@ mod tests {
                 if err.contains("Missing window row for capture")
         ));
         assert!(workspaces[0].windows.is_empty());
+    }
+
+    #[test]
+    fn throttle_prevents_repeated_title_queries() {
+        let mut workspaces = vec![workspace_with_window(None, None)];
+        let start = Instant::now();
+        let mut last = None;
+        let mut title_queries = 0;
+
+        assert!(refresh_live_titles_throttled_with(
+            &mut workspaces,
+            &mut last,
+            start,
+            false,
+            crate::multi_manager::state::LIVE_TITLE_REFRESH_INTERVAL,
+            |_| true,
+            |_| {
+                title_queries += 1;
+                Some("Live one".into())
+            },
+        ));
+        assert!(!refresh_live_titles_throttled_with(
+            &mut workspaces,
+            &mut last,
+            start + crate::multi_manager::state::LIVE_TITLE_REFRESH_INTERVAL / 2,
+            false,
+            crate::multi_manager::state::LIVE_TITLE_REFRESH_INTERVAL,
+            |_| true,
+            |_| {
+                title_queries += 1;
+                Some("Live two".into())
+            },
+        ));
+
+        assert_eq!(title_queries, 1);
+        assert_eq!(workspaces[0].windows[0].live_title, "Live one");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Title");
+    }
+
+    #[test]
+    fn live_title_refresh_helper_does_not_mark_workspace_or_bindings_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let mut state = crate::multi_manager::state::MultiManagerState::load_or_default(
+            &crate::settings::MultiManagerSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        state
+            .workspaces
+            .lock()
+            .unwrap()
+            .push(workspace_with_window(None, None));
+        let mut last = None;
+
+        assert!(refresh_live_titles_throttled_with(
+            &mut state.workspaces.lock().unwrap(),
+            &mut last,
+            Instant::now(),
+            false,
+            crate::multi_manager::state::LIVE_TITLE_REFRESH_INTERVAL,
+            |_| true,
+            |_| Some("Runtime only".into()),
+        ));
+
+        assert!(!state.dirty);
+        assert!(!state.bindings_dirty);
+    }
+
+    #[test]
+    fn manual_refresh_bypasses_throttle() {
+        let mut workspaces = vec![workspace_with_window(None, None)];
+        let start = Instant::now();
+        let mut last = Some(start);
+        let mut title_queries = 0;
+
+        assert!(refresh_live_titles_throttled_with(
+            &mut workspaces,
+            &mut last,
+            start,
+            true,
+            crate::multi_manager::state::LIVE_TITLE_REFRESH_INTERVAL,
+            |_| true,
+            |_| {
+                title_queries += 1;
+                Some("Manual live".into())
+            },
+        ));
+
+        assert_eq!(title_queries, 1);
+        assert_eq!(workspaces[0].windows[0].live_title, "Manual live");
+        assert_eq!(workspaces[0].windows[0].captured_title, "Title");
     }
 
     fn workspace_with_window(

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 const AUTO_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const BINDINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+pub const LIVE_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
 pub struct MultiManagerState {
     pub dirty: bool,
@@ -35,6 +36,7 @@ pub struct MultiManagerState {
     binding_save_debounce: Duration,
     pub bindings_dirty_since: Option<Instant>,
     pub last_bindings_save_attempt: Option<Instant>,
+    pub last_live_title_refresh: Option<Instant>,
 }
 
 impl MultiManagerState {
@@ -81,6 +83,7 @@ impl MultiManagerState {
             binding_save_debounce: BINDINGS_SAVE_DEBOUNCE,
             bindings_dirty_since: None,
             last_bindings_save_attempt: None,
+            last_live_title_refresh: None,
         }
     }
 
