@@ -1103,16 +1103,18 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn button_and_mm_reconnect_command_use_same_manual_start_path() {
-        clear_toast_log();
         let mut button_app = test_app();
+        clear_toast_log();
+        button_app.multi_manager.pending_automatic_reconnect = false;
         button_app
             .multi_manager
             .reconnect_in_progress
             .store(true, Ordering::Relaxed);
         button_app.multi_manager_start_manual_reconnect();
 
-        clear_toast_log();
         let mut command_app = test_app();
+        clear_toast_log();
+        command_app.multi_manager.pending_automatic_reconnect = false;
         command_app
             .multi_manager
             .reconnect_in_progress
@@ -1140,8 +1142,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn duplicate_manual_reconnect_shows_already_running_message() {
-        clear_toast_log();
         let mut app = test_app();
+        clear_toast_log();
+        app.multi_manager.pending_automatic_reconnect = false;
         app.multi_manager
             .reconnect_in_progress
             .store(true, Ordering::Relaxed);
@@ -1164,8 +1167,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn manual_reconnect_completion_produces_one_terminal_toast() {
-        clear_toast_log();
         let mut app = test_app();
+        clear_toast_log();
         app.multi_manager.runtime.event_queue.lock().unwrap().push_back(
             MultiManagerRuntimeEvent::ReconnectCompleted {
                 trigger: ReconnectTrigger::Manual,
