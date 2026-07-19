@@ -524,6 +524,33 @@ mod tests {
     }
 
     #[test]
+    fn zero_hwnd_binding_helpers_reset_to_missing_state() {
+        let mut bound = MmWindow::default();
+        bound.mark_bound(0);
+        assert_eq!(
+            (
+                bound.valid,
+                bound.hwnd,
+                bound.binding_status,
+                bound.binding_verified
+            ),
+            (false, 0, MmBindingStatus::Missing, false)
+        );
+
+        let mut reconnected = MmWindow::default();
+        reconnected.mark_reconnected(0);
+        assert_eq!(
+            (
+                reconnected.valid,
+                reconnected.hwnd,
+                reconnected.binding_status,
+                reconnected.binding_verified
+            ),
+            (false, 0, MmBindingStatus::Missing, false)
+        );
+    }
+
+    #[test]
     fn activation_helpers_keep_legacy_valid_hwnd_compatibility() {
         let window = MmWindow {
             hwnd: 9,
