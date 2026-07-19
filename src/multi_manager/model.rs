@@ -209,12 +209,7 @@ impl MmWindow {
     }
 
     pub fn can_activate(&self) -> bool {
-        !self.disabled
-            && self.hwnd != 0
-            && matches!(
-                self.binding_status,
-                MmBindingStatus::Bound | MmBindingStatus::Reconnected
-            )
+        !self.disabled && self.has_bound_hwnd()
     }
 
     pub fn mark_bound(&mut self, hwnd: usize) {
