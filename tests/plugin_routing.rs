@@ -344,3 +344,117 @@ fn clipboard_modify_baseline_builtin_queries_keep_current_routing_results() {
         .iter()
         .any(|result| result.action == "app:plan"));
 }
+
+fn clipboard_modify_manager_with_catalog(
+    catalog: multi_launcher::clipboard_modify::model::ClipboardModifierCatalog,
+) -> PluginManager {
+    use multi_launcher::clipboard_modify::store::shared_default_catalog;
+    use multi_launcher::plugins::clipboard_modify::ClipboardModifyPlugin;
+
+    let shared = shared_default_catalog();
+    *shared.write().unwrap() = Arc::new(catalog);
+    let mut pm = PluginManager::with_clipboard_modifier_catalog(Arc::clone(&shared));
+    pm.register(Box::new(ClipboardModifyPlugin::new(shared)));
+    pm
+}
+
+#[test]
+fn cm_prefix_routes_only_clipboard_modify_plugin() {
+    use multi_launcher::plugins::clipboard_modify::ClipboardModifyPlugin;
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+    use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+
+    let actions = Arc::new(vec![Action {
+        label: "plan app".into(),
+        desc: "launcher".into(),
+        action: "app:plan".into(),
+        args: None,
+    }]);
+    let mut pm = PluginManager::new();
+    let catalog = Arc::clone(&pm.internal_services().clipboard_modifier_catalog);
+    pm.register(Box::new(FileSearchPlugin::default()));
+    pm.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+    pm.register(Box::new(ClipboardModifyPlugin::new(catalog)));
+
+    let results = pm.search_filtered("cm", None, None);
+    assert!(results
+        .iter()
+        .any(|a| a.action == "clipboard_modify:open:modify"));
+    assert!(!results.iter().any(|a| a.action == "app:plan"));
+    assert!(!results.iter().any(|a| a.action.starts_with("file_search:")));
+}
+
+#[test]
+fn cm_wrap_and_json_queries_return_contextual_suggestions() {
+    let pm = clipboard_modify_manager_with_catalog(
+        multi_launcher::clipboard_modify::defaults::default_catalog(),
+    );
+
+    let wrap = pm.search_filtered("cm wrap", None, None);
+    assert!(wrap.iter().any(|a| a.label.contains("wrap quotes")));
+    assert!(wrap.iter().any(|a| a.action == "query:cm wrap quotes"));
+
+    let json = pm.search_filtered("cm json", None, None);
+    assert!(json.iter().any(|a| a.label.contains("json-pretty")));
+    assert!(json.iter().any(|a| a.label.contains("json-minify")));
+}
+
+#[test]
+fn cm_template_and_apply_suggestions_come_from_current_catalog() {
+    use multi_launcher::clipboard_modify::model::{
+        ClipboardModifierCatalog, ClipboardTemplate, OperationId, SavedPipeline, StageArguments,
+        StageSpec,
+    };
+
+    let catalog = ClipboardModifierCatalog::new(
+        vec![ClipboardTemplate {
+            id: "prompt-context".into(),
+            label: "Prompt context".into(),
+            aliases: vec!["pc".into()],
+            template: "{{clipboard}}".into(),
+            processor: None,
+        }],
+        vec![SavedPipeline {
+            id: "cleanup-code".into(),
+            label: "Cleanup code".into(),
+            aliases: vec!["cc".into()],
+            stages: vec![StageSpec {
+                operation: OperationId::Trim,
+                arguments: StageArguments::default(),
+            }],
+        }],
+    )
+    .unwrap();
+    let pm = clipboard_modify_manager_with_catalog(catalog);
+
+    let templates = pm.search_filtered("cm template p", None, None);
+    assert!(templates
+        .iter()
+        .any(|a| a.label == "Use template prompt-context"));
+    assert!(templates
+        .iter()
+        .any(|a| a.action == "query:cm template prompt-context"));
+
+    let pipelines = pm.search_filtered("cm apply c", None, None);
+    assert!(pipelines
+        .iter()
+        .any(|a| a.label == "Apply pipeline cleanup-code"));
+    assert!(pipelines
+        .iter()
+        .any(|a| a.action == "query:cm apply cleanup-code"));
+}
+
+#[test]
+fn cm_complete_query_encodes_stages_without_touching_clipboard() {
+    let pm = clipboard_modify_manager_with_catalog(
+        multi_launcher::clipboard_modify::defaults::default_catalog(),
+    );
+    let results = pm.search_filtered("cm trim | json-pretty", None, None);
+    let action = results
+        .iter()
+        .find(|a| a.action == "clipboard_modify:execute")
+        .expect("execute action");
+    let args = action.args.as_deref().expect("encoded args");
+    assert!(args.contains("trim"));
+    assert!(args.contains("json-pretty"));
+}

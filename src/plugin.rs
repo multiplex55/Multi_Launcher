@@ -8,6 +8,7 @@ use crate::plugins::brightness::BrightnessPlugin;
 use crate::plugins::browser_tabs::BrowserTabsPlugin;
 use crate::plugins::calendar::CalendarPlugin;
 use crate::plugins::clipboard::ClipboardPlugin;
+use crate::plugins::clipboard_modify::ClipboardModifyPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
@@ -184,6 +185,11 @@ impl PluginManager {
         self.register_with_settings(RedditPlugin, plugin_settings);
         self.register_with_settings(WikipediaPlugin, plugin_settings);
         self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
+        let clipboard_modifier_catalog = Arc::clone(&self.services.clipboard_modifier_catalog);
+        self.register_with_settings(
+            ClipboardModifyPlugin::new(clipboard_modifier_catalog),
+            plugin_settings,
+        );
         self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
         self.register_with_settings(FoldersPlugin::default(), plugin_settings);
         self.register_with_settings(FileSearchPlugin::default(), plugin_settings);
