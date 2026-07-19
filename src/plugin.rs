@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::clipboard_modify::store::{SharedClipboardModifierCatalog, shared_default_catalog};
 use crate::common::query::{apply_action_filters, split_action_filters};
 use crate::plugins::asciiart::AsciiArtPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
@@ -105,8 +106,14 @@ pub trait Plugin: Send + Sync {
 }
 
 /// A manager that holds plugins
+#[derive(Clone)]
+pub struct PluginInternalServices {
+    pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
+}
+
 pub struct PluginManager {
     plugins: Vec<Box<dyn Plugin>>,
+    services: PluginInternalServices,
     #[allow(dead_code)]
     libs: Vec<libloading::Library>,
 }
@@ -121,6 +128,23 @@ impl PluginManager {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            services: PluginInternalServices {
+                clipboard_modifier_catalog: shared_default_catalog(),
+            },
+            libs: Vec::new(),
+        }
+    }
+
+    pub fn internal_services(&self) -> &PluginInternalServices {
+        &self.services
+    }
+
+    pub fn with_clipboard_modifier_catalog(catalog: SharedClipboardModifierCatalog) -> Self {
+        Self {
+            plugins: Vec::new(),
+            services: PluginInternalServices {
+                clipboard_modifier_catalog: catalog,
+            },
             libs: Vec::new(),
         }
     }
@@ -256,9 +280,10 @@ impl PluginManager {
         let mut out = Vec::new();
         for p in &self.plugins {
             if let Some(set) = enabled_plugins
-                && !set.contains(p.name()) {
-                    continue;
-                }
+                && !set.contains(p.name())
+            {
+                continue;
+            }
             out.extend(p.commands());
         }
         out
@@ -329,14 +354,16 @@ impl PluginManager {
         for p in &self.plugins {
             let name = p.name();
             if let Some(list) = enabled_plugins
-                && !list.contains(name) {
-                    continue;
-                }
+                && !list.contains(name)
+            {
+                continue;
+            }
             if let Some(map) = enabled_caps
                 && let Some(caps) = map.get(name)
-                    && !caps.iter().any(|c| c == "search") {
-                        continue;
-                    }
+                && !caps.iter().any(|c| c == "search")
+            {
+                continue;
+            }
 
             if !p.always_search() {
                 let prefixes = p.query_prefixes();
@@ -364,5 +391,29 @@ impl PluginManager {
         } else {
             apply_action_filters(actions, &filters)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn shared_catalog_handle_preserved_across_reload() {
+        let mut manager = PluginManager::new();
+        let handle = Arc::clone(&manager.internal_services().clipboard_modifier_catalog);
+        manager.reload_from_dirs(
+            &[],
+            10,
+            NetUnit::Auto,
+            false,
+            &HashMap::new(),
+            Arc::new(Vec::new()),
+        );
+        assert!(Arc::ptr_eq(
+            &handle,
+            &manager.internal_services().clipboard_modifier_catalog
+        ));
     }
 }

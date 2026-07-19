@@ -83,7 +83,7 @@ pub fn default_pipelines() -> Vec<SavedPipeline> {
             ],
         ),
         pipeline(
-            "prompt-context",
+            "apply-prompt-context",
             "Prompt context",
             &["prompt"],
             vec![StageSpec {
