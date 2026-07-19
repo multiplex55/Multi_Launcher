@@ -568,6 +568,7 @@ mod tests {
         let state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -686,6 +687,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -728,6 +730,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -743,6 +746,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -757,6 +761,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -773,6 +778,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -794,6 +800,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -814,6 +821,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -839,6 +847,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -865,6 +874,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -886,6 +896,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -906,6 +917,7 @@ mod tests {
         let mut state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
@@ -926,6 +938,7 @@ mod tests {
         let state = MultiManagerState::load_or_default(
             &MultiManagerSettings {
                 enabled: false,
+                auto_reconnect_on_load: false,
                 ..Default::default()
             },
             settings_path.to_str().unwrap(),
