@@ -1,8 +1,8 @@
 use crate::gui::LauncherApp;
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
-    MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace, PendingCaptureAction,
-    new_workspace_id,
+    MmBindingStatus, MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace,
+    PendingCaptureAction, new_workspace_id,
 };
 use crate::multi_manager::win;
 use eframe::egui;
@@ -360,11 +360,7 @@ impl MultiManagerDialog {
                     });
                 }
                 ui.label(format!("HWND: {}", win.hwnd));
-                let (status_text, status_color) = window_status_text_color(
-                    &win,
-                    win.hwnd != 0 && crate::multi_manager::win::is_valid_window(win.hwnd),
-                    false,
-                );
+                let (status_text, status_color) = window_status_text_color(&win);
                 ui.colored_label(status_color, status_text);
                 if is_duplicate_hwnd(app, win.hwnd, id, index) {
                     ui.colored_label(egui::Color32::YELLOW, "⚠ duplicate HWND");
@@ -560,21 +556,18 @@ fn workspace_header_color(workspace: &MmWorkspace) -> egui::Color32 {
     }
 }
 
-fn window_status_text_color(
-    win: &MmWindow,
-    hwnd_is_currently_valid: bool,
-    ambiguous: bool,
-) -> (&'static str, egui::Color32) {
-    if ambiguous {
-        ("ambiguous", egui::Color32::YELLOW)
-    } else if win.hwnd == 0 {
-        ("missing HWND", egui::Color32::RED)
-    } else if !win.valid {
-        ("invalid", egui::Color32::RED)
-    } else if !hwnd_is_currently_valid {
-        ("stale HWND", egui::Color32::YELLOW)
-    } else {
-        ("valid", egui::Color32::GREEN)
+fn window_status_text_color(win: &MmWindow) -> (&'static str, egui::Color32) {
+    binding_status_text_color(win.binding_status)
+}
+
+fn binding_status_text_color(status: MmBindingStatus) -> (&'static str, egui::Color32) {
+    match status {
+        MmBindingStatus::Bound => ("Bound", egui::Color32::GREEN),
+        MmBindingStatus::Reconnected => ("Reconnected", egui::Color32::LIGHT_GREEN),
+        MmBindingStatus::Missing => ("Missing", egui::Color32::RED),
+        MmBindingStatus::Closed => ("Closed", egui::Color32::YELLOW),
+        MmBindingStatus::Ambiguous => ("Ambiguous", egui::Color32::YELLOW),
+        MmBindingStatus::MetadataMismatch => ("Metadata mismatch", egui::Color32::RED),
     }
 }
 
@@ -1000,73 +993,68 @@ mod tests {
     }
 
     #[test]
-    fn window_status_reports_missing_hwnd() {
+    fn every_binding_status_maps_to_expected_label_and_color() {
+        let cases = [
+            (MmBindingStatus::Bound, ("Bound", egui::Color32::GREEN)),
+            (
+                MmBindingStatus::Reconnected,
+                ("Reconnected", egui::Color32::LIGHT_GREEN),
+            ),
+            (MmBindingStatus::Missing, ("Missing", egui::Color32::RED)),
+            (MmBindingStatus::Closed, ("Closed", egui::Color32::YELLOW)),
+            (
+                MmBindingStatus::Ambiguous,
+                ("Ambiguous", egui::Color32::YELLOW),
+            ),
+            (
+                MmBindingStatus::MetadataMismatch,
+                ("Metadata mismatch", egui::Color32::RED),
+            ),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(binding_status_text_color(status), expected);
+        }
+    }
+
+    #[test]
+    fn ambiguous_and_metadata_mismatch_are_displayed_by_window_status_rendering() {
+        let mut ambiguous = MmWindow::default();
+        ambiguous.mark_ambiguous();
+        let mut metadata_mismatch = MmWindow::default();
+        metadata_mismatch.mark_metadata_mismatch();
+
+        assert_eq!(
+            window_status_text_color(&ambiguous),
+            ("Ambiguous", egui::Color32::YELLOW)
+        );
+        assert_eq!(
+            window_status_text_color(&metadata_mismatch),
+            ("Metadata mismatch", egui::Color32::RED)
+        );
+    }
+
+    #[test]
+    fn status_rendering_uses_recorded_status_without_win32_validation_callbacks() {
         let window = MmWindow {
             hwnd: 0,
-            valid: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            window_status_text_color(&window, false, false),
-            ("missing HWND", egui::Color32::RED)
-        );
-    }
-
-    #[test]
-    fn window_status_reports_invalid() {
-        let window = MmWindow {
-            hwnd: 42,
             valid: false,
+            binding_status: MmBindingStatus::Bound,
             ..Default::default()
         };
 
         assert_eq!(
-            window_status_text_color(&window, true, false),
-            ("invalid", egui::Color32::RED)
+            window_status_text_color(&window),
+            ("Bound", egui::Color32::GREEN)
         );
     }
 
     #[test]
-    fn window_status_reports_stale_hwnd() {
-        let window = MmWindow {
-            hwnd: 42,
-            valid: true,
-            ..Default::default()
-        };
+    fn reconnected_windows_are_treated_as_usable() {
+        let mut window = MmWindow::default();
+        window.mark_reconnected(42);
 
-        assert_eq!(
-            window_status_text_color(&window, false, false),
-            ("stale HWND", egui::Color32::YELLOW)
-        );
-    }
-
-    #[test]
-    fn window_status_reports_valid() {
-        let window = MmWindow {
-            hwnd: 42,
-            valid: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            window_status_text_color(&window, true, false),
-            ("valid", egui::Color32::GREEN)
-        );
-    }
-
-    #[test]
-    fn window_status_reports_ambiguous_when_recorded() {
-        let window = MmWindow {
-            hwnd: 42,
-            valid: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            window_status_text_color(&window, true, true),
-            ("ambiguous", egui::Color32::YELLOW)
-        );
+        assert!(window.can_activate());
     }
 
     #[test]

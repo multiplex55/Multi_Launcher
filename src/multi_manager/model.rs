@@ -209,7 +209,12 @@ impl MmWindow {
     }
 
     pub fn can_activate(&self) -> bool {
-        !self.disabled && self.has_bound_hwnd()
+        !self.disabled
+            && self.hwnd != 0
+            && matches!(
+                self.binding_status,
+                MmBindingStatus::Bound | MmBindingStatus::Reconnected
+            )
     }
 
     pub fn mark_bound(&mut self, hwnd: usize) {
@@ -475,6 +480,8 @@ mod tests {
             ),
             (true, 8, MmBindingStatus::Reconnected, true)
         );
+        assert!(window.has_bound_hwnd());
+        assert!(window.can_activate());
 
         window.mark_closed();
         assert_eq!(
