@@ -316,7 +316,11 @@ fn clipboard_modify_baseline_builtin_queries_keep_current_routing_results() {
         ("cb clear", "clipboard:clear", "Clipboard"),
         ("cs", "snippet:dialog", "Snippet"),
         ("case Rust", "clipboard:RUST", "Text Case-Uppercase"),
-        ("fs", "file_search:open", "File Search"),
+        (
+            "fs",
+            "file_search:open",
+            "Open local filename/content search",
+        ),
         ("o plan", "app:plan", "launcher"),
     ];
 
