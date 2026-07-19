@@ -630,20 +630,6 @@ impl MultiManagerSettingsDialog {
                     .changed();
                 changed |= ui
                     .checkbox(
-                        &mut s.auto_reconnect_missing_windows,
-                        "Auto-reconnect missing windows while running",
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut s.auto_reconnect_interval_ms)
-                            .clamp_range(500..=60000)
-                            .prefix("Auto-reconnect interval ")
-                            .suffix(" ms"),
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(
                         &mut s.ignore_launcher_window_on_capture,
                         "Ignore launcher window on capture",
                     )
@@ -658,18 +644,8 @@ impl MultiManagerSettingsDialog {
                     app.multi_manager_settings = s.clone();
                     app.multi_manager.auto_save = s.auto_save;
                     app.multi_manager.auto_reconnect_on_load = s.auto_reconnect_on_load;
-                    app.multi_manager.auto_reconnect_missing_windows =
-                        s.auto_reconnect_missing_windows;
-                    app.multi_manager.reconnect_interval =
-                        std::time::Duration::from_millis(s.auto_reconnect_interval_ms);
                     let control = &app.multi_manager.runtime.control;
                     control.enabled.store(s.enabled, Ordering::Relaxed);
-                    control
-                        .auto_reconnect_missing_windows
-                        .store(s.auto_reconnect_missing_windows, Ordering::Relaxed);
-                    control
-                        .auto_reconnect_interval_ms
-                        .store(s.auto_reconnect_interval_ms, Ordering::Relaxed);
                 }
                 ui.separator();
                 if ui.button("Save MultiManager Settings").clicked() {

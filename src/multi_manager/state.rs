@@ -28,8 +28,6 @@ pub struct MultiManagerState {
     pub bindings_path: PathBuf,
     pub auto_save: bool,
     pub auto_reconnect_on_load: bool,
-    pub auto_reconnect_missing_windows: bool,
-    pub reconnect_interval: Duration,
     save_debounce: Duration,
     dirty_since: Option<Instant>,
     last_save_attempt: Option<Instant>,
@@ -50,7 +48,6 @@ impl MultiManagerState {
         // Startup always attempts to restore saved HWND binding snapshots first.
         // `auto_reconnect_on_load` only controls the exact-title fallback for windows
         // that snapshot restore could not resolve during startup/reload.
-        // `auto_reconnect_missing_windows` controls the runtime's periodic reconnect loop.
         let loaded = prepare_workspaces_for_startup(
             store::load_or_default(&workspace_path),
             &bindings_path,
@@ -75,8 +72,6 @@ impl MultiManagerState {
             bindings_path,
             auto_save: settings.auto_save,
             auto_reconnect_on_load: settings.auto_reconnect_on_load,
-            auto_reconnect_missing_windows: settings.auto_reconnect_missing_windows,
-            reconnect_interval: Duration::from_millis(settings.auto_reconnect_interval_ms),
             save_debounce: AUTO_SAVE_DEBOUNCE,
             dirty_since: None,
             last_save_attempt: None,

@@ -40,8 +40,6 @@ mod tests {
             show_force_recapture_prompt: true,
             hotkey_poll_ms: 250,
             auto_reconnect_on_load: false,
-            auto_reconnect_missing_windows: false,
-            auto_reconnect_interval_ms: 10_000,
             hide_launcher_before_toggle: true,
             ignore_launcher_window_on_capture: false,
         };
