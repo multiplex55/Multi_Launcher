@@ -290,3 +290,57 @@ fn constructing_manager_with_file_search_settings_preserves_omni_and_indexer_beh
     };
     assert_eq!(action_view(indexed_before), action_view(indexed_after));
 }
+
+#[test]
+fn clipboard_modify_baseline_builtin_queries_keep_current_routing_results() {
+    use multi_launcher::plugins::clipboard::ClipboardPlugin;
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+    use multi_launcher::plugins::omni_search::OmniSearchPlugin;
+    use multi_launcher::plugins::snippets::SnippetsPlugin;
+    use multi_launcher::plugins::text_case::TextCasePlugin;
+
+    let actions = Arc::new(vec![Action {
+        label: "plan app".into(),
+        desc: "launcher".into(),
+        action: "app:plan".into(),
+        args: None,
+    }]);
+    let mut pm = PluginManager::new();
+    pm.register(Box::new(ClipboardPlugin::new(10)));
+    pm.register(Box::new(SnippetsPlugin::default()));
+    pm.register(Box::new(TextCasePlugin));
+    pm.register(Box::new(FileSearchPlugin::default()));
+    pm.register(Box::new(OmniSearchPlugin::new(Arc::clone(&actions))));
+
+    let cases = [
+        ("cb clear", "clipboard:clear", "Clipboard"),
+        ("cs", "snippet:dialog", "Snippet"),
+        ("case Rust", "clipboard:RUST", "Text Case-Uppercase"),
+        (
+            "fs",
+            "file_search:open",
+            "Open local filename/content search",
+        ),
+        ("o plan", "app:plan", "launcher"),
+    ];
+
+    for (query, action, desc) in cases {
+        let results = pm.search_filtered(query, None, None);
+        assert!(
+            results
+                .iter()
+                .any(|result| result.action == action && result.desc == desc),
+            "missing routed result {action:?} for {query:?}: {results:?}"
+        );
+    }
+
+    let file_search_unrelated = pm.search_filtered("plain query", None, None);
+    assert!(!file_search_unrelated
+        .iter()
+        .any(|result| result.action.starts_with("file_search:")));
+
+    let omni_unrelated = pm.search_filtered("plan", None, None);
+    assert!(!omni_unrelated
+        .iter()
+        .any(|result| result.action == "app:plan"));
+}
