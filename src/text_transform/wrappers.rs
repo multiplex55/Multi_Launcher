@@ -26,10 +26,23 @@ pub fn validate_language_identifier(
         }
     }
 }
+fn longest_backtick_run(s: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for c in s.chars() {
+        if c == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
 pub fn markdown_fence(s: &str, lang: Option<&str>) -> Result<String, TextTransformError> {
     let lang = validate_language_identifier(lang)?.unwrap_or_default();
-    let max = s.split('`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(std::cmp::max(3, max + 1));
+    let fence = "`".repeat(std::cmp::max(3, longest_backtick_run(s) + 1));
     Ok(format!("{fence}{lang}\n{s}\n{fence}"))
 }
 pub fn json_string(s: &str) -> String {
