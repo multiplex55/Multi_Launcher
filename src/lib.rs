@@ -42,6 +42,7 @@ pub mod plugins_builtin;
 pub mod settings;
 pub mod settings_editor;
 pub mod sound;
+pub mod text_transform;
 pub mod toast_log;
 pub mod usage;
 pub mod visibility;
