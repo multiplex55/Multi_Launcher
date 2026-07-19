@@ -5,8 +5,10 @@ use crate::multi_manager::win::{self, EnumeratedWindow};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{self, File};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkspaceBindingSnapshot {
@@ -36,7 +38,44 @@ pub struct DuplicateHwnd {
 }
 
 pub fn save_bindings(path: &Path, workspaces: &[MmWorkspace]) -> Result<()> {
-    let snapshots = workspaces
+    save_bindings_with_validator(path, workspaces, win::is_valid_window)
+}
+
+fn save_bindings_with_validator(
+    path: &Path,
+    workspaces: &[MmWorkspace],
+    is_valid_window: impl Fn(usize) -> bool,
+) -> Result<()> {
+    let snapshots = binding_snapshots_with_validator(workspaces, is_valid_window);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp_path = tmp_path_for(path);
+    let json = serde_json::to_vec_pretty(&snapshots)?;
+    {
+        let mut file = File::create(&tmp_path)
+            .with_context(|| format!("create temporary binding file {}", tmp_path.display()))?;
+        file.write_all(&json)
+            .with_context(|| format!("write temporary binding file {}", tmp_path.display()))?;
+        file.flush()
+            .with_context(|| format!("flush temporary binding file {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temporary binding file {}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "atomically replace {} with {}",
+            path.display(),
+            tmp_path.display()
+        )
+    })
+}
+
+fn binding_snapshots_with_validator(
+    workspaces: &[MmWorkspace],
+    is_valid_window: impl Fn(usize) -> bool,
+) -> Vec<WorkspaceBindingSnapshot> {
+    workspaces
         .iter()
         .map(|workspace| WorkspaceBindingSnapshot {
             workspace_id: (!workspace.id.is_empty()).then(|| workspace.id.clone()),
@@ -45,7 +84,7 @@ pub fn save_bindings(path: &Path, workspaces: &[MmWorkspace]) -> Result<()> {
                 .windows
                 .iter()
                 .enumerate()
-                .filter(|(_, window)| window.hwnd != 0 && win::is_valid_window(window.hwnd))
+                .filter(|(_, window)| window.hwnd != 0 && is_valid_window(window.hwnd))
                 .map(|(index, window)| WindowBindingSnapshot {
                     window_id: index,
                     window_index: index,
@@ -58,12 +97,16 @@ pub fn save_bindings(path: &Path, workspaces: &[MmWorkspace]) -> Result<()> {
                 })
                 .collect(),
         })
-        .collect::<Vec<_>>();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&snapshots)?)
-        .with_context(|| format!("write {}", path.display()))
+        .collect()
+}
+
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "multi_manager_bindings.json".into());
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 pub fn load_bindings(path: &Path) -> Result<Vec<WorkspaceBindingSnapshot>> {
@@ -509,5 +552,32 @@ mod tests {
         assert_eq!(workspaces[0].windows[0].captured_title, "old");
         assert_eq!(workspaces[0].windows[0].live_title, "new");
         assert_eq!(workspaces[0].windows[0].alias, "alias");
+    }
+    #[test]
+    fn cleared_hwnd_is_removed_from_next_snapshot() {
+        let snapshots =
+            binding_snapshots_with_validator(&[ws("id", "name", vec![win("a", "t", 0)])], |_| true);
+        assert!(snapshots[0].windows.is_empty());
+    }
+
+    #[test]
+    fn atomic_save_preserves_existing_snapshot_when_temp_create_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.json");
+        std::fs::write(&path, "old complete snapshot").unwrap();
+        std::fs::create_dir(path.with_file_name("bindings.json.tmp")).unwrap();
+
+        let err = save_bindings_with_validator(
+            &path,
+            &[ws("id", "name", vec![win("a", "t", 123)])],
+            |_| true,
+        )
+        .expect_err("temporary file creation should fail");
+
+        assert!(err.to_string().contains("temporary binding file"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "old complete snapshot"
+        );
     }
 }

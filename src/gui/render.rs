@@ -640,6 +640,7 @@ impl eframe::App for LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.multi_manager_drain_runtime_events();
+        self.multi_manager.maybe_auto_save_bindings();
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
@@ -1347,6 +1348,9 @@ impl eframe::App for LauncherApp {
             && let Err(err) = self.multi_manager.save() {
                 self.report_error("multi_manager.save_on_exit", err);
             }
+        if let Err(err) = self.multi_manager.flush_bindings_if_dirty() {
+            self.report_error("multi_manager.bindings.save_on_exit", err);
+        }
         self.unregister_all_hotkeys();
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
