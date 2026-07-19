@@ -1,14 +1,18 @@
 pub mod catalog;
 pub mod defaults;
 pub mod error;
+pub mod executor;
 pub mod model;
 pub mod parser;
+pub mod pipeline;
 
 pub use catalog::*;
 pub use defaults::*;
 pub use error::*;
+pub use executor::*;
 pub use model::*;
 pub use parser::*;
+pub use pipeline::*;
 pub mod config;
 pub mod migrate;
 pub mod runtime;
