@@ -1238,12 +1238,10 @@ mod tests {
 
         let text = format_reconnect_summary(summary);
 
-        assert!(text.contains("1 already valid"));
-        assert!(text.contains("2 reconnected"));
-        assert!(text.contains("3 missing"));
-        assert!(text.contains("4 ambiguous"));
-        assert!(text.contains("5 metadata mismatches"));
-        assert!(text.contains("6 stale-result discards"));
+        assert!(text.contains("valid: 1"));
+        assert!(text.contains("reconnected: 2"));
+        assert!(text.contains("needs recapture: 3 missing / 4 ambiguous / 5 metadata mismatches"));
+        assert!(text.contains("stale results ignored: 6"));
     }
 
     fn test_app() -> LauncherApp {
