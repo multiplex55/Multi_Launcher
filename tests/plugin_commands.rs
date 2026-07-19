@@ -175,3 +175,46 @@ fn command_collection_keeps_existing_folder_and_omni_commands_and_adds_file_sear
         );
     }
 }
+
+#[test]
+fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered() {
+    let actions = Arc::new(Vec::new());
+    let mut plugins = PluginManager::new();
+    plugins.reload_from_dirs(
+        &[],
+        Settings::default().clipboard_limit,
+        Settings::default().net_unit,
+        false,
+        &std::collections::HashMap::new(),
+        Arc::clone(&actions),
+    );
+
+    let plugin_names: std::collections::HashSet<_> = plugins.plugin_names().into_iter().collect();
+    for name in [
+        "clipboard",
+        "snippets",
+        "text_case",
+        "file_search",
+        "omni_search",
+    ] {
+        assert!(plugin_names.contains(name), "missing plugin {name}");
+    }
+
+    let commands: std::collections::HashSet<_> = plugins
+        .commands()
+        .into_iter()
+        .map(|a| (a.label, a.desc, a.action))
+        .collect();
+    for expected in [
+        ("cb", "Clipboard", "query:cb"),
+        ("cs", "Snippet", "query:cs"),
+        ("case <text>", "Text Case", "query:case "),
+        ("fs", "Open local file search", "query:fs"),
+        ("o", "Omni", "query:o "),
+    ] {
+        assert!(
+            commands.contains(&(expected.0.into(), expected.1.into(), expected.2.into())),
+            "missing command {expected:?}"
+        );
+    }
+}
