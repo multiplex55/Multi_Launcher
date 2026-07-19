@@ -189,7 +189,11 @@ fn restore_bindings_with_windows(
                 workspace.windows[window_index].mark_reconnected(candidate.hwnd);
                 workspace.windows[window_index].live_title = candidate.title.clone();
             } else if workspace.windows[window_index].hwnd == window_snapshot.hwnd {
-                workspace.windows[window_index].mark_missing();
+                if identity::has_stable_metadata(&saved_window) {
+                    workspace.windows[window_index].mark_metadata_mismatch();
+                } else {
+                    workspace.windows[window_index].mark_missing();
+                }
                 workspace.windows[window_index].live_title.clear();
             }
         }
@@ -450,6 +454,10 @@ mod tests {
 
         assert_eq!(workspaces[0].windows[0].hwnd, 0);
         assert!(!workspaces[0].windows[0].valid);
+        assert_eq!(
+            workspaces[0].windows[0].binding_status,
+            crate::multi_manager::model::MmBindingStatus::MetadataMismatch
+        );
     }
 
     #[test]

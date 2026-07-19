@@ -230,12 +230,8 @@ pub fn reconnect_workspaces_with_deps(
                 }
                 ReconnectOutcome::Closed => {
                     summary.invalidated += 1;
-                    let was_already_invalid = !window.valid;
                     window.mark_closed();
                     window.live_title.clear();
-                    if !was_already_invalid {
-                        continue;
-                    }
                 }
                 ReconnectOutcome::MetadataMismatch => {
                     summary.metadata_mismatch += 1;
@@ -652,6 +648,60 @@ mod tests {
         );
         assert_eq!(summary.already_valid, 1);
         assert_eq!(workspaces[0].windows[0].hwnd, 5);
+    }
+
+    #[test]
+    fn verified_valid_hwnd_is_preserved_without_metadata_even_when_fallback_matches_other_hwnd() {
+        let mut workspaces = workspace(MmWindow {
+            hwnd: 5,
+            binding_verified: true,
+            captured_title: "Doc".into(),
+            executable: "edit.exe".into(),
+            class_name: "Editor".into(),
+            process_path: "C:/Apps/edit.exe".into(),
+            ..MmWindow::default()
+        });
+        let summary = reconnect_workspaces_with_deps(
+            &mut workspaces,
+            ReconnectDeps {
+                is_window: &|hwnd| hwnd == 5,
+                query_identity: &|_| panic!("verified HWND preservation must only call IsWindow"),
+                enumerate_top_level_windows: &|| {
+                    vec![live(9, "Doc", "edit.exe", "Editor", "C:/Apps/edit.exe")]
+                },
+            },
+        );
+        assert_eq!(summary.already_valid, 1);
+        assert!(!summary.binding_snapshot_changed);
+        assert_eq!(workspaces[0].windows[0].hwnd, 5);
+        assert!(workspaces[0].windows[0].binding_verified);
+    }
+
+    #[test]
+    fn closed_unverified_hwnd_runs_exact_title_fallback() {
+        let candidate = live(42, "Doc", "edit.exe", "Editor", "C:/Apps/edit.exe");
+        let mut workspaces = workspace(MmWindow {
+            hwnd: 5,
+            binding_verified: false,
+            valid: true,
+            captured_title: "Doc".into(),
+            executable: "edit.exe".into(),
+            class_name: "Editor".into(),
+            process_path: "C:/Apps/edit.exe".into(),
+            ..MmWindow::default()
+        });
+        let summary = reconnect_workspaces_with_deps(
+            &mut workspaces,
+            ReconnectDeps {
+                is_window: &|hwnd| hwnd == 42,
+                query_identity: &|_| panic!("closed HWND identity should not be queried"),
+                enumerate_top_level_windows: &|| vec![candidate.clone()],
+            },
+        );
+        assert_eq!(summary.invalidated, 1);
+        assert_eq!(summary.reconnected, 1);
+        assert!(summary.binding_snapshot_changed);
+        assert_eq!(workspaces[0].windows[0].hwnd, 42);
     }
 
     #[test]
