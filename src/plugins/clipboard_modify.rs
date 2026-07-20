@@ -35,7 +35,10 @@ impl Plugin for ClipboardModifyPlugin {
             ClipboardModifyParseResult::CompleteExecution(intent) => vec![execution_action(intent)],
             ClipboardModifyParseResult::Invalid(error) => vec![Action {
                 label: "Invalid clipboard modify query".into(),
-                desc: format!("Clipboard Modify: {:?}", error.kind),
+                desc: format!(
+                    "Clipboard Modify syntax is invalid: {}. Open `cm` and use the Help section for syntax examples.",
+                    parser_error_hint(&error.kind)
+                ),
                 action: "clipboard_modify:error".into(),
                 args: None,
             }],
@@ -72,13 +75,44 @@ impl Plugin for ClipboardModifyPlugin {
     }
 }
 
+fn parser_error_hint(kind: &crate::clipboard_modify::parser::ParserErrorKind) -> String {
+    match kind {
+        crate::clipboard_modify::parser::ParserErrorKind::UnterminatedQuote => {
+            "unterminated quote".into()
+        }
+        crate::clipboard_modify::parser::ParserErrorKind::TrailingEscape => {
+            "trailing escape".into()
+        }
+        crate::clipboard_modify::parser::ParserErrorKind::LeadingPipe => {
+            "pipeline cannot start with `|`".into()
+        }
+        crate::clipboard_modify::parser::ParserErrorKind::TrailingPipe => {
+            "pipeline cannot end with `|`".into()
+        }
+        crate::clipboard_modify::parser::ParserErrorKind::EmptyStage => {
+            "pipeline contains an empty stage".into()
+        }
+        crate::clipboard_modify::parser::ParserErrorKind::UnknownCommand(c) => {
+            format!("unknown command `{c}`")
+        }
+        crate::clipboard_modify::parser::ParserErrorKind::MissingArgument {
+            operation,
+            argument,
+        } => format!("`{operation}` is missing `{argument}`"),
+        crate::clipboard_modify::parser::ParserErrorKind::UnexpectedArgument {
+            operation,
+            argument,
+        } => format!("`{operation}` does not accept `{argument}`"),
+    }
+}
+
 fn section_action(section: ModifySection) -> Action {
     let section_name = section_name(section);
     let payload = open_dialog_payload(section);
     let encoded = encode_action_payload(&payload).ok();
     Action {
         label: format!("Open Clipboard Modify {section_name}"),
-        desc: "Clipboard Modify".into(),
+        desc: format!("Open the Clipboard Modify {section_name} dialog section"),
         action: format!("clipboard_modify:open:{section_name}"),
         args: encoded,
     }
@@ -92,7 +126,10 @@ fn partial_actions(partial: PartialQuery) -> Vec<Action> {
             let label = suggestion_label(partial.section, &suggestion);
             Action {
                 label,
-                desc: format!("Clipboard Modify stage {}", partial.stage_index + 1),
+                desc: format!(
+                    "Complete the query as `{}`",
+                    suggestion_query(partial.section, &suggestion)
+                ),
                 action: format!("query:{}", suggestion_query(partial.section, &suggestion)),
                 args: None,
             }
@@ -134,7 +171,9 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             let payload = execute_stages_payload(stages);
             Action {
                 label: "Run Clipboard Modify pipeline".into(),
-                desc: format!("Clipboard Modify: {stage_count} stage(s)"),
+                desc: format!(
+                    "Runs {stage_count} Clipboard Modify stage(s); reads the current clipboard and writes the transformed result"
+                ),
                 action: "clipboard_modify:execute".into(),
                 args: serde_json::to_string(&serde_json::json!({
                     "intent": "stages",
@@ -148,7 +187,9 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             let payload = execute_template_payload(normalized);
             Action {
                 label: format!("Apply Clipboard Modify template {name}"),
-                desc: "Clipboard Modify".into(),
+                desc: format!(
+                    "Applies template `{name}` immediately; reads the current clipboard and writes the transformed result"
+                ),
                 action: "clipboard_modify:execute".into(),
                 args: serde_json::to_string(&serde_json::json!({
                     "intent": "template",
@@ -162,7 +203,9 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             let payload = execute_saved_pipeline_payload(normalized);
             Action {
                 label: format!("Run Clipboard Modify pipeline {name}"),
-                desc: "Clipboard Modify".into(),
+                desc: format!(
+                    "Runs saved pipeline `{name}` immediately; reads the current clipboard and writes the transformed result"
+                ),
                 action: "clipboard_modify:execute".into(),
                 args: serde_json::to_string(&serde_json::json!({
                     "intent": "saved-pipeline",
@@ -176,7 +219,8 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             let encoded = encode_action_payload(&payload).ok();
             Action {
                 label: "Undo Clipboard Modify".into(),
-                desc: "Clipboard Modify".into(),
+                desc: "Restores the clipboard text captured before the last Clipboard Modify write"
+                    .into(),
                 action: "clipboard_modify:undo".into(),
                 args: encoded,
             }
@@ -245,6 +289,48 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].action, "clipboard_modify:error");
         assert!(result[0].args.is_none());
+    }
+
+    #[test]
+    fn contextual_descriptions_explain_actions() {
+        let p = plugin();
+        assert!(p.search("cm")[0].desc.contains("Modify dialog section"));
+        assert!(
+            p.search("cm template")[0]
+                .desc
+                .contains("templates dialog section")
+        );
+        assert!(
+            p.search("cm apply")[0]
+                .desc
+                .contains("saved-pipelines dialog section")
+        );
+        assert!(
+            p.search("cm up")[0]
+                .desc
+                .contains("Complete the query as `cm upper")
+        );
+        assert!(
+            p.search("cm upper")[0]
+                .desc
+                .contains("reads the current clipboard and writes the transformed result")
+        );
+        assert!(p.search("cm |")[0].desc.contains("Help section"));
+    }
+
+    #[test]
+    fn template_and_saved_pipeline_descriptions_identify_immediate_execution() {
+        let p = plugin();
+        assert!(
+            p.search("cm template prompt context")[0]
+                .desc
+                .contains("template `prompt context` immediately")
+        );
+        assert!(
+            p.search("cm apply clean lines")[0]
+                .desc
+                .contains("saved pipeline `clean lines` immediately")
+        );
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub struct ClipboardModifyDialogState {
     pub wrap_preview: bool,
     pub last_action: Option<String>,
     pub template_filter: String,
+    pub help_filter: String,
     pub selected_template: Option<String>,
     pub template_draft: Vec<ClipboardTemplate>,
     pub template_editor_error: Option<String>,
@@ -94,6 +95,7 @@ impl Default for ClipboardModifyDialogState {
             wrap_preview: true,
             last_action: None,
             template_filter: String::new(),
+            help_filter: String::new(),
             selected_template: None,
             template_draft: Vec::new(),
             template_editor_error: None,
@@ -285,9 +287,7 @@ impl ClipboardModifyDialogState {
                             ui.label("Pipeline management is unavailable.");
                         }
                     }
-                    _ => {
-                        ui.label(format!("{:?} section", self.section));
-                    }
+                    ClipboardModifyDialogSection::Help => self.help_ui(ui, catalog.clone()),
                 }
             });
         if self.open && !open {
@@ -438,6 +438,41 @@ impl ClipboardModifyDialogState {
     }
     pub fn cancel_pipeline_preview(&mut self) {
         self.preview.cancel_active();
+    }
+
+    fn help_ui(&mut self, ui: &mut egui::Ui, catalog: Arc<ClipboardModifierCatalog>) {
+        ui.horizontal(|ui| {
+            ui.label("Search help");
+            ui.text_edit_singleline(&mut self.help_filter);
+        });
+        ui.separator();
+        for entry in crate::clipboard_modify::help::build_help_entries(catalog.as_ref())
+            .into_iter()
+            .filter(|entry| entry.matches_filter(&self.help_filter))
+        {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(&entry.canonical_syntax);
+                    ui.label(format!("— {}", entry.description));
+                });
+                ui.label(format!(
+                    "Category: {} | Pipeline: {}",
+                    entry.category,
+                    if entry.pipeline_allowed {
+                        "allowed"
+                    } else {
+                        "not allowed"
+                    }
+                ));
+                ui.label(format!("Arguments: {}", entry.arguments));
+                if !entry.aliases.is_empty() {
+                    ui.label(format!("Aliases: {}", entry.aliases.join(", ")));
+                }
+                if !entry.examples.is_empty() {
+                    ui.label(format!("Examples: {}", entry.examples.join("; ")));
+                }
+            });
+        }
     }
     fn templates_ui(
         &mut self,
