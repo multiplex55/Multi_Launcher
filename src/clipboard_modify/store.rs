@@ -1,7 +1,7 @@
 use super::config::{self, LoadedConfig, VersionedClipboardModifiersFile};
 use super::model::ClipboardModifierCatalog;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub type SharedClipboardModifierCatalog = Arc<RwLock<Arc<ClipboardModifierCatalog>>>;
 
@@ -15,9 +15,11 @@ pub struct ClipboardModifierStore {
 impl ClipboardModifierStore {
     pub fn new(settings_path: &Path) -> (Self, LoadedConfig) {
         let loaded = config::load_startup(settings_path);
+        let shared = shared_default_catalog();
+        *shared.write().unwrap() = Arc::new(loaded.catalog.clone());
         let store = Self {
             path: loaded.path.clone(),
-            catalog: Arc::new(RwLock::new(Arc::new(loaded.catalog.clone()))),
+            catalog: shared,
             diagnostic: Arc::new(RwLock::new(None)),
         };
         (store, loaded)
@@ -35,5 +37,8 @@ impl ClipboardModifierStore {
 }
 
 pub fn shared_default_catalog() -> SharedClipboardModifierCatalog {
-    Arc::new(RwLock::new(Arc::new(super::defaults::default_catalog())))
+    static SHARED: OnceLock<SharedClipboardModifierCatalog> = OnceLock::new();
+    SHARED
+        .get_or_init(|| Arc::new(RwLock::new(Arc::new(super::defaults::default_catalog()))))
+        .clone()
 }

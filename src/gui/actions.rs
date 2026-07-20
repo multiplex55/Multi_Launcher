@@ -50,6 +50,9 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        if self.handle_clipboard_modify_action(&a.action) {
+            return;
+        }
         if self.handle_file_search_action(&a.action) {
             return;
         }
@@ -837,6 +840,37 @@ impl LauncherApp {
         } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
             self.focus_input();
         }
+    }
+
+    fn handle_clipboard_modify_action(&mut self, action: &str) -> bool {
+        use crate::clipboard_modify::actions::{
+            ClipboardModifyActionPayload, ClipboardModifySectionPayload, OPEN_PREFIX,
+            decode_action_payload,
+        };
+
+        let Some(encoded) = action.strip_prefix(OPEN_PREFIX) else {
+            return false;
+        };
+        match decode_action_payload::<ClipboardModifyActionPayload>(encoded) {
+            Ok(ClipboardModifyActionPayload::OpenDialogSection { section }) => match section {
+                ClipboardModifySectionPayload::Modify
+                | ClipboardModifySectionPayload::Templates
+                | ClipboardModifySectionPayload::SavedPipelines => {
+                    self.clipboard_dialog.open();
+                }
+            },
+            Ok(_) => self.report_clipboard_modify_action_error(
+                "unexpected clipboard modify open payload".into(),
+            ),
+            Err(err) => self.report_clipboard_modify_action_error(err),
+        }
+        true
+    }
+
+    fn report_clipboard_modify_action_error(&mut self, err: String) {
+        let msg = format!("Invalid clipboard modify action: {err}");
+        self.set_inline_error(msg.clone());
+        self.add_error_toast(msg);
     }
 
     fn handle_file_search_action(&mut self, action: &str) -> bool {

@@ -20,7 +20,9 @@ pub enum ModifySection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardModifyIntent {
     Stages(Vec<StageSpec>),
+    ApplyTemplate { name: String },
     ApplySavedPipeline { name: String },
+    Undo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +290,11 @@ fn parse_special(
 ) -> Option<ClipboardModifyParseResult> {
     let first = stage.tokens.first()?;
     let n = normalize_name(&first.text);
+    if n == "undo" && stage.tokens.len() == 1 {
+        return Some(ClipboardModifyParseResult::CompleteExecution(
+            ClipboardModifyIntent::Undo,
+        ));
+    }
     if n == "template" {
         return Some(if stage.tokens.len() == 1 {
             ClipboardModifyParseResult::OpenSection(ModifySection::Templates)
@@ -306,15 +313,9 @@ fn parse_special(
                         .collect(),
                 )
             } else {
-                ClipboardModifyParseResult::CompleteExecution(ClipboardModifyIntent::Stages(vec![
-                    StageSpec {
-                        operation: OperationId::Template,
-                        arguments: StageArguments {
-                            name: Some(q),
-                            ..Default::default()
-                        },
-                    },
-                ]))
+                ClipboardModifyParseResult::CompleteExecution(
+                    ClipboardModifyIntent::ApplyTemplate { name: q },
+                )
             }
         });
     }

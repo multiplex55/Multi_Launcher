@@ -9,9 +9,16 @@ pub(crate) struct LaunchPlan<'a> {
 }
 
 pub(crate) fn plan_action<'a>(action: &'a Action) -> LaunchPlan<'a> {
+    let parsed = parse_action_kind(action);
+    let args = action.args.as_deref().or_else(|| {
+        action
+            .action
+            .strip_prefix("clipboard_modify:execute:")
+            .or_else(|| action.action.strip_prefix("clipboard_modify:undo:"))
+    });
     LaunchPlan {
-        action: parse_action_kind(action),
-        args: action.args.as_deref(),
+        args,
+        action: parsed,
     }
 }
 

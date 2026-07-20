@@ -166,10 +166,10 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
             keep_open: false,
         };
     }
-    if s == "clipboard_modify:execute" {
+    if s == "clipboard_modify:execute" || s.starts_with("clipboard_modify:execute:") {
         return ActionKind::ClipboardModifyExecute;
     }
-    if s == "clipboard_modify:undo" {
+    if s == "clipboard_modify:undo" || s.starts_with("clipboard_modify:undo:") {
         return ActionKind::ClipboardModifyUndo;
     }
     if let Some(rest) = s.strip_prefix("clipboard:") {
