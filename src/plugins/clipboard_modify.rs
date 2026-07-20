@@ -107,13 +107,14 @@ fn parser_error_hint(kind: &crate::clipboard_modify::parser::ParserErrorKind) ->
 }
 
 fn section_action(section: ModifySection) -> Action {
+    let section_slug = section_slug(section);
     let section_name = section_name(section);
     let payload = open_dialog_payload(section);
     let encoded = encode_action_payload(&payload).ok();
     Action {
         label: format!("Open Clipboard Modify {section_name}"),
         desc: format!("Open the Clipboard Modify {section_name} dialog section"),
-        action: format!("clipboard_modify:open:{section_name}"),
+        action: format!("clipboard_modify:open:{section_slug}"),
         args: encoded,
     }
 }
@@ -230,6 +231,14 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
 
 fn section_name(section: ModifySection) -> &'static str {
     match section {
+        ModifySection::Modify => "Modify",
+        ModifySection::Templates => "Templates",
+        ModifySection::SavedPipelines => "Saved Pipelines",
+    }
+}
+
+fn section_slug(section: ModifySection) -> &'static str {
+    match section {
         ModifySection::Modify => "modify",
         ModifySection::Templates => "templates",
         ModifySection::SavedPipelines => "saved-pipelines",
@@ -298,12 +307,12 @@ mod tests {
         assert!(
             p.search("cm template")[0]
                 .desc
-                .contains("templates dialog section")
+                .contains("Templates dialog section")
         );
         assert!(
             p.search("cm apply")[0]
                 .desc
-                .contains("saved-pipelines dialog section")
+                .contains("Saved Pipelines dialog section")
         );
         assert!(
             p.search("cm up")[0]
