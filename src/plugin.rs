@@ -140,6 +140,17 @@ impl PluginManager {
         &self.services
     }
 
+    pub fn clipboard_modifier_catalog(&self) -> SharedClipboardModifierCatalog {
+        Arc::clone(&self.services.clipboard_modifier_catalog)
+    }
+
+    pub fn replace_clipboard_modifier_catalog_snapshot(
+        &self,
+        catalog: crate::clipboard_modify::model::ClipboardModifierCatalog,
+    ) {
+        *self.services.clipboard_modifier_catalog.write().unwrap() = Arc::new(catalog);
+    }
+
     pub fn with_clipboard_modifier_catalog(catalog: SharedClipboardModifierCatalog) -> Self {
         Self {
             plugins: Vec::new(),

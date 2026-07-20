@@ -50,7 +50,7 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
-        if self.handle_clipboard_modify_action(&a.action) {
+        if self.handle_clipboard_modify_action(&a, source) {
             return;
         }
         if self.handle_file_search_action(&a.action) {
@@ -842,29 +842,184 @@ impl LauncherApp {
         }
     }
 
-    fn handle_clipboard_modify_action(&mut self, action: &str) -> bool {
+    pub(crate) fn handle_clipboard_modify_action(
+        &mut self,
+        action: &Action,
+        source: ActivationSource,
+    ) -> bool {
         use crate::clipboard_modify::actions::{
-            ClipboardModifyActionPayload, ClipboardModifySectionPayload, OPEN_PREFIX,
-            decode_action_payload,
+            ClipboardModifyActionPayload, ClipboardModifySectionPayload, EXECUTE_PREFIX,
+            OPEN_PREFIX, UNDO_PREFIX, decode_action_payload,
         };
+        use crate::clipboard_modify::parser::ClipboardModifyIntent;
 
-        let Some(encoded) = action.strip_prefix(OPEN_PREFIX) else {
+        let is_clipboard_modify = action.action.starts_with("clipboard_modify:");
+        if !is_clipboard_modify {
             return false;
-        };
-        match decode_action_payload::<ClipboardModifyActionPayload>(encoded) {
-            Ok(ClipboardModifyActionPayload::OpenDialogSection { section }) => match section {
-                ClipboardModifySectionPayload::Modify
-                | ClipboardModifySectionPayload::Templates
-                | ClipboardModifySectionPayload::SavedPipelines => {
-                    self.clipboard_dialog.open();
-                }
-            },
-            Ok(_) => self.report_clipboard_modify_action_error(
-                "unexpected clipboard modify open payload".into(),
-            ),
-            Err(err) => self.report_clipboard_modify_action_error(err),
         }
-        true
+
+        let payload = action
+            .args
+            .as_deref()
+            .and_then(|args| decode_action_payload::<ClipboardModifyActionPayload>(args).ok());
+
+        if action.action.starts_with(OPEN_PREFIX) {
+            let section = match payload {
+                Some(ClipboardModifyActionPayload::OpenDialogSection { section }) => section,
+                _ if action.action.ends_with(":templates") => {
+                    ClipboardModifySectionPayload::Templates
+                }
+                _ if action.action.ends_with(":saved-pipelines") => {
+                    ClipboardModifySectionPayload::SavedPipelines
+                }
+                _ => ClipboardModifySectionPayload::Modify,
+            };
+            let section = match section {
+                ClipboardModifySectionPayload::Modify => ClipboardModifyDialogSection::Modify,
+                ClipboardModifySectionPayload::Templates => ClipboardModifyDialogSection::Templates,
+                ClipboardModifySectionPayload::SavedPipelines => {
+                    ClipboardModifyDialogSection::SavedPipelines
+                }
+            };
+            self.clipboard_modify_dialog.open_section(section);
+            return true;
+        }
+
+        if action.action.starts_with(UNDO_PREFIX)
+            || matches!(payload.as_ref(), Some(ClipboardModifyActionPayload::Undo))
+        {
+            match crate::clipboard_modify::runtime::undo() {
+                Ok(()) => {
+                    self.visible_flag.store(false, Ordering::SeqCst);
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: "Undid Clipboard Modify".into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                }
+                Err(err) => self.report_clipboard_modify_action_error(err.to_string()),
+            }
+            return true;
+        }
+
+        if action.action.starts_with(EXECUTE_PREFIX) || action.action == "clipboard_modify:execute"
+        {
+            let payload = match payload.or_else(|| {
+                action.args.as_deref().and_then(|args| {
+                    crate::clipboard_modify::runtime::decode_execute_payload_for_gui(args).ok()
+                })
+            }) {
+                Some(payload) => payload,
+                None => {
+                    self.report_clipboard_modify_action_error("missing execute payload".into());
+                    return true;
+                }
+            };
+            let intent = match payload {
+                ClipboardModifyActionPayload::ExecuteAdHocStages { stages } => {
+                    ClipboardModifyIntent::Stages(stages)
+                }
+                ClipboardModifyActionPayload::ExecuteTemplate { name } => {
+                    ClipboardModifyIntent::ApplyTemplate { name }
+                }
+                ClipboardModifyActionPayload::ExecuteSavedPipeline { name } => {
+                    ClipboardModifyIntent::ApplySavedPipeline { name }
+                }
+                _ => {
+                    self.report_clipboard_modify_action_error("unexpected execute payload".into());
+                    return true;
+                }
+            };
+            let meta = ImmediateRequestMetadata {
+                action: action.clone(),
+                query: self.query.clone(),
+                source,
+            };
+            let id = self.clipboard_modify_immediate.start(
+                intent,
+                self.clipboard_modify_runtime.catalog_snapshot(),
+                meta.clone(),
+            );
+            self.pending_clipboard_modify_immediate.insert(id.0, meta);
+            return true;
+        }
+
+        if action.action == "clipboard_modify:error" {
+            self.report_clipboard_modify_action_error(action.desc.clone());
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn drain_clipboard_modify_immediate(&mut self) {
+        for ev in self.clipboard_modify_immediate.drain_completions() {
+            let meta = self
+                .pending_clipboard_modify_immediate
+                .remove(&ev.request_id.0);
+            match ev.result {
+                Ok(()) => {
+                    if let Some(meta) = meta.as_ref() {
+                        self.record_history_usage(&meta.action, &meta.query, meta.source);
+                    }
+                    self.visible_flag.store(false, Ordering::SeqCst);
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: format!("{} complete", ev.display_label).into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
+                        );
+                    }
+                }
+                Err(ref err) => {
+                    if let Some(meta) = meta {
+                        self.query = meta.query;
+                    }
+                    self.visible_flag.store(true, Ordering::SeqCst);
+                    self.focus_input();
+                    self.report_error_message("clipboard_modify", err.message.clone());
+                }
+            }
+            self.clipboard_modify_events.push(ev);
+        }
+    }
+
+    pub(crate) fn refresh_clipboard_modify_catalog(
+        &mut self,
+        catalog: crate::clipboard_modify::model::ClipboardModifierCatalog,
+        static_commands_changed: bool,
+    ) {
+        self.clipboard_modify_runtime.replace_catalog(catalog);
+        self.clipboard_modify_config_diagnostic = self
+            .clipboard_modify_runtime
+            .diagnostic
+            .read()
+            .unwrap()
+            .clone();
+        self.last_results_valid = false;
+        if self
+            .query
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("cm")
+        {
+            self.search();
+        }
+        if static_commands_changed {
+            self.update_command_cache();
+        } else {
+            self.update_suggestions();
+        }
     }
 
     fn report_clipboard_modify_action_error(&mut self, err: String) {
@@ -1003,7 +1158,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
     use tempfile::tempdir;
 
-    fn new_app(ctx: &egui::Context) -> LauncherApp {
+    pub(super) fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -1130,5 +1285,73 @@ mod tests {
 
         set_execute_action_hook(None);
         std::env::set_current_dir(original_dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clipboard_modify_gui_action_tests {
+    use super::*;
+    use crate::clipboard_modify::actions::{encode_action_payload, open_dialog_payload};
+    use crate::clipboard_modify::parser::ModifySection;
+
+    fn action(action: &str, args: Option<String>) -> Action {
+        Action {
+            label: "Test".into(),
+            desc: "Test".into(),
+            action: action.into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn clipboard_modify_handler_claims_only_clipboard_modify_actions() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        assert!(!app.handle_clipboard_modify_action(
+            &action("clipboard:upper", None),
+            ActivationSource::Enter
+        ));
+        assert!(app.handle_clipboard_modify_action(
+            &action("clipboard_modify:error", None),
+            ActivationSource::Enter
+        ));
+    }
+
+    #[test]
+    fn dialog_open_payload_selects_requested_section() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        let args = encode_action_payload(&open_dialog_payload(ModifySection::Templates)).unwrap();
+        assert!(app.handle_clipboard_modify_action(
+            &action("clipboard_modify:open:templates", Some(args)),
+            ActivationSource::Click
+        ));
+        assert!(app.clipboard_modify_dialog.open);
+        assert_eq!(
+            app.clipboard_modify_dialog.section,
+            ClipboardModifyDialogSection::Templates
+        );
+    }
+
+    #[test]
+    fn catalog_replacement_refreshes_cm_results_without_rebuilding_plugin_manager() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.plugins.register(Box::new(
+            crate::plugins::clipboard_modify::ClipboardModifyPlugin::new(
+                app.plugins.clipboard_modifier_catalog(),
+            ),
+        ));
+        app.update_command_cache();
+        let names = app.plugins.plugin_names();
+        app.query = "cm".into();
+        app.refresh_clipboard_modify_catalog(crate::clipboard_modify::default_catalog(), false);
+        assert_eq!(app.plugins.plugin_names(), names);
+        assert!(app.last_results_valid);
+        assert!(
+            app.results
+                .iter()
+                .any(|a| a.action.starts_with("clipboard_modify:"))
+        );
     }
 }

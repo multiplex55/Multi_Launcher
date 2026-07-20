@@ -2,12 +2,15 @@ pub use super::store::{
     ClipboardModifierStore, SharedClipboardModifierCatalog, shared_default_catalog,
 };
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use serde::Deserialize;
 
 use super::actions::{ClipboardModifyActionPayload, decode_action_payload};
+use super::config::LoadedConfig;
+use super::model::ClipboardModifierCatalog;
 
 use super::clipboard::{ClipboardError, ProductionClipboardService, production_clipboard_service};
 use super::executor::Cancellation;
@@ -15,6 +18,42 @@ use super::parser::ClipboardModifyIntent;
 use super::pipeline::find_pipeline;
 
 static SERVICE: OnceLock<Arc<ProductionClipboardService>> = OnceLock::new();
+
+#[derive(Clone)]
+pub struct ClipboardModifyRuntime {
+    pub store: ClipboardModifierStore,
+    pub diagnostic: Arc<std::sync::RwLock<Option<String>>>,
+}
+
+impl ClipboardModifyRuntime {
+    pub fn new(
+        settings_path: &Path,
+        shared_catalog: SharedClipboardModifierCatalog,
+    ) -> (Self, LoadedConfig) {
+        let loaded = super::config::load_startup(settings_path);
+        *shared_catalog.write().unwrap() = Arc::new(loaded.catalog.clone());
+        let store = ClipboardModifierStore {
+            path: loaded.path.clone(),
+            catalog: shared_catalog,
+            diagnostic: Arc::new(std::sync::RwLock::new(None)),
+        };
+        (
+            Self {
+                diagnostic: Arc::clone(&store.diagnostic),
+                store,
+            },
+            loaded,
+        )
+    }
+
+    pub fn replace_catalog(&self, catalog: ClipboardModifierCatalog) {
+        self.store.replace_valid(catalog);
+    }
+
+    pub fn catalog_snapshot(&self) -> Arc<ClipboardModifierCatalog> {
+        self.store.catalog.read().unwrap().clone()
+    }
+}
 
 pub fn clipboard_service() -> Arc<ProductionClipboardService> {
     SERVICE
@@ -36,7 +75,9 @@ enum LegacyExecutePayload {
     },
 }
 
-fn decode_execute_payload(encoded_or_json: &str) -> Result<ClipboardModifyActionPayload, String> {
+pub fn decode_execute_payload_for_gui(
+    encoded_or_json: &str,
+) -> Result<ClipboardModifyActionPayload, String> {
     if let Ok(payload) = decode_action_payload(encoded_or_json) {
         return Ok(payload);
     }
@@ -54,7 +95,7 @@ pub fn execute_action_args(
     catalog: &SharedClipboardModifierCatalog,
 ) -> Result<(), ClipboardError> {
     let encoded = args.unwrap_or("");
-    let payload = decode_execute_payload(encoded).map_err(ClipboardError::Config)?;
+    let payload = decode_execute_payload_for_gui(encoded).map_err(ClipboardError::Config)?;
     let snapshot = catalog.read().unwrap().clone();
     let cancel = AtomicBool::new(false);
     match payload {

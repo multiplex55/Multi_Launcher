@@ -31,6 +31,22 @@ pub enum LoadState {
     OversizedFile { size: u64 },
 }
 
+impl LoadState {
+    pub fn startup_diagnostic(&self) -> Option<String> {
+        match self {
+            Self::InvalidStartupInMemoryDefaults { diagnostic }
+            | Self::InvalidReloadRetained { diagnostic } => Some(diagnostic.clone()),
+            Self::UnsupportedFutureSchema { version } => Some(format!(
+                "unsupported future clipboard modifiers schema version {version}"
+            )),
+            Self::OversizedFile { size } => Some(format!(
+                "clipboard modifiers config is too large ({size} bytes)"
+            )),
+            Self::ValidLoaded | Self::DefaultsCreated => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub path: PathBuf,

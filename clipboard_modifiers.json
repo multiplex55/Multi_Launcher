@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "id": "markdown-quote",
+      "label": "Markdown quote",
+      "aliases": [
+        "md-quote"
+      ],
+      "template": "> {{clipboard}}",
+      "processor": "literal"
+    },
+    {
+      "id": "prompt-context",
+      "label": "Prompt context",
+      "aliases": [
+        "context"
+      ],
+      "template": "Context:\n{{clipboard}}",
+      "processor": "literal"
+    },
+    {
+      "id": "xml-block",
+      "label": "XML block",
+      "aliases": [
+        "xml"
+      ],
+      "template": "<clipboard>\n{{clipboard}}\n</clipboard>",
+      "processor": "literal"
+    },
+    {
+      "id": "rust-raw-string",
+      "label": "Rust raw string",
+      "aliases": [
+        "raw-string"
+      ],
+      "template": "{{clipboard}}",
+      "processor": "rust-raw-string"
+    },
+    {
+      "id": "sql-diagnostic",
+      "label": "SQL diagnostic",
+      "aliases": [
+        "sql-diag"
+      ],
+      "template": "-- Diagnostic SQL\n{{clipboard}}",
+      "processor": "literal"
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "clean-lines",
+      "label": "Clean lines",
+      "aliases": [
+        "tidy-lines"
+      ],
+      "stages": [
+        {
+          "operation": "trim-lines",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": null
+          }
+        },
+        {
+          "operation": "unique-lines",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "sorted-unique-lines",
+      "label": "Sorted unique lines",
+      "aliases": [
+        "sort-uniq"
+      ],
+      "stages": [
+        {
+          "operation": "trim-lines",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": null
+          }
+        },
+        {
+          "operation": "unique-lines",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": null
+          }
+        },
+        {
+          "operation": "sort-ascending",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "rust-code",
+      "label": "Rust code",
+      "aliases": [
+        "rs-code"
+      ],
+      "stages": [
+        {
+          "operation": "code-block",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": "rust"
+          }
+        }
+      ]
+    },
+    {
+      "id": "json-code",
+      "label": "JSON code",
+      "aliases": [
+        "json-fence"
+      ],
+      "stages": [
+        {
+          "operation": "json-pretty",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": null
+          }
+        },
+        {
+          "operation": "code-block",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": null,
+            "language": "json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "apply-prompt-context",
+      "label": "Prompt context",
+      "aliases": [
+        "prompt"
+      ],
+      "stages": [
+        {
+          "operation": "template",
+          "arguments": {
+            "prefix": null,
+            "suffix": null,
+            "name": "prompt-context",
+            "language": null
+          }
+        }
+      ]
+    }
+  ]
+}

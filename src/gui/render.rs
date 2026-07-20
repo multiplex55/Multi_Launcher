@@ -651,6 +651,7 @@ impl eframe::App for LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.multi_manager_drain_runtime_events();
+        self.drain_clipboard_modify_immediate();
         let _ = self.multi_manager.start_pending_automatic_reconnect();
         if self
             .multi_manager

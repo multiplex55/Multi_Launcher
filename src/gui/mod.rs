@@ -51,6 +51,28 @@ pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClipboardModifyDialogSection {
+    #[default]
+    Modify,
+    Templates,
+    SavedPipelines,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ClipboardModifyDialogState {
+    pub open: bool,
+    pub section: ClipboardModifyDialogSection,
+}
+
+impl ClipboardModifyDialogState {
+    pub fn open_section(&mut self, section: ClipboardModifyDialogSection) {
+        self.open = true;
+        self.section = section;
+    }
+}
+
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
@@ -87,6 +109,10 @@ pub use volume_dialog::VolumeDialog;
 use crate::actions::folders;
 use crate::actions::{Action, load_actions};
 use crate::actions_editor::ActionsEditor;
+use crate::clipboard_modify::coordinator::{
+    ImmediateCompletionEvent, ImmediateExecutionCoordinator, ImmediateRequestMetadata,
+};
+use crate::clipboard_modify::runtime::{ClipboardModifyRuntime, clipboard_service};
 use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_action_filters};
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
@@ -430,6 +456,14 @@ pub struct LauncherApp {
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
+    pub clipboard_modify_runtime: ClipboardModifyRuntime,
+    pub clipboard_modify_dialog: ClipboardModifyDialogState,
+    pub clipboard_modify_config_diagnostic: Option<String>,
+    pending_clipboard_modify_immediate: HashMap<u64, ImmediateRequestMetadata>,
+    clipboard_modify_immediate: ImmediateExecutionCoordinator<
+        crate::clipboard_modify::clipboard::ProductionClipboardService,
+    >,
+    clipboard_modify_events: Vec<ImmediateCompletionEvent>,
     convert_panel: ConvertPanel,
     volume_dialog: VolumeDialog,
     brightness_dialog: BrightnessDialog,
@@ -953,6 +987,10 @@ impl LauncherApp {
 
         let (folder_aliases, folder_aliases_lc) = Self::folder_alias_maps();
         let (bookmark_aliases, bookmark_aliases_lc) = Self::bookmark_alias_maps();
+        let clipboard_modify_catalog = plugins.clipboard_modifier_catalog();
+        let (clipboard_modify_runtime, loaded_clipboard_modify) =
+            ClipboardModifyRuntime::new(Path::new(&settings_path), clipboard_modify_catalog);
+        let clipboard_modify_config_diagnostic = loaded_clipboard_modify.state.startup_diagnostic();
 
         #[cfg(not(test))]
         match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
@@ -1298,6 +1336,12 @@ impl LauncherApp {
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
+            clipboard_modify_runtime,
+            clipboard_modify_dialog: ClipboardModifyDialogState::default(),
+            clipboard_modify_config_diagnostic,
+            pending_clipboard_modify_immediate: HashMap::new(),
+            clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
+            clipboard_modify_events: Vec::new(),
             convert_panel: ConvertPanel::default(),
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
