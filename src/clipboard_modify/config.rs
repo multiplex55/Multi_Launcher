@@ -217,17 +217,20 @@ pub fn validate_model(model: &VersionedClipboardModifiersFile) -> Result<Clipboa
     for p in &pipelines {
         p.validate()?;
         for st in &p.stages {
-            if st.operation == OperationId::Template {
+            if matches!(st.operation, OperationId::Template | OperationId::NamedWrap) {
                 let n = st.arguments.name.as_deref().unwrap_or("");
+                if pipelines
+                    .iter()
+                    .any(|p| p.id == n || p.aliases.iter().any(|a| a == n))
+                {
+                    anyhow::bail!("nested saved-pipeline stages are not allowed");
+                }
                 if !templates
                     .iter()
                     .any(|t| t.id == n || t.aliases.iter().any(|a| a == n))
                 {
                     anyhow::bail!("referenced template {n} not found");
                 }
-            }
-            if st.operation == OperationId::NamedWrap {
-                anyhow::bail!("nested saved-pipeline stages are not allowed");
             }
         }
     }
