@@ -187,7 +187,11 @@ fn validate_label_and_aliases(
     }
     for alias in aliases {
         if super::catalog::normalize_name(alias).is_empty()
+            || !alias.chars().any(char::is_alphanumeric)
             || alias.trim().contains(char::is_whitespace)
+            || alias
+                .chars()
+                .any(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
         {
             return Err(ClipboardModifyError::InvalidAlias {
                 alias: alias.clone(),
