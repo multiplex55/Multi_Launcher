@@ -36,7 +36,7 @@ fn every_baseline_command_parses_to_execution() {
             }
             multi_launcher::clipboard_modify::catalog::ArgumentRequirements::NamedWrap
             | multi_launcher::clipboard_modify::catalog::ArgumentRequirements::Template => {
-                format!("cm {} pc", op.command)
+                format!("cm {} 'pc'", op.command)
             }
             multi_launcher::clipboard_modify::catalog::ArgumentRequirements::CodeBlock => {
                 format!("cm {} rust", op.command)
@@ -90,7 +90,7 @@ fn aliases_and_sections_parse() {
 #[test]
 fn pipes_quoted_pipes_escapes_and_empty_arguments() {
     let cat = catalog();
-    let r = parse(r#"cm custom-wrap "|" "\" | upper"#, &cat);
+    let r = parse("cm custom-wrap \"|\" \"\\\"\" | upper", &cat);
     match r {
         ClipboardModifyParseResult::CompleteExecution(ClipboardModifyIntent::Stages(s)) => {
             assert_eq!(s.len(), 2);

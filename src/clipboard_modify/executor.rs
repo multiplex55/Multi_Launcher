@@ -580,7 +580,7 @@ mod comprehensive_transform_regressions {
             run("{\"s\":\"a\\nb\"}", st(OperationId::JsonPretty)).unwrap(),
             "{\n  \"s\": \"a\\nb\"\n}"
         );
-        assert!(run("%zz", st(OperationId::UrlDecode)).is_err());
+        assert!(run("%FF", st(OperationId::UrlDecode)).is_err());
         assert!(run("not base64!", st(OperationId::Base64Decode)).is_err());
         assert!(run("//8=", st(OperationId::Base64Decode)).is_err());
         assert_eq!(run("✓", st(OperationId::Base64Encode)).unwrap(), "4pyT");
