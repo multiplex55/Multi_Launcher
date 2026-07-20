@@ -495,3 +495,110 @@ mod tests {
         assert!(err.to_string().contains("nested saved pipeline"));
     }
 }
+
+#[cfg(test)]
+mod comprehensive_transform_regressions {
+    use super::*;
+    use crate::clipboard_modify::model::{StageArguments, StageSpec};
+
+    fn st(operation: OperationId) -> StageSpec {
+        StageSpec {
+            operation,
+            arguments: StageArguments::default(),
+        }
+    }
+    fn arg(operation: OperationId, arguments: StageArguments) -> StageSpec {
+        StageSpec {
+            operation,
+            arguments,
+        }
+    }
+    fn run(input: &str, stage: StageSpec) -> Result<String, ExecuteError> {
+        execute_stages(
+            input,
+            &[stage],
+            &crate::clipboard_modify::defaults::default_catalog(),
+            &|| false,
+        )
+    }
+
+    #[test]
+    fn empty_unicode_and_newline_edges() {
+        assert_eq!(run("", st(OperationId::Uppercase)).unwrap(), "");
+        assert_eq!(
+            run("ß café", st(OperationId::Uppercase)).unwrap(),
+            "SS CAFÉ"
+        );
+        assert_eq!(
+            run(" a\r\nb \n c\r", st(OperationId::TrimLines)).unwrap(),
+            "a\nb\nc"
+        );
+        assert_eq!(
+            run("b\na\n", st(OperationId::SortAscending)).unwrap(),
+            "a\nb"
+        );
+        assert_eq!(run(" \n\t\n", st(OperationId::TrimLines)).unwrap(), "\n");
+    }
+
+    #[test]
+    fn wrappers_preserve_embedded_delimiters_and_backticks() {
+        assert_eq!(
+            run("a'b\"c", st(OperationId::SingleQuote)).unwrap(),
+            "'a'b\"c'"
+        );
+        assert_eq!(
+            run("a`b``c", st(OperationId::Backticks)).unwrap(),
+            "`a`b``c`"
+        );
+        assert_eq!(
+            run(
+                "x",
+                arg(
+                    OperationId::CustomWrap,
+                    StageArguments {
+                        prefix: Some("<<".into()),
+                        suffix: Some(">>".into()),
+                        ..Default::default()
+                    }
+                )
+            )
+            .unwrap(),
+            "<<x>>"
+        );
+    }
+
+    #[test]
+    fn json_url_base64_errors_and_escapes() {
+        assert_eq!(
+            run("a\n\"b", st(OperationId::JsonMinify))
+                .unwrap_err()
+                .to_string()
+                .contains("Stage 1"),
+            true
+        );
+        assert_eq!(
+            run("{\"s\":\"a\\nb\"}", st(OperationId::JsonPretty)).unwrap(),
+            "{\n  \"s\": \"a\\nb\"\n}"
+        );
+        assert!(run("%FF", st(OperationId::UrlDecode)).is_err());
+        assert!(run("not base64!", st(OperationId::Base64Decode)).is_err());
+        assert!(run("//8=", st(OperationId::Base64Decode)).is_err());
+        assert_eq!(run("✓", st(OperationId::Base64Encode)).unwrap(), "4pyT");
+    }
+
+    #[test]
+    fn stable_equivalent_key_ordering_for_sort_and_unique() {
+        assert_eq!(
+            run("b\na\na", st(OperationId::SortAscending)).unwrap(),
+            "a\na\nb"
+        );
+        assert_eq!(
+            run("b\na\nb\na", st(OperationId::UniqueLines)).unwrap(),
+            "b\na"
+        );
+        assert_eq!(
+            run("item2\nitem10\nitem1", st(OperationId::SortAscending)).unwrap(),
+            "item1\nitem10\nitem2"
+        );
+    }
+}

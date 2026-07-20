@@ -406,3 +406,15 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod comprehensive_case_regressions {
+    use super::identifier::{IdentifierCase::*, transform};
+    #[test]
+    fn empty_unicode_expansion_and_delimiters() {
+        assert_eq!(transform("", Snake), "");
+        assert_eq!(transform("straße", Upper), "STRASSE");
+        assert_eq!(transform("foo--bar_baz 42", Kebab), "foo-bar-baz-42");
+        assert_eq!(transform("mañana café", Pascal), "MañanaCafé");
+    }
+}

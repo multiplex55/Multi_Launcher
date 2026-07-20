@@ -553,6 +553,9 @@ fn is_known_wrapper(name: &str) -> bool {
 fn longest_op(tokens: &[Token]) -> Option<(&'static super::catalog::OperationInfo, usize)> {
     let mut best = None;
     for end in 1..=tokens.len() {
+        if tokens[end - 1].quoted {
+            break;
+        }
         let name = join_tokens(&tokens[..end]);
         if let Some(op) = operation_lookup(&name) {
             best = Some((op, end));

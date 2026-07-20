@@ -75,3 +75,24 @@ mod tests {
         assert!(validate_language_identifier(Some("rs lang")).is_err())
     }
 }
+
+#[cfg(test)]
+mod comprehensive_wrapper_regressions {
+    use super::*;
+    #[test]
+    fn empty_and_embedded_delimiters() {
+        assert_eq!(inline("", "[", "]"), "[]");
+        assert_eq!(block("a\r\nb\n", "<", ">"), "<\na\r\nb\n\n>");
+        assert_eq!(powershell_single_quoted("Bob's 'hat'"), "'Bob''s ''hat'''");
+        assert_eq!(json_string("a\n\"b\\c"), r#""a\n\"b\\c""#);
+    }
+    #[test]
+    fn backtick_and_rust_raw_string_collisions() {
+        let fenced = markdown_fence("```\n````", Some("rs")).unwrap();
+        assert!(fenced.starts_with("`````rs"));
+        assert_eq!(
+            rust_raw_string("contains \"# and \"##"),
+            "r###\"contains \"# and \"##\"###"
+        );
+    }
+}
