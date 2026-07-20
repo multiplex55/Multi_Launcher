@@ -3,8 +3,8 @@ use crate::clipboard_modify::clipboard::{
 };
 use crate::clipboard_modify::coordinator::{PreviewCoordinator, PreviewState};
 use crate::clipboard_modify::model::{
-    ClipboardModifierCatalog, ClipboardTemplate, OperationId, StageArguments, StageSpec,
-    TemplateProcessor,
+    ClipboardModifierCatalog, ClipboardTemplate, OperationId, SavedPipeline, StageArguments,
+    StageSpec, TemplateProcessor,
 };
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
 use crate::clipboard_modify::pipeline::find_template;
@@ -65,6 +65,11 @@ pub struct ClipboardModifyDialogState {
     pub template_draft: Vec<ClipboardTemplate>,
     pub template_editor_error: Option<String>,
     pub template_delete_confirmation: Option<String>,
+    pub selected_pipeline: Option<String>,
+    pub pipeline_draft: Vec<SavedPipeline>,
+    pub pipeline_editor_error: Option<String>,
+    pub pipeline_delete_confirmation: Option<String>,
+    pub duplicate_save_confirmation: Option<String>,
 }
 
 impl Default for ClipboardModifyDialogState {
@@ -93,6 +98,11 @@ impl Default for ClipboardModifyDialogState {
             template_draft: Vec::new(),
             template_editor_error: None,
             template_delete_confirmation: None,
+            selected_pipeline: None,
+            pipeline_draft: Vec::new(),
+            pipeline_editor_error: None,
+            pipeline_delete_confirmation: None,
+            duplicate_save_confirmation: None,
         }
     }
 }
@@ -258,11 +268,21 @@ impl ClipboardModifyDialogState {
                     ClipboardModifyDialogSection::Templates => {
                         self.templates_ui(ui, service, catalog.clone())
                     }
+                    ClipboardModifyDialogSection::SavedPipelines => {
+                        self.saved_pipelines_ui(ui, service, catalog.clone())
+                    }
                     ClipboardModifyDialogSection::ManageTemplates => {
                         if let Some(store) = store {
                             self.manage_templates_ui(ui, catalog.clone(), store)
                         } else {
                             ui.label("Template management is unavailable.");
+                        }
+                    }
+                    ClipboardModifyDialogSection::ManagePipelines => {
+                        if let Some(store) = store {
+                            self.manage_pipelines_ui(ui, catalog.clone(), store)
+                        } else {
+                            ui.label("Pipeline management is unavailable.");
                         }
                     }
                     _ => {
@@ -292,6 +312,132 @@ impl ClipboardModifyDialogState {
                         .any(|a| crate::clipboard_modify::catalog::normalize_name(a).contains(&q))
             })
             .collect()
+    }
+
+    pub fn pipeline_stage_summary(p: &SavedPipeline) -> String {
+        p.stages
+            .iter()
+            .map(|s| crate::clipboard_modify::catalog::canonical_command(s.operation))
+            .collect::<Vec<_>>()
+            .join(" → ")
+    }
+    pub fn pipeline_identity_line(p: &SavedPipeline) -> String {
+        format!(
+            "{} ({}) aliases: {}",
+            p.label,
+            p.id,
+            if p.aliases.is_empty() {
+                "—".into()
+            } else {
+                p.aliases.join(", ")
+            }
+        )
+    }
+    pub fn preview_pipeline(&mut self, id: String, catalog: Arc<ClipboardModifierCatalog>) {
+        self.preview.request(
+            self.source.clone(),
+            ClipboardModifyIntent::ApplySavedPipeline { name: id },
+            catalog,
+        );
+    }
+    pub fn apply_pipeline_through_commit_path(
+        &mut self,
+        id: &str,
+        catalog: Arc<ClipboardModifierCatalog>,
+    ) {
+        self.preview_pipeline(id.to_string(), catalog);
+    }
+    pub fn duplicate_pipeline_id(base: &ClipboardModifierCatalog, id: &str) -> String {
+        let root = format!(
+            "{}-copy",
+            crate::clipboard_modify::catalog::normalize_name(id)
+        );
+        let taken = |n: &str| {
+            base.pipelines
+                .iter()
+                .any(|p| p.id == n || p.aliases.iter().any(|a| a == n))
+                || base
+                    .templates
+                    .iter()
+                    .any(|t| t.id == n || t.aliases.iter().any(|a| a == n))
+        };
+        if !taken(&root) {
+            return root;
+        }
+        for i in 2.. {
+            let c = format!("{root}-{i}");
+            if !taken(&c) {
+                return c;
+            }
+        }
+        unreachable!()
+    }
+    pub fn begin_pipeline_edit(&mut self, catalog: &ClipboardModifierCatalog) {
+        self.pipeline_draft = catalog.pipelines.clone();
+        self.unsaved_pipeline_draft = false;
+        self.pipeline_editor_error = None;
+    }
+    pub fn validate_pipeline_draft(
+        &self,
+        base: &ClipboardModifierCatalog,
+    ) -> Result<ClipboardModifierCatalog, String> {
+        let model = crate::clipboard_modify::config::VersionedClipboardModifiersFile {
+            schema_version: crate::clipboard_modify::config::CURRENT_SCHEMA_VERSION,
+            templates: base.templates.clone(),
+            pipelines: self.pipeline_draft.clone(),
+        };
+        crate::clipboard_modify::config::validate_model(&model).map_err(|e| e.to_string())
+    }
+    pub fn save_pipeline_draft(
+        &mut self,
+        base: &ClipboardModifierCatalog,
+        store: &ClipboardModifierStore,
+    ) -> Result<ClipboardModifierCatalog, String> {
+        let catalog = self.validate_pipeline_draft(base)?;
+        let model = crate::clipboard_modify::config::model_from_catalog(&catalog);
+        if let Err(e) = store.save(&model) {
+            self.pipeline_editor_error = Some(format!(
+                "Could not save clipboard pipelines. Check file permissions and retry: {e}"
+            ));
+            return Err(self.pipeline_editor_error.clone().unwrap());
+        }
+        store.replace_valid(catalog.clone());
+        self.unsaved_pipeline_draft = false;
+        self.pipeline_editor_error = None;
+        Ok(catalog)
+    }
+    pub fn delete_pipeline_from_draft_and_save(
+        &mut self,
+        base: &ClipboardModifierCatalog,
+        store: &ClipboardModifierStore,
+        id: &str,
+    ) -> Result<(), String> {
+        self.pipeline_draft.retain(|p| p.id != id);
+        self.unsaved_pipeline_draft = true;
+        self.save_pipeline_draft(base, store).map(|_| ())
+    }
+    pub fn reorder_pipeline_draft_and_save(
+        &mut self,
+        base: &ClipboardModifierCatalog,
+        store: &ClipboardModifierStore,
+        from: usize,
+        to: usize,
+    ) -> Result<(), String> {
+        if from < self.pipeline_draft.len() && to < self.pipeline_draft.len() {
+            self.pipeline_draft.swap(from, to);
+        }
+        self.unsaved_pipeline_draft = true;
+        self.save_pipeline_draft(base, store).map(|_| ())
+    }
+    pub fn allowed_stage_operations() -> Vec<OperationId> {
+        crate::clipboard_modify::catalog::operations()
+            .iter()
+            .filter(|o| o.pipeline_available)
+            .map(|o| o.id)
+            .collect()
+    }
+    pub fn cancel_pipeline_preview(&mut self) {
+        self.preview.cancel_active();
     }
     fn templates_ui(
         &mut self,
@@ -530,6 +676,152 @@ impl ClipboardModifyDialogState {
             .clicked()
         {
             let _ = self.save_template_draft(catalog.as_ref(), store);
+        }
+    }
+
+    fn saved_pipelines_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        service: &Arc<ProductionClipboardService>,
+        catalog: Arc<ClipboardModifierCatalog>,
+    ) {
+        if ui.button("Manage Pipelines").clicked() {
+            self.begin_pipeline_edit(catalog.as_ref());
+            self.section = ClipboardModifyDialogSection::ManagePipelines;
+        }
+        for p in &catalog.pipelines {
+            ui.separator();
+            let selected = self.selected_pipeline.as_deref() == Some(&p.id);
+            if ui
+                .selectable_label(selected, Self::pipeline_identity_line(p))
+                .clicked()
+            {
+                self.selected_pipeline = Some(p.id.clone());
+                self.preview_pipeline(p.id.clone(), catalog.clone());
+            }
+            ui.label(format!("Stages: {}", Self::pipeline_stage_summary(p)));
+            ui.label(format!(
+                "Current-source preview: {}",
+                self.source.chars().take(80).collect::<String>()
+            ));
+            if ui.button(format!("Execute {}", p.label)).clicked() {
+                self.apply_pipeline_through_commit_path(&p.id, catalog.clone());
+                self.commit(service, false, false);
+            }
+        }
+    }
+
+    fn manage_pipelines_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        catalog: Arc<ClipboardModifierCatalog>,
+        store: &ClipboardModifierStore,
+    ) {
+        if self.pipeline_draft.is_empty() && !catalog.pipelines.is_empty() {
+            self.begin_pipeline_edit(catalog.as_ref());
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Add pipeline").clicked() {
+                self.pipeline_draft.push(SavedPipeline {
+                    id: Self::duplicate_pipeline_id(catalog.as_ref(), "new-pipeline"),
+                    label: "New Pipeline".into(),
+                    aliases: vec![],
+                    stages: vec![],
+                });
+                self.unsaved_pipeline_draft = true;
+            }
+            if ui.button("Cancel preview").clicked() {
+                self.cancel_pipeline_preview();
+            }
+        });
+        let mut remove = None;
+        let mut swap = None;
+        for i in 0..self.pipeline_draft.len() {
+            ui.push_id(format!("pipeline-{i}"), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("ID");
+                    ui.text_edit_singleline(&mut self.pipeline_draft[i].id);
+                    ui.label("Label");
+                    ui.text_edit_singleline(&mut self.pipeline_draft[i].label);
+                    if ui.button("Duplicate").clicked() {
+                        let mut p = self.pipeline_draft[i].clone();
+                        p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
+                        p.label = format!("{} Copy", p.label);
+                        self.duplicate_save_confirmation = Some(p.id.clone());
+                        self.pipeline_draft.push(p);
+                        self.unsaved_pipeline_draft = true;
+                    }
+                    if ui.button("↑").clicked() && i > 0 {
+                        swap = Some((i, i - 1));
+                    }
+                    if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
+                        swap = Some((i, i + 1));
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.pipeline_delete_confirmation = Some(self.pipeline_draft[i].id.clone());
+                        remove = Some(self.pipeline_draft[i].id.clone());
+                    }
+                });
+                let mut aliases = self.pipeline_draft[i].aliases.join(", ");
+                if ui.text_edit_singleline(&mut aliases).changed() {
+                    self.pipeline_draft[i].aliases = aliases
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect();
+                    self.unsaved_pipeline_draft = true;
+                }
+                for j in 0..self.pipeline_draft[i].stages.len() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "Stage {} {:?}",
+                            j + 1,
+                            self.pipeline_draft[i].stages[j].operation
+                        ));
+                        let a = &mut self.pipeline_draft[i].stages[j].arguments;
+                        ui.text_edit_singleline(a.prefix.get_or_insert_with(String::new));
+                        ui.text_edit_singleline(a.suffix.get_or_insert_with(String::new));
+                        ui.text_edit_singleline(a.name.get_or_insert_with(String::new));
+                        ui.text_edit_singleline(a.language.get_or_insert_with(String::new));
+                        if ui.button("Remove stage").clicked() {
+                            self.pipeline_draft[i].stages.remove(j);
+                        }
+                    });
+                }
+                if ui.button("Add trim stage").clicked() {
+                    self.pipeline_draft[i].stages.push(StageSpec {
+                        operation: OperationId::Trim,
+                        arguments: Default::default(),
+                    });
+                    self.unsaved_pipeline_draft = true;
+                }
+                if ui.button("Preview complete output").clicked() {
+                    self.preview.request(
+                        self.source.clone(),
+                        ClipboardModifyIntent::Stages(self.pipeline_draft[i].stages.clone()),
+                        catalog.clone(),
+                    );
+                }
+            });
+        }
+        if let Some((a, b)) = swap {
+            let _ = self.reorder_pipeline_draft_and_save(catalog.as_ref(), store, a, b);
+        }
+        if let Some(id) = remove {
+            let _ = self.delete_pipeline_from_draft_and_save(catalog.as_ref(), store, &id);
+        }
+        if let Some(id) = &self.duplicate_save_confirmation {
+            ui.label(format!(
+                "Confirm saving duplicated pipeline {id} before pressing Save."
+            ));
+        }
+        if let Some(e) = &self.pipeline_editor_error {
+            ui.colored_label(egui::Color32::RED, e);
+        }
+        if ui.button("Save").clicked() {
+            let _ = self.save_pipeline_draft(catalog.as_ref(), store);
+            self.duplicate_save_confirmation = None;
         }
     }
     fn shortcuts(
@@ -985,5 +1277,159 @@ mod tests {
         d.template_draft.swap(0, 1);
         d.save_template_draft(&base, &store).unwrap();
         assert_eq!(store.catalog.read().unwrap().templates[0].id, "quote");
+    }
+    #[test]
+    fn saved_pipeline_list_displays_identity_and_stage_summary() {
+        let p = SavedPipeline {
+            id: "clean".into(),
+            label: "Clean Text".into(),
+            aliases: vec!["ct".into()],
+            stages: vec![
+                StageSpec {
+                    operation: OperationId::Trim,
+                    arguments: Default::default(),
+                },
+                StageSpec {
+                    operation: OperationId::Uppercase,
+                    arguments: Default::default(),
+                },
+            ],
+        };
+        assert!(
+            ClipboardModifyDialogState::pipeline_identity_line(&p)
+                .contains("Clean Text (clean) aliases: ct")
+        );
+        assert_eq!(
+            ClipboardModifyDialogState::pipeline_stage_summary(&p),
+            "trim → uppercase"
+        );
+    }
+
+    #[test]
+    fn executing_saved_pipeline_uses_current_source_and_commit_preview_path() {
+        let mut base = cat();
+        base.pipelines = vec![SavedPipeline {
+            id: "up".into(),
+            label: "Up".into(),
+            aliases: vec![],
+            stages: vec![StageSpec {
+                operation: OperationId::Uppercase,
+                arguments: Default::default(),
+            }],
+        }];
+        let catalog = Arc::new(base);
+        let mut d = ClipboardModifyDialogState::default();
+        d.source = "current dialog source".into();
+        d.apply_pipeline_through_commit_path("up", catalog);
+        assert!(matches!(
+            d.preview.state(),
+            PreviewState::PendingDebounce { .. } | PreviewState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_pipeline_id_is_nonconflicting_and_requires_confirmation() {
+        let mut base = cat();
+        base.pipelines = vec![
+            SavedPipeline {
+                id: "pipe".into(),
+                label: "Pipe".into(),
+                aliases: vec![],
+                stages: vec![],
+            },
+            SavedPipeline {
+                id: "pipe-copy".into(),
+                label: "Pipe Copy".into(),
+                aliases: vec![],
+                stages: vec![],
+            },
+        ];
+        assert_eq!(
+            ClipboardModifyDialogState::duplicate_pipeline_id(&base, "pipe"),
+            "pipe-copy-2"
+        );
+        let mut d = ClipboardModifyDialogState::default();
+        d.duplicate_save_confirmation = Some("pipe-copy-2".into());
+        assert!(d.duplicate_save_confirmation.is_some());
+    }
+
+    #[test]
+    fn editor_stage_choices_are_deterministic_and_nested_pipelines_rejected() {
+        let ops = ClipboardModifyDialogState::allowed_stage_operations();
+        assert!(ops.contains(&OperationId::Template));
+        assert!(ops.contains(&OperationId::CustomWrap));
+        let mut base = cat();
+        base.pipelines = vec![SavedPipeline {
+            id: "pipe".into(),
+            label: "Pipe".into(),
+            aliases: vec![],
+            stages: vec![],
+        }];
+        let nested = vec![StageSpec {
+            operation: OperationId::Template,
+            arguments: StageArguments {
+                name: Some("pipe".into()),
+                ..Default::default()
+            },
+        }];
+        assert!(
+            crate::clipboard_modify::pipeline::validate_executable_stages(&nested, &base).is_err()
+        );
+    }
+
+    #[test]
+    fn preview_can_be_cancelled() {
+        let mut d = ClipboardModifyDialogState::default();
+        d.cancel_pipeline_preview();
+        assert!(!d.can_apply());
+    }
+
+    #[test]
+    fn pipeline_deletion_and_reorder_save_immediately_and_preserve_drafts_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut base = cat();
+        base.pipelines = vec![
+            SavedPipeline {
+                id: "one".into(),
+                label: "One".into(),
+                aliases: vec![],
+                stages: vec![],
+            },
+            SavedPipeline {
+                id: "two".into(),
+                label: "Two".into(),
+                aliases: vec![],
+                stages: vec![],
+            },
+        ];
+        let store = ClipboardModifierStore {
+            path: dir.path().join("cm.json"),
+            catalog: Arc::new(RwLock::new(Arc::new(base.clone()))),
+            diagnostic: Arc::new(RwLock::new(None)),
+        };
+        let mut d = ClipboardModifyDialogState::default();
+        d.pipeline_draft = base.pipelines.clone();
+        d.delete_pipeline_from_draft_and_save(&base, &store, "one")
+            .unwrap();
+        assert_eq!(store.catalog.read().unwrap().pipelines[0].id, "two");
+        let active = (*store.catalog.read().unwrap()).as_ref().clone();
+        d.reorder_pipeline_draft_and_save(&active, &store, 0, 0)
+            .unwrap();
+        assert_eq!(store.catalog.read().unwrap().pipelines[0].id, "two");
+
+        let bad_store = ClipboardModifierStore {
+            path: dir.path().to_path_buf(),
+            catalog: Arc::new(RwLock::new(Arc::new(base.clone()))),
+            diagnostic: Arc::new(RwLock::new(None)),
+        };
+        let mut failed = ClipboardModifyDialogState::default();
+        failed.pipeline_draft = base.pipelines.clone();
+        assert!(
+            failed
+                .reorder_pipeline_draft_and_save(&base, &bad_store, 0, 1)
+                .is_err()
+        );
+        assert_eq!(bad_store.catalog.read().unwrap().pipelines[0].id, "one");
+        assert_eq!(failed.pipeline_draft[0].id, "two");
     }
 }
