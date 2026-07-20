@@ -278,6 +278,11 @@ impl SettingsEditor {
         }
         let enabled_list = app.enabled_plugins_list();
         let mut open_mg_settings_dialog = false;
+        let mut clipboard_modify_command = None;
+        let clipboard_modify_status = app
+            .clipboard_modify_config_diagnostic
+            .clone()
+            .unwrap_or_else(|| "valid".to_owned());
 
         for plugin in app.plugins.iter_mut() {
             let name = plugin.name().to_string();
@@ -308,12 +313,27 @@ impl SettingsEditor {
                 entry,
                 plugin.as_mut(),
                 &mut open_mg_settings_dialog,
-                app,
+                &mut clipboard_modify_command,
+                &clipboard_modify_status,
             );
         }
 
         if open_mg_settings_dialog {
             app.open_mouse_gesture_settings_dialog();
+        }
+        if let Some(command) = clipboard_modify_command {
+            match command {
+                ClipboardModifySettingsCommand::OpenDialog => app.open_clipboard_modify_dialog(),
+                ClipboardModifySettingsCommand::OpenConfigFile => {
+                    app.open_clipboard_modify_config_file()
+                }
+                ClipboardModifySettingsCommand::ReloadConfig => {
+                    app.reload_clipboard_modify_config()
+                }
+                ClipboardModifySettingsCommand::ResetFactoryDefaults => {
+                    app.reset_clipboard_modify_config_to_factory_defaults()
+                }
+            }
         }
         self.render_note_section(ui);
     }
@@ -325,7 +345,8 @@ impl SettingsEditor {
         entry: &mut serde_json::Value,
         plugin: &mut dyn crate::plugin::Plugin,
         open_mg_settings_dialog: &mut bool,
-        app: &mut LauncherApp,
+        clipboard_modify_command: &mut Option<ClipboardModifySettingsCommand>,
+        clipboard_modify_status: &str,
     ) {
         let id = ui.make_persistent_id(format!("plugin_{name}"));
         let mut state =
@@ -349,24 +370,23 @@ impl SettingsEditor {
                 } else if name == "clipboard_modify" {
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Open Clipboard Modify").clicked() {
-                            app.open_clipboard_modify_dialog();
+                            *clipboard_modify_command =
+                                Some(ClipboardModifySettingsCommand::OpenDialog);
                         }
                         if ui.button("Open clipboard_modifiers.json").clicked() {
-                            app.open_clipboard_modify_config_file();
+                            *clipboard_modify_command =
+                                Some(ClipboardModifySettingsCommand::OpenConfigFile);
                         }
                         if ui.button("Reload configuration").clicked() {
-                            app.reload_clipboard_modify_config();
+                            *clipboard_modify_command =
+                                Some(ClipboardModifySettingsCommand::ReloadConfig);
                         }
                         if ui.button("Reset to factory defaults").clicked() {
-                            app.reset_clipboard_modify_config_to_factory_defaults();
+                            *clipboard_modify_command =
+                                Some(ClipboardModifySettingsCommand::ResetFactoryDefaults);
                         }
                     });
-                    ui.label(format!(
-                        "Configuration status: {}",
-                        app.clipboard_modify_config_diagnostic
-                            .as_deref()
-                            .unwrap_or("valid")
-                    ));
+                    ui.label(format!("Configuration status: {clipboard_modify_status}"));
                     ui.separator();
                     plugin.settings_ui(ui, entry);
                 } else {
@@ -523,6 +543,14 @@ impl SettingsEditor {
 enum HotkeyKind {
     Quit,
     Help,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardModifySettingsCommand {
+    OpenDialog,
+    OpenConfigFile,
+    ReloadConfig,
+    ResetFactoryDefaults,
 }
 
 fn hotkey_indicator(ui: &mut egui::Ui, valid: bool) {
