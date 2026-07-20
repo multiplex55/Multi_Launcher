@@ -22,6 +22,7 @@ It’s designed to be “one hotkey away” from:
 - [Command prefixes cheat sheet](#command-prefixes-cheat-sheet)
 - [Cookbook examples](#cookbook-examples)
 - [File-search plugin](#file-search-plugin)
+- [Clipboard Modify](#clipboard-modify)
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
 - [Layouts](#layouts)
@@ -83,6 +84,7 @@ Multi Launcher is centered around a **single query box**:
 | `bm` | Bookmarks | `bm youtube` |
 | `f` | Saved folders | `f downloads` |
 | `cb` | Clipboard history | `cb list` / `cb clear` |
+| `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
 | `case` | Text case tools | `case snake Hello World` |
@@ -363,6 +365,19 @@ The improved file-search plugin does **not** include these deferred features yet
 - Performance benchmark infrastructure.
 
 ---
+
+
+## Clipboard Modify
+
+Clipboard Modify is a clipboard transformation surface available from the launcher with `cm` and from the Clipboard Modify dialog. Help in the dialog is generated from the same operation registry, template catalog, and saved-pipeline catalog used by execution, so custom templates and pipelines appear after configuration reloads. See [docs/clipboard_modify.md](docs/clipboard_modify.md) for the full operation catalog, syntax, schema, validation, undo, privacy, large-input, race-behavior, and recovery details.
+
+Common examples:
+
+- `cm trim | unique-lines | sort-ascending` trims each line, removes duplicates, then sorts.
+- `cm wrap "<!-- " " -->"` uses custom wrapper quoting for prefixes/suffixes containing spaces.
+- `cm template prompt-context` applies a configured template immediately.
+- `cm apply clean-lines` runs a saved pipeline immediately.
+- `cm undo` restores the clipboard text captured before the last Clipboard Modify write.
 
 ## Dashboard
 
