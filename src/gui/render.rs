@@ -1317,6 +1317,13 @@ impl eframe::App for LauncherApp {
         let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
         cb_dlg.ui(ctx, self);
         self.clipboard_dialog = cb_dlg;
+        let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
+        cm_dlg.ui(
+            ctx,
+            &crate::clipboard_modify::runtime::clipboard_service(),
+            self.clipboard_modify_runtime.catalog_snapshot(),
+        );
+        self.clipboard_modify_dialog = cm_dlg;
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         conv_panel.ui(ctx, self);
         self.convert_panel = conv_panel;

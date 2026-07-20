@@ -8,6 +8,7 @@ mod calendar_event_details;
 mod calendar_event_editor;
 mod calendar_popover;
 mod clipboard_dialog;
+mod clipboard_modify_dialog;
 mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
@@ -52,27 +53,7 @@ pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ClipboardModifyDialogSection {
-    #[default]
-    Modify,
-    Templates,
-    SavedPipelines,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ClipboardModifyDialogState {
-    pub open: bool,
-    pub section: ClipboardModifyDialogSection,
-}
-
-impl ClipboardModifyDialogState {
-    pub fn open_section(&mut self, section: ClipboardModifyDialogSection) {
-        self.open = true;
-        self.section = section;
-    }
-}
-
+pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
 pub use fav_dialog::FavDialog;
@@ -287,6 +268,7 @@ pub enum Panel {
     TodoDialog,
     TodoViewDialog,
     ClipboardDialog,
+    ClipboardModifyDialog,
     ConvertPanel,
     VolumeDialog,
     BrightnessDialog,
@@ -330,6 +312,7 @@ struct PanelStates {
     todo_dialog: bool,
     todo_view_dialog: bool,
     clipboard_dialog: bool,
+    clipboard_modify_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
     brightness_dialog: bool,
@@ -1878,7 +1861,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 39] = [
+    const TRACKED_PANELS: [Panel; 40] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -1905,6 +1888,7 @@ impl LauncherApp {
         Panel::TodoDialog,
         Panel::TodoViewDialog,
         Panel::ClipboardDialog,
+        Panel::ClipboardModifyDialog,
         Panel::ConvertPanel,
         Panel::VolumeDialog,
         Panel::BrightnessDialog,
@@ -1948,6 +1932,7 @@ impl LauncherApp {
             Panel::TodoDialog => self.todo_dialog.open,
             Panel::TodoViewDialog => self.todo_view_dialog.open,
             Panel::ClipboardDialog => self.clipboard_dialog.open,
+            Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
             Panel::BrightnessDialog => self.brightness_dialog.open,
@@ -2138,6 +2123,11 @@ impl LauncherApp {
                 self.clipboard_dialog.open = false;
                 self.panel_states.clipboard_dialog = false;
             }
+            Panel::ClipboardModifyDialog => {
+                self.clipboard_modify_dialog.open = false;
+                self.clipboard_modify_dialog.cleanup_after_close();
+                self.panel_states.clipboard_modify_dialog = false;
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -2304,6 +2294,11 @@ impl LauncherApp {
                 self.clipboard_dialog.open = false;
                 self.panel_states.clipboard_dialog = false;
             }
+            Panel::ClipboardModifyDialog => {
+                self.clipboard_modify_dialog.open = false;
+                self.clipboard_modify_dialog.cleanup_after_close();
+                self.panel_states.clipboard_modify_dialog = false;
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -2388,6 +2383,9 @@ impl LauncherApp {
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
             Panel::ClipboardDialog => self.clipboard_dialog.open = true,
+            Panel::ClipboardModifyDialog => self
+                .clipboard_modify_dialog
+                .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.open = true,
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
@@ -2484,6 +2482,7 @@ impl LauncherApp {
         check!(todo_dialog, Panel::TodoDialog);
         check!(todo_view_dialog, Panel::TodoViewDialog);
         check!(clipboard_dialog, Panel::ClipboardDialog);
+        check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);
         check!(brightness_dialog, Panel::BrightnessDialog);

@@ -881,7 +881,10 @@ impl LauncherApp {
                     ClipboardModifyDialogSection::SavedPipelines
                 }
             };
-            self.clipboard_modify_dialog.open_section(section);
+            self.clipboard_modify_dialog.open_section(
+                section,
+                &crate::clipboard_modify::runtime::clipboard_service(),
+            );
             return true;
         }
 
