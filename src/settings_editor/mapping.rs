@@ -330,6 +330,7 @@ impl SettingsEditor {
 #[cfg(test)]
 mod tests {
     use super::SettingsEditor;
+    use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
     use crate::plugins::note::NotePluginSettings;
     use crate::plugins::screenshot::ScreenshotPluginSettings;
     use crate::settings::Settings;
@@ -346,6 +347,36 @@ mod tests {
         let editor = SettingsEditor::new(&initial);
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout, initial.query_results_layout);
+    }
+
+    #[test]
+    fn clipboard_modify_settings_round_trip_editor_conversion() {
+        let mut initial = Settings::default();
+        let cfg = ClipboardModifyPluginSettings {
+            dialog_width: 777.0,
+            dialog_height: 555.0,
+            navigation_width: 123.0,
+            source_preview_split_ratio: 0.65,
+            template_filter: "templ".into(),
+            pipeline_filter: "pipe".into(),
+            management_sort_field: "label".into(),
+            management_sort_ascending: false,
+        };
+        initial.plugin_settings.insert(
+            "clipboard_modify".into(),
+            serde_json::to_value(&cfg).unwrap(),
+        );
+        let editor = SettingsEditor::new(&initial);
+        let saved = editor.to_settings(&initial);
+        let round_trip: ClipboardModifyPluginSettings = serde_json::from_value(
+            saved
+                .plugin_settings
+                .get("clipboard_modify")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(round_trip, cfg);
     }
 
     #[test]

@@ -87,6 +87,12 @@ fn spawn_gui(
     Arc<Mutex<Option<egui::Context>>>,
 ) {
     let custom_len_for_window = custom_len;
+    let mut settings = settings;
+    if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings)
+        && let Err(err) = settings.save(&settings_path)
+    {
+        tracing::warn!(?err, "failed to save clipboard modify enablement migration");
+    }
     let mut plugins = PluginManager::new();
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
@@ -180,6 +186,9 @@ fn spawn_gui(
 fn main() -> anyhow::Result<()> {
     let mut settings = Settings::load("settings.json").unwrap_or_default();
     multi_launcher::settings::set_settings_path("settings.json");
+    if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings) {
+        let _ = settings.save("settings.json");
+    }
     logging::init(settings.debug_logging, settings.log_file_path());
     tracing::debug!(?settings, "settings loaded");
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(

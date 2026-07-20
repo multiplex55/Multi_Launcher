@@ -10,6 +10,50 @@ use crate::clipboard_modify::parser::{
 use crate::clipboard_modify::store::SharedClipboardModifierCatalog;
 use crate::plugin::Plugin;
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipboardModifyPluginSettings {
+    pub dialog_width: f32,
+    pub dialog_height: f32,
+    pub navigation_width: f32,
+    pub source_preview_split_ratio: f32,
+    pub template_filter: String,
+    pub pipeline_filter: String,
+    pub management_sort_field: String,
+    pub management_sort_ascending: bool,
+}
+
+impl Default for ClipboardModifyPluginSettings {
+    fn default() -> Self {
+        Self {
+            dialog_width: 900.0,
+            dialog_height: 640.0,
+            navigation_width: 150.0,
+            source_preview_split_ratio: 0.5,
+            template_filter: String::new(),
+            pipeline_filter: String::new(),
+            management_sort_field: "name".into(),
+            management_sort_ascending: true,
+        }
+    }
+}
+
+pub fn migrate_enablement(settings: &mut crate::settings::Settings) -> bool {
+    if settings.plugin_settings.contains_key("clipboard_modify") {
+        return false;
+    }
+    settings.plugin_settings.insert(
+        "clipboard_modify".into(),
+        serde_json::to_value(ClipboardModifyPluginSettings::default())
+            .expect("clipboard modify settings serialize"),
+    );
+    if let Some(enabled) = settings.enabled_plugins.as_mut() {
+        enabled.insert("clipboard_modify".into());
+    }
+    true
+}
+
 pub struct ClipboardModifyPlugin {
     catalog: SharedClipboardModifierCatalog,
 }
@@ -72,6 +116,50 @@ impl Plugin for ClipboardModifyPlugin {
 
     fn query_prefixes(&self) -> &[&str] {
         &["cm"]
+    }
+
+    fn default_settings(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(ClipboardModifyPluginSettings::default()).ok()
+    }
+
+    fn settings_ui(&mut self, ui: &mut eframe::egui::Ui, value: &mut serde_json::Value) {
+        let mut cfg = serde_json::from_value::<ClipboardModifyPluginSettings>(value.clone())
+            .unwrap_or_default();
+        ui.small("Clipboard Modify stores only UI preferences here; templates, pipelines, source text, previews, and undo text are not stored in settings.");
+        ui.horizontal(|ui| {
+            ui.label("Dialog size");
+            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).clamp_range(320.0..=2400.0));
+            ui.add(
+                eframe::egui::DragValue::new(&mut cfg.dialog_height).clamp_range(240.0..=1600.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Navigation width");
+            ui.add(
+                eframe::egui::DragValue::new(&mut cfg.navigation_width).clamp_range(80.0..=500.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Source/preview split");
+            ui.add(eframe::egui::Slider::new(
+                &mut cfg.source_preview_split_ratio,
+                0.1..=0.9,
+            ));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Template filter");
+            ui.text_edit_singleline(&mut cfg.template_filter);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Pipeline filter");
+            ui.text_edit_singleline(&mut cfg.pipeline_filter);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Management sort");
+            ui.text_edit_singleline(&mut cfg.management_sort_field);
+        });
+        ui.checkbox(&mut cfg.management_sort_ascending, "Sort ascending");
+        *value = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
     }
 }
 
@@ -252,9 +340,53 @@ mod tests {
         ClipboardModifyActionPayload, ClipboardModifySectionPayload, decode_action_payload,
     };
     use crate::clipboard_modify::store::shared_default_catalog;
+    use std::collections::HashSet;
 
     fn plugin() -> ClipboardModifyPlugin {
         ClipboardModifyPlugin::new(shared_default_catalog())
+    }
+
+    #[test]
+    fn enablement_migration_keeps_default_enabled_plugins_none() {
+        let mut settings = crate::settings::Settings::default();
+        assert!(migrate_enablement(&mut settings));
+        assert!(settings.plugin_settings.contains_key("clipboard_modify"));
+        assert!(settings.enabled_plugins.is_none());
+    }
+
+    #[test]
+    fn enablement_migration_adds_to_explicit_old_set_once() {
+        let mut settings = crate::settings::Settings::default();
+        settings.enabled_plugins = Some(HashSet::from(["calculator".to_owned()]));
+        assert!(migrate_enablement(&mut settings));
+        assert!(
+            settings
+                .enabled_plugins
+                .as_ref()
+                .unwrap()
+                .contains("clipboard_modify")
+        );
+        let len = settings.enabled_plugins.as_ref().unwrap().len();
+        assert!(!migrate_enablement(&mut settings));
+        assert_eq!(settings.enabled_plugins.as_ref().unwrap().len(), len);
+    }
+
+    #[test]
+    fn user_disabled_clipboard_modify_remains_disabled_after_settings_exist() {
+        let mut settings = crate::settings::Settings::default();
+        settings.enabled_plugins = Some(HashSet::from(["calculator".to_owned()]));
+        settings.plugin_settings.insert(
+            "clipboard_modify".into(),
+            serde_json::to_value(ClipboardModifyPluginSettings::default()).unwrap(),
+        );
+        assert!(!migrate_enablement(&mut settings));
+        assert!(
+            !settings
+                .enabled_plugins
+                .as_ref()
+                .unwrap()
+                .contains("clipboard_modify")
+        );
     }
 
     fn payload(action: &Action) -> ClipboardModifyActionPayload {

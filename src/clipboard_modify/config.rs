@@ -415,6 +415,26 @@ mod tests {
         let before = Arc::clone(&shared.read().unwrap());
         assert!(Arc::ptr_eq(&before, &shared.read().unwrap()));
     }
+
+    #[test]
+    fn missing_file_can_be_created_with_defaults_for_open() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("clipboard_modifiers.json");
+        assert!(!p.exists());
+        save_model_atomic(&p, &default_model()).unwrap();
+        assert!(p.exists());
+        assert!(load_current_or_migrate(&p).is_ok());
+    }
+
+    #[test]
+    fn invalid_file_open_path_is_left_unchanged_by_validation_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("clipboard_modifiers.json");
+        let invalid = "{ not valid json";
+        write(&p, invalid);
+        assert!(load_current_or_migrate(&p).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), invalid);
+    }
 }
 
 pub fn reset_to_defaults_with_backup(path: &Path) -> Result<VersionedClipboardModifiersFile> {

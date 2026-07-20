@@ -308,6 +308,7 @@ impl SettingsEditor {
                 entry,
                 plugin.as_mut(),
                 &mut open_mg_settings_dialog,
+                app,
             );
         }
 
@@ -324,6 +325,7 @@ impl SettingsEditor {
         entry: &mut serde_json::Value,
         plugin: &mut dyn crate::plugin::Plugin,
         open_mg_settings_dialog: &mut bool,
+        app: &mut LauncherApp,
     ) {
         let id = ui.make_persistent_id(format!("plugin_{name}"));
         let mut state =
@@ -344,6 +346,29 @@ impl SettingsEditor {
                     }
                     ui.add_space(4.0);
                     ui.small("Tip: you can also open this window via `mg settings`.");
+                } else if name == "clipboard_modify" {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Open Clipboard Modify").clicked() {
+                            app.open_clipboard_modify_dialog();
+                        }
+                        if ui.button("Open clipboard_modifiers.json").clicked() {
+                            app.open_clipboard_modify_config_file();
+                        }
+                        if ui.button("Reload configuration").clicked() {
+                            app.reload_clipboard_modify_config();
+                        }
+                        if ui.button("Reset to factory defaults").clicked() {
+                            app.reset_clipboard_modify_config_to_factory_defaults();
+                        }
+                    });
+                    ui.label(format!(
+                        "Configuration status: {}",
+                        app.clipboard_modify_config_diagnostic
+                            .as_deref()
+                            .unwrap_or("valid")
+                    ));
+                    ui.separator();
+                    plugin.settings_ui(ui, entry);
                 } else {
                     plugin.settings_ui(ui, entry);
                 }

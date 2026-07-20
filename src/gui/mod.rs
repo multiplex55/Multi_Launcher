@@ -625,6 +625,50 @@ impl LauncherApp {
         self.mouse_gesture_settings_dialog.open();
     }
 
+    pub fn open_clipboard_modify_dialog(&mut self) {
+        self.clipboard_modify_dialog.open_section(
+            ClipboardModifyDialogSection::Modify,
+            &crate::clipboard_modify::runtime::clipboard_service(),
+        );
+    }
+
+    pub fn open_clipboard_modify_config_file(&mut self) {
+        let path = self.clipboard_modify_runtime.store.path.clone();
+        if !path.exists() {
+            let model = crate::clipboard_modify::config::default_model();
+            if let Err(err) = crate::clipboard_modify::config::save_model_atomic(&path, &model) {
+                self.report_error_message(
+                    "clipboard_modify.config.create",
+                    format!("Failed to create Clipboard Modify config: {err}"),
+                );
+                return;
+            }
+        }
+        if let Err(err) = open::that(&path) {
+            self.report_error_message(
+                "clipboard_modify.config.open",
+                format!("Failed to open {}: {err}", path.display()),
+            );
+        }
+    }
+
+    pub fn reload_clipboard_modify_config(&mut self) {
+        match self.clipboard_modify_runtime.reload_now() {
+            Ok(catalog) => self.refresh_clipboard_modify_catalog(catalog, true),
+            Err(err) => {
+                self.clipboard_modify_config_diagnostic = Some(err.to_string());
+                self.report_error_message("clipboard_modify.config.reload", err.to_string());
+            }
+        }
+    }
+
+    pub fn reset_clipboard_modify_config_to_factory_defaults(&mut self) {
+        match self.clipboard_modify_runtime.reset_to_factory_defaults() {
+            Ok(catalog) => self.refresh_clipboard_modify_catalog(catalog, true),
+            Err(err) => self.report_error_message("clipboard_modify.config.reset", err.to_string()),
+        }
+    }
+
     pub fn apply_file_search_settings(
         &mut self,
         mut settings: crate::file_search::settings::FileSearchSettings,

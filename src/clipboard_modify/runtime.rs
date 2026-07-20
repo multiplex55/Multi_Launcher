@@ -53,6 +53,14 @@ impl ClipboardModifyRuntime {
     pub fn catalog_snapshot(&self) -> Arc<ClipboardModifierCatalog> {
         self.store.catalog.read().unwrap().clone()
     }
+
+    pub fn reload_now(&self) -> anyhow::Result<ClipboardModifierCatalog> {
+        self.store.reload_now()
+    }
+
+    pub fn reset_to_factory_defaults(&self) -> anyhow::Result<ClipboardModifierCatalog> {
+        self.store.reset_to_factory_defaults()
+    }
 }
 
 pub fn clipboard_service() -> Arc<ProductionClipboardService> {
