@@ -147,7 +147,7 @@ impl ClipboardModifyDialogState {
     }
     pub fn cleanup_after_close(&mut self) {
         let wrap = self.wrap_preview;
-        self.preview.cancel_active();
+        self.preview.cancel_and_invalidate();
         self.source.clear();
         self.baseline.clear();
         self.reset_source.clear();
@@ -155,6 +155,7 @@ impl ClipboardModifyDialogState {
         self.source_error = None;
         self.stages.clear();
         self.preview = PreviewCoordinator::default();
+        self.acknowledged_large_sources.clear();
         self.external_change = None;
         self.pending_action = None;
         self.unsaved_template_draft = false;
@@ -233,7 +234,6 @@ impl ClipboardModifyDialogState {
         if !self.open {
             return;
         }
-        self.preview.tick();
         let mut open = self.open;
         egui::Window::new("Clipboard Modify")
             .open(&mut open)
@@ -1138,6 +1138,34 @@ mod tests {
         let d = ClipboardModifyDialogState::default();
         assert!(!d.can_apply());
     }
+    #[test]
+    fn cleanup_after_close_clears_content_bearing_fields() {
+        let mut dlg = ClipboardModifyDialogState::default();
+        dlg.open = true;
+        dlg.source = "secret source".into();
+        dlg.baseline = "secret baseline".into();
+        dlg.reset_source = "secret reset".into();
+        dlg.source_fingerprint = 99;
+        dlg.source_error = Some("secret error".into());
+        dlg.external_change = Some(ClipboardSummary {
+            fingerprint: 1,
+            bytes: 2,
+            chars: 3,
+        });
+        dlg.pending_action = Some(PendingDialogAction::Apply);
+        dlg.wrap_preview = false;
+        dlg.cleanup_after_close();
+        assert!(dlg.source.is_empty());
+        assert!(dlg.baseline.is_empty());
+        assert!(dlg.reset_source.is_empty());
+        assert_eq!(dlg.source_fingerprint, 0);
+        assert!(dlg.source_error.is_none());
+        assert!(dlg.external_change.is_none());
+        assert!(dlg.pending_action.is_none());
+        assert!(!dlg.wrap_preview);
+        assert!(matches!(dlg.preview.state(), PreviewState::IdleMissing));
+    }
+
     #[test]
     fn ctrl_z_not_global_clipboard_modify_undo() {
         assert_ne!("Ctrl+Z", "cm undo");

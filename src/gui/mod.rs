@@ -144,7 +144,7 @@ use std::time::{Duration, Instant};
 use url::Url;
 use watch::watch_file;
 
-pub use state::{ActivationSource, TestWatchEvent, WatchEvent};
+pub use state::{ActivationSource, ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
 pub(crate) use state::{PendingConfirmAction, ResultContextMenuKind, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
@@ -654,10 +654,16 @@ impl LauncherApp {
 
     pub fn reload_clipboard_modify_config(&mut self) {
         match self.clipboard_modify_runtime.reload_now() {
-            Ok(catalog) => self.refresh_clipboard_modify_catalog(catalog, true),
+            Ok(catalog) => {
+                self.refresh_clipboard_modify_catalog(catalog, true);
+                self.handle_clipboard_modify_gui_event(
+                    ClipboardModifyGuiEvent::ConfigurationReloadSuccess,
+                );
+            }
             Err(err) => {
-                self.clipboard_modify_config_diagnostic = Some(err.to_string());
-                self.report_error_message("clipboard_modify.config.reload", err.to_string());
+                self.handle_clipboard_modify_gui_event(
+                    ClipboardModifyGuiEvent::ConfigurationReloadFailure(err.to_string()),
+                );
             }
         }
     }
@@ -2879,7 +2885,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Todos
             | WatchEvent::Favorites
             | WatchEvent::Gestures
-            | WatchEvent::ExecuteAction(_) => {
+            | WatchEvent::ExecuteAction(_)
+            | WatchEvent::ClipboardModify(_) => {
                 continue;
             }
             WatchEvent::Recycle(_) => return Some(ev.into()),
