@@ -74,11 +74,24 @@ pub fn serialize_model(model: &VersionedClipboardModifiersFile) -> Result<Vec<u8
     validate_model(model)?;
     let mut s = serde_json::to_string_pretty(model)?;
     s.push('\n');
+    anyhow::ensure!(
+        s.len() as u64 <= MAX_CONFIG_BYTES,
+        "resulting clipboard modifiers config is too large ({} bytes, max {MAX_CONFIG_BYTES})",
+        s.len()
+    );
     Ok(s.into_bytes())
 }
 
 pub fn save_model_atomic(path: &Path, model: &VersionedClipboardModifiersFile) -> Result<()> {
     save_atomic(path, &serialize_model(model)?)
+}
+
+pub fn model_from_catalog(catalog: &ClipboardModifierCatalog) -> VersionedClipboardModifiersFile {
+    VersionedClipboardModifiersFile {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        templates: catalog.templates.clone(),
+        pipelines: catalog.pipelines.clone(),
+    }
 }
 
 pub fn load_startup(settings_path: &Path) -> LoadedConfig {

@@ -1322,6 +1322,7 @@ impl eframe::App for LauncherApp {
             ctx,
             &crate::clipboard_modify::runtime::clipboard_service(),
             self.clipboard_modify_runtime.catalog_snapshot(),
+            Some(&self.clipboard_modify_runtime.store),
         );
         self.clipboard_modify_dialog = cm_dlg;
         let mut conv_panel = std::mem::take(&mut self.convert_panel);

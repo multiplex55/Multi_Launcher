@@ -1,5 +1,5 @@
 use super::config::{self, LoadedConfig, VersionedClipboardModifiersFile};
-use super::model::ClipboardModifierCatalog;
+use super::model::{ClipboardModifierCatalog, ClipboardTemplate};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -33,6 +33,19 @@ impl ClipboardModifierStore {
     }
     pub fn save(&self, model: &VersionedClipboardModifiersFile) -> anyhow::Result<()> {
         config::save_model_atomic(&self.path, model)
+    }
+
+    pub fn save_templates(
+        &self,
+        base: &ClipboardModifierCatalog,
+        templates: Vec<ClipboardTemplate>,
+    ) -> anyhow::Result<ClipboardModifierCatalog> {
+        let mut model = config::model_from_catalog(base);
+        model.templates = templates;
+        let catalog = config::validate_model(&model)?;
+        self.save(&model)?;
+        self.replace_valid(catalog.clone());
+        Ok(catalog)
     }
 }
 
