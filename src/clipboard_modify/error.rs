@@ -19,6 +19,12 @@ pub enum ClipboardModifyError {
     DuplicateName {
         name: String,
     },
+    EmptyLabel {
+        name: String,
+    },
+    InvalidAlias {
+        alias: String,
+    },
     UnknownOperation {
         operation: String,
     },
@@ -48,6 +54,8 @@ impl fmt::Display for ClipboardModifyError {
             }
             Self::ReservedName { name } => write!(f, "{name} is reserved"),
             Self::DuplicateName { name } => write!(f, "{name} is duplicated"),
+            Self::EmptyLabel { name } => write!(f, "{name} label must not be empty"),
+            Self::InvalidAlias { alias } => write!(f, "{alias} is not a valid alias"),
             Self::UnknownOperation { operation } => write!(f, "unknown operation {operation}"),
             Self::UnknownTemplate { name } => write!(f, "unknown template {name}"),
             Self::NestedPipeline { name } => {

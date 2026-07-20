@@ -117,6 +117,7 @@ impl StageSpec {
 
 impl ClipboardTemplate {
     pub fn validate(&self) -> Result<(), ClipboardModifyError> {
+        validate_label_and_aliases(&self.id, &self.label, &self.aliases)?;
         if !self.template.contains("{{clipboard}}") {
             return Err(ClipboardModifyError::MissingPlaceholder {
                 template: self.id.clone(),
@@ -147,6 +148,7 @@ pub fn rust_raw_string_literal(text: &str) -> String {
 
 impl SavedPipeline {
     pub fn validate(&self) -> Result<(), ClipboardModifyError> {
+        validate_label_and_aliases(&self.id, &self.label, &self.aliases)?;
         for stage in &self.stages {
             stage.validate()?;
         }
@@ -171,6 +173,28 @@ impl ClipboardModifierCatalog {
             pipelines,
         })
     }
+}
+
+fn validate_label_and_aliases(
+    id: &str,
+    label: &str,
+    aliases: &[String],
+) -> Result<(), ClipboardModifyError> {
+    if label.trim().is_empty() {
+        return Err(ClipboardModifyError::EmptyLabel {
+            name: id.to_string(),
+        });
+    }
+    for alias in aliases {
+        if super::catalog::normalize_name(alias).is_empty()
+            || alias.trim().contains(char::is_whitespace)
+        {
+            return Err(ClipboardModifyError::InvalidAlias {
+                alias: alias.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_namespace(

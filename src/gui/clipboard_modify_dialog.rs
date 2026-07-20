@@ -2,8 +2,13 @@ use crate::clipboard_modify::clipboard::{
     ClipboardError, ClipboardSummary, ProductionClipboardService,
 };
 use crate::clipboard_modify::coordinator::{PreviewCoordinator, PreviewState};
-use crate::clipboard_modify::model::{OperationId, StageArguments, StageSpec};
+use crate::clipboard_modify::model::{
+    ClipboardModifierCatalog, ClipboardTemplate, OperationId, StageArguments, StageSpec,
+    TemplateProcessor,
+};
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
+use crate::clipboard_modify::pipeline::find_template;
+use crate::clipboard_modify::store::ClipboardModifierStore;
 use eframe::egui;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -55,6 +60,11 @@ pub struct ClipboardModifyDialogState {
     pub unsaved_pipeline_draft: bool,
     pub wrap_preview: bool,
     pub last_action: Option<String>,
+    pub template_filter: String,
+    pub selected_template: Option<String>,
+    pub template_draft: Vec<ClipboardTemplate>,
+    pub template_editor_error: Option<String>,
+    pub template_delete_confirmation: Option<String>,
 }
 
 impl Default for ClipboardModifyDialogState {
@@ -78,6 +88,11 @@ impl Default for ClipboardModifyDialogState {
             unsaved_pipeline_draft: false,
             wrap_preview: true,
             last_action: None,
+            template_filter: String::new(),
+            selected_template: None,
+            template_draft: Vec::new(),
+            template_editor_error: None,
+            template_delete_confirmation: None,
         }
     }
 }
@@ -201,6 +216,7 @@ impl ClipboardModifyDialogState {
         ctx: &egui::Context,
         service: &Arc<ProductionClipboardService>,
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
+        store: Option<&ClipboardModifierStore>,
     ) {
         if !self.open {
             return;
@@ -239,6 +255,16 @@ impl ClipboardModifyDialogState {
                     ClipboardModifyDialogSection::Modify => {
                         self.modify_ui(ui, service, catalog.clone())
                     }
+                    ClipboardModifyDialogSection::Templates => {
+                        self.templates_ui(ui, service, catalog.clone())
+                    }
+                    ClipboardModifyDialogSection::ManageTemplates => {
+                        if let Some(store) = store {
+                            self.manage_templates_ui(ui, catalog.clone(), store)
+                        } else {
+                            ui.label("Template management is unavailable.");
+                        }
+                    }
                     _ => {
                         ui.label(format!("{:?} section", self.section));
                     }
@@ -247,6 +273,263 @@ impl ClipboardModifyDialogState {
         if self.open && !open {
             self.open = false;
             self.cleanup_after_close();
+        }
+    }
+    pub fn filtered_templates<'a>(
+        &self,
+        catalog: &'a ClipboardModifierCatalog,
+    ) -> Vec<&'a ClipboardTemplate> {
+        let q = crate::clipboard_modify::catalog::normalize_name(&self.template_filter);
+        catalog
+            .templates
+            .iter()
+            .filter(|t| {
+                q.is_empty()
+                    || crate::clipboard_modify::catalog::normalize_name(&t.id).contains(&q)
+                    || crate::clipboard_modify::catalog::normalize_name(&t.label).contains(&q)
+                    || t.aliases
+                        .iter()
+                        .any(|a| crate::clipboard_modify::catalog::normalize_name(a).contains(&q))
+            })
+            .collect()
+    }
+    fn templates_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        service: &Arc<ProductionClipboardService>,
+        catalog: Arc<ClipboardModifierCatalog>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            ui.text_edit_singleline(&mut self.template_filter);
+            if ui.button("Manage Templates").clicked() {
+                self.begin_template_edit(catalog.as_ref());
+                self.section = ClipboardModifyDialogSection::ManageTemplates;
+            }
+        });
+        for t in self.filtered_templates(catalog.as_ref()) {
+            let selected = self.selected_template.as_deref() == Some(&t.id);
+            if ui
+                .selectable_label(selected, format!("{} ({})", t.label, t.id))
+                .clicked()
+            {
+                self.selected_template = Some(t.id.clone());
+                self.preview_template(t.id.clone(), catalog.clone());
+            }
+        }
+        if let Some(id) = self.selected_template.clone() {
+            if let Some(t) = find_template(catalog.as_ref(), &id) {
+                ui.separator();
+                ui.label("Preview");
+                ui.monospace(t.render(&self.source));
+                if ui.button("Apply Template").clicked() {
+                    self.apply_template_through_commit_path(&id, catalog.clone());
+                    self.commit(service, false, false);
+                }
+            }
+        }
+    }
+    pub fn preview_template(&mut self, id: String, catalog: Arc<ClipboardModifierCatalog>) {
+        self.preview.request(
+            self.source.clone(),
+            ClipboardModifyIntent::ApplyTemplate { name: id },
+            catalog,
+        );
+    }
+    pub fn apply_template_through_commit_path(
+        &mut self,
+        id: &str,
+        catalog: Arc<ClipboardModifierCatalog>,
+    ) {
+        self.preview_template(id.to_string(), catalog);
+    }
+    pub fn begin_template_edit(&mut self, catalog: &ClipboardModifierCatalog) {
+        self.template_draft = catalog.templates.clone();
+        self.unsaved_template_draft = false;
+        self.template_editor_error = None;
+    }
+    pub fn validate_template_draft(
+        &self,
+        base: &ClipboardModifierCatalog,
+    ) -> Result<ClipboardModifierCatalog, String> {
+        let model = crate::clipboard_modify::config::VersionedClipboardModifiersFile {
+            schema_version: crate::clipboard_modify::config::CURRENT_SCHEMA_VERSION,
+            templates: self.template_draft.clone(),
+            pipelines: base.pipelines.clone(),
+        };
+        crate::clipboard_modify::config::validate_model(&model).map_err(|e| e.to_string())
+    }
+    pub fn can_save_template_draft(&self, base: &ClipboardModifierCatalog) -> bool {
+        self.validate_template_draft(base).is_ok()
+    }
+    pub fn save_template_draft(
+        &mut self,
+        base: &ClipboardModifierCatalog,
+        store: &ClipboardModifierStore,
+    ) -> Result<ClipboardModifierCatalog, String> {
+        let catalog = self.validate_template_draft(base)?;
+        let model = crate::clipboard_modify::config::model_from_catalog(&catalog);
+        if let Err(e) = store.save(&model) {
+            self.template_editor_error = Some(format!(
+                "Could not save clipboard templates. Check file permissions and retry: {e}"
+            ));
+            return Err(self.template_editor_error.clone().unwrap());
+        }
+        store.replace_valid(catalog.clone());
+        self.unsaved_template_draft = false;
+        self.template_editor_error = None;
+        Ok(catalog)
+    }
+    pub fn referencing_pipelines(
+        catalog: &ClipboardModifierCatalog,
+        template_id: &str,
+    ) -> Vec<String> {
+        catalog
+            .pipelines
+            .iter()
+            .filter(|p| {
+                p.stages.iter().any(|s| {
+                    s.operation == OperationId::Template
+                        && s.arguments.name.as_deref() == Some(template_id)
+                })
+            })
+            .map(|p| format!("{} ({})", p.label, p.id))
+            .collect()
+    }
+    pub fn delete_template_from_draft(
+        &mut self,
+        base: &ClipboardModifierCatalog,
+        template_id: &str,
+    ) -> Result<(), String> {
+        let refs = Self::referencing_pipelines(base, template_id);
+        if !refs.is_empty() {
+            return Err(format!(
+                "Cannot delete template because saved pipelines reference it: {}",
+                refs.join(", ")
+            ));
+        }
+        self.template_draft.retain(|t| t.id != template_id);
+        self.unsaved_template_draft = true;
+        Ok(())
+    }
+    pub fn template_delete_confirmation_text(
+        catalog: &ClipboardModifierCatalog,
+        template_id: &str,
+    ) -> Option<String> {
+        find_template(catalog, template_id).map(|t| {
+            format!(
+                "Delete template \"{}\" (ID: {})? Saved pipelines must be updated before referenced templates can be deleted.",
+                t.label, t.id
+            )
+        })
+    }
+    fn manage_templates_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        catalog: Arc<ClipboardModifierCatalog>,
+        store: &ClipboardModifierStore,
+    ) {
+        if self.template_draft.is_empty() && !catalog.templates.is_empty() {
+            self.begin_template_edit(catalog.as_ref());
+        }
+        if ui.button("Add template").clicked() {
+            self.template_draft.push(ClipboardTemplate {
+                id: "new-template".into(),
+                label: "New Template".into(),
+                aliases: vec![],
+                template: "{{clipboard}}".into(),
+                processor: Some(TemplateProcessor::Literal),
+            });
+            self.unsaved_template_draft = true;
+        }
+        let mut remove = None;
+        let mut moved = false;
+        let mut edited = false;
+        for i in 0..self.template_draft.len() {
+            ui.push_id(i, |ui| {
+                ui.horizontal(|ui| {
+                    edited |= ui
+                        .text_edit_singleline(&mut self.template_draft[i].id)
+                        .changed();
+                    edited |= ui
+                        .text_edit_singleline(&mut self.template_draft[i].label)
+                        .changed();
+                    if ui.button("↑").clicked() && i > 0 {
+                        self.template_draft.swap(i, i - 1);
+                        moved = true;
+                    }
+                    if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
+                        self.template_draft.swap(i, i + 1);
+                        moved = true;
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.template_delete_confirmation = Some(self.template_draft[i].id.clone());
+                        remove = Some(self.template_draft[i].id.clone());
+                    }
+                });
+                let mut aliases = self.template_draft[i].aliases.join(", ");
+                if ui.text_edit_singleline(&mut aliases).changed() {
+                    self.template_draft[i].aliases = aliases
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect();
+                    edited = true;
+                }
+                edited |= ui
+                    .text_edit_multiline(&mut self.template_draft[i].template)
+                    .changed();
+                egui::ComboBox::from_label("Processor")
+                    .selected_text(format!("{:?}", self.template_draft[i].processor))
+                    .show_ui(ui, |ui| {
+                        edited |= ui
+                            .selectable_value(
+                                &mut self.template_draft[i].processor,
+                                Some(TemplateProcessor::Literal),
+                                "Literal",
+                            )
+                            .changed();
+                        edited |= ui
+                            .selectable_value(
+                                &mut self.template_draft[i].processor,
+                                Some(TemplateProcessor::RustRawString),
+                                "Rust raw string",
+                            )
+                            .changed();
+                    });
+            });
+        }
+        if let Some(id) = remove {
+            if let Err(e) = self.delete_template_from_draft(catalog.as_ref(), &id) {
+                self.template_editor_error = Some(e);
+            }
+        }
+        if let Some(id) = &self.template_delete_confirmation
+            && let Some(message) = Self::template_delete_confirmation_text(catalog.as_ref(), id)
+        {
+            ui.label(message);
+        }
+        if moved {
+            let _ = self.save_template_draft(catalog.as_ref(), store);
+        }
+        if edited {
+            self.unsaved_template_draft = true;
+        }
+        if let Err(e) = self.validate_template_draft(catalog.as_ref()) {
+            ui.colored_label(egui::Color32::RED, e);
+        }
+        if let Some(e) = &self.template_editor_error {
+            ui.colored_label(egui::Color32::RED, e);
+        }
+        if ui
+            .add_enabled(
+                self.can_save_template_draft(catalog.as_ref()),
+                egui::Button::new("Save"),
+            )
+            .clicked()
+        {
+            let _ = self.save_template_draft(catalog.as_ref(), store);
         }
     }
     fn shortcuts(
@@ -452,6 +735,35 @@ pub fn fingerprint(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard_modify::model::{ClipboardModifierCatalog, SavedPipeline};
+    use crate::clipboard_modify::store::ClipboardModifierStore;
+    use std::sync::RwLock;
+
+    fn tmpl(id: &str, label: &str, aliases: &[&str], body: &str) -> ClipboardTemplate {
+        ClipboardTemplate {
+            id: id.into(),
+            label: label.into(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            template: body.into(),
+            processor: Some(TemplateProcessor::Literal),
+        }
+    }
+
+    fn cat() -> ClipboardModifierCatalog {
+        ClipboardModifierCatalog::new(
+            vec![
+                tmpl(
+                    "prompt-context",
+                    "Prompt Context",
+                    &["pc"],
+                    "Context {{clipboard}}",
+                ),
+                tmpl("quote", "Quote", &["blockquote"], "> {{clipboard}}"),
+            ],
+            vec![],
+        )
+        .unwrap()
+    }
     #[test]
     fn targeted_opens_select_section() {
         let mut d = ClipboardModifyDialogState::default();
@@ -502,5 +814,176 @@ mod tests {
     #[test]
     fn ctrl_z_not_global_clipboard_modify_undo() {
         assert_ne!("Ctrl+Z", "cm undo");
+    }
+
+    #[test]
+    fn template_filtering_matches_id_label_alias() {
+        let catalog = cat();
+        let mut d = ClipboardModifyDialogState::default();
+        d.template_filter = "prompt".into();
+        assert_eq!(d.filtered_templates(&catalog)[0].id, "prompt-context");
+        d.template_filter = "quote".into();
+        assert_eq!(d.filtered_templates(&catalog)[0].id, "quote");
+        d.template_filter = "block".into();
+        assert_eq!(d.filtered_templates(&catalog)[0].id, "quote");
+    }
+
+    #[test]
+    fn selecting_template_does_not_dirty_configuration() {
+        let catalog = Arc::new(cat());
+        let mut d = ClipboardModifyDialogState::default();
+        d.source = "x".into();
+        d.selected_template = Some("quote".into());
+        d.preview_template("quote".into(), catalog);
+        assert!(!d.unsaved_template_draft);
+    }
+
+    #[test]
+    fn applying_template_uses_dialog_preview_commit_path() {
+        let catalog = Arc::new(cat());
+        let mut d = ClipboardModifyDialogState::default();
+        d.source = "x".into();
+        d.apply_template_through_commit_path("quote", catalog);
+        assert!(matches!(
+            d.preview.state(),
+            PreviewState::PendingDebounce { .. } | PreviewState::Running { .. }
+        ));
+    }
+
+    #[test]
+    fn invalid_drafts_disable_save_and_messages_are_specific() {
+        let base = cat();
+        let mut d = ClipboardModifyDialogState::default();
+        d.template_draft = vec![tmpl("x", "X", &[], "missing")];
+        assert!(!d.can_save_template_draft(&base));
+        assert!(
+            d.validate_template_draft(&base)
+                .unwrap_err()
+                .contains("{{clipboard}}")
+        );
+        d.template_draft = vec![
+            tmpl("x", "X", &[], "{{clipboard}}"),
+            tmpl("x", "Y", &[], "{{clipboard}}"),
+        ];
+        assert!(
+            d.validate_template_draft(&base)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        d.template_draft = vec![tmpl("template", "X", &[], "{{clipboard}}")];
+        assert!(
+            d.validate_template_draft(&base)
+                .unwrap_err()
+                .contains("reserved")
+        );
+        d.template_draft = vec![tmpl("x", "", &[], "{{clipboard}}")];
+        assert!(
+            d.validate_template_draft(&base)
+                .unwrap_err()
+                .contains("label")
+        );
+        d.template_draft = vec![tmpl("x", "X", &["!!!"], "{{clipboard}}")];
+        assert!(
+            d.validate_template_draft(&base)
+                .unwrap_err()
+                .contains("valid alias")
+        );
+        d.template_draft = vec![tmpl(
+            "x",
+            "X",
+            &[],
+            &format!(
+                "{{{{clipboard}}}}{}",
+                "a".repeat(crate::clipboard_modify::config::MAX_CONFIG_BYTES as usize)
+            ),
+        )];
+        let model = crate::clipboard_modify::config::VersionedClipboardModifiersFile {
+            schema_version: crate::clipboard_modify::config::CURRENT_SCHEMA_VERSION,
+            templates: d.template_draft.clone(),
+            pipelines: vec![],
+        };
+        assert!(
+            crate::clipboard_modify::config::serialize_model(&model)
+                .unwrap_err()
+                .to_string()
+                .contains("too large")
+        );
+    }
+
+    #[test]
+    fn successful_save_persists_and_replaces_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ClipboardModifierStore {
+            path: dir.path().join("cm.json"),
+            catalog: Arc::new(RwLock::new(Arc::new(cat()))),
+            diagnostic: Arc::new(RwLock::new(None)),
+        };
+        let base = cat();
+        let mut d = ClipboardModifyDialogState::default();
+        d.template_draft = vec![tmpl("saved", "Saved", &[], "{{clipboard}}")];
+        let saved = d.save_template_draft(&base, &store).unwrap();
+        assert_eq!(saved.templates[0].id, "saved");
+        assert!(
+            std::fs::read_to_string(&store.path)
+                .unwrap()
+                .contains("saved")
+        );
+        assert_eq!(store.catalog.read().unwrap().templates[0].id, "saved");
+    }
+
+    #[test]
+    fn failed_save_preserves_active_catalog_and_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ClipboardModifierStore {
+            path: dir.path().to_path_buf(),
+            catalog: Arc::new(RwLock::new(Arc::new(cat()))),
+            diagnostic: Arc::new(RwLock::new(None)),
+        };
+        let base = cat();
+        let mut d = ClipboardModifyDialogState::default();
+        d.template_draft = vec![tmpl("draft", "Draft", &[], "{{clipboard}}")];
+        assert!(d.save_template_draft(&base, &store).is_err());
+        assert_eq!(
+            store.catalog.read().unwrap().templates[0].id,
+            "prompt-context"
+        );
+        assert_eq!(d.template_draft[0].id, "draft");
+    }
+
+    #[test]
+    fn deletion_blocked_when_pipeline_references_template() {
+        let mut base = cat();
+        base.pipelines = vec![SavedPipeline {
+            id: "pipe".into(),
+            label: "Pipe".into(),
+            aliases: vec![],
+            stages: vec![StageSpec {
+                operation: OperationId::Template,
+                arguments: StageArguments {
+                    name: Some("quote".into()),
+                    ..Default::default()
+                },
+            }],
+        }];
+        let mut d = ClipboardModifyDialogState::default();
+        d.template_draft = base.templates.clone();
+        let err = d.delete_template_from_draft(&base, "quote").unwrap_err();
+        assert!(err.contains("Pipe (pipe)"));
+    }
+
+    #[test]
+    fn reorder_saves_immediately_and_refreshes_suggestions_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = cat();
+        let store = ClipboardModifierStore {
+            path: dir.path().join("cm.json"),
+            catalog: Arc::new(RwLock::new(Arc::new(base.clone()))),
+            diagnostic: Arc::new(RwLock::new(None)),
+        };
+        let mut d = ClipboardModifyDialogState::default();
+        d.template_draft = base.templates.clone();
+        d.template_draft.swap(0, 1);
+        d.save_template_draft(&base, &store).unwrap();
+        assert_eq!(store.catalog.read().unwrap().templates[0].id, "quote");
     }
 }
