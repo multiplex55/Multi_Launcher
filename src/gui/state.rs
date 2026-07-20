@@ -2,6 +2,15 @@ use crate::actions::Action;
 use crate::dashboard::DashboardEvent;
 use std::fmt::Display;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardModifyGuiEvent {
+    ImmediateOperationComplete,
+    ImmediateOperationFailed,
+    ConfigurationReloadSuccess,
+    ConfigurationReloadFailure(String),
+    StartupDiagnosticChanged(Option<String>),
+}
+
 #[derive(Clone)]
 pub enum WatchEvent {
     Actions,
@@ -16,6 +25,7 @@ pub enum WatchEvent {
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
     ExecuteAction(Action),
+    ClipboardModify(ClipboardModifyGuiEvent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +105,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
+            WatchEvent::ClipboardModify(_) => TestWatchEvent::Actions,
         }
     }
 }

@@ -893,6 +893,9 @@ impl LauncherApp {
         {
             match crate::clipboard_modify::runtime::undo() {
                 Ok(()) => {
+                    self.handle_clipboard_modify_gui_event(
+                        ClipboardModifyGuiEvent::ImmediateOperationComplete,
+                    );
                     self.visible_flag.store(false, Ordering::SeqCst);
                     if self.enable_toasts {
                         push_toast(
@@ -962,12 +965,16 @@ impl LauncherApp {
     }
 
     pub(crate) fn drain_clipboard_modify_immediate(&mut self) {
+        let mut typed_events = Vec::new();
         for ev in self.clipboard_modify_immediate.drain_completions() {
             let meta = self
                 .pending_clipboard_modify_immediate
                 .remove(&ev.request_id.0);
             match ev.result {
                 Ok(()) => {
+                    typed_events.push(WatchEvent::ClipboardModify(
+                        ClipboardModifyGuiEvent::ImmediateOperationComplete,
+                    ));
                     if let Some(meta) = meta.as_ref() {
                         self.record_history_usage(&meta.action, &meta.query, meta.source);
                     }
@@ -985,6 +992,9 @@ impl LauncherApp {
                     }
                 }
                 Err(ref err) => {
+                    typed_events.push(WatchEvent::ClipboardModify(
+                        ClipboardModifyGuiEvent::ImmediateOperationFailed,
+                    ));
                     if let Some(meta) = meta {
                         self.query = meta.query;
                     }
@@ -994,6 +1004,44 @@ impl LauncherApp {
                 }
             }
             self.clipboard_modify_events.push(ev);
+        }
+        for ev in typed_events {
+            self.handle_clipboard_modify_gui_event(match ev {
+                WatchEvent::ClipboardModify(e) => e,
+                _ => unreachable!(),
+            });
+        }
+    }
+
+    pub(crate) fn handle_clipboard_modify_gui_event(&mut self, ev: ClipboardModifyGuiEvent) {
+        match ev {
+            ClipboardModifyGuiEvent::ImmediateOperationComplete
+            | ClipboardModifyGuiEvent::ImmediateOperationFailed => {}
+            ClipboardModifyGuiEvent::ConfigurationReloadSuccess => {
+                self.clipboard_modify_config_diagnostic = self
+                    .clipboard_modify_runtime
+                    .diagnostic
+                    .read()
+                    .unwrap()
+                    .clone();
+                self.last_results_valid = false;
+                if self
+                    .query
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("cm")
+                {
+                    self.search();
+                }
+                self.update_command_cache();
+            }
+            ClipboardModifyGuiEvent::ConfigurationReloadFailure(err) => {
+                self.clipboard_modify_config_diagnostic = Some(err.clone());
+                self.report_error_message("clipboard_modify.config.reload", err);
+            }
+            ClipboardModifyGuiEvent::StartupDiagnosticChanged(diagnostic) => {
+                self.clipboard_modify_config_diagnostic = diagnostic;
+            }
         }
     }
 

@@ -134,6 +134,9 @@ impl LauncherApp {
                 WatchEvent::ExecuteAction(action) => {
                     self.activate_action(action, None, ActivationSource::Gesture);
                 }
+                WatchEvent::ClipboardModify(ev) => {
+                    self.handle_clipboard_modify_gui_event(ev);
+                }
             }
         }
         self.maybe_rebuild_completion_index(Instant::now());
@@ -165,6 +168,22 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn clipboard_modify_watch_events_map_to_action_refresh_for_tests() {
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ClipboardModify(
+                ClipboardModifyGuiEvent::ImmediateOperationComplete
+            )),
+            TestWatchEvent::Actions
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ClipboardModify(
+                ClipboardModifyGuiEvent::ConfigurationReloadFailure("bad".into())
+            )),
+            TestWatchEvent::Actions
+        );
     }
 
     #[test]

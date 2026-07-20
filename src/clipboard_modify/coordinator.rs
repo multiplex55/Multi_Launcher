@@ -183,13 +183,25 @@ impl PreviewCoordinator {
             t.cancel();
         }
     }
-    pub fn tick(&mut self) {
+    pub fn cancel_and_invalidate(&mut self) {
+        self.cancel_active();
+        self.active = None;
+        self.pending = None;
+        self.full_output = None;
+        self.state = PreviewState::IdleMissing;
+    }
+    pub fn is_active(&self) -> bool {
+        self.active.is_some() || self.pending.is_some()
+    }
+    pub fn tick(&mut self) -> bool {
+        let before = self.is_active();
         self.drain();
         if self.pending.as_ref().is_some_and(|p| Instant::now() >= p.1) {
             let (id, _, source, intent, catalog) = self.pending.take().unwrap();
             self.start(id, source, intent, catalog);
         }
         self.drain();
+        before && !self.is_active()
     }
     pub fn force_start_pending(&mut self) {
         if let Some((id, _, s, i, c)) = self.pending.take() {
@@ -459,6 +471,12 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
     pub fn pending_metadata(&self, id: OperationId) -> Option<&ImmediateRequestMetadata> {
         self.pending.get(&id.0)
     }
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+    pub fn cancel_pending(&mut self) {
+        self.pending.clear();
+    }
     pub fn diagnostics(&self) -> &ImmediateDiagnostics {
         &self.diagnostics
     }
@@ -582,6 +600,25 @@ mod tests {
         assert!(ev.undo_available);
         assert!(ev.result.is_ok());
     }
+    #[test]
+    fn immediate_cancel_pending_rejects_stale_completion() {
+        let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));
+        let mut ic = ImmediateExecutionCoordinator::new(svc);
+        let id = ic.start(
+            ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+            Arc::new(default_catalog()),
+            ImmediateRequestMetadata {
+                action: action(),
+                query: "q".into(),
+                source: ActivationSource::Enter,
+            },
+        );
+        assert!(ic.pending_metadata(id).is_some());
+        ic.cancel_pending();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(ic.drain_completions().is_empty());
+    }
+
     #[test]
     fn hooks_only_after_successful_commits() {
         let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));

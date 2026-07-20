@@ -642,6 +642,25 @@ impl LauncherApp {
     }
 }
 
+impl LauncherApp {
+    pub(crate) fn poll_clipboard_modify_runtime(&mut self, ctx: &egui::Context) {
+        let preview_finished = self.clipboard_modify_dialog.preview.tick();
+        if preview_finished {
+            ctx.request_repaint();
+        }
+        let had_immediate = self.clipboard_modify_immediate.has_pending();
+        self.drain_clipboard_modify_immediate();
+        if preview_finished || (had_immediate && !self.clipboard_modify_immediate.has_pending()) {
+            ctx.request_repaint();
+        }
+        if self.clipboard_modify_dialog.preview.is_active()
+            || self.clipboard_modify_immediate.has_pending()
+        {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
+    }
+}
+
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
@@ -651,7 +670,7 @@ impl eframe::App for LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.multi_manager_drain_runtime_events();
-        self.drain_clipboard_modify_immediate();
+        self.poll_clipboard_modify_runtime(ctx);
         let _ = self.multi_manager.start_pending_automatic_reconnect();
         if self
             .multi_manager
@@ -1369,6 +1388,10 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.clipboard_modify_dialog.cleanup_after_close();
+        self.clipboard_modify_immediate.cancel_pending();
+        self.pending_clipboard_modify_immediate.clear();
+        self.clipboard_modify_events.clear();
         self.multi_manager.shutdown();
         let multi_manager_save_on_exit = crate::settings::Settings::load(&self.settings_path)
             .map(|settings| settings.multi_manager.save_on_exit)
