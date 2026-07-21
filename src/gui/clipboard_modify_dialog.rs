@@ -273,29 +273,7 @@ impl ClipboardModifyDialogState {
             .open(&mut open)
             .show(ctx, |ui| {
                 self.shortcuts(ui, service, catalog.clone());
-                ui.horizontal(|ui| {
-                    for (s, l) in [
-                        (ClipboardModifyDialogSection::Modify, "Modify"),
-                        (ClipboardModifyDialogSection::Templates, "Templates"),
-                        (
-                            ClipboardModifyDialogSection::SavedPipelines,
-                            "Saved Pipelines",
-                        ),
-                        (
-                            ClipboardModifyDialogSection::ManageTemplates,
-                            "Manage Templates",
-                        ),
-                        (
-                            ClipboardModifyDialogSection::ManagePipelines,
-                            "Manage Pipelines",
-                        ),
-                        (ClipboardModifyDialogSection::Help, "Help"),
-                    ] {
-                        if ui.selectable_label(self.section == s, l).clicked() {
-                            self.section = s;
-                        }
-                    }
-                });
+                self.render_tab_navigation(ui);
                 ui.separator();
                 match self.section {
                     ClipboardModifyDialogSection::Modify => {
@@ -336,6 +314,41 @@ impl ClipboardModifyDialogState {
             self.cleanup_after_close();
         }
     }
+    fn render_tab_navigation(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::horizontal()
+            .id_source("clipboard_modify_tab_navigation")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.style_mut().wrap = Some(false);
+                    for (section, label) in [
+                        (ClipboardModifyDialogSection::Modify, "Modify"),
+                        (ClipboardModifyDialogSection::Templates, "Templates"),
+                        (
+                            ClipboardModifyDialogSection::SavedPipelines,
+                            "Saved Pipelines",
+                        ),
+                        (
+                            ClipboardModifyDialogSection::ManageTemplates,
+                            "Manage Templates",
+                        ),
+                        (
+                            ClipboardModifyDialogSection::ManagePipelines,
+                            "Manage Pipelines",
+                        ),
+                        (ClipboardModifyDialogSection::Help, "Help"),
+                    ] {
+                        if ui
+                            .selectable_label(self.section == section, label)
+                            .clicked()
+                        {
+                            self.section = section;
+                        }
+                    }
+                });
+            });
+    }
+
     pub fn filtered_templates<'a>(
         &self,
         catalog: &'a ClipboardModifierCatalog,
@@ -487,33 +500,35 @@ impl ClipboardModifyDialogState {
             ui.text_edit_singleline(&mut self.help_filter);
         });
         ui.separator();
-        for entry in crate::clipboard_modify::help::build_help_entries(catalog.as_ref())
-            .into_iter()
-            .filter(|entry| entry.matches_filter(&self.help_filter))
-        {
-            ui.group(|ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(&entry.canonical_syntax);
-                    ui.label(format!("— {}", entry.description));
-                });
-                ui.label(format!(
-                    "Category: {} | Pipeline: {}",
-                    entry.category,
-                    if entry.pipeline_allowed {
-                        "allowed"
-                    } else {
-                        "not allowed"
+        tab_body_scroll(ClipboardModifyDialogSection::Help, ui, |ui| {
+            for entry in crate::clipboard_modify::help::build_help_entries(catalog.as_ref())
+                .into_iter()
+                .filter(|entry| entry.matches_filter(&self.help_filter))
+            {
+                ui.group(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(&entry.canonical_syntax);
+                        ui.label(format!("— {}", entry.description));
+                    });
+                    ui.label(format!(
+                        "Category: {} | Pipeline: {}",
+                        entry.category,
+                        if entry.pipeline_allowed {
+                            "allowed"
+                        } else {
+                            "not allowed"
+                        }
+                    ));
+                    ui.label(format!("Arguments: {}", entry.arguments));
+                    if !entry.aliases.is_empty() {
+                        ui.label(format!("Aliases: {}", entry.aliases.join(", ")));
                     }
-                ));
-                ui.label(format!("Arguments: {}", entry.arguments));
-                if !entry.aliases.is_empty() {
-                    ui.label(format!("Aliases: {}", entry.aliases.join(", ")));
-                }
-                if !entry.examples.is_empty() {
-                    ui.label(format!("Examples: {}", entry.examples.join("; ")));
-                }
-            });
-        }
+                    if !entry.examples.is_empty() {
+                        ui.label(format!("Examples: {}", entry.examples.join("; ")));
+                    }
+                });
+            }
+        });
     }
     fn templates_ui(
         &mut self,
@@ -529,26 +544,31 @@ impl ClipboardModifyDialogState {
                 self.section = ClipboardModifyDialogSection::ManageTemplates;
             }
         });
-        for t in self.filtered_templates(catalog.as_ref()) {
-            let selected = self.selected_template.as_deref() == Some(&t.id);
-            if ui
-                .selectable_label(selected, format!("{} ({})", t.label, t.id))
-                .clicked()
-            {
-                self.selected_template = Some(t.id.clone());
-                self.preview_template(t.id.clone(), catalog.clone());
-            }
-        }
-        if let Some(id) = self.selected_template.clone() {
-            if let Some(t) = find_template(catalog.as_ref(), &id) {
-                ui.separator();
-                ui.label("Preview");
-                ui.monospace(t.render(&self.source));
-                if ui.button("Apply Template").clicked() {
-                    self.apply_template_through_commit_path(&id, catalog.clone());
-                    self.commit(service, false, false);
+        tab_body_scroll(ClipboardModifyDialogSection::Templates, ui, |ui| {
+            for t in self.filtered_templates(catalog.as_ref()) {
+                let selected = self.selected_template.as_deref() == Some(&t.id);
+                if ui
+                    .selectable_label(selected, format!("{} ({})", t.label, t.id))
+                    .clicked()
+                {
+                    self.selected_template = Some(t.id.clone());
+                    self.preview_template(t.id.clone(), catalog.clone());
                 }
             }
+            if let Some(id) = self.selected_template.clone() {
+                if let Some(t) = find_template(catalog.as_ref(), &id) {
+                    ui.separator();
+                    ui.label("Preview");
+                    ui.monospace(t.render(&self.source));
+                }
+            }
+        });
+        if let Some(id) = self.selected_template.clone()
+            && find_template(catalog.as_ref(), &id).is_some()
+            && ui.button("Apply Template").clicked()
+        {
+            self.apply_template_through_commit_path(&id, catalog.clone());
+            self.commit(service, false, false);
         }
     }
     pub fn preview_template(&mut self, id: String, catalog: Arc<ClipboardModifierCatalog>) {
@@ -667,61 +687,64 @@ impl ClipboardModifyDialogState {
         let mut remove = None;
         let mut moved = false;
         let mut edited = false;
-        for i in 0..self.template_draft.len() {
-            ui.push_id(i, |ui| {
-                ui.horizontal(|ui| {
-                    edited |= ui
-                        .text_edit_singleline(&mut self.template_draft[i].id)
-                        .changed();
-                    edited |= ui
-                        .text_edit_singleline(&mut self.template_draft[i].label)
-                        .changed();
-                    if ui.button("↑").clicked() && i > 0 {
-                        self.template_draft.swap(i, i - 1);
-                        moved = true;
-                    }
-                    if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
-                        self.template_draft.swap(i, i + 1);
-                        moved = true;
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.template_delete_confirmation = Some(self.template_draft[i].id.clone());
-                        remove = Some(self.template_draft[i].id.clone());
-                    }
-                });
-                let mut aliases = self.template_draft[i].aliases.join(", ");
-                if ui.text_edit_singleline(&mut aliases).changed() {
-                    self.template_draft[i].aliases = aliases
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned)
-                        .collect();
-                    edited = true;
-                }
-                edited |= ui
-                    .text_edit_multiline(&mut self.template_draft[i].template)
-                    .changed();
-                egui::ComboBox::from_label("Processor")
-                    .selected_text(format!("{:?}", self.template_draft[i].processor))
-                    .show_ui(ui, |ui| {
+        tab_body_scroll(ClipboardModifyDialogSection::ManageTemplates, ui, |ui| {
+            for i in 0..self.template_draft.len() {
+                ui.push_id(i, |ui| {
+                    ui.horizontal(|ui| {
                         edited |= ui
-                            .selectable_value(
-                                &mut self.template_draft[i].processor,
-                                Some(TemplateProcessor::Literal),
-                                "Literal",
-                            )
+                            .text_edit_singleline(&mut self.template_draft[i].id)
                             .changed();
                         edited |= ui
-                            .selectable_value(
-                                &mut self.template_draft[i].processor,
-                                Some(TemplateProcessor::RustRawString),
-                                "Rust raw string",
-                            )
+                            .text_edit_singleline(&mut self.template_draft[i].label)
                             .changed();
+                        if ui.button("↑").clicked() && i > 0 {
+                            self.template_draft.swap(i, i - 1);
+                            moved = true;
+                        }
+                        if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
+                            self.template_draft.swap(i, i + 1);
+                            moved = true;
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.template_delete_confirmation =
+                                Some(self.template_draft[i].id.clone());
+                            remove = Some(self.template_draft[i].id.clone());
+                        }
                     });
-            });
-        }
+                    let mut aliases = self.template_draft[i].aliases.join(", ");
+                    if ui.text_edit_singleline(&mut aliases).changed() {
+                        self.template_draft[i].aliases = aliases
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect();
+                        edited = true;
+                    }
+                    edited |= ui
+                        .text_edit_multiline(&mut self.template_draft[i].template)
+                        .changed();
+                    egui::ComboBox::from_label("Processor")
+                        .selected_text(format!("{:?}", self.template_draft[i].processor))
+                        .show_ui(ui, |ui| {
+                            edited |= ui
+                                .selectable_value(
+                                    &mut self.template_draft[i].processor,
+                                    Some(TemplateProcessor::Literal),
+                                    "Literal",
+                                )
+                                .changed();
+                            edited |= ui
+                                .selectable_value(
+                                    &mut self.template_draft[i].processor,
+                                    Some(TemplateProcessor::RustRawString),
+                                    "Rust raw string",
+                                )
+                                .changed();
+                        });
+                });
+            }
+        });
         if let Some(id) = remove {
             if let Err(e) = self.delete_template_from_draft(catalog.as_ref(), &id) {
                 self.template_editor_error = Some(e);
@@ -765,28 +788,29 @@ impl ClipboardModifyDialogState {
             self.begin_pipeline_edit(catalog.as_ref());
             self.section = ClipboardModifyDialogSection::ManagePipelines;
         }
-        for p in &catalog.pipelines {
-            ui.separator();
-            let selected = self.selected_pipeline.as_deref() == Some(&p.id);
-            if ui
-                .selectable_label(selected, Self::pipeline_identity_line(p))
-                .clicked()
-            {
-                self.selected_pipeline = Some(p.id.clone());
-                self.preview_pipeline(p.id.clone(), catalog.clone());
+        tab_body_scroll(ClipboardModifyDialogSection::SavedPipelines, ui, |ui| {
+            for p in &catalog.pipelines {
+                ui.separator();
+                let selected = self.selected_pipeline.as_deref() == Some(&p.id);
+                if ui
+                    .selectable_label(selected, Self::pipeline_identity_line(p))
+                    .clicked()
+                {
+                    self.selected_pipeline = Some(p.id.clone());
+                    self.preview_pipeline(p.id.clone(), catalog.clone());
+                }
+                ui.label(format!("Stages: {}", Self::pipeline_stage_summary(p)));
+                ui.label(format!(
+                    "Current-source preview: {}",
+                    self.source.chars().take(80).collect::<String>()
+                ));
+                if ui.button(format!("Execute {}", p.label)).clicked() {
+                    self.apply_pipeline_through_commit_path(&p.id, catalog.clone());
+                    self.commit(service, false, false);
+                }
             }
-            ui.label(format!("Stages: {}", Self::pipeline_stage_summary(p)));
-            ui.label(format!(
-                "Current-source preview: {}",
-                self.source.chars().take(80).collect::<String>()
-            ));
-            if ui.button(format!("Execute {}", p.label)).clicked() {
-                self.apply_pipeline_through_commit_path(&p.id, catalog.clone());
-                self.commit(service, false, false);
-            }
-        }
+        });
     }
-
     fn manage_pipelines_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -812,75 +836,78 @@ impl ClipboardModifyDialogState {
         });
         let mut remove = None;
         let mut swap = None;
-        for i in 0..self.pipeline_draft.len() {
-            ui.push_id(format!("pipeline-{i}"), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("ID");
-                    ui.text_edit_singleline(&mut self.pipeline_draft[i].id);
-                    ui.label("Label");
-                    ui.text_edit_singleline(&mut self.pipeline_draft[i].label);
-                    if ui.button("Duplicate").clicked() {
-                        let mut p = self.pipeline_draft[i].clone();
-                        p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
-                        p.label = format!("{} Copy", p.label);
-                        self.duplicate_save_confirmation = Some(p.id.clone());
-                        self.pipeline_draft.push(p);
-                        self.unsaved_pipeline_draft = true;
-                    }
-                    if ui.button("↑").clicked() && i > 0 {
-                        swap = Some((i, i - 1));
-                    }
-                    if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
-                        swap = Some((i, i + 1));
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.pipeline_delete_confirmation = Some(self.pipeline_draft[i].id.clone());
-                        remove = Some(self.pipeline_draft[i].id.clone());
-                    }
-                });
-                let mut aliases = self.pipeline_draft[i].aliases.join(", ");
-                if ui.text_edit_singleline(&mut aliases).changed() {
-                    self.pipeline_draft[i].aliases = aliases
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned)
-                        .collect();
-                    self.unsaved_pipeline_draft = true;
-                }
-                for j in 0..self.pipeline_draft[i].stages.len() {
+        tab_body_scroll(ClipboardModifyDialogSection::ManagePipelines, ui, |ui| {
+            for i in 0..self.pipeline_draft.len() {
+                ui.push_id(format!("pipeline-{i}"), |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Stage {} {:?}",
-                            j + 1,
-                            self.pipeline_draft[i].stages[j].operation
-                        ));
-                        let a = &mut self.pipeline_draft[i].stages[j].arguments;
-                        ui.text_edit_singleline(a.prefix.get_or_insert_with(String::new));
-                        ui.text_edit_singleline(a.suffix.get_or_insert_with(String::new));
-                        ui.text_edit_singleline(a.name.get_or_insert_with(String::new));
-                        ui.text_edit_singleline(a.language.get_or_insert_with(String::new));
-                        if ui.button("Remove stage").clicked() {
-                            self.pipeline_draft[i].stages.remove(j);
+                        ui.label("ID");
+                        ui.text_edit_singleline(&mut self.pipeline_draft[i].id);
+                        ui.label("Label");
+                        ui.text_edit_singleline(&mut self.pipeline_draft[i].label);
+                        if ui.button("Duplicate").clicked() {
+                            let mut p = self.pipeline_draft[i].clone();
+                            p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
+                            p.label = format!("{} Copy", p.label);
+                            self.duplicate_save_confirmation = Some(p.id.clone());
+                            self.pipeline_draft.push(p);
+                            self.unsaved_pipeline_draft = true;
+                        }
+                        if ui.button("↑").clicked() && i > 0 {
+                            swap = Some((i, i - 1));
+                        }
+                        if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
+                            swap = Some((i, i + 1));
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.pipeline_delete_confirmation =
+                                Some(self.pipeline_draft[i].id.clone());
+                            remove = Some(self.pipeline_draft[i].id.clone());
                         }
                     });
-                }
-                if ui.button("Add trim stage").clicked() {
-                    self.pipeline_draft[i].stages.push(StageSpec {
-                        operation: OperationId::Trim,
-                        arguments: Default::default(),
-                    });
-                    self.unsaved_pipeline_draft = true;
-                }
-                if ui.button("Preview complete output").clicked() {
-                    self.preview.request(
-                        self.source.clone(),
-                        ClipboardModifyIntent::Stages(self.pipeline_draft[i].stages.clone()),
-                        catalog.clone(),
-                    );
-                }
-            });
-        }
+                    let mut aliases = self.pipeline_draft[i].aliases.join(", ");
+                    if ui.text_edit_singleline(&mut aliases).changed() {
+                        self.pipeline_draft[i].aliases = aliases
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect();
+                        self.unsaved_pipeline_draft = true;
+                    }
+                    for j in 0..self.pipeline_draft[i].stages.len() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "Stage {} {:?}",
+                                j + 1,
+                                self.pipeline_draft[i].stages[j].operation
+                            ));
+                            let a = &mut self.pipeline_draft[i].stages[j].arguments;
+                            ui.text_edit_singleline(a.prefix.get_or_insert_with(String::new));
+                            ui.text_edit_singleline(a.suffix.get_or_insert_with(String::new));
+                            ui.text_edit_singleline(a.name.get_or_insert_with(String::new));
+                            ui.text_edit_singleline(a.language.get_or_insert_with(String::new));
+                            if ui.button("Remove stage").clicked() {
+                                self.pipeline_draft[i].stages.remove(j);
+                            }
+                        });
+                    }
+                    if ui.button("Add trim stage").clicked() {
+                        self.pipeline_draft[i].stages.push(StageSpec {
+                            operation: OperationId::Trim,
+                            arguments: Default::default(),
+                        });
+                        self.unsaved_pipeline_draft = true;
+                    }
+                    if ui.button("Preview complete output").clicked() {
+                        self.preview.request(
+                            self.source.clone(),
+                            ClipboardModifyIntent::Stages(self.pipeline_draft[i].stages.clone()),
+                            catalog.clone(),
+                        );
+                    }
+                });
+            }
+        });
         if let Some((a, b)) = swap {
             let _ = self.reorder_pipeline_draft_and_save(catalog.as_ref(), store, a, b);
         }
@@ -954,16 +981,6 @@ impl ClipboardModifyDialogState {
             }
             return;
         }
-        if ui
-            .add(
-                egui::TextEdit::multiline(&mut self.source)
-                    .id_source("cm_source")
-                    .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
-            )
-            .changed()
-        {
-            self.mark_dirty(catalog.clone());
-        }
         ui.horizontal(|ui| {
             if ui.button("Add uppercase stage").clicked() {
                 self.add_stage(OperationId::Uppercase, catalog.clone())
@@ -976,63 +993,87 @@ impl ClipboardModifyDialogState {
                 self.mark_dirty(catalog.clone())
             }
         });
-        let mut remove = None;
-        let mut changed = false;
-        for i in 0..self.stages.len() {
-            ui.push_id(self.stages[i].id, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "Stage {}: {:?}",
-                        i + 1,
-                        self.stages[i].spec.operation
-                    ));
-                    if ui.button("↑").clicked() && i > 0 {
-                        self.stages.swap(i, i - 1);
-                        changed = true;
-                    }
-                    if ui.button("↓").clicked() && i + 1 < self.stages.len() {
-                        self.stages.swap(i, i + 1);
-                        changed = true;
-                    }
-                    if ui.button("Remove").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            });
-        }
-        if let Some(i) = remove {
-            self.stages.remove(i);
-            changed = true;
-        }
-        if changed {
-            self.mark_dirty(catalog.clone());
-        }
-        ui.separator();
-        match self.preview.state() {
-            PreviewState::Completed { display, .. } => {
-                ui.label(format!(
-                    "Result: {} bytes, {} chars, {} lines{}",
-                    display.metadata.bytes,
-                    display.metadata.chars,
-                    display.metadata.lines,
-                    if display.truncated {
-                        " (visible preview truncated)"
-                    } else {
-                        ""
-                    }
-                ));
-                ui.add(
-                    egui::TextEdit::multiline(&mut display.text.clone())
+        tab_body_scroll(ClipboardModifyDialogSection::Modify, ui, |ui| {
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut self.source)
+                        .id_source("cm_source")
                         .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
-                );
+                )
+                .changed()
+            {
+                self.mark_dirty(catalog.clone());
             }
-            PreviewState::Failed { error, .. } => {
-                ui.colored_label(egui::Color32::RED, error);
+            let mut remove = None;
+            let mut changed = false;
+            for i in 0..self.stages.len() {
+                ui.push_id(self.stages[i].id, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "Stage {}: {:?}",
+                            i + 1,
+                            self.stages[i].spec.operation
+                        ));
+                        if ui.button("↑").clicked() && i > 0 {
+                            self.stages.swap(i, i - 1);
+                            changed = true;
+                        }
+                        if ui.button("↓").clicked() && i + 1 < self.stages.len() {
+                            self.stages.swap(i, i + 1);
+                            changed = true;
+                        }
+                        if ui.button("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                });
             }
-            s => {
-                ui.label(format!("Preview: {:?}", s));
+            if let Some(i) = remove {
+                self.stages.remove(i);
+                changed = true;
             }
-        }
+            if changed {
+                self.mark_dirty(catalog.clone());
+            }
+            ui.separator();
+            match self.preview.state() {
+                PreviewState::Completed { display, .. } => {
+                    ui.label(format!(
+                        "Result: {} bytes, {} chars, {} lines{}",
+                        display.metadata.bytes,
+                        display.metadata.chars,
+                        display.metadata.lines,
+                        if display.truncated {
+                            " (visible preview truncated)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut display.text.clone())
+                            .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
+                    );
+                }
+                PreviewState::Failed { error, .. } => {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+                s => {
+                    ui.label(format!("Preview: {:?}", s));
+                }
+            }
+            if let Some(cur) = &self.external_change {
+                ui.separator();
+                ui.label(format!("Clipboard changed since preview source was captured. Current clipboard: {} bytes, {} chars, fingerprint {:016x}. Applying overwrites it; undo restores the replaced value.", cur.bytes, cur.chars, cur.fingerprint));
+                if ui.button("Overwrite clipboard").clicked() {
+                    let close = matches!(
+                        self.pending_action,
+                        Some(PendingDialogAction::ApplyAndClose)
+                    );
+                    self.commit(service, close, true);
+                    self.external_change = None;
+                }
+            }
+        });
         ui.horizontal(|ui| {
             ui.add_enabled_ui(self.can_apply(), |ui| {
                 if ui.button("Apply").clicked() {
@@ -1050,18 +1091,6 @@ impl ClipboardModifyDialogState {
                 self.cleanup_after_close();
             }
         });
-        if let Some(cur) = &self.external_change {
-            ui.separator();
-            ui.label(format!("Clipboard changed since preview source was captured. Current clipboard: {} bytes, {} chars, fingerprint {:016x}. Applying overwrites it; undo restores the replaced value.", cur.bytes, cur.chars, cur.fingerprint));
-            if ui.button("Overwrite clipboard").clicked() {
-                let close = matches!(
-                    self.pending_action,
-                    Some(PendingDialogAction::ApplyAndClose)
-                );
-                self.commit(service, close, true);
-                self.external_change = None;
-            }
-        }
     }
     pub fn commit(
         &mut self,
@@ -1095,6 +1124,28 @@ impl ClipboardModifyDialogState {
             }
         }
     }
+}
+
+pub fn tab_scroll_id(section: ClipboardModifyDialogSection) -> &'static str {
+    match section {
+        ClipboardModifyDialogSection::Modify => "clipboard_modify_modify_scroll",
+        ClipboardModifyDialogSection::Templates => "clipboard_modify_templates_scroll",
+        ClipboardModifyDialogSection::SavedPipelines => "clipboard_modify_saved_pipelines_scroll",
+        ClipboardModifyDialogSection::ManageTemplates => "clipboard_modify_manage_templates_scroll",
+        ClipboardModifyDialogSection::ManagePipelines => "clipboard_modify_manage_pipelines_scroll",
+        ClipboardModifyDialogSection::Help => "clipboard_modify_help_scroll",
+    }
+}
+
+fn tab_body_scroll(
+    section: ClipboardModifyDialogSection,
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::ScrollArea::vertical()
+        .id_source(tab_scroll_id(section))
+        .auto_shrink([false, false])
+        .show(ui, add_contents);
 }
 
 pub fn validate_clipboard_modify_size(width: f32, height: f32) -> Option<egui::Vec2> {
@@ -1170,6 +1221,20 @@ mod tests {
     fn assert_vec2_eq(actual: egui::Vec2, expected: egui::Vec2) {
         assert_eq!(actual.x, expected.x);
         assert_eq!(actual.y, expected.y);
+    }
+
+    #[test]
+    fn tab_scroll_ids_are_distinct() {
+        let sections = [
+            ClipboardModifyDialogSection::Modify,
+            ClipboardModifyDialogSection::Templates,
+            ClipboardModifyDialogSection::SavedPipelines,
+            ClipboardModifyDialogSection::ManageTemplates,
+            ClipboardModifyDialogSection::ManagePipelines,
+            ClipboardModifyDialogSection::Help,
+        ];
+        let ids: HashSet<&'static str> = sections.into_iter().map(tab_scroll_id).collect();
+        assert_eq!(ids.len(), sections.len());
     }
 
     #[test]
