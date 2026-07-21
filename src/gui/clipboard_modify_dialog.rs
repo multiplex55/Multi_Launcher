@@ -559,10 +559,25 @@ impl ClipboardModifyDialogState {
                 if let Some(t) = find_template(catalog.as_ref(), &id) {
                     ui.separator();
                     ui.label("Preview");
-                    ui.monospace(t.render(&self.source));
+                    let preview = t.render(&self.source);
+                    readonly_multiline_preview(
+                        ui,
+                        egui::Id::new("cm_template_preview"),
+                        &preview,
+                        true,
+                    );
                 }
             }
         });
+        if let PreviewState::Completed { display, .. } = self.preview.state() {
+            ui.checkbox(&mut self.wrap_preview, "Wrap preview");
+            readonly_multiline_preview(
+                ui,
+                egui::Id::new("cm_template_preview"),
+                &display.text,
+                self.wrap_preview,
+            );
+        }
         if let Some(id) = self.selected_template.clone()
             && find_template(catalog.as_ref(), &id).is_some()
             && ui.button("Apply Template").clicked()
@@ -721,9 +736,15 @@ impl ClipboardModifyDialogState {
                             .collect();
                         edited = true;
                     }
-                    edited |= ui
-                        .text_edit_multiline(&mut self.template_draft[i].template)
-                        .changed();
+                    edited |= editable_multiline_ten_rows(
+                        ui,
+                        egui::Id::new(format!(
+                            "cm_template_{}_template_body_{i}",
+                            self.template_draft[i].id
+                        )),
+                        &mut self.template_draft[i].template,
+                    )
+                    .changed();
                     egui::ComboBox::from_label("Processor")
                         .selected_text(format!("{:?}", self.template_draft[i].processor))
                         .show_ui(ui, |ui| {
@@ -810,6 +831,15 @@ impl ClipboardModifyDialogState {
                 }
             }
         });
+        if let PreviewState::Completed { display, .. } = self.preview.state() {
+            ui.checkbox(&mut self.wrap_preview, "Wrap preview");
+            readonly_multiline_preview(
+                ui,
+                egui::Id::new("cm_pipeline_preview"),
+                &display.text,
+                self.wrap_preview,
+            );
+        }
     }
     fn manage_pipelines_ui(
         &mut self,
@@ -836,14 +866,27 @@ impl ClipboardModifyDialogState {
         });
         let mut remove = None;
         let mut swap = None;
+        let mut edited = false;
         tab_body_scroll(ClipboardModifyDialogSection::ManagePipelines, ui, |ui| {
             for i in 0..self.pipeline_draft.len() {
-                ui.push_id(format!("pipeline-{i}"), |ui| {
+                let pipeline_field_id =
+                    format!("cm_pipeline_{}_record_{i}", self.pipeline_draft[i].id);
+                ui.push_id(&pipeline_field_id, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("ID");
-                        ui.text_edit_singleline(&mut self.pipeline_draft[i].id);
+                        edited |= ui
+                            .push_id("pipeline_id", |ui| {
+                                ui.text_edit_singleline(&mut self.pipeline_draft[i].id)
+                            })
+                            .inner
+                            .changed();
                         ui.label("Label");
-                        ui.text_edit_singleline(&mut self.pipeline_draft[i].label);
+                        edited |= ui
+                            .push_id("pipeline_label", |ui| {
+                                ui.text_edit_singleline(&mut self.pipeline_draft[i].label)
+                            })
+                            .inner
+                            .changed();
                         if ui.button("Duplicate").clicked() {
                             let mut p = self.pipeline_draft[i].clone();
                             p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
@@ -882,10 +925,36 @@ impl ClipboardModifyDialogState {
                                 self.pipeline_draft[i].stages[j].operation
                             ));
                             let a = &mut self.pipeline_draft[i].stages[j].arguments;
-                            ui.text_edit_singleline(a.prefix.get_or_insert_with(String::new));
-                            ui.text_edit_singleline(a.suffix.get_or_insert_with(String::new));
-                            ui.text_edit_singleline(a.name.get_or_insert_with(String::new));
-                            ui.text_edit_singleline(a.language.get_or_insert_with(String::new));
+                            edited |= ui
+                                .push_id(format!("stage_{j}_prefix"), |ui| {
+                                    ui.text_edit_singleline(
+                                        a.prefix.get_or_insert_with(String::new),
+                                    )
+                                })
+                                .inner
+                                .changed();
+                            edited |= ui
+                                .push_id(format!("stage_{j}_suffix"), |ui| {
+                                    ui.text_edit_singleline(
+                                        a.suffix.get_or_insert_with(String::new),
+                                    )
+                                })
+                                .inner
+                                .changed();
+                            edited |= ui
+                                .push_id(format!("stage_{j}_name"), |ui| {
+                                    ui.text_edit_singleline(a.name.get_or_insert_with(String::new))
+                                })
+                                .inner
+                                .changed();
+                            edited |= ui
+                                .push_id(format!("stage_{j}_language"), |ui| {
+                                    ui.text_edit_singleline(
+                                        a.language.get_or_insert_with(String::new),
+                                    )
+                                })
+                                .inner
+                                .changed();
                             if ui.button("Remove stage").clicked() {
                                 self.pipeline_draft[i].stages.remove(j);
                             }
@@ -913,6 +982,18 @@ impl ClipboardModifyDialogState {
         }
         if let Some(id) = remove {
             let _ = self.delete_pipeline_from_draft_and_save(catalog.as_ref(), store, &id);
+        }
+        if edited {
+            self.unsaved_pipeline_draft = true;
+        }
+        if let PreviewState::Completed { display, .. } = self.preview.state() {
+            ui.checkbox(&mut self.wrap_preview, "Wrap preview");
+            readonly_multiline_preview(
+                ui,
+                egui::Id::new("cm_pipeline_preview"),
+                &display.text,
+                self.wrap_preview,
+            );
         }
         if let Some(id) = &self.duplicate_save_confirmation {
             ui.label(format!(
@@ -994,12 +1075,7 @@ impl ClipboardModifyDialogState {
             }
         });
         tab_body_scroll(ClipboardModifyDialogSection::Modify, ui, |ui| {
-            if ui
-                .add(
-                    egui::TextEdit::multiline(&mut self.source)
-                        .id_source("cm_source")
-                        .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
-                )
+            if editable_multiline_ten_rows(ui, egui::Id::new("cm_source"), &mut self.source)
                 .changed()
             {
                 self.mark_dirty(catalog.clone());
@@ -1049,9 +1125,12 @@ impl ClipboardModifyDialogState {
                             ""
                         }
                     ));
-                    ui.add(
-                        egui::TextEdit::multiline(&mut display.text.clone())
-                            .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
+                    ui.checkbox(&mut self.wrap_preview, "Wrap preview");
+                    readonly_multiline_preview(
+                        ui,
+                        egui::Id::new("cm_modify_result"),
+                        &display.text,
+                        self.wrap_preview,
                     );
                 }
                 PreviewState::Failed { error, .. } => {
@@ -1124,6 +1203,59 @@ impl ClipboardModifyDialogState {
             }
         }
     }
+}
+
+pub fn multiline_control_height_for(row_height: f32, frame_padding_y: f32) -> f32 {
+    row_height * CLIPBOARD_MODIFY_MULTILINE_ROWS as f32 + frame_padding_y * 2.0
+}
+
+pub fn multiline_control_height(ui: &egui::Ui) -> f32 {
+    multiline_control_height_for(
+        ui.text_style_height(&egui::TextStyle::Body),
+        ui.spacing().button_padding.y,
+    )
+}
+
+fn editable_multiline_ten_rows(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+) -> egui::Response {
+    let size = egui::vec2(ui.available_width(), multiline_control_height(ui));
+    ui.add_sized(
+        size,
+        egui::TextEdit::multiline(text)
+            .id_source(id)
+            .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS)
+            .desired_width(f32::INFINITY),
+    )
+}
+
+fn readonly_multiline_preview(ui: &mut egui::Ui, id: egui::Id, text: &str, wrap: bool) {
+    let size = egui::vec2(ui.available_width(), multiline_control_height(ui));
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_size(size);
+        ui.set_max_size(size);
+        if wrap {
+            egui::ScrollArea::vertical()
+                .id_source(id.with("vertical_scroll"))
+                .auto_shrink([false, false])
+                .max_height(size.y)
+                .show(ui, |ui| {
+                    ui.set_width(size.x);
+                    ui.add(egui::Label::new(text).selectable(true).wrap(true));
+                });
+        } else {
+            egui::ScrollArea::both()
+                .id_source(id.with("both_scroll"))
+                .auto_shrink([false, false])
+                .max_height(size.y)
+                .show(ui, |ui| {
+                    ui.style_mut().wrap = Some(false);
+                    ui.add(egui::Label::new(text).selectable(true).wrap(false));
+                });
+        }
+    });
 }
 
 pub fn tab_scroll_id(section: ClipboardModifyDialogSection) -> &'static str {
@@ -1221,6 +1353,16 @@ mod tests {
     fn assert_vec2_eq(actual: egui::Vec2, expected: egui::Vec2) {
         assert_eq!(actual.x, expected.x);
         assert_eq!(actual.y, expected.y);
+    }
+
+    #[test]
+    fn multiline_rows_constant_is_ten() {
+        assert_eq!(CLIPBOARD_MODIFY_MULTILINE_ROWS, 10);
+    }
+
+    #[test]
+    fn multiline_control_height_includes_ten_rows_and_frame_padding() {
+        assert_eq!(multiline_control_height_for(12.5, 2.0), 129.0);
     }
 
     #[test]
