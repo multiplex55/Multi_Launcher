@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn modify_direct_action_label_does_not_repeat_section_name() {
-        assert_eq!(plugin().search("cm")[0].label, "Open Clipboard Modify");
+        assert_eq!(plugin().search("cm")[0].label, "cm: Open Clipboard Modify");
         assert_eq!(
             plugin().search("cm modify")[0].label,
             "Open Clipboard Modify"
