@@ -545,46 +545,43 @@ impl ClipboardModifyDialogState {
                 self.section = ClipboardModifyDialogSection::ManageTemplates;
             }
         });
-        tab_body_scroll(ClipboardModifyDialogSection::Templates, ui, |ui| {
-            for t in self.filtered_templates(catalog.as_ref()) {
-                let selected = self.selected_template.as_deref() == Some(&t.id);
-                if ui
-                    .selectable_label(selected, format!("{} ({})", t.label, t.id))
-                    .clicked()
-                {
-                    self.selected_template = Some(t.id.clone());
-                    self.preview_template(t.id.clone(), catalog.clone());
+        let selected_template = self
+            .selected_template
+            .clone()
+            .filter(|id| find_template(catalog.as_ref(), id).is_some());
+        let body_max_height = if selected_template.is_some() {
+            (ui.available_height() - CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT).max(0.0)
+        } else {
+            ui.available_height()
+        };
+        tab_body_scroll_with_max_height(
+            ClipboardModifyDialogSection::Templates,
+            ui,
+            body_max_height,
+            |ui| {
+                for t in self.filtered_templates(catalog.as_ref()) {
+                    let selected = self.selected_template.as_deref() == Some(&t.id);
+                    if ui
+                        .selectable_label(selected, format!("{} ({})", t.label, t.id))
+                        .clicked()
+                    {
+                        self.selected_template = Some(t.id.clone());
+                        self.preview_template(t.id.clone(), catalog.clone());
+                    }
                 }
-            }
-            if let Some(id) = self.selected_template.clone() {
-                if let Some(t) = find_template(catalog.as_ref(), &id) {
+                if selected_template.is_some() {
                     ui.separator();
                     ui.label("Preview");
-                    let preview = t.render(&self.source);
-                    readonly_multiline_preview(
-                        ui,
-                        egui::Id::new("cm_template_preview"),
-                        &preview,
-                        true,
-                    );
+                    self.preview_state_ui(ui, egui::Id::new("cm_template_preview"));
                 }
+            },
+        );
+        if let Some(id) = selected_template {
+            ui.separator();
+            if ui.button("Apply Template").clicked() {
+                self.apply_template_through_commit_path(&id, catalog.clone());
+                self.commit(service, false, false);
             }
-        });
-        if let PreviewState::Completed { display, .. } = self.preview.state() {
-            ui.checkbox(&mut self.wrap_preview, "Wrap preview");
-            readonly_multiline_preview(
-                ui,
-                egui::Id::new("cm_template_preview"),
-                &display.text,
-                self.wrap_preview,
-            );
-        }
-        if let Some(id) = self.selected_template.clone()
-            && find_template(catalog.as_ref(), &id).is_some()
-            && ui.button("Apply Template").clicked()
-        {
-            self.apply_template_through_commit_path(&id, catalog.clone());
-            self.commit(service, false, false);
         }
     }
     pub fn preview_template(&mut self, id: String, catalog: Arc<ClipboardModifierCatalog>) {
@@ -810,6 +807,7 @@ impl ClipboardModifyDialogState {
             self.begin_pipeline_edit(catalog.as_ref());
             self.section = ClipboardModifyDialogSection::ManagePipelines;
         }
+        let source_preview = capped_current_source_preview(&self.source);
         tab_body_scroll(ClipboardModifyDialogSection::SavedPipelines, ui, |ui| {
             for p in &catalog.pipelines {
                 ui.separator();
@@ -822,25 +820,16 @@ impl ClipboardModifyDialogState {
                     self.preview_pipeline(p.id.clone(), catalog.clone());
                 }
                 ui.label(format!("Stages: {}", Self::pipeline_stage_summary(p)));
-                ui.label(format!(
-                    "Current-source preview: {}",
-                    self.source.chars().take(80).collect::<String>()
-                ));
+                ui.label(format!("Current-source preview: {source_preview}"));
+                if selected {
+                    self.preview_state_ui(ui, egui::Id::new("cm_pipeline_preview"));
+                }
                 if ui.button(format!("Execute {}", p.label)).clicked() {
                     self.apply_pipeline_through_commit_path(&p.id, catalog.clone());
                     self.commit(service, false, false);
                 }
             }
         });
-        if let PreviewState::Completed { display, .. } = self.preview.state() {
-            ui.checkbox(&mut self.wrap_preview, "Wrap preview");
-            readonly_multiline_preview(
-                ui,
-                egui::Id::new("cm_pipeline_preview"),
-                &display.text,
-                self.wrap_preview,
-            );
-        }
     }
     fn manage_pipelines_ui(
         &mut self,
@@ -1143,6 +1132,10 @@ impl ClipboardModifyDialogState {
     }
 
     fn modify_preview_ui(&mut self, ui: &mut egui::Ui) {
+        self.preview_state_ui(ui, egui::Id::new("cm_modify_result"));
+    }
+
+    fn preview_state_ui(&mut self, ui: &mut egui::Ui, preview_id: egui::Id) {
         match self.preview.state() {
             PreviewState::Completed { display, .. } => {
                 ui.label(result_preview_summary(
@@ -1152,18 +1145,22 @@ impl ClipboardModifyDialogState {
                     display.truncated,
                 ));
                 ui.checkbox(&mut self.wrap_preview, "Wrap preview");
-                readonly_multiline_preview(
-                    ui,
-                    egui::Id::new("cm_modify_result"),
-                    &display.text,
-                    self.wrap_preview,
-                );
+                readonly_multiline_preview(ui, preview_id, &display.text, self.wrap_preview);
             }
             PreviewState::Failed { error, .. } => {
-                ui.colored_label(egui::Color32::RED, error);
+                ui.colored_label(egui::Color32::RED, format!("Preview failed: {error}"));
             }
-            s => {
-                ui.label(format!("Preview: {:?}", s));
+            PreviewState::PendingDebounce { .. } => {
+                ui.label("Preview pending…");
+            }
+            PreviewState::Running { .. } => {
+                ui.label("Preview running…");
+            }
+            PreviewState::Cancelled { .. } => {
+                ui.label("Preview cancelled.");
+            }
+            PreviewState::IdleMissing => {
+                ui.label("Preview not requested.");
             }
         }
     }
@@ -1255,6 +1252,15 @@ pub fn result_preview_summary(bytes: usize, chars: usize, lines: usize, truncate
             ""
         }
     )
+}
+
+pub fn capped_current_source_preview(source: &str) -> String {
+    const CAP: usize = 80;
+    let mut preview: String = source.chars().take(CAP).collect();
+    if source.chars().nth(CAP).is_some() {
+        preview.push('…');
+    }
+    preview
 }
 
 pub fn external_clipboard_change_warning(cur: &ClipboardSummary) -> String {
@@ -1559,6 +1565,18 @@ mod tests {
         assert_eq!(
             result_preview_summary(12, 10, 2, false),
             "Result: 12 bytes, 10 chars, 2 lines"
+        );
+    }
+
+    #[test]
+    fn current_source_preview_keeps_per_pipeline_card_cap() {
+        let eighty = "a".repeat(80);
+        assert_eq!(capped_current_source_preview(&eighty), eighty);
+
+        let long = format!("{}b", "a".repeat(80));
+        assert_eq!(
+            capped_current_source_preview(&long),
+            format!("{}…", "a".repeat(80))
         );
     }
 
