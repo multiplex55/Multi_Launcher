@@ -502,14 +502,17 @@ impl ClipboardModifyDialogState {
         });
         ui.separator();
         tab_body_scroll(ClipboardModifyDialogSection::Help, ui, |ui| {
+            ui.set_max_width(ui.available_width());
             for entry in crate::clipboard_modify::help::build_help_entries(catalog.as_ref())
                 .into_iter()
                 .filter(|entry| entry.matches_filter(&self.help_filter))
             {
                 ui.group(|ui| {
+                    ui.set_max_width(ui.available_width());
                     ui.horizontal_wrapped(|ui| {
                         ui.monospace(&entry.canonical_syntax);
-                        ui.label(format!("— {}", entry.description));
+                        ui.label(format!("— {}", entry.description))
+                            .on_hover_text(&entry.description);
                     });
                     ui.label(format!(
                         "Category: {} | Pipeline: {}",
@@ -700,70 +703,91 @@ impl ClipboardModifyDialogState {
         let mut remove = None;
         let mut moved = false;
         let mut edited = false;
-        tab_body_scroll(ClipboardModifyDialogSection::ManageTemplates, ui, |ui| {
-            for i in 0..self.template_draft.len() {
-                ui.push_id(i, |ui| {
-                    ui.horizontal(|ui| {
-                        edited |= ui
-                            .text_edit_singleline(&mut self.template_draft[i].id)
-                            .changed();
-                        edited |= ui
-                            .text_edit_singleline(&mut self.template_draft[i].label)
-                            .changed();
-                        if ui.button("↑").clicked() && i > 0 {
-                            self.template_draft.swap(i, i - 1);
-                            moved = true;
-                        }
-                        if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
-                            self.template_draft.swap(i, i + 1);
-                            moved = true;
-                        }
-                        if ui.button("Delete").clicked() {
-                            self.template_delete_confirmation =
-                                Some(self.template_draft[i].id.clone());
-                            remove = Some(self.template_draft[i].id.clone());
-                        }
-                    });
-                    let mut aliases = self.template_draft[i].aliases.join(", ");
-                    if ui.text_edit_singleline(&mut aliases).changed() {
-                        self.template_draft[i].aliases = aliases
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect();
-                        edited = true;
-                    }
-                    edited |= editable_multiline_ten_rows(
-                        ui,
-                        egui::Id::new(format!(
-                            "cm_template_{}_template_body_{i}",
-                            self.template_draft[i].id
-                        )),
-                        &mut self.template_draft[i].template,
-                    )
-                    .changed();
-                    egui::ComboBox::from_label("Processor")
-                        .selected_text(format!("{:?}", self.template_draft[i].processor))
-                        .show_ui(ui, |ui| {
+        let body_max_height =
+            (ui.available_height() - CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT * 3.0).max(0.0);
+        tab_body_scroll_with_max_height(
+            ClipboardModifyDialogSection::ManageTemplates,
+            ui,
+            body_max_height,
+            |ui| {
+                for i in 0..self.template_draft.len() {
+                    let record_id =
+                        egui::Id::new(("cm_template_record", self.template_draft[i].id.as_str()));
+                    ui.push_id(record_id, |ui| {
+                        ui.horizontal(|ui| {
                             edited |= ui
-                                .selectable_value(
-                                    &mut self.template_draft[i].processor,
-                                    Some(TemplateProcessor::Literal),
-                                    "Literal",
-                                )
+                                .push_id("template_id", |ui| {
+                                    ui.text_edit_singleline(&mut self.template_draft[i].id)
+                                })
+                                .inner
                                 .changed();
                             edited |= ui
-                                .selectable_value(
-                                    &mut self.template_draft[i].processor,
-                                    Some(TemplateProcessor::RustRawString),
-                                    "Rust raw string",
-                                )
+                                .push_id("template_label", |ui| {
+                                    ui.text_edit_singleline(&mut self.template_draft[i].label)
+                                })
+                                .inner
                                 .changed();
+                            if ui.button("↑").clicked() && i > 0 {
+                                self.template_draft.swap(i, i - 1);
+                                moved = true;
+                            }
+                            if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
+                                self.template_draft.swap(i, i + 1);
+                                moved = true;
+                            }
+                            if ui.button("Delete").clicked() {
+                                self.template_delete_confirmation =
+                                    Some(self.template_draft[i].id.clone());
+                                remove = Some(self.template_draft[i].id.clone());
+                            }
                         });
-                });
-            }
-        });
+                        let mut aliases = self.template_draft[i].aliases.join(", ");
+                        if ui
+                            .push_id("template_aliases", |ui| {
+                                ui.text_edit_singleline(&mut aliases)
+                            })
+                            .inner
+                            .changed()
+                        {
+                            self.template_draft[i].aliases = aliases
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(ToOwned::to_owned)
+                                .collect();
+                            edited = true;
+                        }
+                        edited |= editable_multiline_ten_rows(
+                            ui,
+                            egui::Id::new(format!(
+                                "cm_template_{}_template_body",
+                                self.template_draft[i].id
+                            )),
+                            &mut self.template_draft[i].template,
+                        )
+                        .changed();
+                        egui::ComboBox::from_label("Processor")
+                            .selected_text(format!("{:?}", self.template_draft[i].processor))
+                            .show_ui(ui, |ui| {
+                                edited |= ui
+                                    .selectable_value(
+                                        &mut self.template_draft[i].processor,
+                                        Some(TemplateProcessor::Literal),
+                                        "Literal",
+                                    )
+                                    .changed();
+                                edited |= ui
+                                    .selectable_value(
+                                        &mut self.template_draft[i].processor,
+                                        Some(TemplateProcessor::RustRawString),
+                                        "Rust raw string",
+                                    )
+                                    .changed();
+                            });
+                    });
+                }
+            },
+        );
         if let Some(id) = remove {
             if let Err(e) = self.delete_template_from_draft(catalog.as_ref(), &id) {
                 self.template_editor_error = Some(e);
@@ -772,7 +796,12 @@ impl ClipboardModifyDialogState {
         if let Some(id) = &self.template_delete_confirmation
             && let Some(message) = Self::template_delete_confirmation_text(catalog.as_ref(), id)
         {
-            ui.label(message);
+            readonly_multiline_preview(
+                ui,
+                egui::Id::new("cm_template_delete_confirmation"),
+                &message,
+                true,
+            );
         }
         if moved {
             let _ = self.save_template_draft(catalog.as_ref(), store);
@@ -781,10 +810,10 @@ impl ClipboardModifyDialogState {
             self.unsaved_template_draft = true;
         }
         if let Err(e) = self.validate_template_draft(catalog.as_ref()) {
-            ui.colored_label(egui::Color32::RED, e);
+            readonly_multiline_preview(ui, egui::Id::new("cm_template_validation_error"), &e, true);
         }
         if let Some(e) = &self.template_editor_error {
-            ui.colored_label(egui::Color32::RED, e);
+            readonly_multiline_preview(ui, egui::Id::new("cm_template_editor_error"), e, true);
         }
         if ui
             .add_enabled(
@@ -857,116 +886,148 @@ impl ClipboardModifyDialogState {
         let mut remove = None;
         let mut swap = None;
         let mut edited = false;
-        tab_body_scroll(ClipboardModifyDialogSection::ManagePipelines, ui, |ui| {
-            for i in 0..self.pipeline_draft.len() {
-                let pipeline_field_id =
-                    format!("cm_pipeline_{}_record_{i}", self.pipeline_draft[i].id);
-                ui.push_id(&pipeline_field_id, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("ID");
-                        edited |= ui
-                            .push_id("pipeline_id", |ui| {
-                                ui.text_edit_singleline(&mut self.pipeline_draft[i].id)
-                            })
-                            .inner
-                            .changed();
-                        ui.label("Label");
-                        edited |= ui
-                            .push_id("pipeline_label", |ui| {
-                                ui.text_edit_singleline(&mut self.pipeline_draft[i].label)
-                            })
-                            .inner
-                            .changed();
-                        if ui.button("Duplicate").clicked() {
-                            let mut p = self.pipeline_draft[i].clone();
-                            p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
-                            p.label = format!("{} Copy", p.label);
-                            self.duplicate_save_confirmation = Some(p.id.clone());
-                            self.pipeline_draft.push(p);
-                            self.unsaved_pipeline_draft = true;
-                        }
-                        if ui.button("↑").clicked() && i > 0 {
-                            swap = Some((i, i - 1));
-                        }
-                        if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
-                            swap = Some((i, i + 1));
-                        }
-                        if ui.button("Delete").clicked() {
-                            self.pipeline_delete_confirmation =
-                                Some(self.pipeline_draft[i].id.clone());
-                            remove = Some(self.pipeline_draft[i].id.clone());
-                        }
-                    });
-                    let mut aliases = self.pipeline_draft[i].aliases.join(", ");
-                    if ui.text_edit_singleline(&mut aliases).changed() {
-                        self.pipeline_draft[i].aliases = aliases
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect();
-                        self.unsaved_pipeline_draft = true;
-                    }
-                    for j in 0..self.pipeline_draft[i].stages.len() {
+        let body_max_height =
+            (ui.available_height() - CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT * 4.0).max(0.0);
+        tab_body_scroll_with_max_height(
+            ClipboardModifyDialogSection::ManagePipelines,
+            ui,
+            body_max_height,
+            |ui| {
+                for i in 0..self.pipeline_draft.len() {
+                    let pipeline_field_id =
+                        format!("cm_pipeline_{}_record", self.pipeline_draft[i].id);
+                    ui.push_id(&pipeline_field_id, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(format!(
-                                "Stage {} {:?}",
-                                j + 1,
-                                self.pipeline_draft[i].stages[j].operation
-                            ));
-                            let a = &mut self.pipeline_draft[i].stages[j].arguments;
+                            ui.label("ID");
                             edited |= ui
-                                .push_id(format!("stage_{j}_prefix"), |ui| {
-                                    ui.text_edit_singleline(
-                                        a.prefix.get_or_insert_with(String::new),
-                                    )
+                                .push_id("pipeline_id", |ui| {
+                                    ui.text_edit_singleline(&mut self.pipeline_draft[i].id)
                                 })
                                 .inner
                                 .changed();
+                            ui.label("Label");
                             edited |= ui
-                                .push_id(format!("stage_{j}_suffix"), |ui| {
-                                    ui.text_edit_singleline(
-                                        a.suffix.get_or_insert_with(String::new),
-                                    )
+                                .push_id("pipeline_label", |ui| {
+                                    ui.text_edit_singleline(&mut self.pipeline_draft[i].label)
                                 })
                                 .inner
                                 .changed();
-                            edited |= ui
-                                .push_id(format!("stage_{j}_name"), |ui| {
-                                    ui.text_edit_singleline(a.name.get_or_insert_with(String::new))
-                                })
-                                .inner
-                                .changed();
-                            edited |= ui
-                                .push_id(format!("stage_{j}_language"), |ui| {
-                                    ui.text_edit_singleline(
-                                        a.language.get_or_insert_with(String::new),
-                                    )
-                                })
-                                .inner
-                                .changed();
-                            if ui.button("Remove stage").clicked() {
-                                self.pipeline_draft[i].stages.remove(j);
+                            if ui.button("Duplicate").clicked() {
+                                let mut p = self.pipeline_draft[i].clone();
+                                p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
+                                p.label = format!("{} Copy", p.label);
+                                self.duplicate_save_confirmation = Some(p.id.clone());
+                                self.pipeline_draft.push(p);
+                                self.unsaved_pipeline_draft = true;
+                            }
+                            if ui.button("↑").clicked() && i > 0 {
+                                swap = Some((i, i - 1));
+                            }
+                            if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
+                                swap = Some((i, i + 1));
+                            }
+                            if ui.button("Delete").clicked() {
+                                self.pipeline_delete_confirmation =
+                                    Some(self.pipeline_draft[i].id.clone());
+                                remove = Some(self.pipeline_draft[i].id.clone());
                             }
                         });
-                    }
-                    if ui.button("Add trim stage").clicked() {
-                        self.pipeline_draft[i].stages.push(StageSpec {
-                            operation: OperationId::Trim,
-                            arguments: Default::default(),
-                        });
-                        self.unsaved_pipeline_draft = true;
-                    }
-                    if ui.button("Preview complete output").clicked() {
-                        self.preview.request(
-                            self.source.clone(),
-                            ClipboardModifyIntent::Stages(self.pipeline_draft[i].stages.clone()),
-                            catalog.clone(),
-                        );
-                    }
-                });
-            }
-        });
+                        let mut aliases = self.pipeline_draft[i].aliases.join(", ");
+                        if ui.text_edit_singleline(&mut aliases).changed() {
+                            self.pipeline_draft[i].aliases = aliases
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(ToOwned::to_owned)
+                                .collect();
+                            self.unsaved_pipeline_draft = true;
+                        }
+                        for j in 0..self.pipeline_draft[i].stages.len() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "Stage {} {:?}",
+                                    j + 1,
+                                    self.pipeline_draft[i].stages[j].operation
+                                ));
+                                let a = &mut self.pipeline_draft[i].stages[j].arguments;
+                                edited |= ui
+                                    .push_id(format!("stage_{j}_prefix"), |ui| {
+                                        stage_argument_editor(
+                                            ui,
+                                            egui::Id::new((
+                                                pipeline_field_id.as_str(),
+                                                j,
+                                                "prefix",
+                                            )),
+                                            a.prefix.get_or_insert_with(String::new),
+                                        )
+                                    })
+                                    .inner
+                                    .changed();
+                                edited |= ui
+                                    .push_id(format!("stage_{j}_suffix"), |ui| {
+                                        stage_argument_editor(
+                                            ui,
+                                            egui::Id::new((
+                                                pipeline_field_id.as_str(),
+                                                j,
+                                                "suffix",
+                                            )),
+                                            a.suffix.get_or_insert_with(String::new),
+                                        )
+                                    })
+                                    .inner
+                                    .changed();
+                                edited |= ui
+                                    .push_id(format!("stage_{j}_name"), |ui| {
+                                        stage_argument_editor(
+                                            ui,
+                                            egui::Id::new((pipeline_field_id.as_str(), j, "name")),
+                                            a.name.get_or_insert_with(String::new),
+                                        )
+                                    })
+                                    .inner
+                                    .changed();
+                                edited |= ui
+                                    .push_id(format!("stage_{j}_language"), |ui| {
+                                        stage_argument_editor(
+                                            ui,
+                                            egui::Id::new((
+                                                pipeline_field_id.as_str(),
+                                                j,
+                                                "language",
+                                            )),
+                                            a.language.get_or_insert_with(String::new),
+                                        )
+                                    })
+                                    .inner
+                                    .changed();
+                                if ui.button("Remove stage").clicked() {
+                                    self.pipeline_draft[i].stages.remove(j);
+                                    edited = true;
+                                }
+                            });
+                        }
+                        if ui.button("Add trim stage").clicked() {
+                            self.pipeline_draft[i].stages.push(StageSpec {
+                                operation: OperationId::Trim,
+                                arguments: Default::default(),
+                            });
+                            self.unsaved_pipeline_draft = true;
+                        }
+                        if ui.button("Preview complete output").clicked() {
+                            self.preview.request(
+                                self.source.clone(),
+                                ClipboardModifyIntent::Stages(
+                                    self.pipeline_draft[i].stages.clone(),
+                                ),
+                                catalog.clone(),
+                            );
+                        }
+                    });
+                }
+            },
+        );
         if let Some((a, b)) = swap {
             let _ = self.reorder_pipeline_draft_and_save(catalog.as_ref(), store, a, b);
         }
@@ -986,12 +1047,15 @@ impl ClipboardModifyDialogState {
             );
         }
         if let Some(id) = &self.duplicate_save_confirmation {
-            ui.label(format!(
-                "Confirm saving duplicated pipeline {id} before pressing Save."
-            ));
+            readonly_multiline_preview(
+                ui,
+                egui::Id::new("cm_duplicate_save_confirmation"),
+                &format!("Confirm saving duplicated pipeline {id} before pressing Save."),
+                true,
+            );
         }
         if let Some(e) = &self.pipeline_editor_error {
-            ui.colored_label(egui::Color32::RED, e);
+            readonly_multiline_preview(ui, egui::Id::new("cm_pipeline_editor_error"), e, true);
         }
         if ui.button("Save").clicked() {
             let _ = self.save_pipeline_draft(catalog.as_ref(), store);
@@ -1294,6 +1358,14 @@ fn editable_multiline_ten_rows(
             .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS)
             .desired_width(f32::INFINITY),
     )
+}
+
+fn stage_argument_editor(ui: &mut egui::Ui, id: egui::Id, text: &mut String) -> egui::Response {
+    if text.contains('\n') {
+        editable_multiline_ten_rows(ui, id, text)
+    } else {
+        ui.add(egui::TextEdit::singleline(text).id_source(id))
+    }
 }
 
 fn readonly_multiline_preview(ui: &mut egui::Ui, id: egui::Id, text: &str, wrap: bool) {
