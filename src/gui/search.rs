@@ -509,7 +509,14 @@ impl LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{plugin::PluginManager, settings::Settings};
+    use crate::{
+        clipboard_modify::actions::{
+            ClipboardModifyActionPayload, ClipboardModifySectionPayload, decode_action_payload,
+        },
+        plugin::PluginManager,
+        plugins::clipboard_modify::ClipboardModifyPlugin,
+        settings::Settings,
+    };
     use eframe::egui;
     use std::sync::{Arc, atomic::AtomicBool};
 
@@ -530,6 +537,77 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn new_app_with_clipboard_modify(ctx: &egui::Context) -> LauncherApp {
+        let mut plugin_manager = PluginManager::new();
+        let catalog = plugin_manager.clipboard_modifier_catalog();
+        plugin_manager.register(Box::new(ClipboardModifyPlugin::new(catalog)));
+
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            plugin_manager,
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn assert_first_result_is_clipboard_modify_open_modify(app: &LauncherApp) {
+        let first = app
+            .results
+            .first()
+            .expect("clipboard modify result from launcher search path");
+        assert_eq!(first.label, "cm: Open Clipboard Modify");
+        assert_eq!(first.desc, "Opens the Clipboard Modify dialog section");
+        assert_eq!(first.action, "clipboard_modify:open:modify");
+
+        let encoded = first
+            .args
+            .as_deref()
+            .expect("direct Clipboard Modify open action carries encoded section payload");
+        let payload: ClipboardModifyActionPayload = decode_action_payload(encoded).unwrap();
+        assert_eq!(
+            payload,
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::Modify,
+            }
+        );
+    }
+
+    #[test]
+    fn clipboard_modify_root_query_returns_direct_open_modify_first_in_fuzzy_mode() {
+        let ctx = egui::Context::default();
+        let mut app = new_app_with_clipboard_modify(&ctx);
+        app.query = "cm".into();
+        app.match_exact = false;
+        app.fuzzy_weight = 1.0;
+
+        app.search();
+
+        assert_first_result_is_clipboard_modify_open_modify(&app);
+    }
+
+    #[test]
+    fn clipboard_modify_root_query_returns_direct_open_modify_first_in_exact_mode() {
+        let ctx = egui::Context::default();
+        let mut app = new_app_with_clipboard_modify(&ctx);
+        app.query = "cm".into();
+        app.match_exact = true;
+        app.fuzzy_weight = 1.0;
+
+        app.search();
+
+        assert_first_result_is_clipboard_modify_open_modify(&app);
     }
 
     #[test]
