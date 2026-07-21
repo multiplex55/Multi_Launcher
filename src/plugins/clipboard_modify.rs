@@ -104,8 +104,15 @@ impl Plugin for ClipboardModifyPlugin {
     fn commands(&self) -> Vec<Action> {
         vec![
             command_action("cm", "Clipboard Modify"),
+            command_action("cm modify", "Open Clipboard Modify"),
             command_action("cm template", "Open Clipboard Modify templates"),
             command_action("cm apply", "Open Clipboard Modify saved pipelines"),
+            command_action("cm manage-templates", "Manage Clipboard Modify templates"),
+            command_action(
+                "cm manage-pipelines",
+                "Manage Clipboard Modify saved pipelines",
+            ),
+            command_action("cm help", "Open Clipboard Modify help"),
             command_action("cm undo", "Undo last Clipboard Modify"),
             command_action("cm upper", "Clipboard Modify uppercase text"),
             command_action("cm trim", "Clipboard Modify trim text"),
@@ -199,8 +206,13 @@ fn section_action(section: ModifySection) -> Action {
     let section_name = section_name(section);
     let payload = open_dialog_payload(section);
     let encoded = encode_action_payload(&payload).ok();
+    let label = if section == ModifySection::Modify {
+        "Open Clipboard Modify".into()
+    } else {
+        format!("Open Clipboard Modify {section_name}")
+    };
     Action {
-        label: format!("Open Clipboard Modify {section_name}"),
+        label,
         desc: format!("Open the Clipboard Modify {section_name} dialog section"),
         action: format!("clipboard_modify:open:{section_slug}"),
         args: encoded,
@@ -231,6 +243,9 @@ fn suggestion_query(section: ModifySection, suggestion: &str) -> String {
         ModifySection::Modify => format!("cm {suggestion}"),
         ModifySection::Templates => format!("cm template {suggestion}"),
         ModifySection::SavedPipelines => format!("cm apply {suggestion}"),
+        ModifySection::ManageTemplates => "cm manage-templates".into(),
+        ModifySection::ManagePipelines => "cm manage-pipelines".into(),
+        ModifySection::Help => "cm help".into(),
     }
 }
 
@@ -241,6 +256,9 @@ fn suggestion_label(section: ModifySection, suggestion: &str) -> String {
             .unwrap_or_else(|| suggestion.to_string()),
         ModifySection::Templates => format!("Use template {suggestion}"),
         ModifySection::SavedPipelines => format!("Apply pipeline {suggestion}"),
+        ModifySection::ManageTemplates => "Manage templates".into(),
+        ModifySection::ManagePipelines => "Manage pipelines".into(),
+        ModifySection::Help => "Open help".into(),
     }
 }
 
@@ -322,6 +340,9 @@ fn section_name(section: ModifySection) -> &'static str {
         ModifySection::Modify => "Modify",
         ModifySection::Templates => "Templates",
         ModifySection::SavedPipelines => "Saved Pipelines",
+        ModifySection::ManageTemplates => "Manage Templates",
+        ModifySection::ManagePipelines => "Manage Pipelines",
+        ModifySection::Help => "Help",
     }
 }
 
@@ -330,6 +351,9 @@ fn section_slug(section: ModifySection) -> &'static str {
         ModifySection::Modify => "modify",
         ModifySection::Templates => "templates",
         ModifySection::SavedPipelines => "saved-pipelines",
+        ModifySection::ManageTemplates => "manage-templates",
+        ModifySection::ManagePipelines => "manage-pipelines",
+        ModifySection::Help => "help",
     }
 }
 
@@ -413,6 +437,33 @@ mod tests {
             ClipboardModifyActionPayload::OpenDialogSection {
                 section: ClipboardModifySectionPayload::SavedPipelines
             }
+        );
+        assert_eq!(
+            payload(&plugin().search("cm manage-templates").remove(0)),
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::ManageTemplates
+            }
+        );
+        assert_eq!(
+            payload(&plugin().search("cm manage-pipelines").remove(0)),
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::ManagePipelines
+            }
+        );
+        assert_eq!(
+            payload(&plugin().search("cm help").remove(0)),
+            ClipboardModifyActionPayload::OpenDialogSection {
+                section: ClipboardModifySectionPayload::Help
+            }
+        );
+    }
+
+    #[test]
+    fn modify_direct_action_label_does_not_repeat_section_name() {
+        assert_eq!(plugin().search("cm")[0].label, "Open Clipboard Modify");
+        assert_eq!(
+            plugin().search("cm modify")[0].label,
+            "Open Clipboard Modify"
         );
     }
 

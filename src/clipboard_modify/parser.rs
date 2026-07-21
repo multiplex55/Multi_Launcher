@@ -15,6 +15,9 @@ pub enum ModifySection {
     Modify,
     Templates,
     SavedPipelines,
+    ManageTemplates,
+    ManagePipelines,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,10 +293,31 @@ fn parse_special(
 ) -> Option<ClipboardModifyParseResult> {
     let first = stage.tokens.first()?;
     let n = normalize_name(&first.text);
-    if n == "undo" && stage.tokens.len() == 1 {
-        return Some(ClipboardModifyParseResult::CompleteExecution(
-            ClipboardModifyIntent::Undo,
-        ));
+    if stage.tokens.len() == 1 {
+        match n.as_str() {
+            "modify" => {
+                return Some(ClipboardModifyParseResult::OpenSection(
+                    ModifySection::Modify,
+                ));
+            }
+            "manage-templates" => {
+                return Some(ClipboardModifyParseResult::OpenSection(
+                    ModifySection::ManageTemplates,
+                ));
+            }
+            "manage-pipelines" => {
+                return Some(ClipboardModifyParseResult::OpenSection(
+                    ModifySection::ManagePipelines,
+                ));
+            }
+            "help" => return Some(ClipboardModifyParseResult::OpenSection(ModifySection::Help)),
+            "undo" => {
+                return Some(ClipboardModifyParseResult::CompleteExecution(
+                    ClipboardModifyIntent::Undo,
+                ));
+            }
+            _ => {}
+        }
     }
     if n == "template" {
         return Some(if stage.tokens.len() == 1 {
@@ -719,6 +743,52 @@ mod tests {
             p("cm apply no-such"),
             ClipboardModifyParseResult::Partial(_)
         ));
+    }
+
+    #[test]
+    fn navigation_commands_open_sections_case_insensitively() {
+        for (query, section) in [
+            ("cm modify", ModifySection::Modify),
+            ("CM MODIFY", ModifySection::Modify),
+            ("cm template", ModifySection::Templates),
+            ("CM TEMPLATE", ModifySection::Templates),
+            ("cm apply", ModifySection::SavedPipelines),
+            ("CM APPLY", ModifySection::SavedPipelines),
+            ("cm manage-templates", ModifySection::ManageTemplates),
+            ("CM MANAGE_TEMPLATES", ModifySection::ManageTemplates),
+            ("cm manage-pipelines", ModifySection::ManagePipelines),
+            ("CM MANAGE-PIPELINES", ModifySection::ManagePipelines),
+            ("cm help", ModifySection::Help),
+            ("CM HELP", ModifySection::Help),
+        ] {
+            assert_eq!(
+                p(query),
+                ClipboardModifyParseResult::OpenSection(section),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_apply_execution_and_undo_keep_existing_meanings() {
+        assert_eq!(
+            p("cm template prompt context"),
+            ClipboardModifyParseResult::CompleteExecution(ClipboardModifyIntent::ApplyTemplate {
+                name: "prompt context".into()
+            })
+        );
+        assert_eq!(
+            p("CM APPLY clean lines"),
+            ClipboardModifyParseResult::CompleteExecution(
+                ClipboardModifyIntent::ApplySavedPipeline {
+                    name: "clean lines".into()
+                }
+            )
+        );
+        assert_eq!(
+            p("Cm UnDo"),
+            ClipboardModifyParseResult::CompleteExecution(ClipboardModifyIntent::Undo)
+        );
     }
     #[test]
     fn incomplete_categories() {

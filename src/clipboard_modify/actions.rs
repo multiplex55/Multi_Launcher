@@ -32,6 +32,9 @@ pub enum ClipboardModifySectionPayload {
     Modify,
     Templates,
     SavedPipelines,
+    ManageTemplates,
+    ManagePipelines,
+    Help,
 }
 
 impl From<ModifySection> for ClipboardModifySectionPayload {
@@ -40,6 +43,9 @@ impl From<ModifySection> for ClipboardModifySectionPayload {
             ModifySection::Modify => Self::Modify,
             ModifySection::Templates => Self::Templates,
             ModifySection::SavedPipelines => Self::SavedPipelines,
+            ModifySection::ManageTemplates => Self::ManageTemplates,
+            ModifySection::ManagePipelines => Self::ManagePipelines,
+            ModifySection::Help => Self::Help,
         }
     }
 }
@@ -101,7 +107,16 @@ mod tests {
 
     #[test]
     fn encoded_payload_round_trips_for_every_variant() {
-        round_trip(open_dialog_payload(ModifySection::Modify));
+        for section in [
+            ModifySection::Modify,
+            ModifySection::Templates,
+            ModifySection::SavedPipelines,
+            ModifySection::ManageTemplates,
+            ModifySection::ManagePipelines,
+            ModifySection::Help,
+        ] {
+            round_trip(open_dialog_payload(section));
+        }
         round_trip(execute_stages_payload(vec![StageSpec {
             operation: OperationId::Uppercase,
             arguments: StageArguments::default(),
