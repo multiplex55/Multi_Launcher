@@ -33,14 +33,43 @@ Clipboard Modify is launched with the `cm` prefix. It reads the current text cli
 | `screaming-snake` | `constant-case`, `screaming-snake-case` | `cm screaming-snake` | yes |
 | `kebab-case` | `kebab` | `cm kebab-case` | yes |
 
-## Commands and pipeline syntax
+## Command browser behavior
 
-- `cm` opens the Modify section.
+Typing bare `cm` opens the launcher command browser instead of immediately applying a transformation. The root browser is ordered for discovery:
+
+1. **Open Clipboard Modify** appears first and opens the full Clipboard Modify dialog.
+2. Navigation completions are listed for the major Clipboard Modify sections and management views.
+3. Canonical operation suggestions are listed for built-in transformations.
+4. Template completions and saved-pipeline completions are listed from the current catalog.
+
+Aliases are intentionally omitted from the bare-`cm` root list so the browser remains focused on canonical, discoverable commands. Aliases remain available when typed directly in contexts where they are currently supported, such as operation aliases, template aliases, and pipeline aliases. `cm undo` also remains available when typed directly, but it is not shown in the bare-`cm` root list.
+
+Completion rows use a two-Enter flow. Pressing **Enter** the first time on a completion row fills the query with that completed command while keeping launcher focus active. Pressing **Enter** again opens the completed view or executes the completed command.
+
+## Navigation commands
+
+- `cm` shows the command browser with **Open Clipboard Modify** selected first.
+- `cm modify` opens the Modify section.
 - `cm template` opens Templates; `cm template <name-or-alias>` applies that template immediately.
 - `cm apply` opens Saved Pipelines; `cm apply <name-or-alias>` runs that saved pipeline immediately.
-- `cm undo` restores the clipboard text captured before the last Clipboard Modify write.
+- `cm manage-templates` opens template management.
+- `cm manage-pipelines` opens saved-pipeline management.
+- `cm help` opens Clipboard Modify help.
+
+## Commands and pipeline syntax
+
+- `cm undo` restores the clipboard text captured before the last Clipboard Modify write when typed directly.
 - Pipeline stages are separated with `|`, for example `cm trim-lines | unique-lines | sort-ascending`.
 - Custom wrapper values can be quoted with single or double quotes when they contain spaces, pipes, or quote characters: `cm wrap "<!-- " " -->"`.
+
+## Dialog layout and resizing
+
+The Clipboard Modify dialog keeps large content usable without letting the window grow without bound:
+
+- Source, editor, and preview controls display ten rows and scroll internally for larger content.
+- Tabs are scrollable, and tab navigation stays fixed so tab switching remains reachable while tab content scrolls.
+- Important actions, such as add/filter controls and save/apply buttons where applicable, stay fixed and visible while long lists or content panes scroll.
+- Dialog resizing is session-only. Runtime resize changes are retained while the application session is running, but runtime resize is not persisted to settings; after restart, the configured or default startup size is used.
 
 ## Template file schema
 
