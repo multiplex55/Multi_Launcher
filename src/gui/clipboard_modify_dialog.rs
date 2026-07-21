@@ -21,6 +21,7 @@ pub const CLIPBOARD_MODIFY_MIN_WIDTH: f32 = 520.0;
 pub const CLIPBOARD_MODIFY_MIN_HEIGHT: f32 = 360.0;
 pub const CLIPBOARD_MODIFY_VIEWPORT_MARGIN: f32 = 16.0;
 pub const CLIPBOARD_MODIFY_MULTILINE_ROWS: usize = 10;
+const CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT: f32 = 44.0;
 
 const CLIPBOARD_MODIFY_WINDOW_ID: &str = "clipboard_modify_dialog_window";
 
@@ -1052,16 +1053,6 @@ impl ClipboardModifyDialogState {
         if let Some(e) = &self.source_error {
             ui.colored_label(egui::Color32::RED, e);
         }
-        if self.large_confirmation_open {
-            ui.label(format!(
-                "Large clipboard source: {} bytes. Preview is paused.",
-                self.source.len()
-            ));
-            if ui.button("Preview this source").clicked() {
-                self.acknowledge_large_source(catalog.clone());
-            }
-            return;
-        }
         ui.horizontal(|ui| {
             if ui.button("Add uppercase stage").clicked() {
                 self.add_stage(OperationId::Uppercase, catalog.clone())
@@ -1074,85 +1065,135 @@ impl ClipboardModifyDialogState {
                 self.mark_dirty(catalog.clone())
             }
         });
-        tab_body_scroll(ClipboardModifyDialogSection::Modify, ui, |ui| {
-            if editable_multiline_ten_rows(ui, egui::Id::new("cm_source"), &mut self.source)
-                .changed()
-            {
-                self.mark_dirty(catalog.clone());
+
+        ui.separator();
+        let body_max_height =
+            (ui.available_height() - CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT).max(0.0);
+        tab_body_scroll_with_max_height(
+            ClipboardModifyDialogSection::Modify,
+            ui,
+            body_max_height,
+            |ui| {
+                self.modify_body_ui(ui, service, catalog.clone());
+            },
+        );
+        ui.separator();
+        self.modify_footer_ui(ui, service);
+    }
+
+    fn modify_body_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        service: &Arc<ProductionClipboardService>,
+        catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
+    ) {
+        if self.large_confirmation_open {
+            ui.label(format!(
+                "Large clipboard source: {} bytes. Preview is paused.",
+                self.source.len()
+            ));
+            if ui.button("Preview this source").clicked() {
+                self.acknowledge_large_source(catalog.clone());
             }
-            let mut remove = None;
-            let mut changed = false;
-            for i in 0..self.stages.len() {
-                ui.push_id(self.stages[i].id, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Stage {}: {:?}",
-                            i + 1,
-                            self.stages[i].spec.operation
-                        ));
-                        if ui.button("↑").clicked() && i > 0 {
-                            self.stages.swap(i, i - 1);
-                            changed = true;
-                        }
-                        if ui.button("↓").clicked() && i + 1 < self.stages.len() {
-                            self.stages.swap(i, i + 1);
-                            changed = true;
-                        }
-                        if ui.button("Remove").clicked() {
-                            remove = Some(i);
-                        }
-                    });
-                });
-            }
-            if let Some(i) = remove {
-                self.stages.remove(i);
-                changed = true;
-            }
-            if changed {
-                self.mark_dirty(catalog.clone());
-            }
-            ui.separator();
-            match self.preview.state() {
-                PreviewState::Completed { display, .. } => {
+            return;
+        }
+
+        ui.label("Source");
+        if editable_multiline_ten_rows(ui, egui::Id::new("cm_source"), &mut self.source).changed() {
+            self.mark_dirty(catalog.clone());
+        }
+
+        ui.separator();
+        ui.label("Stages");
+        let mut remove = None;
+        let mut changed = false;
+        for i in 0..self.stages.len() {
+            ui.push_id(self.stages[i].id, |ui| {
+                ui.horizontal(|ui| {
                     ui.label(format!(
-                        "Result: {} bytes, {} chars, {} lines{}",
-                        display.metadata.bytes,
-                        display.metadata.chars,
-                        display.metadata.lines,
-                        if display.truncated {
-                            " (visible preview truncated)"
-                        } else {
-                            ""
-                        }
+                        "Stage {}: {:?}",
+                        i + 1,
+                        self.stages[i].spec.operation
                     ));
-                    ui.checkbox(&mut self.wrap_preview, "Wrap preview");
-                    readonly_multiline_preview(
-                        ui,
-                        egui::Id::new("cm_modify_result"),
-                        &display.text,
-                        self.wrap_preview,
-                    );
-                }
-                PreviewState::Failed { error, .. } => {
-                    ui.colored_label(egui::Color32::RED, error);
-                }
-                s => {
-                    ui.label(format!("Preview: {:?}", s));
-                }
+                    if ui.button("↑").clicked() && i > 0 {
+                        self.stages.swap(i, i - 1);
+                        changed = true;
+                    }
+                    if ui.button("↓").clicked() && i + 1 < self.stages.len() {
+                        self.stages.swap(i, i + 1);
+                        changed = true;
+                    }
+                    if ui.button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove {
+            self.stages.remove(i);
+            changed = true;
+        }
+        if changed {
+            self.mark_dirty(catalog.clone());
+        }
+
+        ui.separator();
+        self.modify_preview_ui(ui);
+        self.external_change_warning_ui(ui, service);
+    }
+
+    fn modify_preview_ui(&mut self, ui: &mut egui::Ui) {
+        match self.preview.state() {
+            PreviewState::Completed { display, .. } => {
+                ui.label(result_preview_summary(
+                    display.metadata.bytes,
+                    display.metadata.chars,
+                    display.metadata.lines,
+                    display.truncated,
+                ));
+                ui.checkbox(&mut self.wrap_preview, "Wrap preview");
+                readonly_multiline_preview(
+                    ui,
+                    egui::Id::new("cm_modify_result"),
+                    &display.text,
+                    self.wrap_preview,
+                );
             }
-            if let Some(cur) = &self.external_change {
-                ui.separator();
-                ui.label(format!("Clipboard changed since preview source was captured. Current clipboard: {} bytes, {} chars, fingerprint {:016x}. Applying overwrites it; undo restores the replaced value.", cur.bytes, cur.chars, cur.fingerprint));
-                if ui.button("Overwrite clipboard").clicked() {
-                    let close = matches!(
-                        self.pending_action,
-                        Some(PendingDialogAction::ApplyAndClose)
-                    );
-                    self.commit(service, close, true);
-                    self.external_change = None;
-                }
+            PreviewState::Failed { error, .. } => {
+                ui.colored_label(egui::Color32::RED, error);
             }
-        });
+            s => {
+                ui.label(format!("Preview: {:?}", s));
+            }
+        }
+    }
+
+    fn external_change_warning_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        service: &Arc<ProductionClipboardService>,
+    ) {
+        if let Some(cur) = &self.external_change {
+            ui.separator();
+            let message = external_clipboard_change_warning(cur);
+            readonly_multiline_preview(
+                ui,
+                egui::Id::new("cm_external_change_warning"),
+                &message,
+                true,
+            );
+            if ui.button("Overwrite clipboard").clicked() {
+                let close = matches!(
+                    self.pending_action,
+                    Some(PendingDialogAction::ApplyAndClose)
+                );
+                self.commit(service, close, true);
+                self.external_change = None;
+            }
+        }
+    }
+
+    fn modify_footer_ui(&mut self, ui: &mut egui::Ui, service: &Arc<ProductionClipboardService>) {
         ui.horizontal(|ui| {
             ui.add_enabled_ui(self.can_apply(), |ui| {
                 if ui.button("Apply").clicked() {
@@ -1203,6 +1244,24 @@ impl ClipboardModifyDialogState {
             }
         }
     }
+}
+
+pub fn result_preview_summary(bytes: usize, chars: usize, lines: usize, truncated: bool) -> String {
+    format!(
+        "Result: {bytes} bytes, {chars} chars, {lines} lines{}",
+        if truncated {
+            " (visible preview truncated)"
+        } else {
+            ""
+        }
+    )
+}
+
+pub fn external_clipboard_change_warning(cur: &ClipboardSummary) -> String {
+    format!(
+        "Clipboard changed since preview source was captured. Current clipboard: {} bytes, {} chars, fingerprint {:016x}. Applying overwrites it; undo restores the replaced value.",
+        cur.bytes, cur.chars, cur.fingerprint
+    )
 }
 
 pub fn multiline_control_height_for(row_height: f32, frame_padding_y: f32) -> f32 {
@@ -1277,6 +1336,19 @@ fn tab_body_scroll(
     egui::ScrollArea::vertical()
         .id_source(tab_scroll_id(section))
         .auto_shrink([false, false])
+        .show(ui, add_contents);
+}
+
+fn tab_body_scroll_with_max_height(
+    section: ClipboardModifyDialogSection,
+    ui: &mut egui::Ui,
+    max_height: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::ScrollArea::vertical()
+        .id_source(tab_scroll_id(section))
+        .auto_shrink([false, false])
+        .max_height(max_height)
         .show(ui, add_contents);
 }
 
@@ -1441,6 +1513,67 @@ mod tests {
 
         assert_vec2_eq(state.persisted_window_size, egui::vec2(777.0, 555.0));
         assert!(!state.wrap_preview);
+    }
+
+    #[test]
+    fn cleanup_after_close_clears_source_buffers() {
+        let mut state = ClipboardModifyDialogState::default();
+        state.source = "edited clipboard source".into();
+        state.baseline = "loaded clipboard source".into();
+        state.reset_source = "reset clipboard source".into();
+        state.source_fingerprint = fingerprint(&state.source);
+
+        state.cleanup_after_close();
+
+        assert!(state.source.is_empty());
+        assert!(state.baseline.is_empty());
+        assert!(state.reset_source.is_empty());
+        assert_eq!(state.source_fingerprint, 0);
+    }
+
+    #[test]
+    fn cleanup_after_close_clears_preview_state() {
+        let mut state = ClipboardModifyDialogState::default();
+        state.source = "preview source".into();
+        state.preview.request(
+            state.source.clone(),
+            ClipboardModifyIntent::Stages(vec![StageSpec {
+                operation: OperationId::Uppercase,
+                arguments: StageArguments::default(),
+            }]),
+            Arc::new(cat()),
+        );
+
+        state.cleanup_after_close();
+
+        assert!(matches!(state.preview.state(), PreviewState::IdleMissing));
+        assert!(!state.can_apply());
+    }
+
+    #[test]
+    fn result_preview_summary_reports_truncation_without_full_text() {
+        assert_eq!(
+            result_preview_summary(12, 10, 2, true),
+            "Result: 12 bytes, 10 chars, 2 lines (visible preview truncated)"
+        );
+        assert_eq!(
+            result_preview_summary(12, 10, 2, false),
+            "Result: 12 bytes, 10 chars, 2 lines"
+        );
+    }
+
+    #[test]
+    fn external_clipboard_warning_keeps_overwrite_context() {
+        let warning = external_clipboard_change_warning(&ClipboardSummary {
+            bytes: 7,
+            chars: 5,
+            fingerprint: 0xabc,
+        });
+        assert!(warning.contains("Clipboard changed"));
+        assert!(warning.contains("7 bytes"));
+        assert!(warning.contains("5 chars"));
+        assert!(warning.contains("0000000000000abc"));
+        assert!(warning.contains("undo restores"));
     }
 
     #[test]
