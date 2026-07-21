@@ -111,6 +111,7 @@ use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
 use crate::plugin_editor::PluginEditor;
+use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{SNIPPETS_FILE, remove_snippet};
 use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
@@ -408,6 +409,8 @@ pub struct LauncherApp {
     focus_query: bool,
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
+    #[cfg(test)]
+    pub test_toast_messages: Vec<String>,
     pub enable_toasts: bool,
     pub show_inline_errors: bool,
     pub show_error_toasts: bool,
@@ -556,6 +559,8 @@ impl LauncherApp {
             .map(|set| set.iter().cloned().collect())
     }
     pub fn add_toast(&mut self, toast: Toast) {
+        #[cfg(test)]
+        self.test_toast_messages.push(toast.text.text().to_string());
         push_toast(&mut self.toasts, toast);
     }
 
@@ -1265,6 +1270,12 @@ impl LauncherApp {
             })
             .unwrap_or_default();
 
+        let clipboard_modify_settings = settings
+            .plugin_settings
+            .get("clipboard_modify")
+            .and_then(|v| serde_json::from_value::<ClipboardModifyPluginSettings>(v.clone()).ok())
+            .unwrap_or_default();
+
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let multi_manager =
             MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
@@ -1329,6 +1340,8 @@ impl LauncherApp {
             focus_query: false,
             move_cursor_end: false,
             toasts,
+            #[cfg(test)]
+            test_toast_messages: Vec::new(),
             enable_toasts,
             show_inline_errors,
             show_error_toasts,
@@ -1370,7 +1383,10 @@ impl LauncherApp {
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
             clipboard_modify_runtime,
-            clipboard_modify_dialog: ClipboardModifyDialogState::default(),
+            clipboard_modify_dialog: ClipboardModifyDialogState::with_initial_size(
+                clipboard_modify_settings.dialog_width,
+                clipboard_modify_settings.dialog_height,
+            ),
             clipboard_modify_config_diagnostic,
             pending_clipboard_modify_immediate: HashMap::new(),
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),

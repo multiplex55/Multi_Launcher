@@ -15,6 +15,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub const LARGE_SOURCE_CONFIRM_BYTES: usize = 5 * 1024 * 1024;
+pub const CLIPBOARD_MODIFY_DEFAULT_WIDTH: f32 = 900.0;
+pub const CLIPBOARD_MODIFY_DEFAULT_HEIGHT: f32 = 640.0;
+pub const CLIPBOARD_MODIFY_MIN_WIDTH: f32 = 520.0;
+pub const CLIPBOARD_MODIFY_MIN_HEIGHT: f32 = 360.0;
+pub const CLIPBOARD_MODIFY_VIEWPORT_MARGIN: f32 = 16.0;
+pub const CLIPBOARD_MODIFY_MULTILINE_ROWS: usize = 10;
+
+const CLIPBOARD_MODIFY_WINDOW_ID: &str = "clipboard_modify_dialog_window";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClipboardModifyDialogSection {
@@ -59,6 +67,7 @@ pub struct ClipboardModifyDialogState {
     pub unsaved_template_draft: bool,
     pub unsaved_pipeline_draft: bool,
     pub wrap_preview: bool,
+    pub persisted_window_size: egui::Vec2,
     pub last_action: Option<String>,
     pub template_filter: String,
     pub help_filter: String,
@@ -93,6 +102,10 @@ impl Default for ClipboardModifyDialogState {
             unsaved_template_draft: false,
             unsaved_pipeline_draft: false,
             wrap_preview: true,
+            persisted_window_size: egui::vec2(
+                CLIPBOARD_MODIFY_DEFAULT_WIDTH,
+                CLIPBOARD_MODIFY_DEFAULT_HEIGHT,
+            ),
             last_action: None,
             template_filter: String::new(),
             help_filter: String::new(),
@@ -110,6 +123,13 @@ impl Default for ClipboardModifyDialogState {
 }
 
 impl ClipboardModifyDialogState {
+    pub fn with_initial_size(width: f32, height: f32) -> Self {
+        let mut state = Self::default();
+        state.persisted_window_size = validate_clipboard_modify_size(width, height)
+            .unwrap_or_else(clipboard_modify_default_size);
+        state
+    }
+
     pub fn open_section(
         &mut self,
         section: ClipboardModifyDialogSection,
@@ -147,6 +167,7 @@ impl ClipboardModifyDialogState {
     }
     pub fn cleanup_after_close(&mut self) {
         let wrap = self.wrap_preview;
+        let persisted_window_size = self.persisted_window_size;
         self.preview.cancel_and_invalidate();
         self.source.clear();
         self.baseline.clear();
@@ -162,6 +183,7 @@ impl ClipboardModifyDialogState {
         self.unsaved_pipeline_draft = false;
         self.large_confirmation_open = false;
         self.wrap_preview = wrap;
+        self.persisted_window_size = persisted_window_size;
     }
     pub fn can_apply(&self) -> bool {
         matches!(self.preview.state(), PreviewState::Completed { .. })
@@ -234,8 +256,20 @@ impl ClipboardModifyDialogState {
         if !self.open {
             return;
         }
+        let viewport_max_size = clipboard_modify_usable_viewport_size(ctx.available_rect().size());
+        self.persisted_window_size = clamp_clipboard_modify_size(
+            self.persisted_window_size,
+            clipboard_modify_min_size(),
+            viewport_max_size,
+        );
+        let min_size = effective_clipboard_modify_min_size(viewport_max_size);
         let mut open = self.open;
-        egui::Window::new("Clipboard Modify")
+        let response = egui::Window::new("Clipboard Modify")
+            .id(egui::Id::new(CLIPBOARD_MODIFY_WINDOW_ID))
+            .resizable(true)
+            .default_size(self.persisted_window_size)
+            .min_size(min_size)
+            .max_size(viewport_max_size)
             .open(&mut open)
             .show(ctx, |ui| {
                 self.shortcuts(ui, service, catalog.clone());
@@ -290,6 +324,13 @@ impl ClipboardModifyDialogState {
                     ClipboardModifyDialogSection::Help => self.help_ui(ui, catalog.clone()),
                 }
             });
+        if let Some(response) = response {
+            self.persisted_window_size = clamp_clipboard_modify_size(
+                response.response.rect.size(),
+                clipboard_modify_min_size(),
+                viewport_max_size,
+            );
+        }
         if self.open && !open {
             self.open = false;
             self.cleanup_after_close();
@@ -917,7 +958,7 @@ impl ClipboardModifyDialogState {
             .add(
                 egui::TextEdit::multiline(&mut self.source)
                     .id_source("cm_source")
-                    .desired_rows(8),
+                    .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
             )
             .changed()
         {
@@ -980,7 +1021,10 @@ impl ClipboardModifyDialogState {
                         ""
                     }
                 ));
-                ui.add(egui::TextEdit::multiline(&mut display.text.clone()).desired_rows(8));
+                ui.add(
+                    egui::TextEdit::multiline(&mut display.text.clone())
+                        .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS),
+                );
             }
             PreviewState::Failed { error, .. } => {
                 ui.colored_label(egui::Color32::RED, error);
@@ -1053,6 +1097,53 @@ impl ClipboardModifyDialogState {
     }
 }
 
+pub fn validate_clipboard_modify_size(width: f32, height: f32) -> Option<egui::Vec2> {
+    if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+        Some(egui::vec2(width, height))
+    } else {
+        None
+    }
+}
+
+pub fn clipboard_modify_default_size() -> egui::Vec2 {
+    egui::vec2(
+        CLIPBOARD_MODIFY_DEFAULT_WIDTH,
+        CLIPBOARD_MODIFY_DEFAULT_HEIGHT,
+    )
+}
+
+pub fn clipboard_modify_min_size() -> egui::Vec2 {
+    egui::vec2(CLIPBOARD_MODIFY_MIN_WIDTH, CLIPBOARD_MODIFY_MIN_HEIGHT)
+}
+
+pub fn clipboard_modify_usable_viewport_size(viewport_size: egui::Vec2) -> egui::Vec2 {
+    let margin = CLIPBOARD_MODIFY_VIEWPORT_MARGIN * 2.0;
+    egui::vec2(
+        (viewport_size.x - margin).max(1.0),
+        (viewport_size.y - margin).max(1.0),
+    )
+}
+
+pub fn effective_clipboard_modify_min_size(max_size: egui::Vec2) -> egui::Vec2 {
+    let nominal_min = clipboard_modify_min_size();
+    egui::vec2(nominal_min.x.min(max_size.x), nominal_min.y.min(max_size.y))
+}
+
+pub fn clamp_clipboard_modify_size(
+    requested_size: egui::Vec2,
+    min_size: egui::Vec2,
+    max_size: egui::Vec2,
+) -> egui::Vec2 {
+    let fallback = clipboard_modify_default_size();
+    let requested_size =
+        validate_clipboard_modify_size(requested_size.x, requested_size.y).unwrap_or(fallback);
+    let effective_min = egui::vec2(min_size.x.min(max_size.x), min_size.y.min(max_size.y));
+    egui::vec2(
+        requested_size.x.clamp(effective_min.x, max_size.x),
+        requested_size.y.clamp(effective_min.y, max_size.y),
+    )
+}
+
 pub fn fingerprint(text: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
@@ -1074,6 +1165,120 @@ mod tests {
             template: body.into(),
             processor: Some(TemplateProcessor::Literal),
         }
+    }
+
+    fn assert_vec2_eq(actual: egui::Vec2, expected: egui::Vec2) {
+        assert_eq!(actual.x, expected.x);
+        assert_eq!(actual.y, expected.y);
+    }
+
+    #[test]
+    fn startup_size_creation_uses_valid_dimensions() {
+        let state = ClipboardModifyDialogState::with_initial_size(777.0, 555.0);
+        assert_vec2_eq(state.persisted_window_size, egui::vec2(777.0, 555.0));
+
+        let default_state = ClipboardModifyDialogState::default();
+        assert_vec2_eq(
+            default_state.persisted_window_size,
+            clipboard_modify_default_size(),
+        );
+    }
+
+    #[test]
+    fn invalid_startup_size_falls_back_to_default() {
+        for (width, height) in [
+            (0.0, 555.0),
+            (777.0, 0.0),
+            (-1.0, 555.0),
+            (777.0, -1.0),
+            (f32::NAN, 555.0),
+            (777.0, f32::INFINITY),
+        ] {
+            let state = ClipboardModifyDialogState::with_initial_size(width, height);
+            assert_vec2_eq(state.persisted_window_size, clipboard_modify_default_size());
+        }
+    }
+
+    #[test]
+    fn clamps_to_smaller_viewport() {
+        let max_size = clipboard_modify_usable_viewport_size(egui::vec2(700.0, 500.0));
+        let clamped = clamp_clipboard_modify_size(
+            egui::vec2(900.0, 640.0),
+            clipboard_modify_min_size(),
+            max_size,
+        );
+        assert_vec2_eq(clamped, max_size);
+    }
+
+    #[test]
+    fn clamps_when_viewport_is_smaller_than_nominal_minimum() {
+        let max_size = clipboard_modify_usable_viewport_size(egui::vec2(300.0, 240.0));
+        let effective_min = effective_clipboard_modify_min_size(max_size);
+        assert_vec2_eq(effective_min, max_size);
+
+        let clamped = clamp_clipboard_modify_size(
+            egui::vec2(900.0, 640.0),
+            clipboard_modify_min_size(),
+            max_size,
+        );
+        assert_vec2_eq(clamped, max_size);
+    }
+
+    #[test]
+    fn cleanup_after_close_preserves_window_size_and_wrap_preview() {
+        let mut state = ClipboardModifyDialogState::with_initial_size(777.0, 555.0);
+        state.wrap_preview = false;
+        state.source = "source".into();
+
+        state.cleanup_after_close();
+
+        assert_vec2_eq(state.persisted_window_size, egui::vec2(777.0, 555.0));
+        assert!(!state.wrap_preview);
+    }
+
+    #[test]
+    fn cleanup_after_close_clears_clipboard_bearing_runtime_state() {
+        let mut state = ClipboardModifyDialogState::default();
+        state.source = "source".into();
+        state.baseline = "baseline".into();
+        state.reset_source = "reset".into();
+        state.source_fingerprint = 42;
+        state.source_error = Some("error".into());
+        state.stages.push(DialogStage {
+            id: 1,
+            spec: StageSpec {
+                operation: OperationId::Uppercase,
+                arguments: StageArguments::default(),
+            },
+            error: Some("stage error".into()),
+        });
+        state.preview.request(
+            "source".into(),
+            ClipboardModifyIntent::Stages(vec![]),
+            Arc::new(cat()),
+        );
+        state.acknowledged_large_sources.insert((123, 456));
+        state.external_change = Some(ClipboardSummary {
+            bytes: 1,
+            chars: 1,
+            fingerprint: 99,
+        });
+        state.pending_action = Some(PendingDialogAction::CopyResult);
+        state.large_confirmation_open = true;
+
+        state.cleanup_after_close();
+
+        assert!(state.source.is_empty());
+        assert!(state.baseline.is_empty());
+        assert!(state.reset_source.is_empty());
+        assert_eq!(state.source_fingerprint, 0);
+        assert!(state.source_error.is_none());
+        assert!(state.stages.is_empty());
+        assert!(matches!(state.preview.state(), PreviewState::IdleMissing));
+        assert!(state.acknowledged_large_sources.is_empty());
+        assert!(state.external_change.is_none());
+        assert!(state.pending_action.is_none());
+        assert!(!state.large_confirmation_open);
     }
 
     fn cat() -> ClipboardModifierCatalog {
