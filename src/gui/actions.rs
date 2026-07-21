@@ -872,6 +872,13 @@ impl LauncherApp {
                 _ if action.action.ends_with(":saved-pipelines") => {
                     ClipboardModifySectionPayload::SavedPipelines
                 }
+                _ if action.action.ends_with(":manage-templates") => {
+                    ClipboardModifySectionPayload::ManageTemplates
+                }
+                _ if action.action.ends_with(":manage-pipelines") => {
+                    ClipboardModifySectionPayload::ManagePipelines
+                }
+                _ if action.action.ends_with(":help") => ClipboardModifySectionPayload::Help,
                 _ => ClipboardModifySectionPayload::Modify,
             };
             let section = match section {
@@ -880,6 +887,13 @@ impl LauncherApp {
                 ClipboardModifySectionPayload::SavedPipelines => {
                     ClipboardModifyDialogSection::SavedPipelines
                 }
+                ClipboardModifySectionPayload::ManageTemplates => {
+                    ClipboardModifyDialogSection::ManageTemplates
+                }
+                ClipboardModifySectionPayload::ManagePipelines => {
+                    ClipboardModifyDialogSection::ManagePipelines
+                }
+                ClipboardModifySectionPayload::Help => ClipboardModifyDialogSection::Help,
             };
             self.clipboard_modify_dialog.open_section(
                 section,
@@ -1382,6 +1396,62 @@ mod clipboard_modify_gui_action_tests {
             app.clipboard_modify_dialog.section,
             ClipboardModifyDialogSection::Templates
         );
+    }
+
+    #[test]
+    fn dialog_open_payload_routes_all_clipboard_modify_sections() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        for (modify_section, dialog_section) in [
+            (ModifySection::Modify, ClipboardModifyDialogSection::Modify),
+            (
+                ModifySection::Templates,
+                ClipboardModifyDialogSection::Templates,
+            ),
+            (
+                ModifySection::SavedPipelines,
+                ClipboardModifyDialogSection::SavedPipelines,
+            ),
+            (
+                ModifySection::ManageTemplates,
+                ClipboardModifyDialogSection::ManageTemplates,
+            ),
+            (
+                ModifySection::ManagePipelines,
+                ClipboardModifyDialogSection::ManagePipelines,
+            ),
+            (ModifySection::Help, ClipboardModifyDialogSection::Help),
+        ] {
+            let args = encode_action_payload(&open_dialog_payload(modify_section)).unwrap();
+            assert!(app.handle_clipboard_modify_action(
+                &action("clipboard_modify:open", Some(args)),
+                ActivationSource::Click
+            ));
+            assert_eq!(app.clipboard_modify_dialog.section, dialog_section);
+        }
+    }
+
+    #[test]
+    fn dialog_open_legacy_suffix_routes_new_sections() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        for (suffix, dialog_section) in [
+            (
+                "manage-templates",
+                ClipboardModifyDialogSection::ManageTemplates,
+            ),
+            (
+                "manage-pipelines",
+                ClipboardModifyDialogSection::ManagePipelines,
+            ),
+            ("help", ClipboardModifyDialogSection::Help),
+        ] {
+            assert!(app.handle_clipboard_modify_action(
+                &action(&format!("clipboard_modify:open:{suffix}"), None),
+                ActivationSource::Click
+            ));
+            assert_eq!(app.clipboard_modify_dialog.section, dialog_section);
+        }
     }
 
     #[test]
