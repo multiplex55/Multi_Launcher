@@ -111,6 +111,7 @@ use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
 use crate::plugin_editor::PluginEditor;
+use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{SNIPPETS_FILE, remove_snippet};
 use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
@@ -1265,6 +1266,12 @@ impl LauncherApp {
             })
             .unwrap_or_default();
 
+        let clipboard_modify_settings = settings
+            .plugin_settings
+            .get("clipboard_modify")
+            .and_then(|v| serde_json::from_value::<ClipboardModifyPluginSettings>(v.clone()).ok())
+            .unwrap_or_default();
+
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let multi_manager =
             MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
@@ -1370,7 +1377,10 @@ impl LauncherApp {
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
             clipboard_modify_runtime,
-            clipboard_modify_dialog: ClipboardModifyDialogState::default(),
+            clipboard_modify_dialog: ClipboardModifyDialogState::with_initial_size(
+                clipboard_modify_settings.dialog_width,
+                clipboard_modify_settings.dialog_height,
+            ),
             clipboard_modify_config_diagnostic,
             pending_clipboard_modify_immediate: HashMap::new(),
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
