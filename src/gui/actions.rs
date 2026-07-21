@@ -863,7 +863,7 @@ impl LauncherApp {
             .as_deref()
             .and_then(|args| decode_action_payload::<ClipboardModifyActionPayload>(args).ok());
 
-        if action.action.starts_with(OPEN_PREFIX) {
+        if action.action.starts_with(OPEN_PREFIX) || action.action == "clipboard_modify:open" {
             let section = match payload {
                 Some(ClipboardModifyActionPayload::OpenDialogSection { section }) => section,
                 _ if action.action.ends_with(":templates") => {
