@@ -511,8 +511,7 @@ mod tests {
     use super::*;
     use crate::{
         clipboard_modify::actions::{
-            ClipboardModifyActionPayload, ClipboardModifySectionPayload, OPEN_PREFIX,
-            decode_action_payload,
+            ClipboardModifyActionPayload, ClipboardModifySectionPayload, decode_action_payload,
         },
         plugin::PluginManager,
         plugins::clipboard_modify::ClipboardModifyPlugin,
@@ -570,13 +569,12 @@ mod tests {
             .expect("clipboard modify result from launcher search path");
         assert_eq!(first.label, "cm: Open Clipboard Modify");
         assert_eq!(first.desc, "Opens the Clipboard Modify dialog section");
-        assert!(
-            first.action.starts_with(OPEN_PREFIX),
-            "expected direct Clipboard Modify open action, got {}",
-            first.action
-        );
+        assert_eq!(first.action, "clipboard_modify:open:modify");
 
-        let encoded = first.action.strip_prefix(OPEN_PREFIX).unwrap();
+        let encoded = first
+            .args
+            .as_deref()
+            .expect("direct Clipboard Modify open action carries encoded section payload");
         let payload: ClipboardModifyActionPayload = decode_action_payload(encoded).unwrap();
         assert_eq!(
             payload,
