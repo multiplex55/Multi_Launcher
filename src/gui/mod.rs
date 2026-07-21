@@ -409,6 +409,8 @@ pub struct LauncherApp {
     focus_query: bool,
     move_cursor_end: bool,
     toasts: egui_toast::Toasts,
+    #[cfg(test)]
+    pub test_toast_messages: Vec<String>,
     pub enable_toasts: bool,
     pub show_inline_errors: bool,
     pub show_error_toasts: bool,
@@ -557,6 +559,8 @@ impl LauncherApp {
             .map(|set| set.iter().cloned().collect())
     }
     pub fn add_toast(&mut self, toast: Toast) {
+        #[cfg(test)]
+        self.test_toast_messages.push(toast.text.text().to_string());
         push_toast(&mut self.toasts, toast);
     }
 
@@ -1336,6 +1340,8 @@ impl LauncherApp {
             focus_query: false,
             move_cursor_end: false,
             toasts,
+            #[cfg(test)]
+            test_toast_messages: Vec::new(),
             enable_toasts,
             show_inline_errors,
             show_error_toasts,

@@ -1092,19 +1092,17 @@ mod tests {
         }
     }
 
-    fn clear_toast_log() {
-        std::fs::write(crate::toast_log::TOAST_LOG_FILE, "").expect("clear toast log");
-    }
-
-    fn toast_log_contents() -> String {
-        std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap_or_default()
+    fn toast_message_count(app: &LauncherApp, needle: &str) -> usize {
+        app.test_toast_messages
+            .iter()
+            .filter(|message| message.contains(needle))
+            .count()
     }
 
     #[test]
     #[serial_test::serial]
     fn button_and_mm_reconnect_command_use_same_manual_start_path() {
         let mut button_app = test_app();
-        clear_toast_log();
         button_app.multi_manager.pending_automatic_reconnect = false;
         button_app
             .multi_manager
@@ -1113,7 +1111,6 @@ mod tests {
         button_app.multi_manager_start_manual_reconnect();
 
         let mut command_app = test_app();
-        clear_toast_log();
         command_app.multi_manager.pending_automatic_reconnect = false;
         command_app
             .multi_manager
@@ -1124,9 +1121,7 @@ mod tests {
         assert_eq!(button_app.error, command_app.error);
         assert_eq!(command_app.error.as_deref(), None);
         assert_eq!(
-            toast_log_contents()
-                .matches("MultiManager reconnect is already running.")
-                .count(),
+            toast_message_count(&command_app, "MultiManager reconnect is already running."),
             1
         );
         button_app
@@ -1143,7 +1138,6 @@ mod tests {
     #[serial_test::serial]
     fn duplicate_manual_reconnect_shows_already_running_message() {
         let mut app = test_app();
-        clear_toast_log();
         app.multi_manager.pending_automatic_reconnect = false;
         app.multi_manager
             .reconnect_in_progress
@@ -1152,9 +1146,7 @@ mod tests {
         app.multi_manager_start_manual_reconnect();
 
         assert_eq!(
-            toast_log_contents()
-                .matches("MultiManager reconnect is already running.")
-                .count(),
+            toast_message_count(&app, "MultiManager reconnect is already running."),
             1
         );
         assert!(app.multi_manager.reconnect_job.is_none());
@@ -1168,7 +1160,6 @@ mod tests {
     #[serial_test::serial]
     fn manual_reconnect_completion_produces_one_terminal_toast() {
         let mut app = test_app();
-        clear_toast_log();
         app.multi_manager
             .runtime
             .event_queue
@@ -1189,11 +1180,13 @@ mod tests {
 
         app.multi_manager_drain_runtime_events();
 
-        let log = toast_log_contents();
-        assert_eq!(log.matches("MultiManager reconnect complete").count(), 1);
-        assert!(log.contains(
+        assert_eq!(
+            toast_message_count(&app, "MultiManager reconnect complete"),
+            1
+        );
+        assert!(app.test_toast_messages.iter().any(|message| message.contains(
             "valid: 4, reconnected: 2, needs recapture: 1 missing / 0 ambiguous / 3 metadata mismatches, stale results ignored: 5"
-        ));
+        )));
         assert!(app.multi_manager.bindings_dirty);
     }
 
