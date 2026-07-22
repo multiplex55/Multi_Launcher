@@ -210,7 +210,7 @@ mod tests {
 
         assert_eq!(app.note_panels[0].note_content(), "unsaved changed");
         let saved = load_notes().unwrap().remove(0);
-        assert_eq!(saved.content, "unsaved changed");
+        assert_eq!(saved.content, "# Alpha\n\nunsaved changed");
     }
 
     #[test]
@@ -221,12 +221,15 @@ mod tests {
         save_note(&mut disk_note, true).unwrap();
 
         app.mutate_note_by_slug("alpha", |content| {
-            assert_eq!(content, "persisted");
+            assert_eq!(content, "# Alpha\n\npersisted");
             NoteMutationOutput::changed(format!("{content} updated"), NoteMutationResult::default())
         })
         .unwrap();
 
-        assert_eq!(load_notes().unwrap()[0].content, "persisted updated");
+        assert_eq!(
+            load_notes().unwrap()[0].content,
+            "# Alpha\n\npersisted updated"
+        );
     }
 
     #[test]
