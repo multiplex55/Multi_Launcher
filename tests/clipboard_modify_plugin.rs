@@ -1,3 +1,6 @@
+use multi_launcher::clipboard_modify::actions::{
+    ClipboardModifyActionPayload, decode_action_payload,
+};
 use multi_launcher::clipboard_modify::model::*;
 use multi_launcher::clipboard_modify::store::shared_default_catalog;
 use multi_launcher::plugin::{Plugin, PluginManager};
@@ -44,7 +47,13 @@ fn prefix_routing_and_actions() {
     assert!(p.search("cm up")[0].action.starts_with("query:cm upper"));
     let complete = p.search("cm upper").remove(0);
     assert_eq!(complete.action, "clipboard_modify:execute");
-    assert!(complete.args.unwrap().contains("stages"));
+    let payload: ClipboardModifyActionPayload =
+        decode_action_payload(&complete.args.unwrap()).expect("typed execute payload");
+    assert!(matches!(
+        payload,
+        ClipboardModifyActionPayload::ExecuteAdHocStages { ref stages, .. }
+            if stages.iter().any(|stage| stage.operation == OperationId::Uppercase)
+    ));
 }
 
 #[test]

@@ -905,9 +905,7 @@ impl LauncherApp {
             return true;
         }
 
-        if action.action.starts_with(UNDO_PREFIX)
-            || matches!(payload.as_ref(), Some(ClipboardModifyActionPayload::Undo))
-        {
+        if action.action.starts_with(UNDO_PREFIX) || action.action == "clipboard_modify:undo" {
             match crate::clipboard_modify::runtime::undo() {
                 Ok(()) => {
                     self.handle_clipboard_modify_gui_event(

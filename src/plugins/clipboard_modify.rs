@@ -606,14 +606,14 @@ mod tests {
         );
 
         assert_eq!(
-            payload(&p.search("cm template AT").remove(0)),
+            payload(&p.search("cm template alpha-template").remove(0)),
             ClipboardModifyActionPayload::ExecuteTemplate {
                 canonical_command: "cm template alpha-template".into(),
                 name: "alpha-template".into(),
             }
         );
         assert_eq!(
-            payload(&p.search("cm apply AP").remove(0)),
+            payload(&p.search("cm apply alpha-pipeline").remove(0)),
             ClipboardModifyActionPayload::ExecuteSavedPipeline {
                 canonical_command: "cm apply alpha-pipeline".into(),
                 name: "alpha-pipeline".into(),

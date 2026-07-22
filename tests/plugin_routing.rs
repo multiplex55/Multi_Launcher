@@ -1,4 +1,7 @@
 use multi_launcher::actions::Action;
+use multi_launcher::clipboard_modify::actions::{
+    ClipboardModifyActionPayload, decode_action_payload,
+};
 use multi_launcher::plugin::{Plugin, PluginManager};
 use multi_launcher::plugins::todo::TodoPlugin;
 use std::sync::{
@@ -471,6 +474,19 @@ fn cm_complete_query_encodes_stages_without_touching_clipboard() {
         .find(|a| a.action == "clipboard_modify:execute")
         .expect("execute action");
     let args = action.args.as_deref().expect("encoded args");
-    assert!(args.contains("trim"));
-    assert!(args.contains("json-pretty"));
+    let payload: ClipboardModifyActionPayload =
+        decode_action_payload(args).expect("typed execute payload");
+    match payload {
+        ClipboardModifyActionPayload::ExecuteAdHocStages {
+            stages,
+            canonical_command,
+        } => {
+            assert_eq!(canonical_command, "cm trim | json-pretty");
+            assert!(stages.iter().any(|stage| stage.operation
+                == multi_launcher::clipboard_modify::model::OperationId::Trim));
+            assert!(stages.iter().any(|stage| stage.operation
+                == multi_launcher::clipboard_modify::model::OperationId::JsonPretty));
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
 }
