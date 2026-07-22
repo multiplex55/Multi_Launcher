@@ -1,5 +1,24 @@
 use super::*;
 
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredActivation {
+    pub(crate) action: Action,
+    pub(crate) query_override: Option<String>,
+    pub(crate) source: ActivationSource,
+}
+
+pub(crate) fn deferred_activation_from_results(
+    results: &[Action],
+    idx: usize,
+    source: ActivationSource,
+) -> Option<DeferredActivation> {
+    results.get(idx).cloned().map(|action| DeferredActivation {
+        action,
+        query_override: None,
+        source,
+    })
+}
+
 impl LauncherApp {
     pub(crate) fn launcher_query_keyboard_enabled(query_has_focus: bool) -> bool {
         query_has_focus
@@ -992,6 +1011,7 @@ impl eframe::App for LauncherApp {
                     });
                 }
 
+                let mut deferred_activation: Option<DeferredActivation> = None;
                 let mut launch_idx: Option<usize> = None;
                 if !accepted_suggestion
                     && enter
@@ -1012,11 +1032,10 @@ impl eframe::App for LauncherApp {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }
 
-                if let Some(i) = launch_idx
-                    && let Some(a) = self.results.get(i) {
-                        let a = a.clone();
-                        self.activate_action(a, None, ActivationSource::Enter);
-                    }
+                if let Some(i) = launch_idx {
+                    deferred_activation =
+                        deferred_activation_from_results(&self.results, i, ActivationSource::Enter);
+                }
             });
 
             if use_dashboard {
@@ -1107,11 +1126,11 @@ impl eframe::App for LauncherApp {
                                             }
                                             if menu_resp.clicked() {
                                                 self.selected = Some(idx);
-                                                self.activate_action(
+                                                deferred_activation = Some(DeferredActivation {
                                                     action,
-                                                    None,
-                                                    ActivationSource::Click,
-                                                );
+                                                    query_override: None,
+                                                    source: ActivationSource::Click,
+                                                });
                                             }
                                             if (idx + 1) % cols == 0 {
                                                 ui.end_row();
@@ -1153,7 +1172,11 @@ impl eframe::App for LauncherApp {
                                     }
                                     if menu_resp.clicked() {
                                         self.selected = Some(idx);
-                                        self.activate_action(a.clone(), None, ActivationSource::Click);
+                                        deferred_activation = Some(DeferredActivation {
+                                            action: a.clone(),
+                                            query_override: None,
+                                            source: ActivationSource::Click,
+                                        });
                                     }
                                 }
                             }
@@ -1169,6 +1192,13 @@ impl eframe::App for LauncherApp {
                             }
                         });
                     });
+            }
+            if let Some(deferred) = deferred_activation.take() {
+                self.activate_action(
+                    deferred.action,
+                    deferred.query_override,
+                    deferred.source,
+                );
             }
         });
         let show_editor = self.show_editor;
@@ -1523,6 +1553,51 @@ mod tests {
         assert_eq!(app.selected, Some(1));
         app.handle_key(egui::Key::ArrowDown);
         assert_eq!(app.selected, Some(4));
+    }
+
+    #[test]
+    fn deferred_activation_from_results_clones_action_without_retaining_index() {
+        let original = vec![
+            Action {
+                label: "First".into(),
+                desc: "Command".into(),
+                action: "query:first".into(),
+                args: None,
+            },
+            Action {
+                label: "cm camel-case".into(),
+                desc: "Completion".into(),
+                action: "query:cm camel-case".into(),
+                args: Some("{\"query\":\"camel-case\"}".into()),
+            },
+        ];
+
+        let deferred = deferred_activation_from_results(&original, 1, ActivationSource::Enter)
+            .expect("selected result should resolve to a deferred activation");
+        let mut refreshed = original.clone();
+        refreshed[1] = Action {
+            label: "Refreshed".into(),
+            desc: "New list".into(),
+            action: "refreshed:action".into(),
+            args: None,
+        };
+
+        assert_eq!(deferred.action.label, "cm camel-case");
+        assert_eq!(deferred.action.action, "query:cm camel-case");
+        assert_eq!(deferred.source, ActivationSource::Enter);
+        assert_eq!(refreshed[1].action, "refreshed:action");
+    }
+
+    #[test]
+    fn deferred_activation_from_results_ignores_out_of_bounds_index() {
+        let results = vec![Action {
+            label: "Only".into(),
+            desc: "Command".into(),
+            action: "only".into(),
+            args: None,
+        }];
+
+        assert!(deferred_activation_from_results(&results, 3, ActivationSource::Click).is_none());
     }
 
     #[test]
