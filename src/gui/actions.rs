@@ -853,6 +853,9 @@ impl LauncherApp {
         };
         use crate::clipboard_modify::parser::ClipboardModifyIntent;
 
+        if action.action.starts_with("query:") {
+            return false;
+        }
         let is_clipboard_modify = action.action.starts_with("clipboard_modify:");
         if !is_clipboard_modify {
             return false;
@@ -902,9 +905,7 @@ impl LauncherApp {
             return true;
         }
 
-        if action.action.starts_with(UNDO_PREFIX)
-            || matches!(payload.as_ref(), Some(ClipboardModifyActionPayload::Undo))
-        {
+        if action.action.starts_with(UNDO_PREFIX) || action.action == "clipboard_modify:undo" {
             match crate::clipboard_modify::runtime::undo() {
                 Ok(()) => {
                     self.handle_clipboard_modify_gui_event(
@@ -930,27 +931,32 @@ impl LauncherApp {
 
         if action.action.starts_with(EXECUTE_PREFIX) || action.action == "clipboard_modify:execute"
         {
-            let payload = match payload.or_else(|| {
-                action.args.as_deref().and_then(|args| {
-                    crate::clipboard_modify::runtime::decode_execute_payload_for_gui(args).ok()
-                })
-            }) {
+            let payload = match payload {
                 Some(payload) => payload,
                 None => {
                     self.report_clipboard_modify_action_error("missing execute payload".into());
                     return true;
                 }
             };
-            let intent = match payload {
-                ClipboardModifyActionPayload::ExecuteAdHocStages { stages } => {
-                    ClipboardModifyIntent::Stages(stages)
-                }
-                ClipboardModifyActionPayload::ExecuteTemplate { name } => {
-                    ClipboardModifyIntent::ApplyTemplate { name }
-                }
-                ClipboardModifyActionPayload::ExecuteSavedPipeline { name } => {
-                    ClipboardModifyIntent::ApplySavedPipeline { name }
-                }
+            let (intent, canonical_command) = match payload {
+                ClipboardModifyActionPayload::ExecuteAdHocStages {
+                    canonical_command,
+                    stages,
+                } => (ClipboardModifyIntent::Stages(stages), canonical_command),
+                ClipboardModifyActionPayload::ExecuteTemplate {
+                    canonical_command,
+                    name,
+                } => (
+                    ClipboardModifyIntent::ApplyTemplate { name },
+                    canonical_command,
+                ),
+                ClipboardModifyActionPayload::ExecuteSavedPipeline {
+                    canonical_command,
+                    name,
+                } => (
+                    ClipboardModifyIntent::ApplySavedPipeline { name },
+                    canonical_command,
+                ),
                 _ => {
                     self.report_clipboard_modify_action_error("unexpected execute payload".into());
                     return true;
@@ -958,7 +964,7 @@ impl LauncherApp {
             };
             let meta = ImmediateRequestMetadata {
                 action: action.clone(),
-                query: self.query.clone(),
+                query: canonical_command,
                 source,
             };
             let id = self.clipboard_modify_immediate.start(
@@ -1356,7 +1362,10 @@ mod tests {
 #[cfg(test)]
 mod clipboard_modify_gui_action_tests {
     use super::*;
-    use crate::clipboard_modify::actions::{encode_action_payload, open_dialog_payload};
+    use crate::clipboard_modify::actions::{
+        encode_action_payload, execute_stages_payload, open_dialog_payload, undo_payload,
+    };
+    use crate::clipboard_modify::model::{OperationId, StageArguments, StageSpec};
     use crate::clipboard_modify::parser::ModifySection;
 
     fn action(action: &str, args: Option<String>) -> Action {
@@ -1366,6 +1375,74 @@ mod clipboard_modify_gui_action_tests {
             action: action.into(),
             args,
         }
+    }
+
+    #[test]
+    fn query_clipboard_modify_completion_is_not_claimed() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        assert!(!app.handle_clipboard_modify_action(
+            &action("query:cm camel-case", None),
+            ActivationSource::Enter
+        ));
+    }
+
+    #[test]
+    fn execute_without_payload_reports_missing_and_does_not_start() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        assert!(app.handle_clipboard_modify_action(
+            &action("clipboard_modify:execute", None),
+            ActivationSource::Enter
+        ));
+        assert!(app.pending_clipboard_modify_immediate.is_empty());
+        assert!(
+            app.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("missing execute payload")
+        );
+    }
+
+    #[test]
+    fn execute_rejects_open_and_undo_payloads() {
+        let ctx = egui::Context::default();
+        for payload in [open_dialog_payload(ModifySection::Help), undo_payload()] {
+            let mut app = super::tests::new_app(&ctx);
+            let args = encode_action_payload(&payload).unwrap();
+            assert!(app.handle_clipboard_modify_action(
+                &action("clipboard_modify:execute", Some(args)),
+                ActivationSource::Enter
+            ));
+            assert!(app.pending_clipboard_modify_immediate.is_empty());
+            assert!(
+                app.error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("unexpected execute payload")
+            );
+        }
+    }
+
+    #[test]
+    fn typed_execute_starts_immediate_with_canonical_command_metadata() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.query = "not canonical".into();
+        let args = encode_action_payload(&execute_stages_payload(vec![StageSpec {
+            operation: OperationId::CamelCase,
+            arguments: StageArguments::default(),
+        }]))
+        .unwrap();
+        let action = action("clipboard_modify:execute", Some(args));
+        assert!(app.handle_clipboard_modify_action(&action, ActivationSource::Enter));
+        let meta = app
+            .pending_clipboard_modify_immediate
+            .values()
+            .next()
+            .expect("pending immediate metadata");
+        assert_eq!(meta.query, "cm camel-case");
+        assert_eq!(meta.action.action, "clipboard_modify:execute");
     }
 
     #[test]

@@ -82,7 +82,9 @@ impl Plugin for ClipboardModifyPlugin {
             ClipboardModifyParseResult::NotClipboardModify => Vec::new(),
             ClipboardModifyParseResult::OpenSection(section) => vec![section_action(section)],
             ClipboardModifyParseResult::Partial(partial) => partial_actions(partial),
-            ClipboardModifyParseResult::CompleteExecution(intent) => vec![execution_action(intent)],
+            ClipboardModifyParseResult::CompleteExecution(intent) => {
+                vec![execution_action(intent, catalog.as_ref())]
+            }
             ClipboardModifyParseResult::Invalid(error) => vec![Action {
                 label: "Invalid clipboard modify query".into(),
                 desc: format!(
@@ -221,8 +223,8 @@ fn cm_operation_suggestions() -> Vec<Action> {
         .filter(|op| op.id != OperationId::Template)
         .map(|op| {
             let query = match op.argument_requirements {
-                ArgumentRequirements::None => format!("cm {}", op.command),
-                _ => format!("cm {} ", op.command),
+                ArgumentRequirements::None => format!("cm {}", canonical_command(op.id)),
+                _ => format!("cm {} ", canonical_command(op.id)),
             };
             query_action(
                 &query,
@@ -351,7 +353,7 @@ fn command_action(query: &str, desc: &str) -> Action {
     }
 }
 
-fn execution_action(intent: ClipboardModifyIntent) -> Action {
+fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCatalog) -> Action {
     match intent {
         ClipboardModifyIntent::Stages(stages) => {
             let stage_count = stages.len();
@@ -362,15 +364,12 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
                     "Runs {stage_count} Clipboard Modify stage(s); reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "intent": "stages",
-                    "stages": payload,
-                }))
-                .ok(),
+                args: encode_action_payload(&payload).ok(),
             }
         }
         ClipboardModifyIntent::ApplyTemplate { name } => {
-            let normalized = normalize_name(&name);
+            let normalized =
+                resolve_template_id(catalog, &name).unwrap_or_else(|| normalize_name(&name));
             let payload = execute_template_payload(normalized);
             Action {
                 label: format!("Apply Clipboard Modify template {name}"),
@@ -378,15 +377,12 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
                     "Applies template `{name}` immediately; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "intent": "template",
-                    "payload": payload,
-                }))
-                .ok(),
+                args: encode_action_payload(&payload).ok(),
             }
         }
         ClipboardModifyIntent::ApplySavedPipeline { name } => {
-            let normalized = normalize_name(&name);
+            let normalized =
+                resolve_pipeline_id(catalog, &name).unwrap_or_else(|| normalize_name(&name));
             let payload = execute_saved_pipeline_payload(normalized);
             Action {
                 label: format!("Run Clipboard Modify pipeline {name}"),
@@ -394,11 +390,7 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
                     "Runs saved pipeline `{name}` immediately; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "intent": "saved-pipeline",
-                    "payload": payload,
-                }))
-                .ok(),
+                args: encode_action_payload(&payload).ok(),
             }
         }
         ClipboardModifyIntent::Undo => {
@@ -413,6 +405,36 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             }
         }
     }
+}
+
+fn resolve_template_id(catalog: &ClipboardModifierCatalog, name: &str) -> Option<String> {
+    let normalized = normalize_name(name);
+    catalog
+        .templates
+        .iter()
+        .find(|template| {
+            normalize_name(&template.id) == normalized
+                || template
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_name(alias) == normalized)
+        })
+        .map(|template| template.id.clone())
+}
+
+fn resolve_pipeline_id(catalog: &ClipboardModifierCatalog, name: &str) -> Option<String> {
+    let normalized = normalize_name(name);
+    catalog
+        .pipelines
+        .iter()
+        .find(|pipeline| {
+            normalize_name(&pipeline.id) == normalized
+                || pipeline
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_name(alias) == normalized)
+        })
+        .map(|pipeline| pipeline.id.clone())
 }
 
 fn section_name(section: ModifySection) -> &'static str {
@@ -531,8 +553,8 @@ mod tests {
             .filter(|op| op.id != OperationId::Template)
         {
             let expected = match op.argument_requirements {
-                ArgumentRequirements::None => format!("cm {}", op.command),
-                _ => format!("cm {} ", op.command),
+                ArgumentRequirements::None => format!("cm {}", canonical_command(op.id)),
+                _ => format!("cm {} ", canonical_command(op.id)),
             };
             assert!(
                 queries.contains(&expected.as_str()),
@@ -598,6 +620,53 @@ mod tests {
                 .expect("completion action");
             assert!(action.args.is_none());
         }
+    }
+
+    #[test]
+    fn complete_execution_actions_are_typed_and_canonical() {
+        let p = plugin_with_test_catalog();
+        let action = p.search("cm camel-case");
+        assert_eq!(action.len(), 1);
+        assert_eq!(action[0].action, "clipboard_modify:execute");
+        assert_eq!(
+            payload(&action[0]),
+            ClipboardModifyActionPayload::ExecuteAdHocStages {
+                canonical_command: "cm camel-case".into(),
+                stages: vec![crate::clipboard_modify::model::StageSpec {
+                    operation: OperationId::CamelCase,
+                    arguments: crate::clipboard_modify::model::StageArguments::default(),
+                }],
+            }
+        );
+
+        assert_eq!(
+            payload(&p.search("cm template alpha-template").remove(0)),
+            ClipboardModifyActionPayload::ExecuteTemplate {
+                canonical_command: "cm template alpha-template".into(),
+                name: "alpha-template".into(),
+            }
+        );
+        assert_eq!(
+            payload(&p.search("cm apply alpha-pipeline").remove(0)),
+            ClipboardModifyActionPayload::ExecuteSavedPipeline {
+                canonical_command: "cm apply alpha-pipeline".into(),
+                name: "alpha-pipeline".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn help_and_sections_open_not_execute_and_invalid_errors() {
+        let p = plugin();
+        for query in ["cm help", "cm template", "cm apply", "cm modify"] {
+            let results = p.search(query);
+            assert_eq!(results.len(), 1);
+            assert!(results[0].action.starts_with("clipboard_modify:open"));
+        }
+        assert_eq!(
+            p.search("cm unknown-command")[0].action,
+            "clipboard_modify:error"
+        );
     }
 
     #[test]

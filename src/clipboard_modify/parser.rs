@@ -324,7 +324,12 @@ fn parse_special(
             ClipboardModifyParseResult::OpenSection(ModifySection::Templates)
         } else {
             let q = join_tokens(&stage.tokens[1..]);
-            if is_prefix_like(stage) {
+            if is_prefix_like(stage)
+                && !catalog
+                    .templates
+                    .iter()
+                    .any(|t| name_matches_catalog_entry_id(&q, &t.id))
+            {
                 partial(
                     0,
                     ModifySection::Templates,
@@ -348,7 +353,12 @@ fn parse_special(
             ClipboardModifyParseResult::OpenSection(ModifySection::SavedPipelines)
         } else {
             let q = join_tokens(&stage.tokens[1..]);
-            if is_prefix_like(stage) {
+            if is_prefix_like(stage)
+                && !catalog
+                    .pipelines
+                    .iter()
+                    .any(|p| name_matches_catalog_entry_id(&q, &p.id))
+            {
                 partial(
                     0,
                     ModifySection::SavedPipelines,
@@ -388,6 +398,10 @@ fn parse_special(
 }
 fn is_prefix_like(stage: &Stage) -> bool {
     stage.tokens.len() == 2 && !stage.tokens[1].quoted
+}
+
+fn name_matches_catalog_entry_id(query: &str, id: &str) -> bool {
+    normalize_name(id) == normalize_name(query)
 }
 fn partial(
     stage_index: usize,

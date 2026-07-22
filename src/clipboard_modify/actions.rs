@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use super::catalog::canonical_command;
 use super::model::StageSpec;
 use super::parser::ModifySection;
 
@@ -15,12 +16,15 @@ pub enum ClipboardModifyActionPayload {
         section: ClipboardModifySectionPayload,
     },
     ExecuteAdHocStages {
+        canonical_command: String,
         stages: Vec<StageSpec>,
     },
     ExecuteTemplate {
+        canonical_command: String,
         name: String,
     },
     ExecuteSavedPipeline {
+        canonical_command: String,
         name: String,
     },
     Undo,
@@ -76,15 +80,51 @@ pub fn open_dialog_payload(section: ModifySection) -> ClipboardModifyActionPaylo
 }
 
 pub fn execute_stages_payload(stages: Vec<StageSpec>) -> ClipboardModifyActionPayload {
-    ClipboardModifyActionPayload::ExecuteAdHocStages { stages }
+    let canonical_command = canonical_stages_command(&stages);
+    ClipboardModifyActionPayload::ExecuteAdHocStages {
+        canonical_command,
+        stages,
+    }
 }
 
 pub fn execute_template_payload(name: String) -> ClipboardModifyActionPayload {
-    ClipboardModifyActionPayload::ExecuteTemplate { name }
+    ClipboardModifyActionPayload::ExecuteTemplate {
+        canonical_command: format!("cm template {name}"),
+        name,
+    }
 }
 
 pub fn execute_saved_pipeline_payload(name: String) -> ClipboardModifyActionPayload {
-    ClipboardModifyActionPayload::ExecuteSavedPipeline { name }
+    ClipboardModifyActionPayload::ExecuteSavedPipeline {
+        canonical_command: format!("cm apply {name}"),
+        name,
+    }
+}
+
+fn canonical_stages_command(stages: &[StageSpec]) -> String {
+    let parts: Vec<String> = stages
+        .iter()
+        .map(|stage| {
+            let mut part = canonical_command(stage.operation).to_string();
+            if let Some(name) = stage.arguments.name.as_ref() {
+                part.push(' ');
+                part.push_str(name);
+            } else if let Some(language) = stage.arguments.language.as_ref() {
+                part.push(' ');
+                part.push_str(language);
+            } else if let (Some(prefix), Some(suffix)) = (
+                stage.arguments.prefix.as_ref(),
+                stage.arguments.suffix.as_ref(),
+            ) {
+                part.push(' ');
+                part.push_str(prefix);
+                part.push(' ');
+                part.push_str(suffix);
+            }
+            part
+        })
+        .collect();
+    format!("cm {}", parts.join(" | "))
 }
 
 pub fn undo_payload() -> ClipboardModifyActionPayload {
@@ -117,13 +157,44 @@ mod tests {
         ] {
             round_trip(open_dialog_payload(section));
         }
-        round_trip(execute_stages_payload(vec![StageSpec {
-            operation: OperationId::Uppercase,
+        let stages = execute_stages_payload(vec![StageSpec {
+            operation: OperationId::CamelCase,
             arguments: StageArguments::default(),
-        }]));
-        round_trip(execute_template_payload("email".into()));
-        round_trip(execute_saved_pipeline_payload("cleanup".into()));
+        }]);
+        assert_canonical_command(&stages, "cm camel-case");
+        round_trip(stages);
+        let template = execute_template_payload("email".into());
+        assert_canonical_command(&template, "cm template email");
+        round_trip(template);
+        let pipeline = execute_saved_pipeline_payload("cleanup".into());
+        assert_canonical_command(&pipeline, "cm apply cleanup");
+        round_trip(pipeline);
         round_trip(undo_payload());
+    }
+
+    fn assert_canonical_command(payload: &ClipboardModifyActionPayload, expected: &str) {
+        let actual = match payload {
+            ClipboardModifyActionPayload::ExecuteAdHocStages {
+                canonical_command, ..
+            }
+            | ClipboardModifyActionPayload::ExecuteTemplate {
+                canonical_command, ..
+            }
+            | ClipboardModifyActionPayload::ExecuteSavedPipeline {
+                canonical_command, ..
+            } => canonical_command,
+            _ => panic!("execution payload expected"),
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn malformed_and_unknown_payload_fields_fail_to_decode() {
+        let missing = URL_SAFE_NO_PAD.encode(r#"{"type":"execute-template","name":"email"}"#);
+        assert!(decode_action_payload::<ClipboardModifyActionPayload>(&missing).is_err());
+        let unknown = URL_SAFE_NO_PAD.encode(r#"{"type":"execute-template","canonical_command":"cm template email","name":"email","source":"secret"}"#);
+        assert!(decode_action_payload::<ClipboardModifyActionPayload>(&unknown).is_err());
+        assert!(decode_action_payload::<ClipboardModifyActionPayload>("not-base64").is_err());
     }
 
     #[test]
