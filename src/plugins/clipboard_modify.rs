@@ -82,7 +82,9 @@ impl Plugin for ClipboardModifyPlugin {
             ClipboardModifyParseResult::NotClipboardModify => Vec::new(),
             ClipboardModifyParseResult::OpenSection(section) => vec![section_action(section)],
             ClipboardModifyParseResult::Partial(partial) => partial_actions(partial),
-            ClipboardModifyParseResult::CompleteExecution(intent) => vec![execution_action(intent)],
+            ClipboardModifyParseResult::CompleteExecution(intent) => {
+                vec![execution_action(intent, catalog.as_ref())]
+            }
             ClipboardModifyParseResult::Invalid(error) => vec![Action {
                 label: "Invalid clipboard modify query".into(),
                 desc: format!(
@@ -351,7 +353,7 @@ fn command_action(query: &str, desc: &str) -> Action {
     }
 }
 
-fn execution_action(intent: ClipboardModifyIntent) -> Action {
+fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCatalog) -> Action {
     match intent {
         ClipboardModifyIntent::Stages(stages) => {
             let stage_count = stages.len();
@@ -366,7 +368,8 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             }
         }
         ClipboardModifyIntent::ApplyTemplate { name } => {
-            let normalized = normalize_name(&name);
+            let normalized =
+                resolve_template_id(catalog, &name).unwrap_or_else(|| normalize_name(&name));
             let payload = execute_template_payload(normalized);
             Action {
                 label: format!("Apply Clipboard Modify template {name}"),
@@ -378,7 +381,8 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             }
         }
         ClipboardModifyIntent::ApplySavedPipeline { name } => {
-            let normalized = normalize_name(&name);
+            let normalized =
+                resolve_pipeline_id(catalog, &name).unwrap_or_else(|| normalize_name(&name));
             let payload = execute_saved_pipeline_payload(normalized);
             Action {
                 label: format!("Run Clipboard Modify pipeline {name}"),
@@ -401,6 +405,36 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
             }
         }
     }
+}
+
+fn resolve_template_id(catalog: &ClipboardModifierCatalog, name: &str) -> Option<String> {
+    let normalized = normalize_name(name);
+    catalog
+        .templates
+        .iter()
+        .find(|template| {
+            normalize_name(&template.id) == normalized
+                || template
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_name(alias) == normalized)
+        })
+        .map(|template| template.id.clone())
+}
+
+fn resolve_pipeline_id(catalog: &ClipboardModifierCatalog, name: &str) -> Option<String> {
+    let normalized = normalize_name(name);
+    catalog
+        .pipelines
+        .iter()
+        .find(|pipeline| {
+            normalize_name(&pipeline.id) == normalized
+                || pipeline
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_name(alias) == normalized)
+        })
+        .map(|pipeline| pipeline.id.clone())
 }
 
 fn section_name(section: ModifySection) -> &'static str {
