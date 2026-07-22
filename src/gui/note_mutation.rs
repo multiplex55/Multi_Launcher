@@ -82,7 +82,7 @@ impl LauncherApp {
                         self.note_panels.insert(index, panel);
                         return Err(err);
                     }
-                    panel.replace_note_after_external_mutation(note);
+                    panel.replace_content_from_mutation(note.content, 0.0);
                     let result = output.result;
                     self.note_panels.insert(index, panel);
                     self.refresh_after_note_mutation();
