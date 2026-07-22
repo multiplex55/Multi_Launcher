@@ -440,6 +440,14 @@ pub struct LauncherApp {
     note_panels: Vec<NotePanel>,
     #[cfg(test)]
     pub(crate) note_mutation_refresh_count: usize,
+    #[cfg(test)]
+    pub(crate) note_mutation_cache_refresh_count: usize,
+    #[cfg(test)]
+    pub(crate) note_mutation_quick_notes_refresh_count: usize,
+    #[cfg(test)]
+    pub(crate) note_mutation_panel_invalidation_count: usize,
+    #[cfg(test)]
+    pub(crate) note_mutation_search_count: usize,
     image_panels: Vec<ImagePanel>,
     screenshot_editors: Vec<ScreenshotEditor>,
     todo_dialog: TodoDialog,
@@ -1382,6 +1390,14 @@ impl LauncherApp {
             note_panels: Vec::new(),
             #[cfg(test)]
             note_mutation_refresh_count: 0,
+            #[cfg(test)]
+            note_mutation_cache_refresh_count: 0,
+            #[cfg(test)]
+            note_mutation_quick_notes_refresh_count: 0,
+            #[cfg(test)]
+            note_mutation_panel_invalidation_count: 0,
+            #[cfg(test)]
+            note_mutation_search_count: 0,
             image_panels: Vec::new(),
             screenshot_editors: Vec::new(),
             todo_dialog: TodoDialog::default(),
