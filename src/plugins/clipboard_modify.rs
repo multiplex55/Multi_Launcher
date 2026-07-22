@@ -221,8 +221,8 @@ fn cm_operation_suggestions() -> Vec<Action> {
         .filter(|op| op.id != OperationId::Template)
         .map(|op| {
             let query = match op.argument_requirements {
-                ArgumentRequirements::None => format!("cm {}", op.command),
-                _ => format!("cm {} ", op.command),
+                ArgumentRequirements::None => format!("cm {}", canonical_command(op.id)),
+                _ => format!("cm {} ", canonical_command(op.id)),
             };
             query_action(
                 &query,
@@ -362,11 +362,7 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
                     "Runs {stage_count} Clipboard Modify stage(s); reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "intent": "stages",
-                    "stages": payload,
-                }))
-                .ok(),
+                args: encode_action_payload(&payload).ok(),
             }
         }
         ClipboardModifyIntent::ApplyTemplate { name } => {
@@ -378,11 +374,7 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
                     "Applies template `{name}` immediately; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "intent": "template",
-                    "payload": payload,
-                }))
-                .ok(),
+                args: encode_action_payload(&payload).ok(),
             }
         }
         ClipboardModifyIntent::ApplySavedPipeline { name } => {
@@ -394,11 +386,7 @@ fn execution_action(intent: ClipboardModifyIntent) -> Action {
                     "Runs saved pipeline `{name}` immediately; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "intent": "saved-pipeline",
-                    "payload": payload,
-                }))
-                .ok(),
+                args: encode_action_payload(&payload).ok(),
             }
         }
         ClipboardModifyIntent::Undo => {
@@ -531,8 +519,8 @@ mod tests {
             .filter(|op| op.id != OperationId::Template)
         {
             let expected = match op.argument_requirements {
-                ArgumentRequirements::None => format!("cm {}", op.command),
-                _ => format!("cm {} ", op.command),
+                ArgumentRequirements::None => format!("cm {}", canonical_command(op.id)),
+                _ => format!("cm {} ", canonical_command(op.id)),
             };
             assert!(
                 queries.contains(&expected.as_str()),
@@ -598,6 +586,53 @@ mod tests {
                 .expect("completion action");
             assert!(action.args.is_none());
         }
+    }
+
+    #[test]
+    fn complete_execution_actions_are_typed_and_canonical() {
+        let p = plugin_with_test_catalog();
+        let action = p.search("cm camel-case");
+        assert_eq!(action.len(), 1);
+        assert_eq!(action[0].action, "clipboard_modify:execute");
+        assert_eq!(
+            payload(&action[0]),
+            ClipboardModifyActionPayload::ExecuteAdHocStages {
+                canonical_command: "cm camel-case".into(),
+                stages: vec![crate::clipboard_modify::model::StageSpec {
+                    operation: OperationId::CamelCase,
+                    arguments: crate::clipboard_modify::model::StageArguments::default(),
+                }],
+            }
+        );
+
+        assert_eq!(
+            payload(&p.search("cm template AT").remove(0)),
+            ClipboardModifyActionPayload::ExecuteTemplate {
+                canonical_command: "cm template alpha-template".into(),
+                name: "alpha-template".into(),
+            }
+        );
+        assert_eq!(
+            payload(&p.search("cm apply AP").remove(0)),
+            ClipboardModifyActionPayload::ExecuteSavedPipeline {
+                canonical_command: "cm apply alpha-pipeline".into(),
+                name: "alpha-pipeline".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn help_and_sections_open_not_execute_and_invalid_errors() {
+        let p = plugin();
+        for query in ["cm help", "cm template", "cm apply", "cm modify"] {
+            let results = p.search(query);
+            assert_eq!(results.len(), 1);
+            assert!(results[0].action.starts_with("clipboard_modify:open"));
+        }
+        assert_eq!(
+            p.search("cm unknown-command")[0].action,
+            "clipboard_modify:error"
+        );
     }
 
     #[test]

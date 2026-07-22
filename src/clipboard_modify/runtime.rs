@@ -107,10 +107,10 @@ pub fn execute_action_args(
     let snapshot = catalog.read().unwrap().clone();
     let cancel = AtomicBool::new(false);
     match payload {
-        ClipboardModifyActionPayload::ExecuteAdHocStages { stages } => {
+        ClipboardModifyActionPayload::ExecuteAdHocStages { stages, .. } => {
             clipboard_service().apply_stages(&stages, snapshot.as_ref(), "cm execute", &cancel)?;
         }
-        ClipboardModifyActionPayload::ExecuteTemplate { name } => {
+        ClipboardModifyActionPayload::ExecuteTemplate { name, .. } => {
             let stages = vec![super::model::StageSpec {
                 operation: super::model::OperationId::Template,
                 arguments: super::model::StageArguments {
@@ -125,7 +125,7 @@ pub fn execute_action_args(
                 &cancel,
             )?;
         }
-        ClipboardModifyActionPayload::ExecuteSavedPipeline { name } => {
+        ClipboardModifyActionPayload::ExecuteSavedPipeline { name, .. } => {
             if find_pipeline(snapshot.as_ref(), &name).is_none() {
                 return Err(ClipboardError::Config(format!("unknown pipeline {name}")));
             }
