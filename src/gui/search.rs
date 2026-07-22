@@ -256,9 +256,13 @@ impl LauncherApp {
         }
     }
 
+    pub(crate) fn clear_selected_after_results_replaced(&mut self) {
+        self.selected = None;
+    }
+
     pub fn search(&mut self) {
         if self.last_results_valid && self.query == self.last_search_query {
-            self.selected = None;
+            self.clear_selected_after_results_replaced();
             return;
         }
 
@@ -280,7 +284,7 @@ impl LauncherApp {
                 });
             }
             self.results = res;
-            self.selected = None;
+            self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
             return;
         }
@@ -318,7 +322,7 @@ impl LauncherApp {
         res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         self.results = res.into_iter().map(|(a, _)| a).collect();
-        self.selected = None;
+        self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
         self.last_results_valid = true;
         self.update_suggestions();
@@ -582,6 +586,46 @@ mod tests {
                 section: ClipboardModifySectionPayload::Modify,
             }
         );
+    }
+
+    #[test]
+    fn search_replacement_clears_selected_index() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![Action {
+            label: "Calculator".into(),
+            desc: "App".into(),
+            action: "calc".into(),
+            args: None,
+        }]);
+        app.update_action_cache();
+        app.selected = Some(0);
+        app.query = "app calc".into();
+
+        app.search();
+
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.selected, None);
+    }
+
+    #[test]
+    fn repeated_search_clears_stale_out_of_bounds_selected_index() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results = vec![Action {
+            label: "Only".into(),
+            desc: "Result".into(),
+            action: "only".into(),
+            args: None,
+        }];
+        app.query = "same".into();
+        app.last_search_query = "same".into();
+        app.last_results_valid = true;
+        app.selected = Some(5);
+
+        app.search();
+
+        assert_eq!(app.selected, None);
     }
 
     #[test]
