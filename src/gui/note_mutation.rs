@@ -49,9 +49,9 @@ impl LauncherApp {
         &mut self,
         slug: &str,
         mutation: impl FnOnce(&str) -> NoteMutationOutput,
-    ) -> anyhow::Result<NoteMutationResult> {
+    ) -> anyhow::Result<NoteMutationOutcome<NoteMutationResult>> {
         match self.try_mutate_note_by_slug(slug, mutation) {
-            Ok(result) => Ok(result),
+            Ok(outcome) => Ok(outcome),
             Err(err) => {
                 self.report_error_message("note.mutation", err.to_string());
                 Err(err)
@@ -63,7 +63,7 @@ impl LauncherApp {
         &mut self,
         slug: &str,
         mutation: impl FnOnce(&str) -> NoteMutationOutput,
-    ) -> anyhow::Result<NoteMutationResult> {
+    ) -> anyhow::Result<NoteMutationOutcome<NoteMutationResult>> {
         if let Some(index) = self
             .note_panels
             .iter()
@@ -73,7 +73,9 @@ impl LauncherApp {
             let source = panel.note_content().to_owned();
             let outcome = mutation(&source).into_outcome(&source);
             let result = match outcome {
-                NoteMutationOutcome::Unchanged(output) => output.result,
+                NoteMutationOutcome::Unchanged(output) => {
+                    NoteMutationOutcome::Unchanged(output.result)
+                }
                 NoteMutationOutcome::Changed(output) => {
                     let content = output.content;
                     let mut note = panel.note_content_clone_for_mutation();
@@ -87,7 +89,7 @@ impl LauncherApp {
                     let result = output.result;
                     self.note_panels.insert(index, panel);
                     self.refresh_after_note_mutation();
-                    return Ok(result);
+                    return Ok(NoteMutationOutcome::Changed(result));
                 }
             };
             self.note_panels.insert(index, panel);
@@ -101,12 +103,14 @@ impl LauncherApp {
             .ok_or_else(|| anyhow!("Note not found: {slug}"))?;
         let source = note.content.clone();
         match mutation(&source).into_outcome(&source) {
-            NoteMutationOutcome::Unchanged(output) => Ok(output.result),
+            NoteMutationOutcome::Unchanged(output) => {
+                Ok(NoteMutationOutcome::Unchanged(output.result))
+            }
             NoteMutationOutcome::Changed(output) => {
                 note.content = output.content;
                 save_note(&mut note, true).context("save mutated closed note")?;
                 self.refresh_after_note_mutation();
-                Ok(output.result)
+                Ok(NoteMutationOutcome::Changed(output.result))
             }
         }
     }
@@ -116,14 +120,30 @@ impl LauncherApp {
         {
             self.note_mutation_refresh_count += 1;
         }
+        #[cfg(test)]
+        {
+            self.note_mutation_cache_refresh_count += 1;
+        }
         self.dashboard_data_cache.refresh_notes();
         if self.notes_dialog.open {
+            #[cfg(test)]
+            {
+                self.note_mutation_quick_notes_refresh_count += 1;
+            }
             self.notes_dialog.refresh_entries_from_notes();
         }
         for panel in &mut self.note_panels {
+            #[cfg(test)]
+            {
+                self.note_mutation_panel_invalidation_count += 1;
+            }
             panel.invalidate_note_derived_data_after_external_mutation();
         }
         self.last_results_valid = false;
+        #[cfg(test)]
+        {
+            self.note_mutation_search_count += 1;
+        }
         self.search();
     }
 }
@@ -196,17 +216,26 @@ mod tests {
         panel.replace_content_after_external_mutation("unsaved".into());
         app.note_panels.push(panel);
 
-        app.mutate_note_by_slug("alpha", |content| {
-            assert_eq!(content, "unsaved");
-            NoteMutationOutput::changed(
-                format!("{content} changed"),
-                NoteMutationResult {
-                    wrapped_links: 1,
-                    skipped_existing_links: 0,
-                },
-            )
-        })
-        .unwrap();
+        let outcome = app
+            .mutate_note_by_slug("alpha", |content| {
+                assert_eq!(content, "unsaved");
+                NoteMutationOutput::changed(
+                    format!("{content} changed"),
+                    NoteMutationResult {
+                        wrapped_links: 1,
+                        skipped_existing_links: 0,
+                    },
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            NoteMutationOutcome::Changed(NoteMutationResult {
+                wrapped_links: 1,
+                skipped_existing_links: 0,
+            })
+        );
 
         assert_eq!(app.note_panels[0].note_content(), "unsaved changed");
         let saved = load_notes().unwrap().remove(0);
@@ -220,11 +249,20 @@ mod tests {
         let mut disk_note = note("Alpha", "alpha", "persisted");
         save_note(&mut disk_note, true).unwrap();
 
-        app.mutate_note_by_slug("alpha", |content| {
-            assert_eq!(content, "# Alpha\n\npersisted");
-            NoteMutationOutput::changed(format!("{content} updated"), NoteMutationResult::default())
-        })
-        .unwrap();
+        let outcome = app
+            .mutate_note_by_slug("alpha", |content| {
+                assert_eq!(content, "# Alpha\n\npersisted");
+                NoteMutationOutput::changed(
+                    format!("{content} updated"),
+                    NoteMutationResult::default(),
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            NoteMutationOutcome::Changed(NoteMutationResult::default())
+        );
 
         assert_eq!(
             load_notes().unwrap()[0].content,
@@ -241,14 +279,66 @@ mod tests {
         let path = load_notes().unwrap()[0].path.clone();
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-        app.mutate_note_by_slug("alpha", |content| {
-            NoteMutationOutput::unchanged(content, NoteMutationResult::default())
-        })
-        .unwrap();
+        let outcome = app
+            .mutate_note_by_slug("alpha", |content| {
+                NoteMutationOutput::unchanged(content, NoteMutationResult::default())
+            })
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            NoteMutationOutcome::Unchanged(NoteMutationResult::default())
+        );
 
         let after = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert_eq!(before, after);
         assert_eq!(app.note_mutation_refresh_count, 0);
+        assert_eq!(app.note_mutation_cache_refresh_count, 0);
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 0);
+        assert_eq!(app.note_mutation_panel_invalidation_count, 0);
+        assert_eq!(app.note_mutation_search_count, 0);
+    }
+
+    #[test]
+    fn unchanged_open_note_mutation_leaves_panel_content_untouched() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, _ctx, mut app) = setup();
+        let mut disk_note = note("Alpha", "alpha", "disk");
+        save_note(&mut disk_note, true).unwrap();
+        let path = load_notes().unwrap()[0].path.clone();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut panel = NotePanel::from_note(disk_note);
+        panel.replace_content_after_external_mutation("unsaved".into());
+        app.note_panels.push(panel);
+
+        let outcome = app
+            .mutate_note_by_slug("alpha", |content| {
+                assert_eq!(content, "unsaved");
+                NoteMutationOutput::unchanged(
+                    content,
+                    NoteMutationResult {
+                        wrapped_links: 2,
+                        skipped_existing_links: 3,
+                    },
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            NoteMutationOutcome::Unchanged(NoteMutationResult {
+                wrapped_links: 2,
+                skipped_existing_links: 3,
+            })
+        );
+        assert_eq!(app.note_panels[0].note_content(), "unsaved");
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+        assert_eq!(app.note_mutation_refresh_count, 0);
+        assert_eq!(app.note_mutation_cache_refresh_count, 0);
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 0);
+        assert_eq!(app.note_mutation_panel_invalidation_count, 0);
+        assert_eq!(app.note_mutation_search_count, 0);
     }
 
     #[test]
@@ -259,12 +349,30 @@ mod tests {
         let mut disk_note = note("Alpha", "alpha", "old");
         save_note(&mut disk_note, true).unwrap();
 
-        app.mutate_note_by_slug("alpha", |_| {
-            NoteMutationOutput::changed("new", NoteMutationResult::default())
-        })
-        .unwrap();
+        let outcome = app
+            .mutate_note_by_slug("alpha", |_| {
+                NoteMutationOutput::changed(
+                    "new",
+                    NoteMutationResult {
+                        wrapped_links: 4,
+                        skipped_existing_links: 5,
+                    },
+                )
+            })
+            .unwrap();
 
+        assert_eq!(
+            outcome,
+            NoteMutationOutcome::Changed(NoteMutationResult {
+                wrapped_links: 4,
+                skipped_existing_links: 5,
+            })
+        );
         assert_eq!(app.note_mutation_refresh_count, 1);
+        assert_eq!(app.note_mutation_cache_refresh_count, 1);
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 1);
+        assert_eq!(app.note_mutation_panel_invalidation_count, 0);
+        assert_eq!(app.note_mutation_search_count, 1);
     }
 
     #[test]
