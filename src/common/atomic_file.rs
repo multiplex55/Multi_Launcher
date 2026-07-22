@@ -5,6 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    save_atomic_with_replace(path, bytes, replace_existing)
+}
+
+fn save_atomic_with_replace(
+    path: &Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
     let name = path
@@ -18,7 +26,7 @@ pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        replace_existing(&tmp, path)?;
+        replace(&tmp, path)?;
         Ok(())
     })();
     if res.is_err() {
@@ -81,6 +89,42 @@ fn timestamp() -> String {
 #[cfg(not(windows))]
 fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
     fs::rename(src, dst).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_atomic_failed_replace_preserves_existing_destination_and_removes_temp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("note.md");
+        fs::write(&dest, b"original markdown").expect("write existing destination");
+
+        let result = save_atomic_with_replace(&dest, b"updated markdown", |_tmp, _dst| {
+            anyhow::bail!("deterministic replace failure")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&dest).expect("read destination"),
+            b"original markdown"
+        );
+        let temp_entries: Vec<_> = fs::read_dir(dir.path())
+            .expect("read notes dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".note.md.tmp."))
+            })
+            .collect();
+        assert!(
+            temp_entries.is_empty(),
+            "temporary files should be removed after a failed replace: {temp_entries:?}"
+        );
+    }
 }
 
 #[cfg(windows)]

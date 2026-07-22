@@ -280,6 +280,25 @@ static NOTE_VERSION: AtomicU64 = AtomicU64::new(0);
 static LAST_NOTE_REINDEX_MS: AtomicU64 = AtomicU64::new(0);
 const NOTE_REINDEX_DEBOUNCE_MS: u64 = 250;
 
+#[cfg(test)]
+type NoteSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync;
+
+#[cfg(test)]
+static NOTE_SAVE_HOOK: Lazy<Mutex<Option<Box<NoteSaveHook>>>> = Lazy::new(|| Mutex::new(None));
+
+fn persist_note_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = NOTE_SAVE_HOOK
+        .lock()
+        .expect("note save hook lock poisoned")
+        .as_ref()
+    {
+        return hook(path, bytes);
+    }
+
+    crate::common::atomic_file::save_atomic(path, bytes)
+}
+
 fn extract_tags(content: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();
     let mut in_code = false;
@@ -966,7 +985,7 @@ pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
     note.alias = note.aliases.first().cloned();
     note.tags = extract_tags(&content);
     note.entity_refs = extract_entity_refs(&content);
-    crate::common::atomic_file::save_atomic(&path, content.as_bytes())
+    persist_note_file(&path, content.as_bytes())
         .with_context(|| format!("save note {}", path.display()))?;
     if !note.path.as_os_str().is_empty() && note.path != path {
         let _ = std::fs::remove_file(&note.path);
@@ -1008,7 +1027,7 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
             let rest = lines.collect::<Vec<_>>().join("\n");
             content = format!("{first}\nAlias: {a}\n{rest}");
         }
-        crate::common::atomic_file::save_atomic(&path, content.as_bytes())
+        persist_note_file(&path, content.as_bytes())
             .with_context(|| format!("save note {}", path.display()))?;
     }
     for entry in std::fs::read_dir(&dir)? {
@@ -2003,6 +2022,27 @@ mod tests {
     }
 
     static TEMPLATE_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn set_note_save_hook(
+        hook: impl Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        *NOTE_SAVE_HOOK.lock().expect("note save hook lock poisoned") = Some(Box::new(hook));
+    }
+
+    fn clear_note_save_hook() {
+        *NOTE_SAVE_HOOK.lock().expect("note save hook lock poisoned") = None;
+    }
+
+    fn assert_no_bak_files(dir: &std::path::Path) {
+        assert!(std::fs::read_dir(dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "bak")
+        }));
+    }
 
     fn with_template_dir<T>(test: impl FnOnce(&std::path::Path) -> T) -> T {
         let _lock = TEMPLATE_ENV_LOCK
@@ -3363,49 +3403,39 @@ Body",
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_note_failed_atomic_write_preserves_existing_note_without_backup() {
         use std::fs;
         use tempfile::tempdir;
 
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
         unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
-        let old_path = dir.path().join("alpha.md");
-        let blocked_path = dir.path().join("alpha-renamed.md");
-        fs::write(&old_path, "# Alpha\n\noriginal").unwrap();
-        fs::create_dir(&blocked_path).unwrap();
+        let path = dir.path().join("alpha.md");
+        fs::write(&path, "# Alpha\n\noriginal").unwrap();
         refresh_cache().unwrap();
+        set_note_save_hook(|_path, _bytes| anyhow::bail!("deterministic save failure"));
 
         let mut note = Note {
-            title: "Alpha renamed".into(),
-            path: old_path.clone(),
-            content: "# Alpha renamed\n\nupdated".into(),
+            title: "Alpha".into(),
+            path: path.clone(),
+            content: "# Alpha\n\nupdated".into(),
             tags: Vec::new(),
             links: Vec::new(),
-            slug: "alpha-renamed".into(),
+            slug: "alpha".into(),
             alias: None,
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
 
         let result = save_note(&mut note, true);
+        clear_note_save_hook();
 
         assert!(result.is_err());
-        assert_eq!(
-            fs::read_to_string(&old_path).unwrap(),
-            "# Alpha\n\noriginal"
-        );
-        assert!(blocked_path.is_dir());
-        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "bak")
-        }));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Alpha\n\noriginal");
+        assert_no_bak_files(dir.path());
 
         if let Some(p) = prev {
             unsafe { std::env::set_var("ML_NOTES_DIR", p) };
@@ -3414,12 +3444,12 @@ Body",
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_note_rename_keeps_old_file_when_new_atomic_write_fails() {
         use std::fs;
         use tempfile::tempdir;
 
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
         unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
@@ -3427,8 +3457,8 @@ Body",
         let old_path = dir.path().join("alpha.md");
         let new_path = dir.path().join("alpha-renamed.md");
         fs::write(&old_path, "# Alpha\n\noriginal").unwrap();
-        fs::create_dir(&new_path).unwrap();
         refresh_cache().unwrap();
+        set_note_save_hook(|_path, _bytes| anyhow::bail!("deterministic save failure"));
 
         let mut note = Note {
             title: "Alpha renamed".into(),
@@ -3443,6 +3473,7 @@ Body",
         };
 
         let result = save_note(&mut note, true);
+        clear_note_save_hook();
 
         assert!(result.is_err());
         assert_eq!(note.path, old_path);
@@ -3450,14 +3481,8 @@ Body",
             fs::read_to_string(&old_path).unwrap(),
             "# Alpha\n\noriginal"
         );
-        assert!(new_path.is_dir());
-        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "bak")
-        }));
+        assert!(!new_path.exists());
+        assert_no_bak_files(dir.path());
 
         if let Some(p) = prev {
             unsafe { std::env::set_var("ML_NOTES_DIR", p) };
@@ -3466,49 +3491,71 @@ Body",
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_notes_failed_write_does_not_delete_unrelated_old_notes_or_create_backups() {
         use std::fs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tempfile::tempdir;
 
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let dir = tempdir().unwrap();
         let prev = std::env::var("ML_NOTES_DIR").ok();
         unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
 
         let stale_path = dir.path().join("stale.md");
-        let blocked_path = dir.path().join("alpha.md");
         fs::write(&stale_path, "# Stale\n\nkeep me").unwrap();
-        fs::create_dir(&blocked_path).unwrap();
         refresh_cache().unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let hook_writes = writes.clone();
+        set_note_save_hook(move |path, bytes| {
+            let write_number = hook_writes.fetch_add(1, Ordering::SeqCst);
+            if write_number == 0 {
+                crate::common::atomic_file::save_atomic(path, bytes)
+            } else {
+                anyhow::bail!("deterministic save failure")
+            }
+        });
 
-        let notes = vec![Note {
-            title: "Alpha".into(),
-            path: PathBuf::new(),
-            content: "# Alpha\n\nnew".into(),
-            tags: Vec::new(),
-            links: Vec::new(),
-            slug: "alpha".into(),
-            alias: None,
-            aliases: Vec::new(),
-            entity_refs: Vec::new(),
-        }];
+        let notes = vec![
+            Note {
+                title: "Alpha".into(),
+                path: PathBuf::new(),
+                content: "# Alpha\n\nnew".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "alpha".into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "Beta".into(),
+                path: PathBuf::new(),
+                content: "# Beta\n\nnew".into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "beta".into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+        ];
 
         let result = save_notes(&notes);
+        clear_note_save_hook();
 
         assert!(result.is_err());
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
         assert_eq!(
             fs::read_to_string(&stale_path).unwrap(),
             "# Stale\n\nkeep me"
         );
-        assert!(blocked_path.is_dir());
-        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "bak")
-        }));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("alpha.md")).unwrap(),
+            "# Alpha\n\nnew"
+        );
+        assert!(!dir.path().join("beta.md").exists());
+        assert_no_bak_files(dir.path());
 
         if let Some(p) = prev {
             unsafe { std::env::set_var("ML_NOTES_DIR", p) };
