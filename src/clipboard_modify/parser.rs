@@ -328,7 +328,7 @@ fn parse_special(
                 && !catalog
                     .templates
                     .iter()
-                    .any(|t| name_matches_catalog_entry(&q, &t.id, &t.aliases))
+                    .any(|t| name_matches_catalog_entry_id(&q, &t.id))
             {
                 partial(
                     0,
@@ -357,7 +357,7 @@ fn parse_special(
                 && !catalog
                     .pipelines
                     .iter()
-                    .any(|p| name_matches_catalog_entry(&q, &p.id, &p.aliases))
+                    .any(|p| name_matches_catalog_entry_id(&q, &p.id))
             {
                 partial(
                     0,
@@ -400,12 +400,8 @@ fn is_prefix_like(stage: &Stage) -> bool {
     stage.tokens.len() == 2 && !stage.tokens[1].quoted
 }
 
-fn name_matches_catalog_entry(query: &str, id: &str, aliases: &[String]) -> bool {
-    let normalized = normalize_name(query);
-    normalize_name(id) == normalized
-        || aliases
-            .iter()
-            .any(|alias| normalize_name(alias) == normalized)
+fn name_matches_catalog_entry_id(query: &str, id: &str) -> bool {
+    normalize_name(id) == normalize_name(query)
 }
 fn partial(
     stage_index: usize,
