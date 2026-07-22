@@ -892,6 +892,7 @@ impl eframe::App for LauncherApp {
         }
 
         CentralPanel::default().show(ctx, |ui| {
+            let mut deferred_activation: Option<DeferredActivation> = None;
             ui.heading("🚀 Multi Lnchr");
             if self.should_render_inline_error()
                 && let Some(err) = &self.error {
@@ -1011,7 +1012,6 @@ impl eframe::App for LauncherApp {
                     });
                 }
 
-                let mut deferred_activation: Option<DeferredActivation> = None;
                 let mut launch_idx: Option<usize> = None;
                 if !accepted_suggestion
                     && enter

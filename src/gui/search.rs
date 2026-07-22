@@ -592,12 +592,12 @@ mod tests {
     fn search_replacement_clears_selected_index() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.actions = vec![Action {
+        app.actions = Arc::new(vec![Action {
             label: "Calculator".into(),
             desc: "App".into(),
             action: "calc".into(),
             args: None,
-        }];
+        }]);
         app.update_action_cache();
         app.selected = Some(0);
         app.query = "app calc".into();
