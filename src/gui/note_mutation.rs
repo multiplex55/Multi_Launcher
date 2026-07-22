@@ -75,14 +75,15 @@ impl LauncherApp {
             let result = match outcome {
                 NoteMutationOutcome::Unchanged(output) => output.result,
                 NoteMutationOutcome::Changed(output) => {
+                    let content = output.content;
                     let mut note = panel.note_content_clone_for_mutation();
-                    note.content = output.content;
+                    note.content = content.clone();
                     let save_result = save_note(&mut note, true).context("save mutated open note");
                     if let Err(err) = save_result {
                         self.note_panels.insert(index, panel);
                         return Err(err);
                     }
-                    panel.replace_note_after_external_mutation(note);
+                    panel.replace_content_from_mutation(content, 0.0);
                     let result = output.result;
                     self.note_panels.insert(index, panel);
                     self.refresh_after_note_mutation();
@@ -209,7 +210,7 @@ mod tests {
 
         assert_eq!(app.note_panels[0].note_content(), "unsaved changed");
         let saved = load_notes().unwrap().remove(0);
-        assert_eq!(saved.content, "unsaved changed");
+        assert_eq!(saved.content, "# Alpha\n\nunsaved changed");
     }
 
     #[test]
@@ -220,12 +221,15 @@ mod tests {
         save_note(&mut disk_note, true).unwrap();
 
         app.mutate_note_by_slug("alpha", |content| {
-            assert_eq!(content, "persisted");
+            assert_eq!(content, "# Alpha\n\npersisted");
             NoteMutationOutput::changed(format!("{content} updated"), NoteMutationResult::default())
         })
         .unwrap();
 
-        assert_eq!(load_notes().unwrap()[0].content, "persisted updated");
+        assert_eq!(
+            load_notes().unwrap()[0].content,
+            "# Alpha\n\npersisted updated"
+        );
     }
 
     #[test]
@@ -272,7 +276,9 @@ mod tests {
         let mut panel = NotePanel::from_note(disk_note);
         panel.replace_content_after_external_mutation("unsaved".into());
         app.note_panels.push(panel);
-        unsafe { std::env::set_var("ML_NOTES_DIR", "/dev/null/not-a-dir") };
+        let invalid_notes_dir = _dir.path().join("not-a-dir.md");
+        std::fs::write(&invalid_notes_dir, "not a directory").unwrap();
+        unsafe { std::env::set_var("ML_NOTES_DIR", &invalid_notes_dir) };
 
         let err = app
             .mutate_note_by_slug("alpha", |_| {

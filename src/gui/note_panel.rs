@@ -1159,14 +1159,23 @@ impl NotePanel {
         self.note.clone()
     }
 
-    pub(crate) fn replace_content_after_external_mutation(&mut self, content: String) {
+    pub(crate) fn replace_content_from_mutation(&mut self, content: String, now_secs: f64) {
+        if self.note.content == content {
+            return;
+        }
+
         self.note.content = content;
-        self.mark_content_changed(0.0);
+        self.mark_content_changed(now_secs);
     }
 
-    pub(crate) fn replace_note_after_external_mutation(&mut self, note: Note) {
+    pub(crate) fn replace_content_after_external_mutation(&mut self, content: String) {
+        self.replace_content_from_mutation(content, 0.0);
+    }
+
+    pub(crate) fn replace_note_after_external_mutation(&mut self, mut note: Note) {
+        let content = std::mem::take(&mut note.content);
         self.note = note;
-        self.mark_content_changed(0.0);
+        self.replace_content_from_mutation(content, 0.0);
     }
 
     pub(crate) fn invalidate_note_derived_data_after_external_mutation(&mut self) {
@@ -5990,6 +5999,45 @@ Body with [[Other]]"
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
         assert_eq!(panel.last_edit_at_secs, Some(1.0));
+    }
+
+    #[test]
+    fn programmatic_content_replacement_invalidates_cached_markdown_analysis() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\n- [ ] item"));
+        assert_eq!(panel.markdown_analysis().headings.len(), 1);
+        assert!(panel.markdown_analysis.is_some());
+        assert!(panel.markdown_analysis_source_hash.is_some());
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+
+        panel.replace_content_from_mutation("# Updated\n\nBody".into(), 3.0);
+
+        assert_eq!(panel.note.content, "# Updated\n\nBody");
+        assert!(panel.markdown_analysis.is_none());
+        assert!(panel.markdown_analysis_source_hash.is_none());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, Some(3.0));
+
+        let analysis = panel.markdown_analysis();
+        assert_eq!(analysis.headings.len(), 1);
+        assert_eq!(analysis.headings[0].title, "Updated");
+    }
+
+    #[test]
+    fn programmatic_unchanged_content_does_not_dirty_derived_state() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
+        assert_eq!(panel.markdown_analysis().headings.len(), 1);
+        let cached_hash = panel.markdown_analysis_source_hash;
+
+        panel.replace_content_from_mutation("# Title\n\nBody".into(), 4.0);
+
+        assert_eq!(panel.note.content, "# Title\n\nBody");
+        assert!(panel.markdown_analysis.is_some());
+        assert_eq!(panel.markdown_analysis_source_hash, cached_hash);
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, None);
     }
 
     #[test]
