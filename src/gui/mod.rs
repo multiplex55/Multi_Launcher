@@ -22,6 +22,7 @@ mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
 mod multi_manager_actions;
 mod note_graph_dialog;
+pub(crate) mod note_mutation;
 mod note_panel;
 mod notes_dialog;
 mod render;
@@ -437,6 +438,8 @@ pub struct LauncherApp {
     note_graph_dialog: NoteGraphDialog,
     unused_assets_dialog: UnusedAssetsDialog,
     note_panels: Vec<NotePanel>,
+    #[cfg(test)]
+    pub(crate) note_mutation_refresh_count: usize,
     image_panels: Vec<ImagePanel>,
     screenshot_editors: Vec<ScreenshotEditor>,
     todo_dialog: TodoDialog,
@@ -1377,6 +1380,8 @@ impl LauncherApp {
             note_graph_dialog: NoteGraphDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),
             note_panels: Vec::new(),
+            #[cfg(test)]
+            note_mutation_refresh_count: 0,
             image_panels: Vec::new(),
             screenshot_editors: Vec::new(),
             todo_dialog: TodoDialog::default(),

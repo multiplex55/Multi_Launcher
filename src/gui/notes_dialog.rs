@@ -280,6 +280,11 @@ impl NotesDialog {
         }
     }
 
+    pub(crate) fn refresh_entries_from_notes(&mut self) {
+        self.entries = cached_notes_or_load();
+        self.rebuild_index();
+    }
+
     pub fn open_edit(&mut self, idx: usize) {
         self.entries = cached_notes_or_load();
         self.rebuild_index();

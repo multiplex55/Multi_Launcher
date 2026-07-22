@@ -1155,6 +1155,28 @@ impl NotePanel {
         &self.note.content
     }
 
+    pub(crate) fn note_content_clone_for_mutation(&self) -> Note {
+        self.note.clone()
+    }
+
+    pub(crate) fn replace_content_after_external_mutation(&mut self, content: String) {
+        self.note.content = content;
+        self.mark_content_changed(0.0);
+    }
+
+    pub(crate) fn replace_note_after_external_mutation(&mut self, note: Note) {
+        self.note = note;
+        self.mark_content_changed(0.0);
+    }
+
+    pub(crate) fn invalidate_note_derived_data_after_external_mutation(&mut self) {
+        self.invalidate_markdown_analysis();
+        self.invalidate_link_menu_results();
+        self.link_menu_targets_version = None;
+        self.fast_derived_dirty = true;
+        self.heavy_recompute_requested = true;
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
             return;
