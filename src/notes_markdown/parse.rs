@@ -99,7 +99,7 @@ fn code_line_mask(lines: &[LineSpan<'_>]) -> Vec<bool> {
     mask
 }
 
-fn fence_info(trimmed: &str) -> Option<(u8, usize)> {
+pub(crate) fn fence_info(trimmed: &str) -> Option<(u8, usize)> {
     let bytes = trimmed.as_bytes();
     let marker = *bytes.first()?;
     if marker != b'`' && marker != b'~' {
