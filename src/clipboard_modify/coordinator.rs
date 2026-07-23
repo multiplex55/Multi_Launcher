@@ -750,7 +750,7 @@ mod tests {
                 ClipboardModifyIntent::ApplyTemplate {
                     name: "missing".into(),
                 },
-                Arc::new(ClipboardModifierCatalog::default()),
+                Arc::new(ClipboardModifierCatalog::new(Vec::new(), Vec::new()).unwrap()),
                 meta("q"),
             )
             .unwrap();
