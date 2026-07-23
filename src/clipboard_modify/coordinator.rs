@@ -499,7 +499,12 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
         &self.diagnostics
     }
     #[cfg(test)]
-    pub(crate) fn inject_completion_for_test(&self, ev: ImmediateCompletionEvent) {
+    pub(crate) fn inject_completion_for_test(
+        &mut self,
+        meta: ImmediateRequestMetadata,
+        ev: ImmediateCompletionEvent,
+    ) {
+        self.pending.insert(ev.request_id.0, meta);
         self.tx.send(ev).unwrap();
     }
 }

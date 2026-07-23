@@ -1581,6 +1581,7 @@ mod clipboard_modify_gui_action_tests {
             .insert(7, meta.clone());
         app.query = "changed".into();
         app.clipboard_modify_immediate.inject_completion_for_test(
+            meta.clone(),
             crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
                 request_id: crate::clipboard_modify::coordinator::OperationId(7),
                 display_label: "Test".into(),
@@ -1619,6 +1620,7 @@ mod clipboard_modify_gui_action_tests {
             .insert(8, meta.clone());
         let before_len = history::get_history().len();
         app.clipboard_modify_immediate.inject_completion_for_test(
+            meta.clone(),
             crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
                 request_id: crate::clipboard_modify::coordinator::OperationId(8),
                 display_label: "Test".into(),
