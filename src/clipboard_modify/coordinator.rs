@@ -8,6 +8,7 @@ use crate::clipboard_modify::executor::{
 use crate::clipboard_modify::model::{ClipboardModifierCatalog, StageSpec};
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
 use crate::gui::ActivationSource;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -404,7 +405,12 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
         intent: ClipboardModifyIntent,
         catalog: Arc<ClipboardModifierCatalog>,
         meta: ImmediateRequestMetadata,
-    ) -> OperationId {
+    ) -> Result<OperationId, StructuredClipboardModifyError> {
+        if self.has_pending() {
+            return Err(StructuredClipboardModifyError {
+                message: "Clipboard Modify operation already running".to_string(),
+            });
+        }
         let id = OperationId(self.next_id);
         self.next_id += 1;
         self.pending.insert(id.0, meta.clone());
@@ -414,7 +420,7 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
         let repaint = self.repaint.clone();
         thread::spawn(move || {
             let label = meta.action.label.clone();
-            let result = (|| {
+            let result = catch_unwind(AssertUnwindSafe(|| {
                 let source = service.read_text()?;
                 let cancel = CancellationToken::new();
                 let out = run_intent(&source, &intent, catalog.as_ref(), &cancel)
@@ -422,25 +428,37 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
                 let md = OutputMetadata::from_text(&out);
                 service.commit_output(out, &label)?;
                 Ok::<_, ClipboardError>(md)
-            })();
+            }));
             let ev = match result {
-                Ok(md) => ImmediateCompletionEvent {
-                    request_id: id,
-                    display_label: label,
-                    character_count: md.chars,
-                    line_count: md.lines,
-                    undo_available: true,
-                    result: Ok(()),
-                },
-                Err(e) => ImmediateCompletionEvent {
+                Err(_) => ImmediateCompletionEvent {
                     request_id: id,
                     display_label: label,
                     character_count: 0,
                     line_count: 0,
                     undo_available: false,
                     result: Err(StructuredClipboardModifyError {
-                        message: e.to_string(),
+                        message: "Clipboard Modify operation failed unexpectedly".to_string(),
                     }),
+                },
+                Ok(result) => match result {
+                    Ok(md) => ImmediateCompletionEvent {
+                        request_id: id,
+                        display_label: label,
+                        character_count: md.chars,
+                        line_count: md.lines,
+                        undo_available: true,
+                        result: Ok(()),
+                    },
+                    Err(e) => ImmediateCompletionEvent {
+                        request_id: id,
+                        display_label: label,
+                        character_count: 0,
+                        line_count: 0,
+                        undo_available: false,
+                        result: Err(StructuredClipboardModifyError {
+                            message: e.to_string(),
+                        }),
+                    },
                 },
             };
             let _ = tx.send(ev);
@@ -448,7 +466,7 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
                 r();
             }
         });
-        id
+        Ok(id)
     }
     pub fn drain_completions(&mut self) -> Vec<ImmediateCompletionEvent> {
         let mut out = Vec::new();
@@ -479,6 +497,15 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
     }
     pub fn diagnostics(&self) -> &ImmediateDiagnostics {
         &self.diagnostics
+    }
+    #[cfg(test)]
+    pub(crate) fn inject_completion_for_test(
+        &mut self,
+        meta: ImmediateRequestMetadata,
+        ev: ImmediateCompletionEvent,
+    ) {
+        self.pending.insert(ev.request_id.0, meta);
+        self.tx.send(ev).unwrap();
     }
 }
 
@@ -583,15 +610,17 @@ mod tests {
             "a\nb",
         )));
         let mut ic = ImmediateExecutionCoordinator::new(svc);
-        let id = ic.start(
-            ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
-            Arc::new(default_catalog()),
-            ImmediateRequestMetadata {
-                action: action(),
-                query: "cm upper".into(),
-                source: ActivationSource::Enter,
-            },
-        );
+        let id = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                ImmediateRequestMetadata {
+                    action: action(),
+                    query: "cm upper".into(),
+                    source: ActivationSource::Enter,
+                },
+            )
+            .unwrap();
         std::thread::sleep(Duration::from_millis(50));
         let ev = ic.drain_completions().pop().unwrap();
         assert_eq!(ev.request_id, id);
@@ -604,19 +633,211 @@ mod tests {
     fn immediate_cancel_pending_rejects_stale_completion() {
         let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));
         let mut ic = ImmediateExecutionCoordinator::new(svc);
-        let id = ic.start(
-            ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
-            Arc::new(default_catalog()),
-            ImmediateRequestMetadata {
-                action: action(),
-                query: "q".into(),
-                source: ActivationSource::Enter,
-            },
-        );
+        let id = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                ImmediateRequestMetadata {
+                    action: action(),
+                    query: "q".into(),
+                    source: ActivationSource::Enter,
+                },
+            )
+            .unwrap();
         assert!(ic.pending_metadata(id).is_some());
         ic.cancel_pending();
         std::thread::sleep(Duration::from_millis(50));
         assert!(ic.drain_completions().is_empty());
+    }
+
+    #[derive(Clone, Copy)]
+    enum PanicAt {
+        Read,
+        Commit,
+    }
+    struct PanicService {
+        at: PanicAt,
+    }
+    impl ClipboardCommit for PanicService {
+        fn read_text(&self) -> Result<String, ClipboardError> {
+            if matches!(self.at, PanicAt::Read) {
+                panic!("secret source");
+            }
+            Ok("x".into())
+        }
+        fn commit_output(
+            &self,
+            _output: String,
+            _label: &str,
+        ) -> Result<UndoRecord, ClipboardError> {
+            if matches!(self.at, PanicAt::Commit) {
+                panic!("secret output");
+            }
+            Ok(UndoRecord {
+                original_text: "x".into(),
+                modified_text: "X".into(),
+                operation_label: "Run".into(),
+            })
+        }
+    }
+
+    fn meta(query: &str) -> ImmediateRequestMetadata {
+        ImmediateRequestMetadata {
+            action: action(),
+            query: query.into(),
+            source: ActivationSource::Enter,
+        }
+    }
+
+    fn wait_one<S: ClipboardCommit>(
+        ic: &mut ImmediateExecutionCoordinator<S>,
+    ) -> ImmediateCompletionEvent {
+        for _ in 0..50 {
+            if let Some(ev) = ic.drain_completions().pop() {
+                return ev;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("completion not received")
+    }
+
+    #[test]
+    fn immediate_rejects_start_while_pending_without_mutation() {
+        let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));
+        let mut ic = ImmediateExecutionCoordinator::new(svc);
+        let id = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                meta("first"),
+            )
+            .unwrap();
+        let diagnostics = ic.diagnostics().clone();
+        let err = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::DoubleQuote)]),
+                Arc::new(default_catalog()),
+                meta("second"),
+            )
+            .unwrap_err();
+        assert_eq!(err.message, "Clipboard Modify operation already running");
+        assert_eq!(ic.pending_metadata(id).unwrap().query, "first");
+        assert_eq!(ic.diagnostics(), &diagnostics);
+        let _ = wait_one(&mut ic);
+    }
+
+    #[test]
+    fn immediate_panic_during_read_becomes_failure_and_clears_pending() {
+        let mut ic =
+            ImmediateExecutionCoordinator::new(Arc::new(PanicService { at: PanicAt::Read }));
+        let id = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                meta("q"),
+            )
+            .unwrap();
+        let ev = wait_one(&mut ic);
+        assert_eq!(ev.request_id, id);
+        assert_eq!(
+            ev.result.unwrap_err().message,
+            "Clipboard Modify operation failed unexpectedly"
+        );
+        assert!(!ic.has_pending());
+    }
+
+    #[test]
+    fn immediate_panic_during_transformation_becomes_failure_and_clears_pending() {
+        let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));
+        let mut ic = ImmediateExecutionCoordinator::new(svc);
+        let id = ic
+            .start(
+                ClipboardModifyIntent::ApplyTemplate {
+                    name: "missing".into(),
+                },
+                Arc::new(ClipboardModifierCatalog::new(Vec::new(), Vec::new()).unwrap()),
+                meta("q"),
+            )
+            .unwrap();
+        let ev = wait_one(&mut ic);
+        assert_eq!(ev.request_id, id);
+        assert!(ev.result.is_err());
+        assert!(!ic.has_pending());
+    }
+
+    #[test]
+    fn immediate_panic_during_commit_becomes_failure_and_clears_pending() {
+        let mut ic = ImmediateExecutionCoordinator::new(Arc::new(PanicService {
+            at: PanicAt::Commit,
+        }));
+        let id = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                meta("q"),
+            )
+            .unwrap();
+        let ev = wait_one(&mut ic);
+        assert_eq!(ev.request_id, id);
+        assert_eq!(
+            ev.result.unwrap_err().message,
+            "Clipboard Modify operation failed unexpectedly"
+        );
+        assert!(!ic.has_pending());
+    }
+
+    #[test]
+    fn immediate_repaint_after_success_expected_failure_and_panic() {
+        let repaint_count = Arc::new(AtomicUsize::new(0));
+        let mut success = ImmediateExecutionCoordinator::new(Arc::new(ClipboardService::new(
+            FakeClipboardBackend::with_text("x"),
+        )));
+        let c = repaint_count.clone();
+        success.set_repaint_callback(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+        success
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                meta("q"),
+            )
+            .unwrap();
+        let _ = wait_one(&mut success);
+
+        let mut fail = ImmediateExecutionCoordinator::new(Arc::new(ClipboardService::new(
+            FakeClipboardBackend::with_text("x"),
+        )));
+        fail.service
+            .backend()
+            .push(Op::Write(Err(ClipboardError::Permanent("no".into()))));
+        let c = repaint_count.clone();
+        fail.set_repaint_callback(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+        fail.start(
+            ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+            Arc::new(default_catalog()),
+            meta("q"),
+        )
+        .unwrap();
+        let _ = wait_one(&mut fail);
+
+        let mut panicc =
+            ImmediateExecutionCoordinator::new(Arc::new(PanicService { at: PanicAt::Read }));
+        let c = repaint_count.clone();
+        panicc.set_repaint_callback(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+        panicc
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                meta("q"),
+            )
+            .unwrap();
+        let _ = wait_one(&mut panicc);
+        assert_eq!(repaint_count.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -638,7 +859,8 @@ mod tests {
                 query: "q".into(),
                 source: ActivationSource::Click,
             },
-        );
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(50));
         let ev = ic.drain_completions().pop().unwrap();
         assert!(ev.result.is_err());
