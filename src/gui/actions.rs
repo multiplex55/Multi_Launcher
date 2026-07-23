@@ -967,12 +967,21 @@ impl LauncherApp {
                 query: canonical_command,
                 source,
             };
-            let id = self.clipboard_modify_immediate.start(
+            match self.clipboard_modify_immediate.start(
                 intent,
                 self.clipboard_modify_runtime.catalog_snapshot(),
                 meta.clone(),
-            );
-            self.pending_clipboard_modify_immediate.insert(id.0, meta);
+            ) {
+                Ok(id) => {
+                    self.pending_clipboard_modify_immediate.insert(id.0, meta);
+                }
+                Err(err) => {
+                    self.report_clipboard_modify_action_error(err.message);
+                    self.visible_flag.store(true, Ordering::SeqCst);
+                    self.move_cursor_end = true;
+                    self.focus_input();
+                }
+            }
             return true;
         }
 
@@ -1017,8 +1026,11 @@ impl LauncherApp {
                     ));
                     if let Some(meta) = meta {
                         self.query = meta.query;
+                        self.last_results_valid = false;
+                        self.search();
                     }
                     self.visible_flag.store(true, Ordering::SeqCst);
+                    self.move_cursor_end = true;
                     self.focus_input();
                     self.report_error_message("clipboard_modify", err.message.clone());
                 }
@@ -1250,7 +1262,7 @@ mod tests {
 
     #[test]
     fn destructive_confirmation_supports_queue_confirm_and_cancel_paths() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let notes_dir = dir.path().join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
         let original_dir = std::env::current_dir().unwrap();
@@ -1291,7 +1303,7 @@ mod tests {
 
     #[test]
     fn action_execution_errors_flow_through_unified_ui_reporting() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
 
@@ -1328,7 +1340,7 @@ mod tests {
 
     #[test]
     fn activation_source_and_usage_are_recorded_for_successful_actions() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
 
@@ -1529,6 +1541,123 @@ mod clipboard_modify_gui_action_tests {
             ));
             assert_eq!(app.clipboard_modify_dialog.section, dialog_section);
         }
+    }
+
+    #[test]
+    fn concurrent_activation_shows_already_running_and_leaves_launcher_visible() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        let args = encode_action_payload(&execute_stages_payload(vec![StageSpec {
+            operation: OperationId::Uppercase,
+            arguments: StageArguments::default(),
+        }]))
+        .unwrap();
+        let act = action("clipboard_modify:execute", Some(args));
+        assert!(app.handle_clipboard_modify_action(&act, ActivationSource::Enter));
+        let query_before = app.query.clone();
+        assert!(app.handle_clipboard_modify_action(&act, ActivationSource::Enter));
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.query, query_before);
+        assert!(app.move_cursor_end);
+        assert!(
+            app.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Clipboard Modify operation already running")
+        );
+    }
+
+    #[test]
+    fn immediate_failure_restores_canonical_query_and_focus_cursor_flags() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        let meta = ImmediateRequestMetadata {
+            action: action("clipboard_modify:execute", None),
+            query: "cm uppercase".into(),
+            source: ActivationSource::Enter,
+        };
+        app.pending_clipboard_modify_immediate
+            .insert(7, meta.clone());
+        app.query = "changed".into();
+        app.clipboard_modify_immediate.inject_completion_for_test(
+            crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
+                request_id: crate::clipboard_modify::coordinator::OperationId(7),
+                display_label: "Test".into(),
+                character_count: 0,
+                line_count: 0,
+                undo_available: false,
+                result: Err(
+                    crate::clipboard_modify::coordinator::StructuredClipboardModifyError {
+                        message: "boom".into(),
+                    },
+                ),
+            },
+        );
+        app.drain_clipboard_modify_immediate();
+        assert_eq!(app.query, "cm uppercase");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.move_cursor_end);
+        assert!(app.error.as_deref().unwrap_or_default().contains("boom"));
+        assert!(app.usage.get(&meta.action.action).is_none());
+    }
+
+    #[test]
+    fn immediate_success_records_canonical_usage_history_and_hides_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        let meta = ImmediateRequestMetadata {
+            action: action("clipboard_modify:execute", None),
+            query: "cm uppercase".into(),
+            source: ActivationSource::Gesture,
+        };
+        app.pending_clipboard_modify_immediate
+            .insert(8, meta.clone());
+        let before_len = history::get_history().len();
+        app.clipboard_modify_immediate.inject_completion_for_test(
+            crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
+                request_id: crate::clipboard_modify::coordinator::OperationId(8),
+                display_label: "Test".into(),
+                character_count: 1,
+                line_count: 1,
+                undo_available: true,
+                result: Ok(()),
+            },
+        );
+        app.drain_clipboard_modify_immediate();
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.usage.get(&meta.action.action), Some(&1));
+        assert!(history::get_history().len() > before_len);
+        assert_eq!(
+            history::get_history().front().unwrap().query,
+            "cm uppercase"
+        );
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_payload_failure_leaves_coordinator_ready_for_valid_command() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        assert!(app.handle_clipboard_modify_action(
+            &action("clipboard_modify:execute", Some("not-json".into())),
+            ActivationSource::Enter
+        ));
+        assert!(!app.clipboard_modify_immediate.has_pending());
+        let args = encode_action_payload(&execute_stages_payload(vec![StageSpec {
+            operation: OperationId::Uppercase,
+            arguments: StageArguments::default(),
+        }]))
+        .unwrap();
+        assert!(app.handle_clipboard_modify_action(
+            &action("clipboard_modify:execute", Some(args)),
+            ActivationSource::Enter
+        ));
+        assert!(app.clipboard_modify_immediate.has_pending());
     }
 
     #[test]
