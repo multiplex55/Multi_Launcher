@@ -1425,6 +1425,36 @@ fn relationship_actions(
     actions
 }
 
+fn note_meta_wrap_links_actions(
+    matcher: &SkimMatcherV2,
+    guard: &NoteCache,
+    filter: &str,
+) -> Vec<Action> {
+    if filter.is_empty() {
+        return vec![Action {
+            label: "Usage: note meta wrap-links <note>".into(),
+            desc: "Usage".into(),
+            action: "query:note meta wrap-links ".into(),
+            args: None,
+        }];
+    }
+
+    guard
+        .notes
+        .iter()
+        .filter(|n| note_matches_title_or_alias(matcher, n, filter))
+        .map(|n| Action {
+            label: format!(
+                "Wrap plain links in {}",
+                n.alias.as_ref().unwrap_or(&n.title)
+            ),
+            desc: "Note".into(),
+            action: format!("note:meta:wrap-links:{}", n.slug),
+            args: None,
+        })
+        .collect()
+}
+
 fn note_command_action(label: &str, action: &str) -> Action {
     Action {
         label: label.into(),
@@ -1453,6 +1483,9 @@ fn note_command_suggestions(
         note_command_action("note today", "query:note today"),
         note_command_action("note link", "query:note link "),
         note_command_action("note links", "query:note links "),
+        note_command_action("note meta", "query:note meta"),
+        note_command_action("note meta wrap-links", "query:note meta wrap-links "),
+        note_command_action("note meta wrap-links <note>", "query:note meta wrap-links "),
         note_command_action("note rm", "query:note rm "),
         note_command_action("note reload", "note:reload"),
         note_command_action("notes unused", "note:unused_assets"),
@@ -1493,10 +1526,18 @@ fn note_root_suggestions(backlinks_enabled: bool, templates_enabled: bool) -> Ve
         commands.extend([
             note_command_action("note backlinks", "query:note backlinks "),
             note_command_action("note links", "query:note links "),
+            note_command_action("note meta", "query:note meta"),
+            note_command_action("note meta wrap-links", "query:note meta wrap-links "),
+            note_command_action("note meta wrap-links <note>", "query:note meta wrap-links "),
             note_command_action("note mentions", "query:note mentions "),
         ]);
     } else {
-        commands.push(note_command_action("note links", "query:note links "));
+        commands.extend([
+            note_command_action("note links", "query:note links "),
+            note_command_action("note meta", "query:note meta"),
+            note_command_action("note meta wrap-links", "query:note meta wrap-links "),
+            note_command_action("note meta wrap-links <note>", "query:note meta wrap-links "),
+        ]);
     }
     if templates_enabled {
         commands.push(note_command_action(
@@ -1786,6 +1827,40 @@ impl Plugin for NotePlugin {
                         &guard,
                         args,
                         self.backlinks_enabled,
+                    );
+                }
+                "meta" => {
+                    if args.is_empty() {
+                        return note_suggestions_for_query_prefix(
+                            rest,
+                            self.backlinks_enabled,
+                            self.aliases_enabled,
+                            self.templates_enabled,
+                        );
+                    }
+
+                    let mut meta_parts = args.splitn(2, ' ');
+                    let subcmd = meta_parts.next().unwrap_or("");
+                    let note_filter = meta_parts.next().unwrap_or("").trim();
+
+                    if subcmd == "wrap-links" {
+                        return note_meta_wrap_links_actions(&self.matcher, &guard, note_filter);
+                    }
+
+                    let suggestions = note_suggestions_for_query_prefix(
+                        rest,
+                        self.backlinks_enabled,
+                        self.aliases_enabled,
+                        self.templates_enabled,
+                    );
+                    if !suggestions.is_empty() {
+                        return suggestions;
+                    }
+
+                    return note_command_suggestions(
+                        self.backlinks_enabled,
+                        self.aliases_enabled,
+                        self.templates_enabled,
                     );
                 }
                 "rm" => {
@@ -2284,6 +2359,11 @@ mod tests {
             ("note ta", "note tags"),
             ("note gr", "note graph"),
             ("note lin", "note links"),
+            ("note m", "note meta"),
+            ("note meta", "note meta"),
+            ("note meta", "note meta wrap-links"),
+            ("note meta wrap", "note meta wrap-links"),
+            ("note meta wrap-links", "note meta wrap-links"),
             ("note back", "note backlinks"),
             ("note templ", "note templates"),
             ("note template l", "note template list"),
@@ -2319,10 +2399,15 @@ mod tests {
 
         assert!(labels.contains("note alias"));
         assert!(labels.contains("note aliases"));
+        assert!(labels.contains("note meta"));
+        assert!(labels.contains("note meta wrap-links"));
+        assert!(labels.contains("note meta wrap-links <note>"));
         assert!(labels.contains("note template list"));
         assert!(labels.contains("note new"));
         assert!(actions.contains("query:note alias "));
         assert!(actions.contains("query:note aliases"));
+        assert!(actions.contains("query:note meta"));
+        assert!(actions.contains("query:note meta wrap-links "));
         assert!(actions.contains("query:note template list"));
         assert!(actions.contains("query:note new "));
     }
@@ -2962,6 +3047,76 @@ Body",
         let matches = plugin.search("note search cat");
         let labels: Vec<&str> = matches.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels, vec!["Alpha"]);
+
+        restore_cache(original);
+    }
+
+    #[test]
+    fn note_meta_wrap_links_suggests_and_matches_aliases_with_canonical_slugs() {
+        let original = set_notes(vec![
+            Note {
+                title: "Roadmap".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "roadmap".into(),
+                alias: Some("Plan".into()),
+                aliases: vec!["Plan".into()],
+                entity_refs: Vec::new(),
+            },
+            Note {
+                title: "Roadmap Archive".into(),
+                path: PathBuf::new(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "roadmap-archive".into(),
+                alias: Some("Old Plan".into()),
+                aliases: vec!["Old Plan".into()],
+                entity_refs: Vec::new(),
+            },
+        ]);
+        let plugin = NotePlugin {
+            matcher: SkimMatcherV2::default(),
+            data: CACHE.clone(),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            watcher: None,
+        };
+
+        let empty = plugin.search("note meta wrap-links");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].action, "query:note meta wrap-links ");
+
+        let roadmap = plugin.search("note meta wrap-links roadmap");
+        let roadmap_actions: Vec<&str> = roadmap.iter().map(|a| a.action.as_str()).collect();
+        assert_eq!(
+            roadmap_actions,
+            vec![
+                "note:meta:wrap-links:roadmap",
+                "note:meta:wrap-links:roadmap-archive",
+            ]
+        );
+        assert!(
+            roadmap
+                .iter()
+                .any(|a| a.label == "Wrap plain links in Roadmap")
+        );
+
+        let alias = plugin.search("note meta wrap-links old plan");
+        assert_eq!(alias.len(), 1);
+        assert_eq!(alias[0].label, "Wrap plain links in Old Plan");
+        assert_eq!(alias[0].action, "note:meta:wrap-links:roadmap-archive");
+
+        let invalid = plugin.search("note meta unknown");
+        let invalid_labels: HashSet<&str> = invalid.iter().map(|a| a.label.as_str()).collect();
+        assert!(invalid_labels.contains("note meta"));
+        assert!(invalid_labels.contains("note links"));
+        assert!(invalid_labels.contains("note open"));
 
         restore_cache(original);
     }
