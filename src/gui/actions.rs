@@ -1,4 +1,19 @@
 use super::*;
+use crate::gui::note_mutation::{NoteMutationOutcome, NoteMutationOutput, NoteMutationResult};
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+fn format_wrap_links_toast(result: NoteMutationResult) -> String {
+    format!(
+        "Wrapped {} {}; skipped {} existing {}.",
+        result.wrapped_links,
+        pluralize(result.wrapped_links, "link", "links"),
+        result.skipped_existing_links,
+        pluralize(result.skipped_existing_links, "link", "links"),
+    )
+}
 
 fn validate_note_new_payload(slug: &str, template: Option<&str>) -> Result<(), String> {
     let slug_has_whitespace = slug.chars().any(char::is_whitespace);
@@ -473,6 +488,8 @@ impl LauncherApp {
             set_focus = true;
         } else if let Some(link) = a.action.strip_prefix("note:link:") {
             self.open_note_link(link);
+        } else if let Some(slug) = a.action.strip_prefix("note:meta:wrap-links:") {
+            self.wrap_note_plain_links(slug);
         } else if let Some(link_id) = a.action.strip_prefix("link:open:") {
             if let Ok(parsed) = crate::linking::parse_link_id(link_id) {
                 match parsed.target_type {
@@ -1198,6 +1215,40 @@ impl LauncherApp {
         *count += 1;
     }
 
+    fn wrap_note_plain_links(&mut self, slug: &str) {
+        let outcome = self.mutate_note_by_slug(slug, |content| {
+            let report = crate::notes_markdown::links::wrap_plain_urls(content);
+            NoteMutationOutput::changed(
+                report.content,
+                NoteMutationResult {
+                    wrapped_links: report.wrapped,
+                    skipped_existing_links: report.skipped_existing,
+                },
+            )
+        });
+
+        let Ok(outcome) = outcome else {
+            return;
+        };
+
+        let message = match outcome {
+            NoteMutationOutcome::Changed(result) => format_wrap_links_toast(result),
+            NoteMutationOutcome::Unchanged(_) => "No unwrapped links found.".to_string(),
+        };
+
+        if self.enable_toasts {
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    text: message.into(),
+                    kind: ToastKind::Success,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                },
+            );
+        }
+    }
+
     fn handle_launcher_action(&mut self, action: &str) -> bool {
         match action {
             "launcher:toggle" => {
@@ -1234,12 +1285,15 @@ mod tests {
         common::slug::reset_slug_lookup,
         history,
         plugin::PluginManager,
-        plugins::note::{append_note, load_notes, save_notes},
+        plugins::note::{Note, append_note, load_notes, save_note, save_notes},
         settings::Settings,
     };
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use once_cell::sync::Lazy;
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
     use tempfile::tempdir;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     pub(super) fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -1258,6 +1312,170 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn note(title: &str, slug: &str, content: &str) -> Note {
+        Note {
+            title: title.into(),
+            path: Default::default(),
+            content: content.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        }
+    }
+
+    fn setup_notes_app() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        egui::Context,
+        LauncherApp,
+    ) {
+        let dir = tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        save_notes(&[]).unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        (dir, original_dir, ctx, app)
+    }
+
+    fn activate_wrap_links(app: &mut LauncherApp, slug: &str) {
+        app.activate_action_confirmed(
+            Action {
+                label: "Wrap links".into(),
+                desc: "Notes".into(),
+                action: format!("note:meta:wrap-links:{slug}"),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+    }
+
+    #[test]
+    fn wrap_links_action_changes_correct_note_and_reports_counts() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, original_dir, _ctx, mut app) = setup_notes_app();
+        let mut alpha = note(
+            "Alpha",
+            "alpha",
+            "See https://example.com and [kept](https://kept.example).",
+        );
+        let mut beta = note("Beta", "beta", "See https://beta.example.");
+        save_note(&mut alpha, true).unwrap();
+        save_note(&mut beta, true).unwrap();
+
+        activate_wrap_links(&mut app, "alpha");
+
+        let notes = load_notes().unwrap();
+        let alpha = notes.iter().find(|note| note.slug == "alpha").unwrap();
+        let beta = notes.iter().find(|note| note.slug == "beta").unwrap();
+        assert!(
+            alpha
+                .content
+                .contains("[https://example.com](https://example.com)")
+        );
+        assert!(alpha.content.contains("[kept](https://kept.example)"));
+        assert!(beta.content.contains("https://beta.example"));
+        assert!(
+            !beta
+                .content
+                .contains("[https://beta.example](https://beta.example)")
+        );
+        let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("Wrapped 1 link; skipped 1 existing link."));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn wrap_links_toast_formats_plural_counts() {
+        assert_eq!(
+            format_wrap_links_toast(NoteMutationResult {
+                wrapped_links: 1,
+                skipped_existing_links: 0,
+            }),
+            "Wrapped 1 link; skipped 0 existing links."
+        );
+        assert_eq!(
+            format_wrap_links_toast(NoteMutationResult {
+                wrapped_links: 2,
+                skipped_existing_links: 1,
+            }),
+            "Wrapped 2 links; skipped 1 existing link."
+        );
+    }
+
+    #[test]
+    fn wrap_links_noop_shows_message_and_does_not_rewrite_note() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, original_dir, _ctx, mut app) = setup_notes_app();
+        let mut alpha = note("Alpha", "alpha", "Already <https://example.com>.");
+        save_note(&mut alpha, true).unwrap();
+        let path = load_notes().unwrap()[0].path.clone();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        activate_wrap_links(&mut app, "alpha");
+
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+        assert_eq!(app.note_mutation_refresh_count, 0);
+        let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("No unwrapped links found."));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn wrap_links_action_mutates_open_dirty_panel_content() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, original_dir, _ctx, mut app) = setup_notes_app();
+        let mut alpha = note("Alpha", "alpha", "disk https://disk.example");
+        save_note(&mut alpha, true).unwrap();
+        let mut panel = NotePanel::from_note(alpha);
+        panel.replace_content_after_external_mutation("dirty https://dirty.example".into());
+        app.note_panels.push(panel);
+
+        activate_wrap_links(&mut app, "alpha");
+
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "dirty [https://dirty.example](https://dirty.example)"
+        );
+        let saved = load_notes().unwrap().remove(0);
+        assert!(
+            saved
+                .content
+                .contains("dirty [https://dirty.example](https://dirty.example)")
+        );
+        assert!(!saved.content.contains("disk"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn wrap_links_action_loads_mutates_and_saves_closed_note() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, original_dir, _ctx, mut app) = setup_notes_app();
+        let mut alpha = note("Alpha", "alpha", "closed https://closed.example");
+        save_note(&mut alpha, true).unwrap();
+
+        activate_wrap_links(&mut app, "alpha");
+
+        let saved = load_notes().unwrap().remove(0);
+        assert!(
+            saved
+                .content
+                .contains("closed [https://closed.example](https://closed.example)")
+        );
+        assert_eq!(app.note_mutation_refresh_count, 1);
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
