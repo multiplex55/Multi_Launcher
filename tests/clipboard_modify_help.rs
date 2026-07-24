@@ -1,5 +1,5 @@
 use multi_launcher::clipboard_modify::catalog::{control_commands, operations, wrappers};
-use multi_launcher::clipboard_modify::help::build_help_entries;
+use multi_launcher::clipboard_modify::help::{HelpSource, build_help_entries};
 use multi_launcher::clipboard_modify::model::*;
 use multi_launcher::clipboard_modify::parser::{
     ClipboardModifyIntent, ClipboardModifyParseResult, parse,
@@ -31,10 +31,9 @@ fn help_contains_every_registered_operation_control_and_wrapper_alias() {
     let entries = build_help_entries(&catalog());
 
     for op in operations() {
-        let canonical_example = format!("cm {}", op.help_examples[0]);
         let entry = entries
             .iter()
-            .find(|entry| entry.examples.contains(&canonical_example))
+            .find(|entry| entry.source == HelpSource::Operation(op.id))
             .unwrap_or_else(|| panic!("missing operation help for {}", op.command));
         for alias in op.aliases {
             assert!(
@@ -50,7 +49,7 @@ fn help_contains_every_registered_operation_control_and_wrapper_alias() {
     for control in control_commands() {
         let entry = entries
             .iter()
-            .find(|entry| entry.canonical_syntax == control.syntax)
+            .find(|entry| entry.source == HelpSource::ControlCommand(control.syntax.to_string()))
             .unwrap_or_else(|| panic!("missing control help for {}", control.syntax));
         for alias in control.aliases {
             assert!(
@@ -63,11 +62,7 @@ fn help_contains_every_registered_operation_control_and_wrapper_alias() {
     for wrapper in wrappers() {
         let entry = entries
             .iter()
-            .find(|entry| {
-                entry
-                    .canonical_syntax
-                    .starts_with(&format!("cm {}", wrapper.command))
-            })
+            .find(|entry| entry.source == HelpSource::Wrapper(wrapper.command.to_string()))
             .unwrap_or_else(|| panic!("missing wrapper help for {}", wrapper.command));
         for alias in wrapper.aliases {
             assert!(
@@ -83,14 +78,14 @@ fn dynamic_catalog_entries_and_aliases_are_in_help() {
     let entries = build_help_entries(&catalog());
     let template = entries
         .iter()
-        .find(|entry| entry.canonical_syntax == "cm template prompt-context")
+        .find(|entry| entry.source == HelpSource::Template("prompt-context".into()))
         .unwrap();
     assert!(template.aliases.contains(&"pc".to_string()));
     assert!(template.examples.contains(&"cm template pc".to_string()));
 
     let pipeline = entries
         .iter()
-        .find(|entry| entry.canonical_syntax == "cm apply clean-lines")
+        .find(|entry| entry.source == HelpSource::SavedPipeline("clean-lines".into()))
         .unwrap();
     assert!(pipeline.aliases.contains(&"cl".to_string()));
     assert!(pipeline.examples.contains(&"cm apply cl".to_string()));
@@ -122,11 +117,7 @@ fn operation_pipeline_allowed_help_flag_matches_parser_behavior() {
         );
         let entry = entries
             .iter()
-            .find(|entry| {
-                entry
-                    .examples
-                    .contains(&format!("cm {}", op.help_examples[0]))
-            })
+            .find(|entry| entry.source == HelpSource::Operation(op.id))
             .unwrap();
         assert_eq!(entry.pipeline_allowed, parses, "{}", op.command);
     }

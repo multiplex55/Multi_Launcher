@@ -3,9 +3,25 @@ use super::catalog::{
     operations, wrappers,
 };
 use super::model::ClipboardModifierCatalog;
+use super::model::OperationId;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelpSource {
+    ControlCommand(String),
+    Operation(OperationId),
+    Wrapper(String),
+    Template(String),
+    SavedPipeline(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpEntry {
+    /// Registry or dynamic catalog item that produced this entry.
+    ///
+    /// This identity is intentionally separate from display syntax because
+    /// valid entries can overlap (for example, the `template` operation and
+    /// the `cm template` control command).
+    pub source: HelpSource,
     pub canonical_syntax: String,
     pub description: String,
     pub aliases: Vec<String>,
@@ -38,6 +54,7 @@ pub fn build_help_entries(catalog: &ClipboardModifierCatalog) -> Vec<HelpEntry> 
     let mut entries: Vec<HelpEntry> = control_commands()
         .iter()
         .map(|c| HelpEntry {
+            source: HelpSource::ControlCommand(c.syntax.into()),
             canonical_syntax: c.syntax.into(),
             description: c.description.into(),
             aliases: c.aliases.iter().map(|s| s.to_string()).collect(),
@@ -51,6 +68,7 @@ pub fn build_help_entries(catalog: &ClipboardModifierCatalog) -> Vec<HelpEntry> 
     entries.extend(wrappers().iter().map(wrapper_entry));
     entries.extend(catalog.templates.iter().map(|t| {
         HelpEntry {
+            source: HelpSource::Template(t.id.clone()),
             canonical_syntax: format!("cm template {}", t.id),
             description: format!("Apply template '{}' ({})", t.label, t.id),
             aliases: t.aliases.clone(),
@@ -64,6 +82,7 @@ pub fn build_help_entries(catalog: &ClipboardModifierCatalog) -> Vec<HelpEntry> 
     }));
     entries.extend(catalog.pipelines.iter().map(|p| {
         HelpEntry {
+            source: HelpSource::SavedPipeline(p.id.clone()),
             canonical_syntax: format!("cm apply {}", p.id),
             description: format!("Run saved pipeline '{}' ({})", p.label, p.id),
             aliases: p.aliases.clone(),
@@ -80,6 +99,7 @@ pub fn build_help_entries(catalog: &ClipboardModifierCatalog) -> Vec<HelpEntry> 
 
 fn operation_entry(op: &OperationInfo) -> HelpEntry {
     HelpEntry {
+        source: HelpSource::Operation(op.id),
         canonical_syntax: format!(
             "cm {}{}",
             op.command,
@@ -96,6 +116,7 @@ fn operation_entry(op: &OperationInfo) -> HelpEntry {
 
 fn wrapper_entry(wrapper: &WrapperInfo) -> HelpEntry {
     HelpEntry {
+        source: HelpSource::Wrapper(wrapper.command.into()),
         canonical_syntax: format!(
             "cm {}{}",
             wrapper.command,
