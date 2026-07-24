@@ -1159,6 +1159,21 @@ impl NotePanel {
         self.note.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_view_mode(&self) -> NoteViewMode {
+        self.view_mode
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_view_mode(&mut self, view_mode: NoteViewMode) {
+        self.view_mode = view_mode;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_last_edit_at_secs(&self) -> Option<f64> {
+        self.last_edit_at_secs
+    }
+
     pub(crate) fn replace_content_from_mutation(&mut self, content: String, now_secs: f64) {
         if self.note.content == content {
             return;
