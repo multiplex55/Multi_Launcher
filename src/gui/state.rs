@@ -83,11 +83,12 @@ pub(crate) struct PendingConfirmAction {
     pub(crate) source: ActivationSource,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestWatchEvent {
     Actions,
     Folders,
     Bookmarks,
+    ClipboardModify(ClipboardModifyGuiEvent),
 }
 
 impl From<WatchEvent> for TestWatchEvent {
@@ -105,7 +106,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
-            WatchEvent::ClipboardModify(_) => TestWatchEvent::Actions,
+            WatchEvent::ClipboardModify(event) => TestWatchEvent::ClipboardModify(event),
         }
     }
 }
