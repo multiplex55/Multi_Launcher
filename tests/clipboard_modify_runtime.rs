@@ -5,62 +5,71 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-struct Fake {
+struct FakeState {
     text: Mutex<Option<String>>,
     reads: Mutex<VecDeque<Result<String, ClipboardError>>>,
     writes: Mutex<VecDeque<Result<(), ClipboardError>>>,
     committed: Mutex<Vec<String>>,
 }
+
+#[derive(Clone, Default)]
+struct Fake(Arc<FakeState>);
+
 impl Fake {
     fn text(value: &str) -> Self {
-        Self {
+        Self(Arc::new(FakeState {
             text: Mutex::new(Some(value.into())),
             ..Default::default()
-        }
+        }))
     }
 }
-impl ClipboardBackend for Arc<Fake> {
+
+impl ClipboardBackend for Fake {
     fn read_text(&self) -> Result<String, ClipboardError> {
-        if let Some(result) = self.reads.lock().unwrap().pop_front() {
+        if let Some(result) = self.0.reads.lock().unwrap().pop_front() {
             return result;
         }
-        self.text
+        self.0
+            .text
             .lock()
             .unwrap()
             .clone()
             .ok_or(ClipboardError::NonText)
     }
     fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
-        if let Some(result) = self.writes.lock().unwrap().pop_front() {
+        if let Some(result) = self.0.writes.lock().unwrap().pop_front() {
             result?;
         }
-        *self.text.lock().unwrap() = Some(text.into());
-        self.committed.lock().unwrap().push(text.into());
+        *self.0.text.lock().unwrap() = Some(text.into());
+        self.0.committed.lock().unwrap().push(text.into());
         Ok(())
     }
 }
 
 #[test]
 fn retries_transient_reads_and_writes_and_succeeds() {
-    let fake = Arc::new(Fake::text("old"));
-    fake.reads
+    let fake = Fake::text("old");
+    fake.0
+        .reads
         .lock()
         .unwrap()
         .extend([Err(ClipboardError::Busy("read".into())), Ok("old".into())]);
-    fake.writes
+    fake.0
+        .writes
         .lock()
         .unwrap()
         .extend([Err(ClipboardError::Transient("write".into())), Ok(())]);
     let service = ClipboardService::new(fake.clone());
     let record = service.commit_output("new".into(), "test").unwrap();
     assert_eq!(record.original_text, "old");
-    assert_eq!(&*fake.text.lock().unwrap(), &Some("new".into()));
+    assert_eq!(&*fake.0.text.lock().unwrap(), &Some("new".into()));
 }
 
 #[test]
 fn retry_exhaustion_non_text_and_empty_text_are_distinct() {
-    let fake = Arc::new(Fake::text("x"));
-    fake.reads
+    let fake = Fake::text("x");
+    fake.0
+        .reads
         .lock()
         .unwrap()
         .extend((0..4).map(|_| Err(ClipboardError::Busy("busy".into()))));
@@ -69,11 +78,11 @@ fn retry_exhaustion_non_text_and_empty_text_are_distinct() {
         Err(ClipboardError::Busy(_))
     ));
     assert!(matches!(
-        ClipboardService::new(Arc::new(Fake::default())).read_text_for_modify(),
+        ClipboardService::new(Fake::default()).read_text_for_modify(),
         Err(ClipboardError::NonText)
     ));
     assert_eq!(
-        ClipboardService::new(Arc::new(Fake::text("")))
+        ClipboardService::new(Fake::text(""))
             .read_text_for_modify()
             .unwrap(),
         ""
@@ -82,7 +91,7 @@ fn retry_exhaustion_non_text_and_empty_text_are_distinct() {
 
 #[test]
 fn immediate_noop_replaces_undo_and_successful_undo_clears_it() {
-    let service = ClipboardService::new(Arc::new(Fake::text("same")));
+    let service = ClipboardService::new(Fake::text("same"));
     service.commit_output("first".into(), "first").unwrap();
     let record = service.commit_output("first".into(), "noop").unwrap();
     assert_eq!(record.operation_label, "noop");
@@ -93,9 +102,9 @@ fn immediate_noop_replaces_undo_and_successful_undo_clears_it() {
 
 #[test]
 fn external_change_requires_dialog_confirmation_and_becomes_undo_source() {
-    let fake = Arc::new(Fake::text("baseline"));
+    let fake = Fake::text("baseline");
     let service = ClipboardService::new(fake.clone());
-    *fake.text.lock().unwrap() = Some("external".into());
+    *fake.0.text.lock().unwrap() = Some("external".into());
     assert!(matches!(
         service.commit_dialog("baseline", "working", "out", false, "dialog"),
         Err(ClipboardError::ConfirmationRequired(_))
@@ -104,15 +113,16 @@ fn external_change_requires_dialog_confirmation_and_becomes_undo_source() {
         .commit_dialog("baseline", "working", "out", true, "dialog")
         .unwrap();
     assert_eq!(record.original_text, "external");
-    assert_eq!(&*fake.text.lock().unwrap(), &Some("out".into()));
+    assert_eq!(&*fake.0.text.lock().unwrap(), &Some("out".into()));
 }
 
 #[test]
 fn failed_undo_retains_the_record() {
-    let fake = Arc::new(Fake::text("a"));
+    let fake = Fake::text("a");
     let service = ClipboardService::new(fake.clone());
     service.commit_output("b".into(), "change").unwrap();
-    fake.writes
+    fake.0
+        .writes
         .lock()
         .unwrap()
         .push_back(Err(ClipboardError::Permanent("denied".into())));
