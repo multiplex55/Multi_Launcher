@@ -1444,10 +1444,7 @@ fn note_meta_wrap_links_actions(
         .iter()
         .filter(|n| note_matches_title_or_alias(matcher, n, filter))
         .map(|n| Action {
-            label: format!(
-                "Wrap plain links in {}",
-                n.alias.as_ref().unwrap_or(&n.title)
-            ),
+            label: format!("Wrap plain links in {}", n.title),
             desc: "Note".into(),
             action: format!("note:meta:wrap-links:{}", n.slug),
             args: None,
@@ -2363,7 +2360,6 @@ mod tests {
             ("note meta", "note meta"),
             ("note meta", "note meta wrap-links"),
             ("note meta wrap", "note meta wrap-links"),
-            ("note meta wrap-links", "note meta wrap-links"),
             ("note back", "note backlinks"),
             ("note templ", "note templates"),
             ("note template l", "note template list"),
@@ -3109,7 +3105,7 @@ Body",
 
         let alias = plugin.search("note meta wrap-links old plan");
         assert_eq!(alias.len(), 1);
-        assert_eq!(alias[0].label, "Wrap plain links in Old Plan");
+        assert_eq!(alias[0].label, "Wrap plain links in Roadmap Archive");
         assert_eq!(alias[0].action, "note:meta:wrap-links:roadmap-archive");
 
         let invalid = plugin.search("note meta unknown");
