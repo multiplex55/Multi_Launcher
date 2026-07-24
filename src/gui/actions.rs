@@ -1379,10 +1379,18 @@ mod tests {
         let notes = load_notes().unwrap();
         let alpha = notes.iter().find(|note| note.slug == "alpha").unwrap();
         let beta = notes.iter().find(|note| note.slug == "beta").unwrap();
-        assert!(alpha.content.contains("<https://example.com>"));
+        assert!(
+            alpha
+                .content
+                .contains("[https://example.com](https://example.com)")
+        );
         assert!(alpha.content.contains("[kept](https://kept.example)"));
         assert!(beta.content.contains("https://beta.example"));
-        assert!(!beta.content.contains("<https://beta.example>"));
+        assert!(
+            !beta
+                .content
+                .contains("[https://beta.example](https://beta.example)")
+        );
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
         assert!(log.contains("Wrapped 1 link; skipped 1 existing link."));
         std::env::set_current_dir(original_dir).unwrap();
@@ -1439,10 +1447,14 @@ mod tests {
 
         assert_eq!(
             app.note_panels[0].note_content(),
-            "dirty <https://dirty.example>"
+            "dirty [https://dirty.example](https://dirty.example)"
         );
         let saved = load_notes().unwrap().remove(0);
-        assert!(saved.content.contains("dirty <https://dirty.example>"));
+        assert!(
+            saved
+                .content
+                .contains("dirty [https://dirty.example](https://dirty.example)")
+        );
         assert!(!saved.content.contains("disk"));
         std::env::set_current_dir(original_dir).unwrap();
     }
@@ -1457,7 +1469,11 @@ mod tests {
         activate_wrap_links(&mut app, "alpha");
 
         let saved = load_notes().unwrap().remove(0);
-        assert!(saved.content.contains("closed <https://closed.example>"));
+        assert!(
+            saved
+                .content
+                .contains("closed [https://closed.example](https://closed.example)")
+        );
         assert_eq!(app.note_mutation_refresh_count, 1);
         std::env::set_current_dir(original_dir).unwrap();
     }
