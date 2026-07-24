@@ -171,18 +171,20 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_modify_watch_events_map_to_action_refresh_for_tests() {
+    fn clipboard_modify_watch_events_keep_their_content_free_type_for_tests() {
         assert_eq!(
             TestWatchEvent::from(WatchEvent::ClipboardModify(
                 ClipboardModifyGuiEvent::ImmediateOperationComplete
             )),
-            TestWatchEvent::Actions
+            TestWatchEvent::ClipboardModify(ClipboardModifyGuiEvent::ImmediateOperationComplete)
         );
         assert_eq!(
             TestWatchEvent::from(WatchEvent::ClipboardModify(
                 ClipboardModifyGuiEvent::ConfigurationReloadFailure("bad".into())
             )),
-            TestWatchEvent::Actions
+            TestWatchEvent::ClipboardModify(ClipboardModifyGuiEvent::ConfigurationReloadFailure(
+                "bad".into()
+            ))
         );
     }
 

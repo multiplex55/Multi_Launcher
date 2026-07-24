@@ -456,6 +456,7 @@ pub struct LauncherApp {
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
+    clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
     pending_clipboard_modify_immediate: HashMap<u64, ImmediateRequestMetadata>,
     clipboard_modify_immediate: ImmediateExecutionCoordinator<
         crate::clipboard_modify::clipboard::ProductionClipboardService,
@@ -1040,6 +1041,15 @@ impl LauncherApp {
         let (clipboard_modify_runtime, loaded_clipboard_modify) =
             ClipboardModifyRuntime::new(Path::new(&settings_path), clipboard_modify_catalog);
         let clipboard_modify_config_diagnostic = loaded_clipboard_modify.state.startup_diagnostic();
+        let clipboard_modify_watcher =
+            crate::clipboard_modify::watch::ClipboardModifyWatcher::start(
+                clipboard_modify_runtime.store.clone(),
+                Duration::from_millis(150),
+            )
+            .map_err(
+                |error| tracing::warn!(%error, "failed to watch Clipboard Modify configuration"),
+            )
+            .ok();
 
         #[cfg(not(test))]
         match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
@@ -1409,6 +1419,7 @@ impl LauncherApp {
                 clipboard_modify_settings.dialog_height,
             ),
             clipboard_modify_config_diagnostic,
+            clipboard_modify_watcher,
             pending_clipboard_modify_immediate: HashMap::new(),
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
             clipboard_modify_events: Vec::new(),
@@ -1533,6 +1544,9 @@ impl LauncherApp {
         app.update_command_cache();
         app.rebuild_completion_index_now();
         app.search();
+        let repaint_context = ctx.clone();
+        app.clipboard_modify_immediate
+            .set_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app.recompute_query_results_layout();
         app
@@ -2922,10 +2936,10 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Todos
             | WatchEvent::Favorites
             | WatchEvent::Gestures
-            | WatchEvent::ExecuteAction(_)
-            | WatchEvent::ClipboardModify(_) => {
+            | WatchEvent::ExecuteAction(_) => {
                 continue;
             }
+            WatchEvent::ClipboardModify(_) => return Some(ev.into()),
             WatchEvent::Recycle(_) => return Some(ev.into()),
         }
     }

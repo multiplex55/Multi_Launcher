@@ -663,6 +663,15 @@ impl LauncherApp {
 
 impl LauncherApp {
     pub(crate) fn poll_clipboard_modify_runtime(&mut self, ctx: &egui::Context) {
+        let reload_events = self
+            .clipboard_modify_watcher
+            .as_mut()
+            .map(|watcher| watcher.poll(Instant::now()))
+            .unwrap_or_default();
+        for event in reload_events {
+            self.handle_clipboard_modify_gui_event(event);
+            ctx.request_repaint();
+        }
         let preview_finished = self.clipboard_modify_dialog.preview.tick();
         if preview_finished {
             ctx.request_repaint();
@@ -674,6 +683,10 @@ impl LauncherApp {
         }
         if self.clipboard_modify_dialog.preview.is_active()
             || self.clipboard_modify_immediate.has_pending()
+            || self
+                .clipboard_modify_watcher
+                .as_ref()
+                .is_some_and(|watcher| watcher.has_pending_reload())
         {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
@@ -1422,6 +1435,7 @@ impl eframe::App for LauncherApp {
         self.clipboard_modify_immediate.cancel_pending();
         self.pending_clipboard_modify_immediate.clear();
         self.clipboard_modify_events.clear();
+        self.clipboard_modify_watcher = None;
         self.multi_manager.shutdown();
         let multi_manager_save_on_exit = crate::settings::Settings::load(&self.settings_path)
             .map(|settings| settings.multi_manager.save_on_exit)
@@ -1439,6 +1453,24 @@ impl eframe::App for LauncherApp {
         if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
             settings.window_size = Some(self.window_size);
             settings.pinned_panels = self.pinned_panels.clone();
+            // Persist only the explicitly approved, non-sensitive Clipboard
+            // Modify UI geometry. Runtime source/preview/undo data is held only
+            // by the dialog/service and is never serialized into Settings.
+            let mut clipboard_modify_preferences: ClipboardModifyPluginSettings = settings
+                .plugin_settings
+                .get("clipboard_modify")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            clipboard_modify_preferences.dialog_width =
+                self.clipboard_modify_dialog.persisted_window_size.x;
+            clipboard_modify_preferences.dialog_height =
+                self.clipboard_modify_dialog.persisted_window_size.y;
+            if let Ok(value) = serde_json::to_value(clipboard_modify_preferences) {
+                settings
+                    .plugin_settings
+                    .insert("clipboard_modify".into(), value);
+            }
             let _ = settings.save(&self.settings_path);
         }
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
