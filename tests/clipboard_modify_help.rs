@@ -31,13 +31,10 @@ fn help_contains_every_registered_operation_control_and_wrapper_alias() {
     let entries = build_help_entries(&catalog());
 
     for op in operations() {
+        let canonical_example = format!("cm {}", op.help_examples[0]);
         let entry = entries
             .iter()
-            .find(|entry| {
-                entry
-                    .canonical_syntax
-                    .starts_with(&format!("cm {}", op.command))
-            })
+            .find(|entry| entry.examples.contains(&canonical_example))
             .unwrap_or_else(|| panic!("missing operation help for {}", op.command));
         for alias in op.aliases {
             assert!(
@@ -127,8 +124,8 @@ fn operation_pipeline_allowed_help_flag_matches_parser_behavior() {
             .iter()
             .find(|entry| {
                 entry
-                    .canonical_syntax
-                    .starts_with(&format!("cm {}", op.command))
+                    .examples
+                    .contains(&format!("cm {}", op.help_examples[0]))
             })
             .unwrap();
         assert_eq!(entry.pipeline_allowed, parses, "{}", op.command);

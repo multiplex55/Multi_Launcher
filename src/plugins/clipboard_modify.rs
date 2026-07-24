@@ -175,7 +175,7 @@ fn cm_root_actions(catalog: &ClipboardModifierCatalog) -> Vec<Action> {
 fn root_open_modify_action() -> Action {
     let mut action = section_action(ModifySection::Modify);
     action.label = "cm: Open Clipboard Modify".into();
-    action.desc = "Opens the Modify dialog; no clipboard read/write".into();
+    action.desc = "Opens the Clipboard Modify dialog section".into();
     action
 }
 
@@ -309,7 +309,7 @@ fn partial_actions(partial: PartialQuery) -> Vec<Action> {
             Action {
                 label,
                 desc: format!(
-                    "Complete current query as `{}`",
+                    "Complete the query as `{}`",
                     suggestion_query(partial.section, &suggestion)
                 ),
                 action: format!("query:{}", suggestion_query(partial.section, &suggestion)),
@@ -346,7 +346,9 @@ fn suggestion_label(section: ModifySection, suggestion: &str) -> String {
 fn command_action(query: &str, desc: &str) -> Action {
     Action {
         label: query.into(),
-        desc: launcher_desc(query, desc),
+        // Command-palette metadata describes the command itself. Contextual
+        // completion wording belongs on launcher search results instead.
+        desc: desc.into(),
         action: format!("query:{query}"),
         args: None,
     }
@@ -360,7 +362,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             Action {
                 label: "Run Clipboard Modify pipeline".into(),
                 desc: format!(
-                    "Executes {stage_count} stage(s) now; reads clipboard and writes transformed result"
+                    "Executes {stage_count} stage(s) now; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
                 args: encode_action_payload(&payload).ok(),
@@ -373,7 +375,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             Action {
                 label: format!("Apply Clipboard Modify template {name}"),
                 desc: format!(
-                    "Applies template `{name}` now; reads clipboard and writes transformed result"
+                    "Applies template `{name}` now; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
                 args: encode_action_payload(&payload).ok(),
@@ -386,7 +388,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             Action {
                 label: format!("Run Clipboard Modify pipeline {name}"),
                 desc: format!(
-                    "Runs saved pipeline `{name}` now; reads clipboard and writes transformed result"
+                    "Runs saved pipeline `{name}` now; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
                 args: encode_action_payload(&payload).ok(),
