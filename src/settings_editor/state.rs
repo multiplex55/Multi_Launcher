@@ -87,6 +87,7 @@ pub struct SettingsEditor {
     pub(crate) plugin_settings: std::collections::HashMap<String, serde_json::Value>,
     pub(crate) plugins_expanded: bool,
     pub(crate) expand_request: Option<bool>,
+    pub(crate) confirm_clipboard_modify_factory_reset: bool,
 }
 
 impl SettingsEditor {

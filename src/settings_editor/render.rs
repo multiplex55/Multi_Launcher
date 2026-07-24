@@ -315,6 +315,7 @@ impl SettingsEditor {
                 &mut open_mg_settings_dialog,
                 &mut clipboard_modify_command,
                 &clipboard_modify_status,
+                &mut self.confirm_clipboard_modify_factory_reset,
             );
         }
 
@@ -347,6 +348,7 @@ impl SettingsEditor {
         open_mg_settings_dialog: &mut bool,
         clipboard_modify_command: &mut Option<ClipboardModifySettingsCommand>,
         clipboard_modify_status: &str,
+        confirm_factory_reset: &mut bool,
     ) {
         let id = ui.make_persistent_id(format!("plugin_{name}"));
         let mut state =
@@ -382,10 +384,25 @@ impl SettingsEditor {
                                 Some(ClipboardModifySettingsCommand::ReloadConfig);
                         }
                         if ui.button("Reset to factory defaults").clicked() {
-                            *clipboard_modify_command =
-                                Some(ClipboardModifySettingsCommand::ResetFactoryDefaults);
+                            *confirm_factory_reset = true;
                         }
                     });
+                    if *confirm_factory_reset {
+                        ui.group(|ui| {
+                            ui.label("Replace the configuration with factory defaults? A timestamped backup will be created first.");
+                            ui.horizontal(|ui| {
+                                if ui.button("Confirm reset").clicked() {
+                                    *clipboard_modify_command = Some(
+                                        ClipboardModifySettingsCommand::ResetFactoryDefaults,
+                                    );
+                                    *confirm_factory_reset = false;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    *confirm_factory_reset = false;
+                                }
+                            });
+                        });
+                    }
                     ui.label(format!("Configuration status: {clipboard_modify_status}"));
                     ui.separator();
                     plugin.settings_ui(ui, entry);

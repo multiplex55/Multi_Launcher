@@ -141,6 +141,7 @@ impl SettingsEditor {
             plugin_settings: settings.plugin_settings.clone(),
             plugins_expanded: false,
             expand_request: None,
+            confirm_clipboard_modify_factory_reset: false,
         };
         s.plugin_settings
             .entry("screenshot".into())
