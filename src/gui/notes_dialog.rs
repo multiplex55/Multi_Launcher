@@ -86,6 +86,10 @@ fn note_action(label: impl Into<String>, action: impl Into<String>) -> Action {
     }
 }
 
+fn wrap_links_note_action(slug: &str) -> Action {
+    note_action("Wrap links in note", format!("note:meta:wrap-links:{slug}"))
+}
+
 #[derive(Default)]
 pub struct NotesDialog {
     pub open: bool,
@@ -339,6 +343,7 @@ impl NotesDialog {
         let mut save_now = false;
         let mut rebuild_idx = false;
         let mut refresh_entries = false;
+        let mut wrap_links_slug: Option<String> = None;
         egui::Window::new("Quick Notes")
             .open(&mut self.open)
             .resizable(true)
@@ -543,6 +548,12 @@ impl NotesDialog {
                                             );
                                             ui.close_menu();
                                         }
+                                        ui.menu_button("Meta", |ui| {
+                                            if ui.button("Wrap links in note").clicked() {
+                                                wrap_links_slug = Some(entry.slug.clone());
+                                                ui.close_menu();
+                                            }
+                                        });
                                         if ui.button("Remove Note").clicked() {
                                             if entry.slug.is_empty() {
                                                 remove = Some(idx_copy);
@@ -600,6 +611,9 @@ impl NotesDialog {
                     }
                 }
             });
+        if let Some(slug) = wrap_links_slug {
+            app.activate_action(wrap_links_note_action(&slug), None, ActivationSource::Click);
+        }
         if refresh_entries {
             self.entries = cached_notes_or_load();
             rebuild_idx = true;
@@ -626,7 +640,188 @@ mod tests {
     use super::{
         checkbox_count, format_note_timestamp, insert_at_char_boundary, note_action, short_preview,
     };
+    use crate::gui::{LauncherApp, NotePanel};
+    use crate::plugins::note::{Note, load_notes, save_note, save_notes};
+    use crate::{
+        plugin::PluginManager,
+        settings::{NoteViewMode, Settings},
+    };
     use chrono::{Local, TimeZone};
+    use eframe::egui;
+    use once_cell::sync::Lazy;
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
+    use tempfile::tempdir;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn new_app(ctx: &egui::Context) -> LauncherApp {
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            "actions.json".into(),
+            "settings.json".into(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn note(title: &str, slug: &str, content: &str) -> Note {
+        Note {
+            title: title.into(),
+            path: Default::default(),
+            content: content.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        }
+    }
+
+    fn setup() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        egui::Context,
+        LauncherApp,
+    ) {
+        let dir = tempdir().unwrap();
+        let notes_dir = dir.path().join("notes");
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        save_notes(&[]).unwrap();
+        let ctx = egui::Context::default();
+        let app = new_app(&ctx);
+        (dir, notes_dir, ctx, app)
+    }
+
+    #[test]
+    fn wrap_links_context_action_uses_expected_meta_route_for_selected_slug() {
+        let action = super::wrap_links_note_action("alpha");
+
+        assert_eq!(action.label, "Wrap links in note");
+        assert_eq!(action.desc, "Note");
+        assert_eq!(action.action, "note:meta:wrap-links:alpha");
+    }
+
+    #[test]
+    fn quick_notes_wrap_links_saves_closed_note_and_refreshes_entries() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let mut alpha = note("Alpha", "alpha", "visit https://example.com");
+        save_note(&mut alpha, true).unwrap();
+        app.notes_dialog.open();
+        app.notes_dialog.search = "example".into();
+
+        app.wrap_note_plain_links("alpha");
+
+        let saved = load_notes().unwrap().remove(0);
+        assert!(
+            saved
+                .content
+                .contains("[https://example.com](https://example.com)")
+        );
+        assert!(
+            app.notes_dialog.entries[0]
+                .content
+                .contains("[https://example.com](https://example.com)")
+        );
+        assert_eq!(app.notes_dialog.search, "example");
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 1);
+    }
+
+    #[test]
+    fn quick_notes_wrap_links_mutates_open_unsaved_content_from_memory() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let mut alpha = note("Alpha", "alpha", "disk https://disk.example");
+        save_note(&mut alpha, true).unwrap();
+        let mut panel = NotePanel::from_note(alpha);
+        panel.replace_content_after_external_mutation("memory https://memory.example".into());
+        app.note_panels.push(panel);
+
+        app.wrap_note_plain_links("alpha");
+
+        assert!(
+            app.note_panels[0]
+                .note_content()
+                .contains("[https://memory.example](https://memory.example)")
+        );
+        assert!(!app.note_panels[0].note_content().contains("disk.example"));
+        assert!(
+            load_notes().unwrap()[0]
+                .content
+                .contains("[https://memory.example](https://memory.example)")
+        );
+    }
+
+    #[test]
+    fn quick_notes_wrap_links_noop_preserves_content_and_modification_state() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let mut alpha = note("Alpha", "alpha", "already [link](https://example.com)");
+        save_note(&mut alpha, true).unwrap();
+        let mut panel = NotePanel::from_note(alpha);
+        panel.replace_content_after_external_mutation("already [link](https://example.com)".into());
+        let modified_before = panel.test_last_edit_at_secs();
+        app.note_panels.push(panel);
+
+        app.wrap_note_plain_links("alpha");
+
+        assert_eq!(
+            app.note_panels[0].note_content(),
+            "already [link](https://example.com)"
+        );
+        assert_eq!(app.note_panels[0].test_last_edit_at_secs(), modified_before);
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 0);
+    }
+
+    #[test]
+    fn quick_notes_wrap_links_preserves_open_panel_and_view_mode() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let mut alpha = note("Alpha", "alpha", "visit https://example.com");
+        save_note(&mut alpha, true).unwrap();
+        let mut panel = NotePanel::from_note(alpha);
+        panel.open = true;
+        panel.test_set_view_mode(NoteViewMode::Split);
+        app.note_panels.push(panel);
+
+        app.wrap_note_plain_links("alpha");
+
+        assert_eq!(app.note_panels.len(), 1);
+        assert!(app.note_panels[0].open);
+        assert_eq!(app.note_panels[0].test_view_mode(), NoteViewMode::Split);
+    }
+
+    #[test]
+    fn existing_context_action_routes_are_unchanged() {
+        assert_eq!(
+            note_action("Open note", "note:open:alpha").action,
+            "note:open:alpha"
+        );
+        assert_eq!(
+            note_action("Edit note", "note:edit:alpha").action,
+            "note:edit:alpha"
+        );
+        assert_eq!(
+            note_action("Remove note", "note:remove:alpha").action,
+            "note:remove:alpha"
+        );
+        assert_eq!(
+            format!("@todo:{} {}", "todo-1", "Ship it"),
+            "@todo:todo-1 Ship it"
+        );
+    }
 
     #[test]
     fn insert_in_middle() {

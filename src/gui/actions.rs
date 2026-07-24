@@ -1215,7 +1215,7 @@ impl LauncherApp {
         *count += 1;
     }
 
-    fn wrap_note_plain_links(&mut self, slug: &str) {
+    pub(crate) fn wrap_note_plain_links(&mut self, slug: &str) {
         let outcome = self.mutate_note_by_slug(slug, |content| {
             let report = crate::notes_markdown::links::wrap_plain_urls(content);
             NoteMutationOutput::changed(
