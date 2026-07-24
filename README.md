@@ -369,7 +369,7 @@ The improved file-search plugin does **not** include these deferred features yet
 
 ## Clipboard Modify
 
-Clipboard Modify is a clipboard transformation surface available from the launcher with `cm` and from the Clipboard Modify dialog. Help in the dialog is generated from the same operation registry, template catalog, and saved-pipeline catalog used by execution, so custom templates and pipelines appear after configuration reloads. See [docs/clipboard_modify.md](docs/clipboard_modify.md) for the full operation catalog, syntax, schema, validation, undo, privacy, large-input, race-behavior, and recovery details.
+Clipboard Modify is a clipboard transformation surface available from the launcher with `cm` and from the Clipboard Modify dialog. Help in the dialog is generated from the same operation registry, wrapper registry, control-command metadata, template catalog, and saved-pipeline catalog used by execution, so custom templates and pipelines appear after configuration reloads. See [docs/clipboard_modify.md](docs/clipboard_modify.md) for the full operation catalog, syntax, schema, validation, undo, privacy, large-input, race-behavior, and recovery details.
 
 Common examples:
 

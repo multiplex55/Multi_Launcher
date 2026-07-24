@@ -23,6 +23,26 @@ pub enum ArgumentRequirements {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapperInfo {
+    pub command: &'static str,
+    pub description: &'static str,
+    pub aliases: &'static [&'static str],
+    pub argument_requirements: ArgumentRequirements,
+    pub pipeline_available: bool,
+    pub help_examples: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlCommandInfo {
+    pub syntax: &'static str,
+    pub description: &'static str,
+    pub aliases: &'static [&'static str],
+    pub argument_requirements: &'static str,
+    pub examples: &'static [&'static str],
+    pub pipeline_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationInfo {
     pub id: OperationId,
     pub command: &'static str,
@@ -459,4 +479,115 @@ pub fn reserved_names() -> BTreeSet<String> {
         }
     }
     s
+}
+
+pub static WRAPPERS: Lazy<Vec<WrapperInfo>> = Lazy::new(|| {
+    vec![
+        WrapperInfo {
+            command: "wrap",
+            description: "Custom wrapper shorthand",
+            aliases: &["custom-wrap"],
+            argument_requirements: ArgumentRequirements::CustomWrap,
+            pipeline_available: true,
+            help_examples: &["wrap '<' '>'", "wrap \"<!-- \" \" -->\""],
+        },
+        WrapperInfo {
+            command: "wrap markdown-quote",
+            description: "Apply the markdown-quote named wrapper",
+            aliases: &["wrap md-quote"],
+            argument_requirements: ArgumentRequirements::NamedWrap,
+            pipeline_available: true,
+            help_examples: &["wrap markdown-quote", "wrap md-quote"],
+        },
+    ]
+});
+
+pub static CONTROL_COMMANDS: Lazy<Vec<ControlCommandInfo>> = Lazy::new(|| {
+    vec![
+        ControlCommandInfo {
+            syntax: "cm",
+            description: "Open the Modify dialog section",
+            aliases: &[],
+            argument_requirements: "none",
+            examples: &["cm"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm modify",
+            description: "Open the Modify dialog section",
+            aliases: &[],
+            argument_requirements: "none",
+            examples: &["cm modify"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm template",
+            description: "Open the Templates dialog section",
+            aliases: &[],
+            argument_requirements: "optional template name",
+            examples: &["cm template", "cm template prompt-context"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm apply",
+            description: "Open the Saved Pipelines dialog section",
+            aliases: &[],
+            argument_requirements: "optional saved pipeline name",
+            examples: &["cm apply", "cm apply clean-lines"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm manage-templates",
+            description: "Open the Manage Templates dialog section",
+            aliases: &[],
+            argument_requirements: "none",
+            examples: &["cm manage-templates"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm manage-pipelines",
+            description: "Open the Manage Pipelines dialog section",
+            aliases: &[],
+            argument_requirements: "none",
+            examples: &["cm manage-pipelines"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm help",
+            description: "Open Clipboard Modify syntax help",
+            aliases: &[],
+            argument_requirements: "none",
+            examples: &["cm help"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm undo",
+            description: "Restore the clipboard text captured before the last Clipboard Modify write",
+            aliases: &[],
+            argument_requirements: "none",
+            examples: &["cm undo"],
+            pipeline_available: false,
+        },
+        ControlCommandInfo {
+            syntax: "cm <stage> | <stage>",
+            description: "Run pipeline-capable stages left-to-right",
+            aliases: &["pipe"],
+            argument_requirements: "one or more pipeline-capable stages",
+            examples: &["cm trim-lines | unique-lines | sort-ascending"],
+            pipeline_available: false,
+        },
+    ]
+});
+
+pub fn wrappers() -> &'static [WrapperInfo] {
+    &WRAPPERS
+}
+pub fn control_commands() -> &'static [ControlCommandInfo] {
+    &CONTROL_COMMANDS
+}
+pub fn wrapper_lookup(name: &str) -> Option<&'static WrapperInfo> {
+    let n = normalize_name(name);
+    wrappers().iter().find(|w| {
+        normalize_name(w.command) == n || w.aliases.iter().any(|a| normalize_name(a) == n)
+    })
 }
