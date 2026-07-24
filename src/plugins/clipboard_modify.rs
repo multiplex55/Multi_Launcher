@@ -187,17 +187,14 @@ fn cm_root_suggestions(catalog: &ClipboardModifierCatalog) -> Vec<Action> {
         query_action(
             &format!("cm apply {}", pipeline.id),
             &format!("Pipeline: {} ({})", pipeline.label, pipeline.id),
-            &format!("Replace the launcher query with `cm apply {}`", pipeline.id),
+            &format!("Complete query to apply saved pipeline `{}`", pipeline.id),
         )
     }));
     actions.extend(catalog.templates.iter().map(|template| {
         query_action(
             &format!("cm template {}", template.id),
             &format!("Template: {} ({})", template.label, template.id),
-            &format!(
-                "Replace the launcher query with `cm template {}`",
-                template.id
-            ),
+            &format!("Complete query to apply template `{}`", template.id),
         )
     }));
     actions
@@ -229,7 +226,7 @@ fn cm_operation_suggestions() -> Vec<Action> {
             query_action(
                 &query,
                 &format!("{}: {}", op.command, op.label),
-                op.description,
+                &format!("Complete query; {}", op.description),
             )
         })
         .collect()
@@ -246,7 +243,7 @@ fn cm_static_commands() -> Vec<Action> {
 fn query_action(query: &str, label: &str, desc: &str) -> Action {
     Action {
         label: label.into(),
-        desc: desc.into(),
+        desc: launcher_desc(query, desc),
         action: format!("query:{query}"),
         args: None,
     }
@@ -295,7 +292,9 @@ fn section_action(section: ModifySection) -> Action {
     };
     Action {
         label,
-        desc: format!("Open the Clipboard Modify {section_name} dialog section"),
+        desc: format!(
+            "Opens the Clipboard Modify {section_name} dialog section; no clipboard read/write"
+        ),
         action: format!("clipboard_modify:open:{section_slug}"),
         args: encoded,
     }
@@ -347,6 +346,8 @@ fn suggestion_label(section: ModifySection, suggestion: &str) -> String {
 fn command_action(query: &str, desc: &str) -> Action {
     Action {
         label: query.into(),
+        // Command-palette metadata describes the command itself. Contextual
+        // completion wording belongs on launcher search results instead.
         desc: desc.into(),
         action: format!("query:{query}"),
         args: None,
@@ -361,7 +362,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             Action {
                 label: "Run Clipboard Modify pipeline".into(),
                 desc: format!(
-                    "Runs {stage_count} Clipboard Modify stage(s); reads the current clipboard and writes the transformed result"
+                    "Executes {stage_count} stage(s) now; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
                 args: encode_action_payload(&payload).ok(),
@@ -374,7 +375,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             Action {
                 label: format!("Apply Clipboard Modify template {name}"),
                 desc: format!(
-                    "Applies template `{name}` immediately; reads the current clipboard and writes the transformed result"
+                    "Applies template `{name}` now; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
                 args: encode_action_payload(&payload).ok(),
@@ -387,7 +388,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             Action {
                 label: format!("Run Clipboard Modify pipeline {name}"),
                 desc: format!(
-                    "Runs saved pipeline `{name}` immediately; reads the current clipboard and writes the transformed result"
+                    "Runs saved pipeline `{name}` now; reads the current clipboard and writes the transformed result"
                 ),
                 action: "clipboard_modify:execute".into(),
                 args: encode_action_payload(&payload).ok(),
@@ -398,7 +399,7 @@ fn execution_action(intent: ClipboardModifyIntent, catalog: &ClipboardModifierCa
             let encoded = encode_action_payload(&payload).ok();
             Action {
                 label: "Undo Clipboard Modify".into(),
-                desc: "Restores the clipboard text captured before the last Clipboard Modify write"
+                desc: "Executes undo now; writes clipboard text captured before the last Clipboard Modify write"
                     .into(),
                 action: "clipboard_modify:undo".into(),
                 args: encoded,
@@ -827,17 +828,29 @@ mod tests {
         assert!(
             p.search("cm template prompt context")[0]
                 .desc
-                .contains("template `prompt context` immediately")
+                .contains("template `prompt context` now")
         );
         assert!(
             p.search("cm apply clean lines")[0]
                 .desc
-                .contains("saved pipeline `clean lines` immediately")
+                .contains("saved pipeline `clean lines` now")
         );
     }
 
     #[test]
     fn search_does_not_touch_clipboard_services() {
         let _ = plugin().search("cm upper");
+    }
+}
+
+fn launcher_desc(query: &str, desc: &str) -> String {
+    match query {
+        "cm" => "Complete query to open Clipboard Modify".into(),
+        "cm help" => "Complete query to report syntax help".into(),
+        "cm undo" => "Complete query to execute undo".into(),
+        _ if query.starts_with("cm ") && desc.starts_with("Open ") => {
+            format!("Complete query to {desc}")
+        }
+        _ => desc.into(),
     }
 }

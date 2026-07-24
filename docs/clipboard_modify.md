@@ -1,6 +1,6 @@
 # Clipboard Modify
 
-Clipboard Modify is launched with the `cm` prefix. It reads the current text clipboard, transforms it, and writes the transformed result back to the clipboard for execution actions. The dialog Help section is generated from the operation registry plus the current template and saved-pipeline catalogs.
+Clipboard Modify is launched with the `cm` prefix. It reads the current text clipboard, transforms it, and writes the transformed result back to the clipboard for execution actions. The dialog Help section is generated from the operation registry, wrapper registry, control-command metadata, and the current template and saved-pipeline catalogs.
 
 ## Baseline operation catalog
 
@@ -58,6 +58,8 @@ Completion rows use a two-Enter flow. Pressing **Enter** the first time on a com
 
 ## Commands and pipeline syntax
 
+- Control-command help is registry-backed for `cm`, `cm modify`, `cm template`, `cm apply`, `cm manage-templates`, `cm manage-pipelines`, `cm help`, `cm undo`, and pipeline syntax.
+- Named wrapper help is registry-backed for the `wrap` shorthand and built-in named wrapper shorthands such as `wrap markdown-quote` / `wrap md-quote`; named wrappers resolve through the template catalog and reject saved-pipeline names to prevent nested pipeline execution.
 - `cm undo` restores the clipboard text captured before the last Clipboard Modify write when typed directly.
 - Pipeline stages are separated with `|`, for example `cm trim-lines | unique-lines | sort-ascending`.
 - Custom wrapper values can be quoted with single or double quotes when they contain spaces, pipes, or quote characters: `cm wrap "<!-- " " -->"`.

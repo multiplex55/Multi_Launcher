@@ -582,10 +582,11 @@ fn parse_wrap_stage(stage: &Stage, idx: usize) -> Result<StageSpec, ClipboardMod
 }
 
 fn is_known_wrapper(name: &str) -> bool {
-    matches!(
-        normalize_name(name).as_str(),
-        "quotes" | "single-quote" | "double-quote" | "backticks" | "markdown-quote"
-    )
+    super::catalog::wrapper_lookup(&format!("wrap {name}")).is_some()
+        || matches!(
+            normalize_name(name).as_str(),
+            "quotes" | "single-quote" | "double-quote" | "backticks"
+        )
 }
 
 fn longest_op(tokens: &[Token]) -> Option<(&'static super::catalog::OperationInfo, usize)> {
