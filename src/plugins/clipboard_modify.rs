@@ -13,34 +13,7 @@ use crate::clipboard_modify::parser::{
 use crate::clipboard_modify::store::SharedClipboardModifierCatalog;
 use crate::plugin::Plugin;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClipboardModifyPluginSettings {
-    pub dialog_width: f32,
-    pub dialog_height: f32,
-    pub navigation_width: f32,
-    pub source_preview_split_ratio: f32,
-    pub template_filter: String,
-    pub pipeline_filter: String,
-    pub management_sort_field: String,
-    pub management_sort_ascending: bool,
-}
-
-impl Default for ClipboardModifyPluginSettings {
-    fn default() -> Self {
-        Self {
-            dialog_width: 900.0,
-            dialog_height: 640.0,
-            navigation_width: 150.0,
-            source_preview_split_ratio: 0.5,
-            template_filter: String::new(),
-            pipeline_filter: String::new(),
-            management_sort_field: "name".into(),
-            management_sort_ascending: true,
-        }
-    }
-}
+pub use crate::settings::ClipboardModifyPluginSettings;
 
 pub fn migrate_enablement(settings: &mut crate::settings::Settings) -> bool {
     if settings.plugin_settings.contains_key("clipboard_modify") {
