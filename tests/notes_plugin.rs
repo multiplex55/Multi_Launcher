@@ -421,3 +421,51 @@ fn link_validation_rejects_invalid_urls() {
         ]
     );
 }
+
+#[test]
+fn note_meta_wrap_links_integration_parses_aliases_and_preserves_links_regression() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _tmp = setup();
+    append_note("Roadmap", "# Roadmap\nAlias: Plan\nAliases: Old Plan, Strategy\n\nSee https://roadmap.example and [[Second Note]].").unwrap();
+    append_note("Second Note", "# Second Note\n\nBacklink to [[Roadmap]].").unwrap();
+    let plugin = NotePlugin::default();
+
+    let meta_labels: Vec<String> = plugin
+        .search("note meta")
+        .into_iter()
+        .map(|action| action.label)
+        .collect();
+    assert!(meta_labels.contains(&"note meta".to_string()));
+    assert!(meta_labels.contains(&"note meta wrap-links".to_string()));
+    assert!(meta_labels.contains(&"note meta wrap-links <note>".to_string()));
+
+    let usage = plugin.search("note meta wrap-links");
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].label, "Usage: note meta wrap-links <note>");
+    assert_eq!(usage[0].action, "query:note meta wrap-links ");
+
+    let alias_match = plugin.search("note meta wrap-links old plan");
+    assert_eq!(alias_match.len(), 1);
+    assert_eq!(alias_match[0].label, "Wrap plain links in Roadmap");
+    assert_eq!(alias_match[0].action, "note:meta:wrap-links:roadmap");
+
+    let invalid_labels: Vec<String> = plugin
+        .search("note meta bad-subcommand")
+        .into_iter()
+        .map(|action| action.label)
+        .collect();
+    assert!(invalid_labels.contains(&"note links".to_string()));
+    assert!(invalid_labels.contains(&"note meta".to_string()));
+
+    let links = plugin.search("note links Plan");
+    assert!(
+        links
+            .iter()
+            .any(|action| action.label.contains("Second Note"))
+    );
+    assert!(
+        links
+            .iter()
+            .any(|action| action.action == "note:open:second-note")
+    );
+}
