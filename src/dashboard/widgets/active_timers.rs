@@ -71,9 +71,31 @@ impl ActiveTimersWidget {
             format!("{:02}:{:02}", m, s)
         }
     }
+
+    fn new_timer_action() -> WidgetAction {
+        WidgetAction {
+            action: Action {
+                label: "New Timer".into(),
+                desc: "Timer".into(),
+                action: "timer:dialog:timer".into(),
+                args: None,
+            },
+            query_override: None,
+        }
+    }
 }
 
 impl Widget for ActiveTimersWidget {
+    fn header_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &DashboardContext<'_>,
+    ) -> Option<WidgetAction> {
+        ui.small_button("New Timer")
+            .clicked()
+            .then(Self::new_timer_action)
+    }
+
     fn render(
         &mut self,
         ui: &mut egui::Ui,
@@ -133,5 +155,21 @@ impl Widget for ActiveTimersWidget {
         }
 
         clicked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveTimersWidget;
+
+    #[test]
+    fn new_timer_action_uses_existing_dialog_route_without_overrides() {
+        let action = ActiveTimersWidget::new_timer_action();
+
+        assert_eq!(action.action.label, "New Timer");
+        assert_eq!(action.action.desc, "Timer");
+        assert_eq!(action.action.action, "timer:dialog:timer");
+        assert_eq!(action.action.args, None);
+        assert_eq!(action.query_override, None);
     }
 }
