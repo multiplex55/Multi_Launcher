@@ -2636,7 +2636,12 @@ impl NotePanel {
             self.build_textedit_menu(ui, &ctx2, resp.id, app);
         });
         if resp.has_focus() && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Period)) {
-            if let Some(range) = selected_char_range(&state)
+            // The right-click restoration path may have consumed `state` while
+            // storing it. Reloading also snapshots the authoritative live state
+            // immediately before the keyboard menu is opened.
+            let keyboard_state =
+                egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
+            if let Some(range) = selected_char_range(&keyboard_state)
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
             {
                 self.pending_selection = Some(range);
