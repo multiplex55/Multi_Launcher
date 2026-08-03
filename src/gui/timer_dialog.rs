@@ -13,7 +13,7 @@ pub struct TimerDialog {
     focus_duration_next_frame: bool,
 }
 
-#[derive(Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 enum Mode {
     #[default]
     Timer,
