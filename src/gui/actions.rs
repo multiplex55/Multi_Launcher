@@ -107,6 +107,8 @@ impl LauncherApp {
             self.move_cursor_end = true;
             if let Some(action) = self.results.first().cloned() {
                 self.activate_action(action, None, source);
+            } else {
+                self.focus_input();
             }
             return;
         } else if let Some(new_q) = a.action.strip_prefix("query:") {
