@@ -6,7 +6,7 @@ pub mod parse;
 pub mod sections;
 pub mod task_list;
 
-pub use links::{WrapLinksReport, wrap_plain_urls};
+pub use links::{PlainLinkConversionReport, WrapLinksReport, convert_plain_links, wrap_plain_urls};
 pub use parse::{analyze_markdown, analyze_markdown_with_max_outline_depth};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

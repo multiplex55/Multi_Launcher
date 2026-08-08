@@ -9,6 +9,288 @@ pub struct WrapLinksReport {
     pub skipped_existing: usize,
 }
 
+/// The result of converting web addresses and absolute Windows paths in a note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlainLinkConversionReport {
+    pub content: String,
+    pub web_links: usize,
+    pub directories: usize,
+    pub files: usize,
+    pub skipped_existing: usize,
+    pub skipped_invalid_paths: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathClassification {
+    File,
+    Directory,
+    Missing,
+}
+
+/// Converts plain web addresses and existing absolute Windows filesystem paths.
+///
+/// Unlike [`wrap_plain_urls`], this is deliberately allowed to consult the
+/// filesystem and uses compact, escaped link labels.
+pub fn convert_plain_links(content: &str) -> PlainLinkConversionReport {
+    convert_plain_links_with(content, |path| match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => PathClassification::File,
+        Ok(metadata) if metadata.is_dir() => PathClassification::Directory,
+        _ => PathClassification::Missing,
+    })
+}
+
+fn convert_plain_links_with(
+    content: &str,
+    mut classify: impl FnMut(&str) -> PathClassification,
+) -> PlainLinkConversionReport {
+    let protected = protected_ranges(content);
+    let skipped_existing = protected
+        .iter()
+        .filter(|range| {
+            range.count_existing && contains_new_recognized_target(&content[range.start..range.end])
+        })
+        .count();
+    let mut report = PlainLinkConversionReport {
+        content: String::with_capacity(content.len()),
+        web_links: 0,
+        directories: 0,
+        files: 0,
+        skipped_existing,
+        skipped_invalid_paths: 0,
+    };
+    let mut copied = 0;
+    for range in unprotected_ranges(content.len(), &protected) {
+        report.content.push_str(&content[copied..range.start]);
+        convert_range(content, range.start, range.end, &mut classify, &mut report);
+        copied = range.end;
+    }
+    report.content.push_str(&content[copied..]);
+    report
+}
+
+fn convert_range(
+    content: &str,
+    start: usize,
+    end: usize,
+    classify: &mut impl FnMut(&str) -> PathClassification,
+    report: &mut PlainLinkConversionReport,
+) {
+    let mut copied = start;
+    let mut i = start;
+    while i < end {
+        if !content.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        if let Some((candidate_end, destination, label)) = new_web_at(content, i, end) {
+            report.content.push_str(&content[copied..i]);
+            push_link(&mut report.content, &label, &destination);
+            report.web_links += 1;
+            copied = candidate_end;
+            i = candidate_end;
+            continue;
+        }
+        if is_windows_root_at(content, i, end) && path_start_boundary(content, i) {
+            let scan_end = path_scan_end(content, i, end);
+            let endpoints = path_endpoints(content, i, scan_end);
+            let mut valid = Vec::new();
+            for endpoint in endpoints {
+                let raw = &content[i..endpoint];
+                let trimmed = raw.trim_end_matches([' ', '\t']);
+                let actual_end = i + trimmed.len();
+                if actual_end > i {
+                    let kind = classify(trimmed);
+                    if kind != PathClassification::Missing {
+                        valid.push((actual_end, kind));
+                    }
+                }
+            }
+            valid.sort_by_key(|item| item.0);
+            valid.dedup_by_key(|item| item.0);
+            // If both sides of a prose-looking space are real paths, there is
+            // no byte-level evidence that says whether the prose is part of
+            // the name. Refuse to guess.
+            if valid.len() == 1
+                && let Some(&(path_end, kind)) = valid.last()
+            {
+                let rest = &content[path_end..scan_end];
+                let partial_child = rest.starts_with(['\\', '/'])
+                    || rest
+                        .trim_start_matches([' ', '\t'])
+                        .starts_with(['\\', '/']);
+                if !partial_child {
+                    let raw = &content[i..path_end];
+                    if let Some(destination) = windows_file_url(raw) {
+                        report.content.push_str(&content[copied..i]);
+                        push_link(&mut report.content, &path_label(raw), destination.as_str());
+                        match kind {
+                            PathClassification::File => report.files += 1,
+                            PathClassification::Directory => report.directories += 1,
+                            PathClassification::Missing => unreachable!(),
+                        }
+                        copied = path_end;
+                        i = path_end;
+                        continue;
+                    }
+                }
+            }
+            report.skipped_invalid_paths += 1;
+            // Move beyond the root marker, rather than the line, so an invalid
+            // path cannot hide a later independent URL or path candidate.
+            i += 3.min(scan_end - i);
+            continue;
+        }
+        i += content[i..].chars().next().unwrap().len_utf8();
+    }
+    report.content.push_str(&content[copied..end]);
+}
+
+fn push_link(out: &mut String, label: &str, destination: &str) {
+    out.push('[');
+    out.push_str(&escape_label(label));
+    out.push_str("](");
+    out.push_str(destination);
+    out.push(')');
+}
+
+fn escape_label(label: &str) -> String {
+    label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
+fn new_web_at(content: &str, i: usize, end: usize) -> Option<(usize, String, String)> {
+    if i > 0 && is_url_word(content.as_bytes()[i - 1]) {
+        return None;
+    }
+    let www = content[i..end].starts_with("www.");
+    if !www && !content[i..end].starts_with("http://") && !content[i..end].starts_with("https://") {
+        return None;
+    }
+    let mut raw_end = i;
+    for (offset, ch) in content[i..end].char_indices() {
+        if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'') {
+            break;
+        }
+        raw_end = i + offset + ch.len_utf8();
+    }
+    let mut candidate_end = raw_end;
+    while candidate_end > i {
+        let s = &content[i..candidate_end];
+        let ch = s.chars().next_back()?;
+        if matches!(ch, '.' | ',' | ';' | ':' | '!' | '?') || is_unmatched_closer(s, ch) {
+            candidate_end -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let raw = &content[i..candidate_end];
+    let destination = if www {
+        format!("https://{raw}")
+    } else {
+        raw.to_owned()
+    };
+    let url = Url::parse(&destination).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.to_owned();
+    let without_www = host
+        .strip_prefix("www.")
+        .or_else(|| {
+            host.get(..4)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("www."))
+                .map(|_| &host[4..])
+        })
+        .unwrap_or(&host);
+    let ordinary = without_www.contains('.') && without_www.parse::<std::net::IpAddr>().is_err();
+    let label = if ordinary {
+        without_www.split('.').next().unwrap()
+    } else {
+        without_www
+    }
+    .to_owned();
+    Some((candidate_end, destination, label))
+}
+
+fn is_windows_root_at(content: &str, i: usize, end: usize) -> bool {
+    let b = content.as_bytes();
+    (i + 2 < end && b[i].is_ascii_alphabetic() && b[i + 1] == b':' && b[i + 2] == b'\\')
+        || (i + 1 < end && b[i] == b'\\' && b[i + 1] == b'\\' && unc_has_share(&content[i..end]))
+}
+
+fn unc_has_share(s: &str) -> bool {
+    let mut parts = s[2..].split('\\');
+    parts.next().is_some_and(|p| !p.is_empty()) && parts.next().is_some_and(|p| !p.is_empty())
+}
+
+fn path_start_boundary(content: &str, i: usize) -> bool {
+    i == 0
+        || content[..i].chars().next_back().is_some_and(|c| {
+            c.is_whitespace() || matches!(c, '(' | '[' | '{' | ':' | '>' | '"' | '\'')
+        })
+}
+
+fn path_scan_end(content: &str, start: usize, end: usize) -> usize {
+    content[start..end]
+        .find(['\r', '\n'])
+        .map_or(end, |n| start + n)
+}
+
+fn path_endpoints(content: &str, start: usize, end: usize) -> Vec<usize> {
+    let mut points = vec![end];
+    for (off, ch) in content[start..end].char_indices() {
+        if matches!(ch, ' ' | '\t' | ',' | ';' | ')' | ']' | '}') {
+            points.push(start + off);
+        }
+    }
+    points
+}
+
+fn path_label(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    if trimmed.len() == 2 && trimmed.as_bytes()[1] == b':' {
+        return trimmed.to_owned();
+    }
+    std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|name| !name.contains('\\'))
+        .or_else(|| trimmed.rsplit(['\\', '/']).find(|p| !p.is_empty()))
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+fn windows_file_url(path: &str) -> Option<Url> {
+    let normalized = path.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//") {
+        let (host, tail) = rest.split_once('/')?;
+        let mut url = Url::parse(&format!("file://{host}/")).ok()?;
+        {
+            let mut segments = url.path_segments_mut().ok()?;
+            segments.pop_if_empty();
+            segments.extend(tail.split('/'));
+        }
+        Some(url)
+    } else {
+        let mut url = Url::parse("file:///").ok()?;
+        {
+            let mut segments = url.path_segments_mut().ok()?;
+            segments.pop_if_empty();
+            segments.extend(normalized.split('/'));
+        }
+        Some(url)
+    }
+}
+
+fn contains_new_recognized_target(s: &str) -> bool {
+    (0..s.len()).any(|i| {
+        s.is_char_boundary(i)
+            && (new_web_at(s, i, s.len()).is_some() || is_windows_root_at(s, i, s.len()))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProtectedRange {
     start: usize,
@@ -409,7 +691,7 @@ fn is_line_start_or_after_spaces(bytes: &[u8], i: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_plain_urls;
+    use super::{PathClassification, convert_plain_links_with, wrap_plain_urls};
 
     fn wrap(content: &str) -> (String, usize, usize) {
         let report = wrap_plain_urls(content);
@@ -651,5 +933,108 @@ mod tests {
     #[test]
     fn skipped_existing_counts_only_markdown_and_autolink() {
         assert_eq!(wrap("[x](https://a.com) `https://b.com` <span data-u=\"https://c.com\"></span> <https://d.com>"), ("[x](https://a.com) `https://b.com` <span data-u=\"https://c.com\"></span> <https://d.com>".into(), 0, 2));
+    }
+
+    fn convert_with(
+        content: &str,
+        entries: &[(&str, PathClassification)],
+    ) -> super::PlainLinkConversionReport {
+        convert_plain_links_with(content, |candidate| {
+            entries
+                .iter()
+                .find_map(|(path, kind)| (*path == candidate).then_some(*kind))
+                .unwrap_or(PathClassification::Missing)
+        })
+    }
+
+    #[test]
+    fn converter_uses_compact_web_labels_and_preserves_destinations() {
+        let report = convert_with(
+            "www.google.com, http://google.com https://www.youtube.com:443/watch?v=123#here",
+            &[],
+        );
+        assert_eq!(
+            report.content,
+            "[google](https://www.google.com), [google](http://google.com) [youtube](https://www.youtube.com:443/watch?v=123#here)"
+        );
+        assert_eq!(report.web_links, 3);
+    }
+
+    #[test]
+    fn converter_protects_markdown_code_wiki_and_is_idempotent() {
+        let source = "[x](https://a.com) ![x](https://b.com) <https://c.com> [[https://d.com]] ![[https://e.com]] `https://f.com`\n~~~\nhttps://g.com\n~~~\nwww.google.com";
+        let first = convert_with(source, &[]);
+        assert_eq!(first.web_links, 1);
+        assert_eq!(first.skipped_existing, 3);
+        let second = convert_with(&first.content, &[]);
+        assert_eq!(second.content, first.content);
+        assert_eq!(
+            (second.web_links, second.files, second.directories),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn converter_handles_drive_unc_spaces_unicode_and_escaped_labels() {
+        let entries = [
+            (r"C:\Project Files\[Archive]", PathClassification::Directory),
+            (r"\\server\share\文書\README.md", PathClassification::File),
+        ];
+        let report = convert_with(
+            "- C:\\Project Files\\[Archive]\r\nthen \\\\server\\share\\文書\\README.md.",
+            &entries,
+        );
+        assert!(
+            report
+                .content
+                .contains(r"[\[Archive\]](file:///C:/Project%20Files/%5BArchive%5D)")
+        );
+        assert!(
+            report
+                .content
+                .contains("[README.md](file://server/share/%E6%96%87%E6%9B%B8/README.md).")
+        );
+        assert_eq!((report.directories, report.files), (1, 1));
+        for destination in report
+            .content
+            .split("](")
+            .skip(1)
+            .filter_map(|s| s.split(')').next())
+        {
+            let url = url::Url::parse(destination).unwrap();
+            assert_eq!(url.scheme(), "file");
+            assert!(!destination.contains(' '));
+            assert!(!destination.contains('\\'));
+        }
+    }
+
+    #[test]
+    fn converter_rejects_partial_parent_and_non_absolute_forms() {
+        let report = convert_with(
+            r"C:\Existing\Missing .\x ..\x C:x ~\x %HOME%\x example.org/path",
+            &[(r"C:\Existing", PathClassification::Directory)],
+        );
+        assert_eq!(
+            report.content,
+            r"C:\Existing\Missing .\x ..\x C:x ~\x %HOME%\x example.org/path"
+        );
+        assert_eq!(report.skipped_invalid_paths, 1);
+        assert_eq!(
+            (report.web_links, report.files, report.directories),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn converter_preserves_crlf_and_mixes_paths_with_urls() {
+        let report = convert_with(
+            "C:\\Documents and https://github.com/org/repo\r\n",
+            &[(r"C:\Documents", PathClassification::Directory)],
+        );
+        assert_eq!(
+            report.content,
+            "[Documents](file:///C:/Documents) and [github](https://github.com/org/repo)\r\n"
+        );
+        assert_eq!((report.web_links, report.directories), (1, 1));
     }
 }
