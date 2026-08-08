@@ -1,5 +1,8 @@
 use crate::actions::screenshot::{Mode as ScreenshotMode, capture};
 use crate::common::slug::slugify;
+use crate::file_search::actions::{
+    ExplorerAction, execute_explorer_action, resolve_explorer_action,
+};
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
@@ -431,25 +434,84 @@ fn parse_note_image_target(target: &str) -> ParsedImageTarget {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MarkdownLinkAction {
+    NoteReference(String),
+    TodoReference(String),
+    Filesystem(ExplorerAction),
+    ExternalUrl(String),
+    InvalidNoteLink(String),
+    InvalidFilesystemUrl(String),
+}
+
+/// Classifies a clicked markdown target and performs click-time filesystem
+/// validation, but deliberately has no UI or process-launching side effects.
+fn classify_markdown_link(target: &str) -> MarkdownLinkAction {
+    match Url::parse(target) {
+        Ok(url) => match url.scheme() {
+            "note" => url.host_str().map_or_else(
+                || MarkdownLinkAction::InvalidNoteLink("missing note slug".to_string()),
+                |slug| MarkdownLinkAction::NoteReference(slug.to_string()),
+            ),
+            "todo" => url.host_str().map_or_else(
+                || MarkdownLinkAction::InvalidNoteLink("missing todo id".to_string()),
+                |id| MarkdownLinkAction::TodoReference(id.to_string()),
+            ),
+            "file" => {
+                let path = match url.to_file_path() {
+                    Ok(path) => path,
+                    Err(()) => {
+                        return MarkdownLinkAction::InvalidFilesystemUrl(format!(
+                            "cannot convert file URL to a local path: {target}"
+                        ));
+                    }
+                };
+                match resolve_explorer_action(&path) {
+                    Ok(
+                        action @ (ExplorerAction::OpenDirectory(_) | ExplorerAction::RevealFile(_)),
+                    ) => MarkdownLinkAction::Filesystem(action),
+                    Ok(ExplorerAction::Unsupported { reason, .. }) => {
+                        MarkdownLinkAction::InvalidFilesystemUrl(format!(
+                            "cannot open {}: {reason}",
+                            path.display()
+                        ))
+                    }
+                    Err(err) => MarkdownLinkAction::InvalidFilesystemUrl(err.to_string()),
+                }
+            }
+            _ => MarkdownLinkAction::ExternalUrl(target.to_string()),
+        },
+        Err(err) if target.starts_with("file:") => {
+            MarkdownLinkAction::InvalidFilesystemUrl(format!("invalid file URL: {err}"))
+        }
+        Err(err) if target.starts_with("note:") || target.starts_with("todo:") => {
+            MarkdownLinkAction::InvalidNoteLink(format!("invalid note link: {err}"))
+        }
+        Err(_) if target.starts_with("www.") => {
+            MarkdownLinkAction::ExternalUrl(format!("https://{target}"))
+        }
+        Err(_) => MarkdownLinkAction::ExternalUrl(target.to_string()),
+    }
+}
+
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
     if let Some(mut open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
-        if let Ok(url) = Url::parse(&open_url.url) {
-            if url.scheme() == "note" {
-                if let Some(slug) = url.host_str() {
-                    app.open_note_panel(slug, None);
+        match classify_markdown_link(&open_url.url) {
+            MarkdownLinkAction::NoteReference(slug) => app.open_note_panel(&slug, None),
+            MarkdownLinkAction::TodoReference(todo_id) => open_todo_reference(app, &todo_id),
+            MarkdownLinkAction::Filesystem(action) => {
+                if let Err(err) = execute_explorer_action(action) {
+                    app.report_error("filesystem link", err);
                 }
-            } else if url.scheme() == "todo" {
-                if let Some(todo_id) = url.host_str() {
-                    open_todo_reference(app, todo_id);
-                }
-            } else {
+            }
+            MarkdownLinkAction::ExternalUrl(url) => {
+                open_url.url = url;
                 ui.ctx().open_url(open_url);
             }
-        } else {
-            if open_url.url.starts_with("www.") {
-                open_url.url = format!("https://{}", open_url.url);
+            MarkdownLinkAction::InvalidNoteLink(err) => app.report_error("note link", err),
+            MarkdownLinkAction::InvalidFilesystemUrl(err) => {
+                app.report_error("filesystem link", err);
             }
-            ui.ctx().open_url(open_url);
         }
     }
 }
@@ -5504,6 +5566,95 @@ More text.
             output.platform_output.open_url.unwrap().url,
             "https://www.example.com"
         );
+    }
+
+    #[test]
+    fn classify_markdown_link_references_and_external_urls() {
+        assert_eq!(
+            classify_markdown_link("note://abc"),
+            MarkdownLinkAction::NoteReference("abc".into())
+        );
+        assert_eq!(
+            classify_markdown_link("todo://abc"),
+            MarkdownLinkAction::TodoReference("abc".into())
+        );
+        for url in ["http://example.com", "https://example.com"] {
+            assert_eq!(
+                classify_markdown_link(url),
+                MarkdownLinkAction::ExternalUrl(url.into())
+            );
+        }
+    }
+
+    #[test]
+    fn file_urls_resolve_to_existing_explorer_actions_without_external_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("note.txt");
+        std::fs::write(&file, "note").unwrap();
+
+        let directory_url = Url::from_directory_path(temp.path()).unwrap().to_string();
+        let file_url = Url::from_file_path(&file).unwrap().to_string();
+        assert_eq!(
+            classify_markdown_link(&directory_url),
+            MarkdownLinkAction::Filesystem(ExplorerAction::OpenDirectory(
+                temp.path().to_path_buf()
+            ))
+        );
+        assert_eq!(
+            classify_markdown_link(&file_url),
+            MarkdownLinkAction::Filesystem(ExplorerAction::RevealFile(file.clone()))
+        );
+        assert_eq!(
+            resolve_explorer_action(temp.path()).unwrap(),
+            ExplorerAction::OpenDirectory(temp.path().to_path_buf())
+        );
+        assert_eq!(
+            resolve_explorer_action(&file).unwrap(),
+            ExplorerAction::RevealFile(file)
+        );
+        assert!(!matches!(
+            classify_markdown_link(&file_url),
+            MarkdownLinkAction::ExternalUrl(_)
+        ));
+    }
+
+    fn assert_filesystem_link_error_is_not_forwarded(target: &str) {
+        assert!(matches!(
+            classify_markdown_link(target),
+            MarkdownLinkAction::InvalidFilesystemUrl(_)
+        ));
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_inline_errors = true;
+        let output = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ctx.output_mut(|o| {
+                    o.open_url = Some(egui::OpenUrl::same_tab(target));
+                });
+                handle_markdown_links(ui, &mut app);
+            });
+        });
+        assert!(app.error.is_some());
+        assert!(output.platform_output.open_url.is_none());
+    }
+
+    #[test]
+    fn deleted_file_url_reports_error_without_external_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("deleted.txt");
+        std::fs::write(&file, "note").unwrap();
+        let file_url = Url::from_file_path(&file).unwrap().to_string();
+        std::fs::remove_file(file).unwrap();
+
+        assert_filesystem_link_error_is_not_forwarded(&file_url);
+    }
+
+    #[test]
+    fn non_convertible_file_url_reports_error_without_external_fallback() {
+        let file_url = "file:relative";
+        assert!(Url::parse(file_url).is_ok());
+        assert_filesystem_link_error_is_not_forwarded(file_url);
     }
 
     #[test]
