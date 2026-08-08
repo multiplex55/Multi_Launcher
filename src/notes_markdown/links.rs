@@ -241,7 +241,12 @@ fn path_scan_end(content: &str, start: usize, end: usize) -> usize {
 fn path_endpoints(content: &str, start: usize, end: usize) -> Vec<usize> {
     let mut points = vec![end];
     for (off, ch) in content[start..end].char_indices() {
-        if matches!(ch, ' ' | '\t' | ',' | ';' | ')' | ']' | '}') {
+        // Square brackets are valid Windows filename characters (and labels
+        // escape them later), so they must not truncate a candidate such as
+        // `C:\Backups\[Archive]`. A period, on the other hand, is a useful
+        // progressively-tested endpoint for sentence-final paths; an interior
+        // period is harmless because only probe-confirmed endpoints are used.
+        if matches!(ch, ' ' | '\t' | ',' | ';' | '.' | ')' | '}') {
             points.push(start + off);
         }
     }
@@ -272,6 +277,7 @@ fn windows_file_url(path: &str) -> Option<Url> {
             segments.pop_if_empty();
             segments.extend(tail.split('/'));
         }
+        encode_markdown_sensitive_url_path(&mut url);
         Some(url)
     } else {
         let mut url = Url::parse("file:///").ok()?;
@@ -280,7 +286,19 @@ fn windows_file_url(path: &str) -> Option<Url> {
             segments.pop_if_empty();
             segments.extend(normalized.split('/'));
         }
+        encode_markdown_sensitive_url_path(&mut url);
         Some(url)
+    }
+}
+
+fn encode_markdown_sensitive_url_path(url: &mut Url) {
+    // The URL serializer intentionally permits square brackets in paths, but
+    // leaving them literal makes a generated Markdown destination needlessly
+    // fragile. Feed an escaped path back through `Url` so it remains the sole
+    // destination parser/serializer rather than concatenating URL text here.
+    if url.path().contains(['[', ']']) {
+        let path = url.path().replace('[', "%5B").replace(']', "%5D");
+        url.set_path(&path);
     }
 }
 
