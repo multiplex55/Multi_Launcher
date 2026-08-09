@@ -159,3 +159,76 @@ impl ConfirmationModal {
         result
     }
 }
+
+/// Confirmation state for a captured Diff copy plan.  The plan is owned by the
+/// modal so later tree-selection changes cannot retarget the operation.
+#[derive(Debug, Default)]
+pub struct DiffCopyConfirmation {
+    plan: Option<crate::diff::file_ops::CopyPlan>,
+}
+
+impl DiffCopyConfirmation {
+    pub fn open(&mut self, plan: crate::diff::file_ops::CopyPlan) {
+        self.plan = Some(plan);
+    }
+
+    pub fn pending(&self) -> Option<&crate::diff::file_ops::CopyPlan> {
+        self.plan.as_ref()
+    }
+
+    /// Returns the fixed plan only after an enabled Confirm button is pressed.
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<crate::diff::file_ops::CopyPlan> {
+        let plan = self.plan.as_ref()?;
+        let mut confirm = false;
+        let mut cancel = false;
+        let mut open = true;
+        egui::Window::new("Confirm file operation")
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} files, {} directories",
+                    plan.totals.files_copied, plan.totals.directories_created
+                ));
+                ui.label(format!(
+                    "{} overwrites, {} conflicts, {} skipped",
+                    plan.totals.overwrites, plan.totals.conflicts, plan.totals.skips
+                ));
+                for conflict in &plan.conflicts {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("{}: {}", conflict.relative.display(), conflict.message),
+                    );
+                }
+                for error in &plan.errors {
+                    ui.colored_label(egui::Color32::RED, &error.message);
+                }
+                if plan.totals.overwrites > 0 {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Existing differing files will be overwritten.",
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!plan.has_fatal_errors(), egui::Button::new("Confirm"))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            return self.plan.take();
+        }
+        if cancel || !open {
+            self.plan = None;
+        }
+        None
+    }
+}
