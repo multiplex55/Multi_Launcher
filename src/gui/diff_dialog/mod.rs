@@ -1587,7 +1587,7 @@ mod tests {
                         ui.button("Compare");
                     });
                     ui.separator();
-                    let inner = allocate_remaining_workspace(ui, |ui| {
+                    allocate_remaining_workspace(ui, |ui| {
                         workspace = ui.max_rect();
                         workspace_clip = ui.clip_rect();
                         match view {
@@ -1602,7 +1602,6 @@ mod tests {
                             DiffView::BinaryCompare(_) => ui.label("Binary"),
                         };
                     });
-                    assert_eq!(inner.response.rect.size(), workspace.size());
                 })
                 .unwrap();
             outer = response.response.rect;
@@ -1628,6 +1627,11 @@ mod tests {
             assert!(outer.contains_rect(workspace));
             assert!(outer.contains_rect(clip));
             assert!(clip.contains_rect(workspace));
+            // `InnerResponse::response` describes the widgets' content and may
+            // shrink to a short label. The allocated UI's max rect is the
+            // layout boundary that must reserve the remaining window space.
+            assert!((workspace.width() - outer.width()).abs() <= 0.5);
+            assert!(workspace.height() > 400.0, "{workspace:?}");
             if let Some(expected) = expected {
                 assert_rect_close(outer, expected);
             } else {
