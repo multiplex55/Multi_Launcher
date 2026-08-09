@@ -11,11 +11,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonModeV1 {
+    #[default]
+    Text,
+    Folder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentComparisonModeV1 {
+    Metadata,
+    #[default]
+    OnDemand,
+    Always,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DisplayPathPairV1 {
     pub left: String,
     pub right: String,
+    #[serde(default)]
+    pub mode: ComparisonModeV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,6 +48,50 @@ pub struct SavedDiffSessionV1 {
     pub wrap_text: bool,
     pub syntax_highlighting: bool,
     pub syntax_theme: String,
+    #[serde(default)]
+    pub comparison_mode: ComparisonModeV1,
+    #[serde(default)]
+    pub ignore_whitespace: bool,
+    #[serde(default = "default_true")]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub replacement_rules: Vec<ReplacementRuleV1>,
+    #[serde(default)]
+    pub unimportant_section_rules: Vec<UnimportantSectionRuleV1>,
+    #[serde(default)]
+    pub folder_includes: Vec<String>,
+    #[serde(default)]
+    pub folder_excludes: Vec<String>,
+    #[serde(default)]
+    pub folder_display_filter: String,
+    #[serde(default)]
+    pub content_comparison: ContentComparisonModeV1,
+}
+impl Default for SavedDiffSessionV1 {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            left: String::new(),
+            right: String::new(),
+            pane_split: 0.5,
+            wrap_text: false,
+            syntax_highlighting: true,
+            syntax_theme: "InspiredGitHub".into(),
+            comparison_mode: Default::default(),
+            ignore_whitespace: false,
+            case_sensitive: true,
+            replacement_rules: vec![],
+            unimportant_section_rules: vec![],
+            folder_includes: vec![],
+            folder_excludes: vec![],
+            folder_display_filter: "all".into(),
+            content_comparison: Default::default(),
+        }
+    }
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,16 +159,28 @@ pub fn save(path: &Path, value: &DiffPersistenceV1) -> anyhow::Result<()> {
 }
 
 pub fn record_recent(state: &mut DiffPersistenceV1, left: String, right: String) {
-    let identity = pair_identity(&left, &right);
+    record_recent_mode(state, left, right, ComparisonModeV1::Text)
+}
+/// Call only after `DiffWorkspace::open_paths` succeeds.
+pub fn record_recent_mode(
+    state: &mut DiffPersistenceV1,
+    left: String,
+    right: String,
+    mode: ComparisonModeV1,
+) {
+    let identity = pair_identity(&left, &right, mode);
     state
         .recent_comparisons
-        .retain(|p| pair_identity(&p.left, &p.right) != identity);
+        .retain(|p| pair_identity(&p.left, &p.right, p.mode) != identity);
     state
         .recent_comparisons
-        .insert(0, DisplayPathPairV1 { left, right });
+        .insert(0, DisplayPathPairV1 { left, right, mode });
     state
         .recent_comparisons
         .truncate(state.config.max_recent_comparisons);
+}
+pub fn clear_recents(state: &mut DiffPersistenceV1) {
+    state.recent_comparisons.clear();
 }
 pub fn deduplicate_rule_ids(state: &mut DiffPersistenceV1) {
     fn retain_unique<T>(values: &mut Vec<T>, id: impl Fn(&T) -> &str) {
@@ -114,11 +190,158 @@ pub fn deduplicate_rule_ids(state: &mut DiffPersistenceV1) {
     retain_unique(&mut state.replacement_rules, |r| &r.id);
     retain_unique(&mut state.unimportant_section_rules, |r| &r.id);
 }
-fn pair_identity(left: &str, right: &str) -> (String, String) {
+fn pair_identity(
+    left: &str,
+    right: &str,
+    mode: ComparisonModeV1,
+) -> (String, String, ComparisonModeV1) {
     (
         normalize_path(left).to_string_lossy().to_lowercase(),
         normalize_path(right).to_string_lossy().to_lowercase(),
+        mode,
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionError {
+    DuplicateName(String),
+    NotFound(String),
+    InvalidRule(String),
+    InvalidPath(String),
+}
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateName(n) => write!(f, "a session named '{n}' already exists"),
+            Self::NotFound(id) => write!(f, "session '{id}' was not found"),
+            Self::InvalidRule(e) => write!(f, "invalid rule: {e}"),
+            Self::InvalidPath(e) => write!(f, "cannot reopen session: {e}"),
+        }
+    }
+}
+impl std::error::Error for SessionError {}
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+pub fn new_session_id() -> String {
+    let n = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("session-{nanos:032x}-{n:016x}")
+}
+pub fn validate_rules(
+    replacements: &[ReplacementRuleV1],
+    sections: &[UnimportantSectionRuleV1],
+) -> Result<(), SessionError> {
+    let mut ids = HashSet::new();
+    for r in replacements {
+        if !ids.insert(r.id.as_str()) {
+            return Err(SessionError::InvalidRule(format!(
+                "duplicate rule id '{}'",
+                r.id
+            )));
+        }
+        regex::Regex::new(&r.pattern)
+            .map_err(|e| SessionError::InvalidRule(format!("{}: {e}", r.pattern)))?;
+    }
+    for r in sections {
+        if !ids.insert(r.id.as_str()) {
+            return Err(SessionError::InvalidRule(format!(
+                "duplicate rule id '{}'",
+                r.id
+            )));
+        }
+        regex::Regex::new(&r.pattern)
+            .map_err(|e| SessionError::InvalidRule(format!("{}: {e}", r.pattern)))?;
+    }
+    Ok(())
+}
+pub fn insert_session(
+    state: &mut DiffPersistenceV1,
+    mut session: SavedDiffSessionV1,
+) -> Result<String, SessionError> {
+    validate_rules(
+        &session.replacement_rules,
+        &session.unimportant_section_rules,
+    )?;
+    if state
+        .named_sessions
+        .iter()
+        .any(|s| s.name.eq_ignore_ascii_case(&session.name))
+    {
+        return Err(SessionError::DuplicateName(session.name));
+    }
+    if session.id.is_empty() {
+        session.id = new_session_id();
+    }
+    let id = session.id.clone();
+    state.named_sessions.push(session);
+    Ok(id)
+}
+pub fn rename_session(
+    state: &mut DiffPersistenceV1,
+    id: &str,
+    name: String,
+) -> Result<(), SessionError> {
+    if state
+        .named_sessions
+        .iter()
+        .any(|s| s.id != id && s.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(SessionError::DuplicateName(name));
+    }
+    let s = state
+        .named_sessions
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| SessionError::NotFound(id.into()))?;
+    s.name = name;
+    Ok(())
+}
+pub fn delete_session(
+    state: &mut DiffPersistenceV1,
+    id: &str,
+) -> Result<SavedDiffSessionV1, SessionError> {
+    let i = state
+        .named_sessions
+        .iter()
+        .position(|s| s.id == id)
+        .ok_or_else(|| SessionError::NotFound(id.into()))?;
+    Ok(state.named_sessions.remove(i))
+}
+/// Apply and persist as one logical operation. The caller's state is replaced
+/// only after the atomic file write succeeds.
+pub fn update_atomic(
+    path: &Path,
+    state: &mut DiffPersistenceV1,
+    change: impl FnOnce(&mut DiffPersistenceV1) -> Result<(), SessionError>,
+) -> anyhow::Result<()> {
+    let mut candidate = state.clone();
+    change(&mut candidate).map_err(anyhow::Error::new)?;
+    save(path, &candidate)?;
+    *state = candidate;
+    Ok(())
+}
+/// Validate sources at reopen time. Contents/results are absent from the
+/// persisted type and therefore necessarily recomputed by the workspace.
+pub fn reopen_session(session: &SavedDiffSessionV1) -> Result<(String, String), SessionError> {
+    let l = normalize_path(&session.left);
+    let r = normalize_path(&session.right);
+    let lm = std::fs::metadata(&l)
+        .map_err(|e| SessionError::InvalidPath(format!("{}: {e}", l.display())))?;
+    let rm = std::fs::metadata(&r)
+        .map_err(|e| SessionError::InvalidPath(format!("{}: {e}", r.display())))?;
+    let valid = match session.comparison_mode {
+        ComparisonModeV1::Text => lm.is_file() && rm.is_file(),
+        ComparisonModeV1::Folder => lm.is_dir() && rm.is_dir(),
+    };
+    if !valid {
+        return Err(SessionError::InvalidPath(
+            "saved comparison mode no longer matches its paths".into(),
+        ));
+    }
+    Ok((session.left.clone(), session.right.clone()))
 }
 
 #[cfg(test)]
