@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub struct FolderRuntime {
     pub left_scan: Option<ScanHandle>,
@@ -88,7 +88,26 @@ impl Default for FolderRuntime {
 
 impl FolderRuntime {
     pub fn next_generation() -> u64 {
-        NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+        Self::next_generation_after(0)
+    }
+
+    fn next_generation_after(current: u64) -> u64 {
+        let mut observed = NEXT_GENERATION.load(Ordering::Relaxed);
+        loop {
+            let next = observed
+                .max(current)
+                .checked_add(1)
+                .expect("folder scan generation exhausted");
+            match NEXT_GENERATION.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => observed = actual,
+            }
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -212,7 +231,7 @@ impl FolderRuntime {
     /// replacement scan can emit events.
     pub fn prepare_rescan(&mut self) {
         self.cancel();
-        self.generation = Self::next_generation();
+        self.generation = Self::next_generation_after(self.generation);
         self.restart_prepared = true;
         self.left_root = None;
         self.right_root = None;
