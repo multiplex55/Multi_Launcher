@@ -13,6 +13,188 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+/// Ephemeral, per-view watch controller.  It is intentionally not part of any
+/// serde model: owning this value owns (and, on drop, cancels) the OS watcher.
+pub struct ViewWatchRuntime {
+    pub tag: WatchTag,
+    watcher: Option<WatchSet>,
+    coalescer: EventCoalescer,
+    kind: ViewWatchKind,
+}
+
+#[derive(Debug, Clone)]
+enum ViewWatchKind {
+    Folder {
+        left: PathBuf,
+        right: PathBuf,
+    },
+    Text {
+        left: Option<ExternalDocument>,
+        right: Option<ExternalDocument>,
+    },
+    Binary {
+        left: Option<PathBuf>,
+        right: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug)]
+pub enum ViewWatchAction {
+    FolderChanged {
+        root: PathBuf,
+        subtree: PathBuf,
+    },
+    TextReload {
+        side: crate::diff::model::DiffSide,
+        loaded: LoadedTextFile,
+    },
+    TextConflict {
+        side: crate::diff::model::DiffSide,
+        path: PathBuf,
+    },
+    BinaryRefresh,
+}
+
+impl ViewWatchRuntime {
+    const DEBOUNCE: Duration = Duration::from_millis(120);
+
+    pub fn folder(tag: WatchTag, left: PathBuf, right: PathBuf) -> Self {
+        let watcher = WatchSet::roots(tag, [left.clone(), right.clone()]).ok();
+        Self {
+            tag,
+            watcher,
+            coalescer: EventCoalescer::new(Self::DEBOUNCE),
+            kind: ViewWatchKind::Folder {
+                left: normalize_absolute(&left),
+                right: normalize_absolute(&right),
+            },
+        }
+    }
+    pub fn text(tag: WatchTag, left: Option<PathBuf>, right: Option<PathBuf>) -> Self {
+        let paths = left.iter().chain(right.iter()).cloned().collect::<Vec<_>>();
+        let watcher = (!paths.is_empty())
+            .then(|| WatchSet::files(tag, paths).ok())
+            .flatten();
+        let document = |path: Option<PathBuf>| {
+            path.map(|p| ExternalDocument::new(p.clone(), stat_identity(&p).ok(), 0, tag))
+        };
+        Self {
+            tag,
+            watcher,
+            coalescer: EventCoalescer::new(Self::DEBOUNCE),
+            kind: ViewWatchKind::Text {
+                left: document(left),
+                right: document(right),
+            },
+        }
+    }
+    pub fn binary(tag: WatchTag, left: Option<PathBuf>, right: Option<PathBuf>) -> Self {
+        let paths = left.iter().chain(right.iter()).cloned().collect::<Vec<_>>();
+        let watcher = (!paths.is_empty())
+            .then(|| WatchSet::files(tag, paths).ok())
+            .flatten();
+        Self {
+            tag,
+            watcher,
+            coalescer: EventCoalescer::new(Self::DEBOUNCE),
+            kind: ViewWatchKind::Binary {
+                left: left.map(|p| normalize_absolute(&p)),
+                right: right.map(|p| normalize_absolute(&p)),
+            },
+        }
+    }
+    /// Test/back-end injection boundary. Events are still checked at drain time.
+    pub fn inject(&mut self, now: Instant, event: WatchEvent) {
+        self.coalescer.push(now, event);
+    }
+    pub fn poll(&mut self, now: Instant, dirty: [bool; 2]) -> Vec<ViewWatchAction> {
+        if let Some(watcher) = &self.watcher {
+            for event in watcher.try_events().into_iter().flatten() {
+                self.coalescer.push(now, event);
+            }
+        }
+        let events = self.coalescer.drain_ready(now, self.tag);
+        let mut out = Vec::new();
+        for event in events {
+            match &mut self.kind {
+                ViewWatchKind::Folder { left, right } => {
+                    if &event.identity_path != left && &event.identity_path != right {
+                        continue;
+                    }
+                    if let Some(subtree) = affected_subtree(&event.identity_path, &event.paths) {
+                        out.push(ViewWatchAction::FolderChanged {
+                            root: event.identity_path,
+                            subtree,
+                        });
+                    }
+                }
+                ViewWatchKind::Text { left, right } => {
+                    for (index, document) in [left, right].into_iter().enumerate() {
+                        let Some(document) = document else { continue };
+                        if event.identity_path != document.path {
+                            continue;
+                        }
+                        document.dirty = dirty[index];
+                        let side = if index == 0 {
+                            crate::diff::model::DiffSide::Left
+                        } else {
+                            crate::diff::model::DiffSide::Right
+                        };
+                        if let Some(ticket) = document.observe() {
+                            match ExternalDocument::load(&ticket) {
+                                Ok(loaded) if document.accept_reload(&ticket, &loaded) => {
+                                    out.push(ViewWatchAction::TextReload { side, loaded })
+                                }
+                                Err(error) => {
+                                    document.state = ExternalState::Missing(error.to_string())
+                                }
+                                _ => {}
+                            }
+                        } else if document.state == ExternalState::Conflict {
+                            out.push(ViewWatchAction::TextConflict {
+                                side,
+                                path: document.path.clone(),
+                            });
+                        }
+                    }
+                }
+                ViewWatchKind::Binary { left, right } => {
+                    if left.as_ref() == Some(&event.identity_path)
+                        || right.as_ref() == Some(&event.identity_path)
+                    {
+                        out.push(ViewWatchAction::BinaryRefresh);
+                    }
+                }
+            }
+        }
+        out
+    }
+    pub fn resolve_text_conflict(
+        &mut self,
+        side: crate::diff::model::DiffSide,
+        reload: bool,
+    ) -> Option<LoadedTextFile> {
+        let ViewWatchKind::Text { left, right } = &mut self.kind else {
+            return None;
+        };
+        let document = match side {
+            crate::diff::model::DiffSide::Left => left,
+            crate::diff::model::DiffSide::Right => right,
+        }
+        .as_mut()?;
+        if !reload {
+            document.keep_buffer();
+            return None;
+        }
+        let loaded = load_text_file(&document.path).ok()?;
+        document.dirty = false;
+        document.identity = Some(loaded.identity.clone());
+        document.revision = document.revision.wrapping_add(1);
+        document.state = ExternalState::Current;
+        Some(loaded)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WatchTag {
     pub workspace: u64,
@@ -93,11 +275,18 @@ impl WatchSet {
         let registration = self
             .registrations
             .iter()
-            .find(|(watched, scope)| match scope {
-                WatchScope::File => normalized
+            .find(|(watched, scope)| {
+                *scope == WatchScope::File && normalized.iter().any(|p| p == watched)
+            })
+            .or_else(|| {
+                self.registrations
                     .iter()
-                    .any(|p| p == watched || p.parent() == watched.parent()),
-                WatchScope::Root => normalized.iter().any(|p| p.starts_with(watched)),
+                    .find(|(watched, scope)| match scope {
+                        WatchScope::File => normalized
+                            .iter()
+                            .any(|p| p == watched || p.parent() == watched.parent()),
+                        WatchScope::Root => normalized.iter().any(|p| p.starts_with(watched)),
+                    })
             })
             .or_else(|| self.registrations.first());
         let (identity_path, scope) = registration

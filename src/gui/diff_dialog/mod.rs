@@ -24,6 +24,7 @@ pub struct DiffDialogState {
     folder_runtimes: HashMap<u64, crate::diff::folder_runtime::FolderRuntime>,
     operation_preview: Option<operation_preview::OperationPreview>,
     binary_views: HashMap<u64, crate::diff::binary_compare::BinaryViewModel>,
+    watch_views: HashMap<u64, crate::diff::watch::ViewWatchRuntime>,
     close_prompt: bool,
     pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
@@ -47,12 +48,14 @@ impl DiffDialogState {
         self.text_views.retain(|id, _| retained.contains(id));
         self.folder_runtimes.retain(|id, _| retained.contains(id));
         self.binary_views.retain(|id, _| retained.contains(id));
+        self.watch_views.retain(|id, _| retained.contains(id));
     }
 
     fn clear_runtime_resources(&mut self) {
         self.text_views.clear();
         self.folder_runtimes.clear();
         self.binary_views.clear();
+        self.watch_views.clear();
     }
     pub fn ui(&mut self, ctx: &egui::Context) {
         if !self.open {
@@ -138,7 +141,34 @@ impl DiffDialogState {
                             }
                         }
                     }
+                    let tag = crate::diff::watch::WatchTag { workspace: workspace_id, view: view_id, generation: 1 };
+                    if self.watch_views.get(&view_id).is_none_or(|watch| watch.tag != tag) {
+                        self.watch_views.insert(view_id, crate::diff::watch::ViewWatchRuntime::text(tag, s.left.clone(), s.right.clone()));
+                    }
                     if let Some(m) = self.text_views.get_mut(&view_id) {
+                        let dirty = [m.left.is_dirty(), m.right.is_dirty()];
+                        let actions = self.watch_views.get_mut(&view_id).map(|w| w.poll(std::time::Instant::now(), dirty)).unwrap_or_default();
+                        for action in actions {
+                            match action {
+                                crate::diff::watch::ViewWatchAction::TextReload { side, loaded } => { if let Err(e) = m.reload_external(side, &loaded) { render_error = Some(e); } }
+                                crate::diff::watch::ViewWatchAction::TextConflict { side, .. } => m.external_conflict[if side == crate::diff::model::DiffSide::Left { 0 } else { 1 }] = true,
+                                _ => {}
+                            }
+                        }
+                        for (index, side, label) in [(0, crate::diff::model::DiffSide::Left, "Left"), (1, crate::diff::model::DiffSide::Right, "Right")] {
+                            if m.external_conflict[index] {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(egui::Color32::YELLOW, format!("{label} changed on disk; in-memory edits were preserved."));
+                                    if ui.button("Reload / discard edits").clicked() {
+                                        if let Some(loaded) = self.watch_views.get_mut(&view_id).and_then(|w| w.resolve_text_conflict(side, true)) { let _ = m.reload_external(side, &loaded); }
+                                    }
+                                    if ui.button("Keep current").clicked() {
+                                        if let Some(w) = self.watch_views.get_mut(&view_id) { w.resolve_text_conflict(side, false); }
+                                        m.external_conflict[index] = false;
+                                    }
+                                });
+                            }
+                        }
                         text_view::show(ui, workspace_id, view_id, m);
                     }
                     ui.label(format!(
@@ -162,6 +192,18 @@ impl DiffDialogState {
                             }
                         }
                     }
+                    let tag = crate::diff::watch::WatchTag { workspace: workspace_id, view: view_id, generation: 1 };
+                    if self.watch_views.get(&view_id).is_none_or(|watch| watch.tag != tag) {
+                        self.watch_views.insert(view_id, crate::diff::watch::ViewWatchRuntime::binary(tag, s.left.clone(), s.right.clone()));
+                    }
+                    let refresh = self.watch_views.get_mut(&view_id).is_some_and(|watch| watch.poll(std::time::Instant::now(), [false; 2]).into_iter().any(|a| matches!(a, crate::diff::watch::ViewWatchAction::BinaryRefresh)));
+                    if refresh {
+                        if let Some(model) = self.binary_views.get_mut(&view_id) {
+                            if let Err(error) = model.refresh_external(s) {
+                                render_error = Some(format!("Binary view is stale: {error}"));
+                            }
+                        }
+                    }
                     if let Some(model) = self.binary_views.get_mut(&view_id) {
                         binary_view::show(ui, workspace_id, view_id, model);
                     }
@@ -169,6 +211,21 @@ impl DiffDialogState {
                 DiffView::FolderCompare(s) => {
                     let runtime = self.folder_runtimes.entry(view_id).or_default();
                     poll_folder_runtime(s, runtime);
+                    let tag = crate::diff::watch::WatchTag { workspace: workspace_id, view: view_id, generation: runtime.generation };
+                    if self.watch_views.get(&view_id).is_none_or(|watch| watch.tag != tag) {
+                        self.watch_views.insert(view_id, crate::diff::watch::ViewWatchRuntime::folder(tag, s.left_root.clone(), s.right_root.clone()));
+                    }
+                    let changes = self.watch_views.get_mut(&view_id).map(|w| w.poll(std::time::Instant::now(), [false; 2])).unwrap_or_default();
+                    for change in changes {
+                        if let crate::diff::watch::ViewWatchAction::FolderChanged { subtree, .. } = change {
+                            for entry in s.model.entries.values() {
+                                if entry.relative_path.starts_with(&subtree) { s.stale_paths.insert(entry.relative_path.clone()); }
+                            }
+                            // A bounded replacement scan discovers additions/removals; it
+                            // never performs synchronization or filesystem mutation.
+                            runtime.prepare_rescan();
+                        }
+                    }
                     if runtime.is_active() {
                         ctx.request_repaint();
                     }
@@ -727,6 +784,18 @@ mod tests {
     fn replacing_comparison_removes_obsolete_runtime() {
         let mut dialog = folder_dialog(51);
         dialog.folder_runtimes.insert(51, Default::default());
+        dialog.watch_views.insert(
+            51,
+            crate::diff::watch::ViewWatchRuntime::folder(
+                crate::diff::watch::WatchTag {
+                    workspace: dialog.workspace.workspace_id,
+                    view: 51,
+                    generation: 1,
+                },
+                tempfile::tempdir().unwrap().path().into(),
+                tempfile::tempdir().unwrap().path().into(),
+            ),
+        );
         let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         dialog
             .workspace
@@ -737,6 +806,28 @@ mod tests {
             .unwrap();
         dialog.reconcile_runtime_resources();
         assert!(!dialog.folder_runtimes.contains_key(&51));
+        assert!(!dialog.watch_views.contains_key(&51));
+    }
+
+    #[test]
+    fn closing_dialog_drops_all_watchers() {
+        let mut dialog = folder_dialog(52);
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        dialog.watch_views.insert(
+            52,
+            crate::diff::watch::ViewWatchRuntime::folder(
+                crate::diff::watch::WatchTag {
+                    workspace: dialog.workspace.workspace_id,
+                    view: 52,
+                    generation: 1,
+                },
+                left.path().into(),
+                right.path().into(),
+            ),
+        );
+        dialog.clear_runtime_resources();
+        assert!(dialog.watch_views.is_empty());
     }
 
     #[test]

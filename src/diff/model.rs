@@ -488,6 +488,27 @@ pub struct TextViewModel {
 }
 
 impl TextViewModel {
+    /// Installs a clean external reload while monotonically advancing the
+    /// document revision used to reject stale comparison results.
+    pub fn reload_external(
+        &mut self,
+        side: DiffSide,
+        loaded: &crate::diff::text_file::LoadedTextFile,
+    ) -> Result<(), String> {
+        let replacement = TextDocument::from_loaded(loaded)
+            .ok_or_else(|| "externally changed file is no longer text".to_string())?;
+        let document = match side {
+            DiffSide::Left => &mut self.left,
+            DiffSide::Right => &mut self.right,
+        };
+        let next = document.revision.wrapping_add(1);
+        *document = replacement;
+        document.revision = next;
+        document.saved_revision = next;
+        self.external_conflict[if side == DiffSide::Left { 0 } else { 1 }] = false;
+        self.schedule_compare();
+        Ok(())
+    }
     pub fn load(state: &TextCompareState, settings: &DiffConfigV1) -> Result<Self, String> {
         fn doc(path: Option<&PathBuf>) -> Result<TextDocument, String> {
             path.map(|p| {

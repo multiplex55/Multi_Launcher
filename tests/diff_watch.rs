@@ -97,3 +97,115 @@ fn stale_reload_and_smallest_subtree() {
         Some("a".into())
     );
 }
+
+#[test]
+fn injected_folder_event_invalidates_smallest_affected_subtree() {
+    let d = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let now = Instant::now();
+    let mut runtime = ViewWatchRuntime::folder(tag(4), d.path().into(), other.path().into());
+    runtime.inject(
+        now,
+        WatchEvent {
+            tag: tag(4),
+            identity_path: d.path().into(),
+            paths: vec![
+                d.path().join("src/a.txt"),
+                d.path().join("src/nested/b.txt"),
+            ],
+            scope: WatchScope::Root,
+        },
+    );
+    assert!(
+        runtime
+            .poll(now + Duration::from_millis(119), [false; 2])
+            .is_empty()
+    );
+    let actions = runtime.poll(now + Duration::from_millis(120), [false; 2]);
+    assert!(
+        matches!(&actions[..], [ViewWatchAction::FolderChanged { subtree, .. }] if subtree == &PathBuf::from("src"))
+    );
+}
+
+#[test]
+fn injected_clean_and_dirty_text_changes_are_arbitrated_without_data_loss() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("left.txt");
+    std::fs::write(&p, "before").unwrap();
+    let now = Instant::now();
+    let mut clean = ViewWatchRuntime::text(tag(5), Some(p.clone()), None);
+    std::fs::write(&p, "after, externally").unwrap();
+    clean.inject(
+        now,
+        WatchEvent {
+            tag: tag(5),
+            identity_path: p.clone(),
+            paths: vec![p.clone()],
+            scope: WatchScope::File,
+        },
+    );
+    let actions = clean.poll(now + Duration::from_secs(1), [false; 2]);
+    assert!(
+        matches!(&actions[..], [ViewWatchAction::TextReload { side: multi_launcher::diff::model::DiffSide::Left, loaded }] if loaded.text() == Some("after, externally"))
+    );
+
+    let mut dirty = ViewWatchRuntime::text(tag(6), Some(p.clone()), None);
+    std::fs::write(&p, "a second external version").unwrap();
+    dirty.inject(
+        now,
+        WatchEvent {
+            tag: tag(6),
+            identity_path: p.clone(),
+            paths: vec![p.clone()],
+            scope: WatchScope::File,
+        },
+    );
+    let actions = dirty.poll(now + Duration::from_secs(1), [true, false]);
+    assert!(matches!(
+        &actions[..],
+        [ViewWatchAction::TextConflict { .. }]
+    ));
+}
+
+#[test]
+fn obsolete_root_and_generation_events_are_ignored_and_binary_refreshes_once() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("a.bin");
+    std::fs::write(&p, [0, 1]).unwrap();
+    let now = Instant::now();
+    let mut binary = ViewWatchRuntime::binary(tag(8), Some(p.clone()), None);
+    for event in [
+        WatchEvent {
+            tag: tag(7),
+            identity_path: p.clone(),
+            paths: vec![p.clone()],
+            scope: WatchScope::File,
+        },
+        WatchEvent {
+            tag: tag(8),
+            identity_path: d.path().join("obsolete.bin"),
+            paths: vec![p.clone()],
+            scope: WatchScope::File,
+        },
+    ] {
+        binary.inject(now, event);
+    }
+    assert!(
+        binary
+            .poll(now + Duration::from_secs(1), [false; 2])
+            .is_empty()
+    );
+    binary.inject(
+        now,
+        WatchEvent {
+            tag: tag(8),
+            identity_path: p.clone(),
+            paths: vec![p],
+            scope: WatchScope::File,
+        },
+    );
+    assert!(matches!(
+        &binary.poll(now + Duration::from_secs(1), [false; 2])[..],
+        [ViewWatchAction::BinaryRefresh]
+    ));
+}
