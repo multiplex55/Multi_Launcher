@@ -41,7 +41,14 @@ fn recursive_copy_deduplicates_nested_selection() {
     .unwrap();
     assert_eq!(p.copies.len(), 1);
     assert_eq!(p.directories.len(), 1);
-    execute_copy(&p, &HashSet::new(), &AtomicBool::new(false));
+    let report = execute_copy(&p, &HashSet::new(), &AtomicBool::new(false));
+    assert!(
+        report.items.iter().all(|item| !matches!(
+            item.outcome,
+            ItemOutcome::Failed(_) | ItemOutcome::Cancelled
+        )),
+        "recursive copy report: {report:#?}"
+    );
     assert!(b.path().join("d/x").is_file());
 }
 

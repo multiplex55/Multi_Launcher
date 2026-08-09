@@ -549,7 +549,10 @@ pub fn execute_copy(
                     Err("captured directory target changed".into())
                 }
             })
-            .and_then(|p| fs::create_dir(&p).map(|_| p).map_err(|e| e.to_string()))
+            // A planned descendant can have more than one missing ancestor.
+            // `create_dir_all` is idempotent and makes each planned directory
+            // usable even when another planned directory was deduplicated.
+            .and_then(|p| fs::create_dir_all(&p).map(|_| p).map_err(|e| e.to_string()))
         {
             Ok(_) => {
                 items.push(ItemResult {
