@@ -4,7 +4,8 @@ This checklist covers behavior that depends on a real Windows desktop session, W
 
 ## Diff acceptance matrix (25 criteria)
 
-Use two temporary roots containing text, binary, Unicode, read-only, missing,
+The supported and excluded product boundary is recorded in
+[`diff-scope.md`](diff-scope.md). Use two temporary roots containing text, binary, Unicode, read-only, missing,
 and deliberately large files. Repeat filesystem cases on Windows and Linux.
 
 | # | Scenario | Verify |

@@ -732,8 +732,7 @@ fn poll_folder_runtime(
     state: &mut crate::diff::model::FolderCompareState,
     runtime: &mut crate::diff::folder_runtime::FolderRuntime,
 ) {
-    use crate::diff::folder_compare::PathKeyPolicy;
-    use crate::diff::folder_scan::{RootIdentity, ScanEvent};
+    use crate::diff::folder_scan::RootIdentity;
 
     let completed = runtime.active_operation.as_ref().and_then(|operation| {
         operation.receiver.try_iter().find_map(|event| match event {
@@ -860,60 +859,64 @@ fn poll_folder_runtime(
     let visible = folder_view::ordered_visible(state);
     runtime.prioritize(state.primary_selection.as_ref(), &visible, &state.model);
     runtime.pump(&mut state.model, &state.text_rules);
+}
 
-    fn process_scan_events(
-        state: &mut crate::diff::model::FolderCompareState,
-        runtime: &mut crate::diff::folder_runtime::FolderRuntime,
-        left: bool,
-        expected: &RootIdentity,
-        events: Vec<ScanEvent>,
-    ) {
-        for event in events {
-            if !event.is_current(runtime.generation, expected) {
-                continue;
+/// Deterministic controller seam: production passes events drained from scan
+/// handles; tests inject the same event stream without threads or egui.
+fn process_scan_events(
+    state: &mut crate::diff::model::FolderCompareState,
+    runtime: &mut crate::diff::folder_runtime::FolderRuntime,
+    left: bool,
+    expected: &crate::diff::folder_scan::RootIdentity,
+    events: impl IntoIterator<Item = crate::diff::folder_scan::ScanEvent>,
+) {
+    use crate::diff::folder_compare::PathKeyPolicy;
+    use crate::diff::folder_scan::ScanEvent;
+    for event in events {
+        if !event.is_current(runtime.generation, expected) {
+            continue;
+        }
+        match event {
+            ScanEvent::ScanStarted { .. } => {}
+            ScanEvent::EntriesDiscovered { entries, .. }
+            | ScanEvent::EntriesUpdated { entries, .. } => {
+                for item in entries {
+                    let _ = state.model.upsert(
+                        &item.relative_path,
+                        item.side,
+                        left,
+                        PathKeyPolicy::Platform,
+                        state.timestamp_tolerance,
+                    );
+                }
             }
-            match event {
-                ScanEvent::ScanStarted { .. } => {}
-                ScanEvent::EntriesDiscovered { entries, .. }
-                | ScanEvent::EntriesUpdated { entries, .. } => {
-                    for item in entries {
-                        let _ = state.model.upsert(
-                            &item.relative_path,
-                            item.side,
-                            left,
-                            PathKeyPolicy::Platform,
-                            state.timestamp_tolerance,
-                        );
-                    }
+            ScanEvent::Progress { visited, .. } => {
+                if left {
+                    runtime.left_visited = visited
+                } else {
+                    runtime.right_visited = visited
                 }
-                ScanEvent::Progress { visited, .. } => {
-                    if left {
-                        runtime.left_visited = visited
-                    } else {
-                        runtime.right_visited = visited
-                    }
+            }
+            ScanEvent::Completed { visited, .. } | ScanEvent::Cancelled { visited, .. } => {
+                if left {
+                    runtime.left_visited = visited;
+                    state.left_scan_complete = true;
+                    runtime.left_scan = None;
+                } else {
+                    runtime.right_visited = visited;
+                    state.right_scan_complete = true;
+                    runtime.right_scan = None;
                 }
-                ScanEvent::Completed { visited, .. } | ScanEvent::Cancelled { visited, .. } => {
-                    if left {
-                        runtime.left_visited = visited;
-                        state.left_scan_complete = true;
-                        runtime.left_scan = None;
-                    } else {
-                        runtime.right_visited = visited;
-                        state.right_scan_complete = true;
-                        runtime.right_scan = None;
-                    }
-                }
-                ScanEvent::Failed { error, .. } => {
-                    if left {
-                        runtime.left_error = Some(error);
-                        state.left_scan_complete = true;
-                        runtime.left_scan = None;
-                    } else {
-                        runtime.right_error = Some(error);
-                        state.right_scan_complete = true;
-                        runtime.right_scan = None;
-                    }
+            }
+            ScanEvent::Failed { error, .. } => {
+                if left {
+                    runtime.left_error = Some(error);
+                    state.left_scan_complete = true;
+                    runtime.left_scan = None;
+                } else {
+                    runtime.right_error = Some(error);
+                    state.right_scan_complete = true;
+                    runtime.right_scan = None;
                 }
             }
         }
@@ -1121,5 +1124,230 @@ mod tests {
         let runtime = &dialog.folder_runtimes[&81];
         assert!(runtime.generation > 3 && runtime.restart_prepared);
         assert_eq!(runtime.left_visited, 0);
+    }
+
+    #[test]
+    fn principal_folder_workflow_uses_injected_controller_boundaries() {
+        use crate::diff::file_ops::{ItemOutcome, execute_copy};
+        use crate::diff::folder_compare::{EntryKind, EntryMetadata, EntrySide};
+        use crate::diff::folder_scan::{DiscoveredEntry, RootIdentity, ScanEvent};
+        use crate::diff::model::{DiffSide, FolderDisplayFilter};
+        use crate::diff::text_compare::NavigationDirection;
+        use std::collections::HashSet;
+        use std::sync::atomic::AtomicBool;
+
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        std::fs::write(left.path().join("changed.bin"), [0, 1, 2, 3]).unwrap();
+        std::fs::write(right.path().join("changed.bin"), [0, 9, 2, 8]).unwrap();
+        std::fs::write(left.path().join("copy.txt"), "left version").unwrap();
+        // An archive is deliberately one ordinary file event. There is no
+        // scanner/archive mount callback capable of yielding member paths.
+        std::fs::write(left.path().join("bundle.zip"), b"PK\0opaque").unwrap();
+
+        let mut dialog = DiffDialogState::default();
+        let assign_picker = |workspace: &mut DiffWorkspace, side, path: &std::path::Path| {
+            workspace.assign_selected_path(side, Some(path.to_path_buf()));
+        };
+        assign_picker(&mut dialog.workspace, DiffSide::Left, left.path());
+        assign_picker(&mut dialog.workspace, DiffSide::Right, right.path());
+        dialog
+            .open_and_record(
+                dialog.workspace.left_visible.clone(),
+                dialog.workspace.right_visible.clone(),
+            )
+            .unwrap();
+        let folder_id = dialog.workspace.current_view.id;
+        let runtime = dialog.folder_runtimes.entry(folder_id).or_default();
+        runtime.generation = 77;
+        let left_root = RootIdentity::new(left.path().to_path_buf());
+        let right_root = RootIdentity::new(right.path().to_path_buf());
+        runtime.left_root = Some(left_root.clone());
+        runtime.right_root = Some(right_root.clone());
+
+        let discovered = |root: &std::path::Path, name: &str| DiscoveredEntry {
+            relative_path: name.into(),
+            side: EntrySide {
+                path: root.join(name),
+                metadata: Some(EntryMetadata::from_fs(
+                    &std::fs::metadata(root.join(name)).unwrap(),
+                    EntryKind::File,
+                )),
+                error: None,
+            },
+        };
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        // Inject progressive scanner batches instead of starting worker threads.
+        process_scan_events(
+            state,
+            runtime,
+            true,
+            &left_root,
+            [
+                ScanEvent::EntriesDiscovered {
+                    generation: 77,
+                    root: left_root.clone(),
+                    entries: vec![discovered(left.path(), "changed.bin")],
+                },
+                ScanEvent::Progress {
+                    generation: 77,
+                    root: left_root.clone(),
+                    visited: 1,
+                },
+                ScanEvent::EntriesDiscovered {
+                    generation: 77,
+                    root: left_root.clone(),
+                    entries: vec![
+                        discovered(left.path(), "copy.txt"),
+                        discovered(left.path(), "bundle.zip"),
+                    ],
+                },
+                ScanEvent::Completed {
+                    generation: 77,
+                    root: left_root.clone(),
+                    visited: 3,
+                },
+            ],
+        );
+        process_scan_events(
+            state,
+            runtime,
+            false,
+            &right_root,
+            [
+                ScanEvent::EntriesDiscovered {
+                    generation: 77,
+                    root: right_root.clone(),
+                    entries: vec![discovered(right.path(), "changed.bin")],
+                },
+                ScanEvent::Completed {
+                    generation: 77,
+                    root: right_root,
+                    visited: 1,
+                },
+            ],
+        );
+        assert_eq!(runtime.left_visited, 3);
+        assert!(state.left_scan_complete && state.right_scan_complete);
+        assert!(state.model.entries.contains_key("bundle.zip"));
+        assert!(
+            !state
+                .model
+                .entries
+                .keys()
+                .any(|key| key.starts_with("bundle.zip/"))
+        );
+
+        state.display_filter = FolderDisplayFilter::Differences;
+        state.path_filter = "changed".into();
+        assert_eq!(
+            folder_view::ordered_visible(state),
+            [std::path::PathBuf::from("changed.bin")]
+        );
+        state.primary_selection = Some("changed.bin".into());
+        state.selected_paths.insert("changed.bin".into());
+        state.scroll_anchor = state.primary_selection.clone();
+        let retained = state.clone();
+
+        dialog.apply_folder_action(folder_view::FolderViewAction::OpenChild {
+            relative_path: "changed.bin".into(),
+            left: Some(left.path().join("changed.bin")),
+            right: Some(right.path().join("changed.bin")),
+        });
+        let child_id = dialog.workspace.current_view.id;
+        let DiffView::BinaryCompare(child) = &dialog.workspace.current_view.view else {
+            panic!("binary child must route to the read-only hex comparator")
+        };
+        let mut binary = crate::diff::binary_compare::BinaryViewModel::load(child, 0.5).unwrap();
+        binary.navigate(NavigationDirection::Next);
+        binary.navigate(NavigationDirection::Last);
+        assert!(binary.current_difference.is_some());
+        dialog.binary_views.insert(child_id, binary);
+        assert!(dialog.navigate_back());
+        assert!(
+            matches!(&dialog.workspace.current_view.view, DiffView::FolderCompare(s) if s == &retained)
+        );
+
+        // Capture a new selection, preview it, and pass the immutable plan to
+        // an injected synchronous executor (no GUI click or worker timing).
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        state.path_filter.clear();
+        state.selected_paths.clear();
+        state.selected_paths.insert("copy.txt".into());
+        state.primary_selection = Some("copy.txt".into());
+        dialog.plan_mutation(folder_view::MutationKind::CopyRight);
+        let preview = dialog.operation_preview.take().expect("copy preview");
+        let operation_preview::PreviewPlan::Copy(plan) = preview.plan else {
+            unreachable!()
+        };
+        let execute = |plan| execute_copy(plan, &HashSet::new(), &AtomicBool::new(false));
+        let report = execute(&plan);
+        assert!(matches!(report.items[0].outcome, ItemOutcome::Copied));
+        assert_eq!(
+            std::fs::read_to_string(right.path().join("copy.txt")).unwrap(),
+            "left version"
+        );
+
+        let runtime = dialog.folder_runtimes.get_mut(&folder_id).unwrap();
+        refresh_after_mutation(state, runtime, report.affected_subtree);
+        assert!(state.model.entries.is_empty());
+        assert!(
+            state
+                .selected_paths
+                .contains(std::path::Path::new("copy.txt"))
+        );
+        // Inject the refreshed surviving row, then apply the same reconciliation
+        // performed after completed scans.
+        process_scan_events(
+            state,
+            runtime,
+            false,
+            &RootIdentity::new(right.path().to_path_buf()),
+            std::iter::empty(),
+        );
+        assert!(
+            state
+                .selected_paths
+                .contains(std::path::Path::new("copy.txt"))
+        );
+    }
+
+    #[test]
+    fn gui_delete_planning_is_recycle_only() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("remove.txt"), "x").unwrap();
+        let mut dialog = folder_dialog(901);
+        dialog.folder_runtimes.entry(901).or_default().generation = 4;
+        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        state.left_root = root.path().into();
+        state.right_root = other.path().into();
+        state.selected_paths.insert("remove.txt".into());
+        state
+            .model
+            .upsert(
+                std::path::Path::new("remove.txt"),
+                crate::diff::folder_compare::EntrySide {
+                    path: root.path().join("remove.txt"),
+                    metadata: None,
+                    error: None,
+                },
+                true,
+                crate::diff::folder_compare::PathKeyPolicy::Platform,
+                state.timestamp_tolerance,
+            )
+            .unwrap();
+        dialog.plan_mutation(folder_view::MutationKind::DeleteLeft);
+        let preview = dialog.operation_preview.as_ref().unwrap();
+        let operation_preview::PreviewPlan::Delete(plan) = &preview.plan else {
+            unreachable!()
+        };
+        assert_eq!(plan.mode, crate::diff::file_ops::DeleteMode::Recycle);
     }
 }
