@@ -4110,7 +4110,7 @@ mod tests {
         assert_eq!(pending.report.files, 0);
         assert_eq!(
             pending.report.content,
-            "before [example.com](https://example.com) after"
+            "before [example](https://example.com) after"
         );
     }
 
@@ -4152,8 +4152,11 @@ mod tests {
 
     #[test]
     fn confirming_plain_link_conversion_uses_mutation_invalidation_without_saving() {
+        let temp = tempdir().unwrap();
+        let note_path = temp.path().join("not-written.md");
+        fs::write(&note_path, "persisted content").unwrap();
         let mut note = empty_note("# Title\n\nhttps://example.com");
-        note.path = PathBuf::from("not-written.md");
+        note.path = note_path.clone();
         let mut panel = NotePanel::from_note(note);
         let _ = panel.markdown_analysis();
         panel.fast_derived_dirty = false;
@@ -4167,16 +4170,19 @@ mod tests {
 
         assert_eq!(
             panel.note.content,
-            "# Title\n\n[example.com](https://example.com)"
+            "# Title\n\n[example](https://example.com)"
         );
-        assert_eq!(panel.note.path, PathBuf::from("not-written.md"));
+        assert_eq!(panel.note.path, note_path);
         assert_eq!(panel.last_edit_at_secs, Some(42.0));
         assert!(panel.markdown_analysis.is_none());
         assert!(panel.markdown_analysis_source_hash.is_none());
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
         assert!(panel.focus_textedit_next_frame);
-        assert!(!Path::new("not-written.md").exists());
+        assert_eq!(
+            fs::read_to_string(&panel.note.path).unwrap(),
+            "persisted content"
+        );
     }
 
     #[test]
@@ -4204,7 +4210,7 @@ mod tests {
         );
         assert_eq!(
             panel.note.content,
-            "[one.example](https://one.example) and [two.example](https://two.example)"
+            "[one](https://one.example) and [two](https://two.example)"
         );
         assert_eq!(panel.last_edit_at_secs, Some(2.0));
     }
