@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 mod folder_view;
 mod operation_preview;
+mod rules_dialog;
 mod text_view;
 
 fn render_retained_folder(
