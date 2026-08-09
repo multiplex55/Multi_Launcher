@@ -42,8 +42,21 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             if ui.button("Find").clicked() {
                 model.find_open = true;
             }
+            let mut sync = model.scroll.sync_vertical && model.scroll.sync_horizontal;
+            if ui.checkbox(&mut sync, "Sync Scroll").changed() {
+                model.scroll.set_sync(sync, sync);
+            }
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut model.wrap, "Wrap");
+                if ui.checkbox(&mut model.wrap, "Wrap").changed() {
+                    model.scroll.wrapped = model.wrap;
+                }
+                let mut vertical = model.scroll.sync_vertical;
+                let mut horizontal = model.scroll.sync_horizontal;
+                let changed = ui.checkbox(&mut vertical, "Sync Vertical").changed()
+                    | ui.checkbox(&mut horizontal, "Sync Horizontal").changed();
+                if changed {
+                    model.scroll.set_sync(vertical, horizontal);
+                }
                 ui.add_enabled(
                     model.large_file_tier.syntax_enabled(),
                     egui::Checkbox::new(&mut model.syntax, "Syntax"),
@@ -281,7 +294,22 @@ fn pane(
     );
     let rows = &c.rows;
     let row_height = if model.wrap { 34.0 } else { 20.0 };
-    let mut scroll = egui::ScrollArea::vertical().id_source((workspace, view, side, "diff_scroll"));
+    let axis_id = if model.wrap {
+        "vertical"
+    } else {
+        "horizontal_vertical"
+    };
+    let (stored_x, stored_y) = model.scroll.offsets(side);
+    let mut scroll = if model.wrap {
+        egui::ScrollArea::vertical()
+    } else {
+        egui::ScrollArea::both()
+    }
+    .id_source((workspace, view, side, axis_id))
+    .vertical_scroll_offset(stored_y);
+    if !model.wrap {
+        scroll = scroll.horizontal_scroll_offset(stored_x);
+    }
     if let Some(row_index) = pending {
         let visual = projected
             .binary_search(&row_index)
@@ -291,7 +319,7 @@ fn pane(
     // Defer model mutation until after the scroll callback releases its
     // immutable borrow of the retained comparison.
     let mut selected_row = None;
-    scroll.show_rows(ui, row_height, projected.len(), |ui, range| {
+    let output = scroll.show_rows(ui, row_height, projected.len(), |ui, range| {
         for projected_i in range {
             let i = projected[projected_i];
             let row = &rows[i];
@@ -399,6 +427,44 @@ fn pane(
             });
         }
     });
+    let new_x = output.state.offset.x;
+    let new_y = output.state.offset.y;
+    let focus_id = egui::Id::new((workspace, view, side, axis_id, "focus"));
+    let pane_response = ui.interact(output.inner_rect, focus_id, egui::Sense::click_and_drag());
+    if pane_response.clicked() {
+        pane_response.request_focus();
+    }
+    let offset_changed =
+        (new_y - stored_y).abs() > 0.25 || (!model.wrap && (new_x - stored_x).abs() > 0.25);
+    let directly_interacting = (pane_response.hovered() || pane_response.has_focus())
+        && ui.input(|input| {
+            input.pointer.any_down()
+                || input.raw_scroll_delta != egui::Vec2::ZERO
+                || input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::PageUp
+                                | egui::Key::PageDown
+                                | egui::Key::Home
+                                | egui::Key::End,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                })
+        });
+    if offset_changed || directly_interacting {
+        model
+            .scroll
+            .drive(side, new_x, new_y, row_height, model.wrap);
+        let visual = (new_y / row_height.max(1.0)) as usize;
+        if let Some(&aligned) = projected.get(visual.min(projected.len().saturating_sub(1))) {
+            model.scroll.aligned_row = aligned;
+        }
+        model.active_side = side;
+        ui.ctx().request_repaint();
+    }
     if let Some(row) = selected_row {
         model.active_side = side;
         model.set_current_row(Some(row));
@@ -490,4 +556,45 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
             m.active_side = DiffSide::Right;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn minified_json_long_line_is_clipped_to_pane_and_scrolls_horizontally() {
+        let context = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(screen);
+        let measured = Rc::new(RefCell::new(None));
+        let captured = measured.clone();
+        context.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.allocate_ui(egui::vec2(300.0, 200.0), |ui| {
+                    let json = format!(r#"{{"payload":"{}"}}"#, "x".repeat(100_000));
+                    let output = egui::ScrollArea::both()
+                        .id_source(("long-line-regression", "left", "xy"))
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(json).wrap(false));
+                        });
+                    *captured.borrow_mut() = Some((output.inner_rect, output.content_size));
+                });
+            });
+        });
+        let (pane, content) = measured.borrow().expect("scroll area was rendered");
+        assert_eq!(screen.size(), egui::vec2(800.0, 600.0));
+        assert!(pane.width() <= 300.0, "pane must not widen its parent");
+        assert!(
+            pane.height() <= 200.0,
+            "pane must remain vertically bounded"
+        );
+        assert!(
+            content.x > pane.width(),
+            "horizontal scrolling is available"
+        );
+        assert!(content.y < 50.0, "unwrapped JSON remains one visual line");
+    }
 }
