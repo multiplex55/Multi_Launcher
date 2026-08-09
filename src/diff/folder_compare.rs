@@ -350,7 +350,7 @@ mod tests {
                 Some(&side(EntryKind::File, 10, 103)),
                 Duration::from_secs(2)
             ),
-            FolderStatus::PendingContentComparison
+            FolderStatus::RightNewer
         );
         assert_eq!(
             fast_status(
