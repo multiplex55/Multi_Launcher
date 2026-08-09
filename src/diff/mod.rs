@@ -1,8 +1,9 @@
 //! Native two-way file and folder comparison.
 //!
-//! Deliberately out of scope: three-way merge, synchronization, archive virtual
-//! folders, Git-specific UI, media/image comparison, cloud protocols, fuzzy
-//! filename pairing, and a hex editor.
+//! Deliberately out of the two-way completion scope: three-way merge (tracked as
+//! a deferred text-only initiative in `docs/diff-three-way-initiative.md`),
+//! synchronization, archive virtual folders, Git-specific UI, media/image
+//! comparison, cloud protocols, fuzzy filename pairing, and a hex editor.
 
 pub mod binary_compare;
 pub mod file_ops;
