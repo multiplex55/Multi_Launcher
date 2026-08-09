@@ -3,6 +3,7 @@ use crate::diff::query::DiffOpenPayload;
 use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
+mod binary_view;
 mod folder_view;
 mod operation_preview;
 mod rules_dialog;
@@ -22,8 +23,7 @@ pub struct DiffDialogState {
     text_views: HashMap<u64, crate::diff::model::TextViewModel>,
     folder_runtimes: HashMap<u64, crate::diff::folder_runtime::FolderRuntime>,
     operation_preview: Option<operation_preview::OperationPreview>,
-    // Binary renderers will keep their ephemeral resources in this view-id map.
-    binary_views: HashMap<u64, ()>,
+    binary_views: HashMap<u64, crate::diff::binary_compare::BinaryViewModel>,
     close_prompt: bool,
     pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
@@ -149,20 +149,22 @@ impl DiffDialogState {
                     ));
                 }
                 DiffView::BinaryCompare(s) => {
-                    self.binary_views.entry(view_id).or_insert(());
-                    ui.heading("Binary comparison");
-                    ui.label(format!(
-                        "Left: {}",
-                        s.left
-                            .as_ref()
-                            .map_or("(missing)".into(), |p| p.display().to_string())
-                    ));
-                    ui.label(format!(
-                        "Right: {}",
-                        s.right
-                            .as_ref()
-                            .map_or("(missing)".into(), |p| p.display().to_string())
-                    ));
+                    if !self.binary_views.contains_key(&view_id) {
+                        match crate::diff::binary_compare::BinaryViewModel::load(
+                            s,
+                            settings.pane_split,
+                        ) {
+                            Ok(model) => {
+                                self.binary_views.insert(view_id, model);
+                            }
+                            Err(error) => {
+                                render_error = Some(error);
+                            }
+                        }
+                    }
+                    if let Some(model) = self.binary_views.get_mut(&view_id) {
+                        binary_view::show(ui, workspace_id, view_id, model);
+                    }
                 }
                 DiffView::FolderCompare(s) => {
                     let runtime = self.folder_runtimes.entry(view_id).or_default();

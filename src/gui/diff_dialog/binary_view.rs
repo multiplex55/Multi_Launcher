@@ -1,0 +1,69 @@
+use crate::diff::binary_compare::{BinaryCell, BinaryRow, BinaryViewModel};
+use crate::diff::text_compare::NavigationDirection;
+use eframe::egui::{self, Color32, RichText};
+
+pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut BinaryViewModel) {
+    ui.horizontal(|ui| {
+        for (label, direction) in [
+            ("First", NavigationDirection::First),
+            ("Previous", NavigationDirection::Previous),
+            ("Next", NavigationDirection::Next),
+            ("Last", NavigationDirection::Last),
+        ] {
+            if ui.button(label).clicked() {
+                model.navigate(direction);
+            }
+        }
+        ui.label(model.current_difference.map_or_else(
+            || format!("0/{} differences", model.differences.ranges.len()),
+            |i| format!("Difference {}/{}", i + 1, model.differences.ranges.len()),
+        ));
+        ui.label("Read-only · 16 bytes/row");
+    });
+    let row_height = 22.0;
+    let rows = model
+        .left
+        .len
+        .max(model.right.len)
+        .div_ceil(model.bytes_per_row as u64) as usize;
+    let pending = model.pending_scroll_offset.take();
+    if let Some(offset) = pending {
+        model.visible_byte_offset =
+            offset / model.bytes_per_row as u64 * model.bytes_per_row as u64;
+    }
+    let mut scroll = egui::ScrollArea::vertical().id_source((workspace, view, "binary_scroll"));
+    if pending.is_some() {
+        scroll = scroll.vertical_scroll_offset(
+            (model.visible_byte_offset / model.bytes_per_row as u64) as f32 * row_height,
+        );
+    }
+    scroll.show_rows(ui, row_height, rows, |ui, range| {
+        for row_index in range {
+            let offset = row_index as u64 * model.bytes_per_row as u64;
+            if let Ok(row) = model.row(offset) {
+                ui.horizontal(|ui| {
+                    side(ui, row.offset, &row.left);
+                    ui.separator();
+                    side(ui, row.offset, &row.right);
+                });
+            }
+        }
+    });
+}
+
+fn side(ui: &mut egui::Ui, offset: u64, cells: &[BinaryCell]) {
+    ui.label(RichText::new(format!("{offset:08X}")).monospace().weak());
+    for cell in cells {
+        let text = cell.byte.map_or("--".to_owned(), |b| format!("{b:02X}"));
+        ui.label(
+            RichText::new(text)
+                .monospace()
+                .background_color(if cell.changed {
+                    Color32::from_rgb(100, 65, 20)
+                } else {
+                    Color32::TRANSPARENT
+                }),
+        );
+    }
+    ui.label(RichText::new(BinaryRow::ascii(cells)).monospace());
+}
