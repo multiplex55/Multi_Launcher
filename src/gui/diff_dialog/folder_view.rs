@@ -62,14 +62,24 @@ pub(crate) fn apply_selection(
         SelectionGesture::Toggle => {
             if let Some(i) = target_index {
                 let path = rows[i].clone();
-                if !state.selected_paths.remove(&path) {
+                let removed = state.selected_paths.remove(&path);
+                if !removed {
                     state.selected_paths.insert(path.clone());
                 }
-                state.primary_selection = state
-                    .selected_paths
-                    .contains(&path)
-                    .then_some(path)
-                    .or_else(|| state.selected_paths.iter().next().cloned());
+                // Ctrl-click changes membership without moving the range anchor.
+                // Only replace the primary selection when it no longer belongs to
+                // the selection (or when this is the first selected row).
+                if state
+                    .primary_selection
+                    .as_ref()
+                    .is_none_or(|primary| !state.selected_paths.contains(primary))
+                {
+                    state.primary_selection = if removed {
+                        state.selected_paths.iter().next().cloned()
+                    } else {
+                        Some(path)
+                    };
+                }
             }
         }
         SelectionGesture::Range => {
@@ -504,6 +514,7 @@ mod tests {
             SelectionGesture::Toggle,
         );
         assert_eq!(s.selected_paths.len(), 2);
+        assert_eq!(s.primary_selection, Some("b".into()));
         apply_selection(&mut s, &rows, Some(Path::new("a")), SelectionGesture::Range);
         assert_eq!(s.selected_paths.len(), 2);
         apply_selection(&mut s, &rows, None, SelectionGesture::SelectAll);
