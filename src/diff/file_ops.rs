@@ -378,7 +378,12 @@ fn walk_selected(
         children.sort_by_key(|x| x.file_name());
         for e in children.into_iter().rev() {
             let child = rel.join(e.file_name());
-            match FileIdentity::read(&e.path()) {
+            // Reconstruct from the captured canonical root rather than keeping
+            // `DirEntry::path()`. On Windows the latter can change between DOS
+            // and verbatim (`\\?\`) spellings, making an unchanged source fail
+            // the exact captured-target freshness check during execution.
+            let child_source = sr.canonical.join(&child);
+            match FileIdentity::read(&child_source) {
                 Ok(i) if i.kind == EntryType::Directory => stack.push(child),
                 Ok(i) => {
                     let t = dr.canonical.join(&child);
@@ -386,7 +391,7 @@ fn walk_selected(
                         sr,
                         dr,
                         child,
-                        e.path(),
+                        child_source,
                         t,
                         i,
                         dirs,
