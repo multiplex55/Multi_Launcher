@@ -170,6 +170,9 @@ fn pane(
     if let Some(row_index) = pending {
         scroll = scroll.vertical_scroll_offset(row_index as f32 * row_height);
     }
+    // Defer model mutation until after the scroll callback releases its
+    // immutable borrow of the retained comparison.
+    let mut selected_row = None;
     scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
         for i in range {
             let row = &rows[i];
@@ -225,13 +228,16 @@ fn pane(
                         .on_hover_text("Missing on this side; insert real source text")
                         .clicked()
                     {
-                        model.active_side = side;
-                        model.set_current_row(Some(i));
+                        selected_row = Some(i);
                     }
                 });
             });
         }
     });
+    if let Some(row) = selected_row {
+        model.active_side = side;
+        model.set_current_row(Some(row));
+    }
     true
 }
 fn side_status(
