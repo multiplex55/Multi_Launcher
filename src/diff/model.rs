@@ -378,6 +378,119 @@ pub enum DiffSide {
     Right,
 }
 
+/// Retained scroll controller shared by both text panes. Pixel positions are
+/// deliberately transient; only the two user preferences are serializable.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TextScrollState {
+    pub sync_vertical: bool,
+    pub sync_horizontal: bool,
+    #[serde(skip)]
+    pub left_vertical: f32,
+    #[serde(skip)]
+    pub right_vertical: f32,
+    #[serde(skip)]
+    pub left_horizontal: f32,
+    #[serde(skip)]
+    pub right_horizontal: f32,
+    #[serde(skip)]
+    pub active_driver: DiffSide,
+    /// Aligned comparison row and the fractional visual position within it.
+    #[serde(skip)]
+    pub aligned_row: usize,
+    #[serde(skip)]
+    pub within_row: f32,
+    /// Retained X positions are hidden, rather than destroyed, while wrapped.
+    #[serde(skip)]
+    pub wrapped: bool,
+}
+
+impl Default for TextScrollState {
+    fn default() -> Self {
+        Self {
+            sync_vertical: true,
+            sync_horizontal: true,
+            left_vertical: 0.0,
+            right_vertical: 0.0,
+            left_horizontal: 0.0,
+            right_horizontal: 0.0,
+            active_driver: DiffSide::Left,
+            aligned_row: 0,
+            within_row: 0.0,
+            wrapped: false,
+        }
+    }
+}
+
+impl TextScrollState {
+    pub fn offsets(&self, side: DiffSide) -> (f32, f32) {
+        match side {
+            DiffSide::Left => (self.left_horizontal, self.left_vertical),
+            DiffSide::Right => (self.right_horizontal, self.right_vertical),
+        }
+    }
+
+    pub fn set_driver(&mut self, side: DiffSide) {
+        self.active_driver = side;
+    }
+
+    /// Records a user-driven offset and applies synchronization in aligned
+    /// visual coordinates (row plus within-row pixels), including blank rows.
+    pub fn drive(&mut self, side: DiffSide, x: f32, y: f32, row_height: f32, wrapped: bool) {
+        self.active_driver = side;
+        self.wrapped = wrapped;
+        let h = row_height.max(1.0);
+        self.aligned_row = (y / h).floor().max(0.0) as usize;
+        self.within_row = y.rem_euclid(h);
+        let aligned_y = self.aligned_row as f32 * h + self.within_row;
+        match side {
+            DiffSide::Left => {
+                self.left_vertical = y.max(0.0);
+                if !wrapped {
+                    self.left_horizontal = x.max(0.0);
+                }
+                if self.sync_vertical {
+                    self.right_vertical = aligned_y;
+                }
+                if self.sync_horizontal && !wrapped {
+                    self.right_horizontal = self.left_horizontal;
+                }
+            }
+            DiffSide::Right => {
+                self.right_vertical = y.max(0.0);
+                if !wrapped {
+                    self.right_horizontal = x.max(0.0);
+                }
+                if self.sync_vertical {
+                    self.left_vertical = aligned_y;
+                }
+                if self.sync_horizontal && !wrapped {
+                    self.left_horizontal = self.right_horizontal;
+                }
+            }
+        }
+    }
+
+    pub fn set_sync(&mut self, vertical: bool, horizontal: bool) {
+        let enabling_v = vertical && !self.sync_vertical;
+        let enabling_h = horizontal && !self.sync_horizontal;
+        self.sync_vertical = vertical;
+        self.sync_horizontal = horizontal;
+        let (x, y) = self.offsets(self.active_driver);
+        if enabling_v || enabling_h {
+            self.drive(self.active_driver, x, y, 1.0, self.wrapped);
+        }
+    }
+
+    pub fn target_aligned_row(&mut self, row: usize, row_height: f32) {
+        self.aligned_row = row;
+        self.within_row = 0.0;
+        let y = row as f32 * row_height.max(1.0);
+        self.left_vertical = y;
+        self.right_vertical = y;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePosition {
     pub side: DiffSide,
@@ -479,6 +592,7 @@ pub struct TextViewModel {
     pub current_row: Option<usize>,
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
+    pub scroll: TextScrollState,
     pub projection_mode: RowProjectionMode,
     pub projection_context: usize,
     pub find_open: bool,
@@ -566,6 +680,7 @@ impl TextViewModel {
             active_side: DiffSide::Left,
             current_row: None,
             pending_scroll_row: None,
+            scroll: TextScrollState::default(),
             projection_mode: RowProjectionMode::All,
             projection_context: 3,
             find_open: false,
@@ -676,24 +791,32 @@ impl TextViewModel {
             .and_then(|i| self.find_matches.get(i).copied())
         {
             self.active_side = m.side;
-            self.pending_scroll_row = Some(m.row);
+            self.request_scroll_row(Some(m.row));
         }
     }
     pub fn request_overview_scroll(&mut self, y: f32, height: f32) {
         if let Some(c) = &self.comparison {
-            self.pending_scroll_row = text_compare::overview_row(y, height, c.rows.len());
+            let row = text_compare::overview_row(y, height, c.rows.len());
+            self.request_scroll_row(row);
         }
     }
     pub fn navigate(&mut self, direction: NavigationDirection) {
         if let Some(c) = &self.comparison {
             let row = c.navigate(self.current_row, direction, false, true);
             self.current_row = row;
-            self.pending_scroll_row = row;
+            self.request_scroll_row(row);
         }
     }
     pub fn set_current_row(&mut self, row: Option<usize>) {
         self.current_row = row;
+        self.request_scroll_row(row);
+    }
+    pub fn request_scroll_row(&mut self, row: Option<usize>) {
         self.pending_scroll_row = row;
+        if let Some(row) = row {
+            self.scroll
+                .target_aligned_row(row, if self.wrap { 34.0 } else { 20.0 });
+        }
     }
     pub fn set_ignore_all_whitespace(&mut self, value: bool) {
         if self.rules.ignore_all_whitespace != value {
@@ -1127,6 +1250,88 @@ mod tests {
                 }
             ),
             0
+        );
+    }
+
+    #[test]
+    fn text_scroll_defaults_and_bidirectional_drivers() {
+        let mut scroll = TextScrollState::default();
+        assert!(scroll.sync_vertical && scroll.sync_horizontal);
+        scroll.drive(DiffSide::Left, 12.0, 45.0, 20.0, false);
+        assert_eq!(scroll.active_driver, DiffSide::Left);
+        assert_eq!(scroll.offsets(DiffSide::Right), (12.0, 45.0));
+        assert_eq!((scroll.aligned_row, scroll.within_row), (2, 5.0));
+        scroll.drive(DiffSide::Right, 31.0, 87.0, 20.0, false);
+        assert_eq!(scroll.active_driver, DiffSide::Right);
+        assert_eq!(scroll.offsets(DiffSide::Left), (31.0, 87.0));
+    }
+
+    #[test]
+    fn aligned_blank_rows_use_comparison_coordinates() {
+        let rows = [AlignedDiffRow {
+            id: 7,
+            left: Some(3),
+            right: None,
+            kind: crate::diff::text_compare::DiffRowKind::Deleted,
+            importance: crate::diff::text_compare::ChangeImportance::Important,
+            left_ranges: vec![],
+            right_ranges: vec![],
+        }];
+        let mut scroll = TextScrollState::default();
+        scroll.drive(DiffSide::Left, 0.0, 13.0, 20.0, false);
+        assert_eq!(scroll.aligned_row, 0);
+        assert_eq!(
+            visual_to_source(&rows[scroll.aligned_row], DiffSide::Right),
+            None
+        );
+        assert_eq!(scroll.right_vertical, 13.0);
+    }
+
+    #[test]
+    fn disabled_sync_preserves_independent_offsets_and_reenable_uses_driver() {
+        let mut scroll = TextScrollState::default();
+        scroll.set_sync(false, false);
+        scroll.drive(DiffSide::Left, 10.0, 20.0, 20.0, false);
+        scroll.drive(DiffSide::Right, 70.0, 80.0, 20.0, false);
+        assert_eq!(scroll.offsets(DiffSide::Left), (10.0, 20.0));
+        assert_eq!(scroll.offsets(DiffSide::Right), (70.0, 80.0));
+        scroll.set_sync(true, true);
+        assert_eq!(scroll.offsets(DiffSide::Left), (70.0, 80.0));
+    }
+
+    #[test]
+    fn horizontal_sync_only_applies_unwrapped_and_wrap_preserves_x() {
+        let mut scroll = TextScrollState::default();
+        scroll.drive(DiffSide::Left, 44.0, 0.0, 20.0, false);
+        scroll.drive(DiffSide::Left, 0.0, 20.0, 34.0, true);
+        assert_eq!(scroll.left_horizontal, 44.0);
+        assert_eq!(scroll.right_horizontal, 44.0);
+        scroll.drive(DiffSide::Right, 91.0, 20.0, 20.0, false);
+        assert_eq!(scroll.left_horizontal, 91.0);
+    }
+
+    #[test]
+    fn all_navigation_sources_share_an_aligned_target() {
+        let mut scroll = TextScrollState::default();
+        for target in [3, 17, 42] {
+            // Difference, Find, and overview respectively.
+            scroll.target_aligned_row(target, 20.0);
+            assert_eq!(scroll.aligned_row, target);
+            assert_eq!(scroll.left_vertical, scroll.right_vertical);
+        }
+    }
+
+    #[test]
+    fn serialized_scroll_state_excludes_transient_offsets() {
+        let mut scroll = TextScrollState::default();
+        scroll.drive(DiffSide::Right, 123.0, 456.0, 20.0, false);
+        let json = serde_json::to_value(&scroll).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "sync_vertical": true,
+                "sync_horizontal": true
+            })
         );
     }
 }
