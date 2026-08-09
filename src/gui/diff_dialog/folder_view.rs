@@ -4,7 +4,20 @@ use crate::diff::model::{DiffStatus, FolderCompareState, FolderDisplayFilter};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-pub(super) fn show(ui: &mut egui::Ui, state: &mut FolderCompareState) {
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum FolderViewAction {
+    #[default]
+    Noop,
+    OpenChild {
+        relative_path: PathBuf,
+        left: Option<PathBuf>,
+        right: Option<PathBuf>,
+    },
+    NavigateBack,
+    RequestRescan,
+}
+
+pub(super) fn show(ui: &mut egui::Ui, state: &mut FolderCompareState) -> FolderViewAction {
     ui.heading("Folder comparison");
     ui.horizontal(|ui| {
         ui.label("Show retained results:");
@@ -64,6 +77,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut FolderCompareState) {
             });
         }
     });
+    FolderViewAction::Noop
 }
 fn status_text(s: &DiffStatus) -> &'static str {
     match s {
