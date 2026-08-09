@@ -515,10 +515,7 @@ fn fresh(plan: &CopyPlan, item: &PlannedCopy, dirty: &HashSet<PathBuf>) -> Resul
     if FileIdentity::read(&src).map_err(|e| e.to_string())? != item.expected_source {
         return Err("source changed since confirmation".into());
     }
-    if dirty
-        .iter()
-        .any(|path| path == &dst || path.starts_with(&dst))
-    {
+    if mutation_contains_dirty_path(&dst, dirty) {
         return Err("destination has unsaved Diff changes".into());
     }
     let now = FileIdentity::read(&dst).ok();
@@ -526,6 +523,18 @@ fn fresh(plan: &CopyPlan, item: &PlannedCopy, dirty: &HashSet<PathBuf>) -> Resul
         return Err("destination type or overwrite state changed since confirmation".into());
     }
     Ok(())
+}
+
+/// Returns whether mutating `target` would replace a dirty document or an
+/// ancestor which contains one. Canonicalization is essential on Windows,
+/// where captured roots use verbatim (`\\?\`) paths while editor paths may use
+/// their ordinary spelling.
+pub(crate) fn mutation_contains_dirty_path(target: &Path, dirty: &HashSet<PathBuf>) -> bool {
+    let canonical_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    dirty.iter().any(|path| {
+        let canonical_dirty = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        canonical_dirty == canonical_target || canonical_dirty.starts_with(&canonical_target)
+    })
 }
 
 fn same_root_identity(root: &CapturedRoot) -> Result<bool, String> {
@@ -827,7 +836,7 @@ pub fn execute_delete(
         let validation = ensure_contained(&plan.root, &x.relative).and_then(|p| {
             if p != x.target {
                 Err("captured target changed".into())
-            } else if dirty.iter().any(|path| path == &p || path.starts_with(&p)) {
+            } else if mutation_contains_dirty_path(&p, dirty) {
                 Err("item has unsaved Diff changes".into())
             } else if FileIdentity::read(&p).map_err(|e| e.to_string())? != x.expected {
                 Err("item changed since confirmation".into())

@@ -350,9 +350,10 @@ impl DiffDialogState {
                         .copies
                         .iter()
                         .filter(|item| {
-                            dirty
-                                .iter()
-                                .any(|path| path == &item.target || path.starts_with(&item.target))
+                            crate::diff::file_ops::mutation_contains_dirty_path(
+                                &item.target,
+                                &dirty,
+                            )
                         })
                         .map(|item| item.relative.display().to_string())
                         .collect(),
@@ -360,9 +361,10 @@ impl DiffDialogState {
                         .items
                         .iter()
                         .filter(|item| {
-                            dirty
-                                .iter()
-                                .any(|path| path == &item.target || path.starts_with(&item.target))
+                            crate::diff::file_ops::mutation_contains_dirty_path(
+                                &item.target,
+                                &dirty,
+                            )
                         })
                         .map(|item| item.relative.display().to_string())
                         .collect(),
