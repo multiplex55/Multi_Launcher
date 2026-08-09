@@ -273,6 +273,21 @@ pub struct TextDocument {
     redo: Vec<UndoRecord>,
 }
 impl TextDocument {
+    /// Creates an editable, UTF-8 document for a side which does not exist yet.
+    pub fn empty() -> Self {
+        Self {
+            source: String::new(),
+            revision: 0,
+            saved_revision: 0,
+            read_only: false,
+            encoding: TextEncoding::Utf8,
+            has_bom: false,
+            line_ending: LineEnding::Lf,
+            trailing_newline: false,
+            undo: vec![],
+            redo: vec![],
+        }
+    }
     pub fn from_loaded(file: &LoadedTextFile) -> Option<Self> {
         Some(Self {
             source: file.text()?.into(),
@@ -292,6 +307,30 @@ impl TextDocument {
     }
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
+    }
+    /// Replaces the source as one undo action. UI typing may call this after an
+    /// egui edit; structural merge operations deliberately call it only once.
+    pub fn replace_source(&mut self, source: String) -> Result<bool, String> {
+        if self.read_only {
+            return Err("document is read-only".into());
+        }
+        if self.source == source {
+            return Ok(false);
+        }
+        let before = std::mem::replace(&mut self.source, source);
+        self.revision += 1;
+        self.undo.push(UndoRecord {
+            before,
+            after: self.source.clone(),
+        });
+        self.redo.clear();
+        Ok(true)
+    }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
     pub fn apply_edits(&mut self, edits: &[LineEdit]) -> Result<(), String> {
         if self.read_only {
