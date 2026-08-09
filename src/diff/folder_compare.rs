@@ -159,7 +159,7 @@ pub fn fast_status(
         }
     }
 }
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FolderModel {
     pub entries: BTreeMap<String, FolderEntry>,
     pub revision: u64,
@@ -293,5 +293,135 @@ impl ContentCache {
         e.effective_status = v;
         e.content_checked = true;
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn side(kind: EntryKind, size: u64, modified: u64) -> EntrySide {
+        EntrySide {
+            path: PathBuf::from("item"),
+            metadata: Some(EntryMetadata {
+                kind,
+                size,
+                modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(modified)),
+                identity: None,
+            }),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn metadata_status_matrix_and_tolerance() {
+        let file = side(EntryKind::File, 10, 100);
+        assert_eq!(
+            fast_status(Some(&file), Some(&file), Duration::ZERO),
+            FolderStatus::PendingContentComparison
+        );
+        assert_eq!(
+            fast_status(
+                Some(&file),
+                Some(&side(EntryKind::File, 11, 100)),
+                Duration::ZERO
+            ),
+            FolderStatus::Different
+        );
+        assert_eq!(
+            fast_status(Some(&file), None, Duration::ZERO),
+            FolderStatus::LeftOnly
+        );
+        assert_eq!(
+            fast_status(None, Some(&file), Duration::ZERO),
+            FolderStatus::RightOnly
+        );
+        assert_eq!(
+            fast_status(
+                Some(&side(EntryKind::File, 10, 103)),
+                Some(&file),
+                Duration::from_secs(2)
+            ),
+            FolderStatus::LeftNewer
+        );
+        assert_eq!(
+            fast_status(
+                Some(&file),
+                Some(&side(EntryKind::File, 10, 103)),
+                Duration::from_secs(2)
+            ),
+            FolderStatus::RightNewer
+        );
+        assert_eq!(
+            fast_status(
+                Some(&file),
+                Some(&side(EntryKind::File, 10, 101)),
+                Duration::from_secs(2)
+            ),
+            FolderStatus::PendingContentComparison
+        );
+        assert_eq!(
+            fast_status(
+                Some(&file),
+                Some(&side(EntryKind::Directory, 10, 100)),
+                Duration::ZERO
+            ),
+            FolderStatus::Different
+        );
+        let unreadable = EntrySide {
+            path: "bad".into(),
+            metadata: None,
+            error: Some("denied".into()),
+        };
+        assert_eq!(
+            fast_status(Some(&unreadable), Some(&file), Duration::ZERO),
+            FolderStatus::Unreadable
+        );
+    }
+
+    #[test]
+    fn insensitive_pairing_and_large_upserts_are_lossless() {
+        let mut model = FolderModel::default();
+        model
+            .upsert(
+                Path::new("Dir/FILE.txt"),
+                side(EntryKind::File, 1, 1),
+                true,
+                PathKeyPolicy::Insensitive,
+                Duration::ZERO,
+            )
+            .unwrap();
+        model
+            .upsert(
+                Path::new("dir/file.TXT"),
+                side(EntryKind::File, 1, 1),
+                false,
+                PathKeyPolicy::Insensitive,
+                Duration::ZERO,
+            )
+            .unwrap();
+        assert_eq!(model.entries.len(), 1);
+        for i in 0..10_000 {
+            let path = PathBuf::from(format!("batch/{i}.txt"));
+            model
+                .upsert(
+                    &path,
+                    side(EntryKind::File, i, 1),
+                    true,
+                    PathKeyPolicy::Sensitive,
+                    Duration::ZERO,
+                )
+                .unwrap();
+        }
+        assert_eq!(model.entries.len(), 10_001);
+        assert_eq!(
+            model
+                .entries
+                .values()
+                .map(|e| &e.relative_path)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            10_001
+        );
     }
 }

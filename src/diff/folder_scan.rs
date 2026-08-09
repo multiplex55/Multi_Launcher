@@ -91,7 +91,7 @@ impl ScanEvent {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanRules {
     pub includes: Vec<String>,
     pub excludes: Vec<String>,
@@ -211,6 +211,13 @@ fn scan(
         },
         &c,
     ) {
+        if c.load(Ordering::Acquire) {
+            let _ = tx.send(ScanEvent::Cancelled {
+                generation: g,
+                root,
+                visited: 0,
+            });
+        }
         return;
     }
     let mut stack = vec![base.to_path_buf()];
@@ -386,5 +393,57 @@ mod tests {
         assert!(!r.permits(Path::new("x/a.tmp"), false));
         assert!(!r.permits(Path::new("a/x.bak"), false));
         assert!(r.permits(Path::new("b/x.bak"), false));
+    }
+
+    #[test]
+    fn event_rejects_stale_generation_and_wrong_root() {
+        let root = RootIdentity {
+            path: "a".into(),
+            token: None,
+        };
+        let event = ScanEvent::Progress {
+            generation: 7,
+            root: root.clone(),
+            visited: 1,
+        };
+        assert!(event.is_current(7, &root));
+        assert!(!event.is_current(8, &root));
+        assert!(!event.is_current(
+            7,
+            &RootIdentity {
+                path: "b".into(),
+                token: None
+            }
+        ));
+    }
+
+    #[test]
+    fn recursive_scan_batches_and_does_not_follow_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        for i in 0..130 {
+            fs::write(nested.join(format!("{i}.txt")), b"x").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nested, temp.path().join("link")).unwrap();
+        let handle = spawn_scan(temp.path().to_path_buf(), 4, ScanRules::default());
+        let events: Vec<_> = handle.receiver.iter().collect();
+        let batches: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::EntriesDiscovered { entries, .. } => Some(entries),
+                _ => None,
+            })
+            .collect();
+        assert!(batches.len() >= 3);
+        let paths: std::collections::BTreeSet<_> = batches
+            .iter()
+            .flat_map(|b| b.iter().map(|e| e.relative_path.clone()))
+            .collect();
+        assert_eq!(paths.len(), 131 + usize::from(cfg!(unix)));
+        #[cfg(unix)]
+        assert!(!paths.iter().any(|p| p.starts_with("link/")));
+        assert!(matches!(events.last(), Some(ScanEvent::Completed { .. })));
     }
 }
