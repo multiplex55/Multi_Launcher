@@ -6,7 +6,8 @@ use crate::file_search::actions::{
 use crate::gui::LauncherApp;
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
-    analyze_markdown, task_list::toggle_task_marker,
+    PlainLinkConversionReport, analyze_markdown, convert_plain_links,
+    task_list::toggle_task_marker,
 };
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
@@ -525,6 +526,19 @@ fn open_todo_reference(app: &mut LauncherApp, todo_id: &str) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPlainLinkConversion {
+    source: String,
+    report: PlainLinkConversionReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainLinkConfirmOutcome {
+    Applied,
+    Refreshed,
+    NoCandidates,
+}
+
 pub struct NotePanel {
     pub open: bool,
     note: Note,
@@ -566,6 +580,7 @@ pub struct NotePanel {
     link_url: String,
     link_new_dialog_open: bool,
     link_new_name: String,
+    pending_plain_link_conversion: Option<PendingPlainLinkConversion>,
     new_alias: String,
     alias_rename_inputs: HashMap<String, String>,
 
@@ -851,6 +866,7 @@ impl NotePanel {
             link_url: String::new(),
             link_new_dialog_open: false,
             link_new_name: String::new(),
+            pending_plain_link_conversion: None,
             new_alias: String::new(),
             alias_rename_inputs: HashMap::new(),
             focus_textedit_next_frame: false,
@@ -1285,6 +1301,64 @@ impl NotePanel {
         self.mark_content_changed(now_secs);
     }
 
+    fn plain_link_candidate_count(report: &PlainLinkConversionReport) -> usize {
+        report.web_links + report.directories + report.files
+    }
+
+    fn start_plain_link_conversion(&mut self) -> bool {
+        let source = self.note.content.clone();
+        let report = convert_plain_links(&source);
+        if Self::plain_link_candidate_count(&report) == 0 {
+            self.pending_plain_link_conversion = None;
+            false
+        } else {
+            self.pending_plain_link_conversion =
+                Some(PendingPlainLinkConversion { source, report });
+            true
+        }
+    }
+
+    fn cancel_plain_link_conversion(&mut self) {
+        self.pending_plain_link_conversion = None;
+        self.focus_textedit_next_frame = true;
+    }
+
+    fn confirm_plain_link_conversion(&mut self, now_secs: f64) -> PlainLinkConfirmOutcome {
+        let Some(pending) = self.pending_plain_link_conversion.as_ref() else {
+            return PlainLinkConfirmOutcome::NoCandidates;
+        };
+        if self.note.content != pending.source {
+            let source = self.note.content.clone();
+            let report = convert_plain_links(&source);
+            if Self::plain_link_candidate_count(&report) == 0 {
+                self.pending_plain_link_conversion = None;
+                self.focus_textedit_next_frame = true;
+                return PlainLinkConfirmOutcome::NoCandidates;
+            }
+            self.pending_plain_link_conversion =
+                Some(PendingPlainLinkConversion { source, report });
+            return PlainLinkConfirmOutcome::Refreshed;
+        }
+
+        let transformed = self
+            .pending_plain_link_conversion
+            .take()
+            .expect("pending conversion checked above")
+            .report
+            .content;
+        self.replace_content_from_mutation(transformed, now_secs);
+        self.focus_textedit_next_frame = true;
+        PlainLinkConfirmOutcome::Applied
+    }
+
+    fn show_no_plain_links_toast(app: &mut LauncherApp) {
+        app.add_toast(Toast {
+            text: "No convertible plain links found.".into(),
+            kind: ToastKind::Info,
+            options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+        });
+    }
+
     pub(crate) fn replace_content_after_external_mutation(&mut self, content: String) {
         self.replace_content_from_mutation(content, 0.0);
     }
@@ -1440,6 +1514,52 @@ impl NotePanel {
                     });
                 });
             self.link_new_dialog_open &= open_link_new;
+        }
+        if self.pending_plain_link_conversion.is_some() {
+            let mut dialog_open = true;
+            let mut convert = false;
+            let mut cancel = false;
+            egui::Window::new("Convert plain links?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut dialog_open)
+                .show(ctx, |ui| {
+                    let report = &self
+                        .pending_plain_link_conversion
+                        .as_ref()
+                        .expect("dialog requires pending conversion")
+                        .report;
+                    egui::Grid::new("plain_link_conversion_counts").show(ui, |ui| {
+                        ui.label("Web links:");
+                        ui.label(report.web_links.to_string());
+                        ui.end_row();
+                        ui.label("Directories:");
+                        ui.label(report.directories.to_string());
+                        ui.end_row();
+                        ui.label("Files:");
+                        ui.label(report.files.to_string());
+                        ui.end_row();
+                        ui.label("Already linked/protected candidates:");
+                        ui.label(report.skipped_existing.to_string());
+                        ui.end_row();
+                        ui.label("Skipped/invalid paths:");
+                        ui.label(report.skipped_invalid_paths.to_string());
+                        ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        convert = ui.button("Convert").clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                });
+            if cancel || !dialog_open {
+                self.cancel_plain_link_conversion();
+            } else if convert
+                && self.confirm_plain_link_conversion(ctx.input(|i| i.time))
+                    == PlainLinkConfirmOutcome::NoCandidates
+            {
+                Self::show_no_plain_links_toast(app);
+            }
         }
         if save_now || (!open && app.note_save_on_close) {
             self.save(app);
@@ -3141,6 +3261,12 @@ impl NotePanel {
                 self.link_dialog_open = true;
                 ui.close_menu();
             }
+            if ui.button("Convert plain links").clicked() {
+                if !self.start_plain_link_conversion() {
+                    Self::show_no_plain_links_toast(app);
+                }
+                ui.close_menu();
+            }
             if ui.button("Bold Selection").clicked() {
                 self.wrap_selection(ctx, id, "**", "**");
                 ui.close_menu();
@@ -3969,6 +4095,149 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn plain_link_conversion_starts_from_entire_unsaved_buffer() {
+        let mut panel = NotePanel::from_note(empty_note("before https://example.com after"));
+        panel.pending_selection = Some((0, 6));
+
+        assert!(panel.start_plain_link_conversion());
+        let pending = panel.pending_plain_link_conversion.as_ref().unwrap();
+        assert_eq!(pending.source, "before https://example.com after");
+        assert_eq!(pending.report.web_links, 1);
+        assert_eq!(pending.report.directories, 0);
+        assert_eq!(pending.report.files, 0);
+        assert_eq!(
+            pending.report.content,
+            "before [example.com](https://example.com) after"
+        );
+    }
+
+    #[test]
+    fn plain_link_conversion_noop_has_no_dialog_or_mutation_and_can_notify() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("[linked](https://example.com)"));
+        let before_edit = panel.last_edit_at_secs;
+
+        assert!(!panel.start_plain_link_conversion());
+        NotePanel::show_no_plain_links_toast(&mut app);
+
+        assert!(panel.pending_plain_link_conversion.is_none());
+        assert_eq!(panel.note.content, "[linked](https://example.com)");
+        assert_eq!(panel.last_edit_at_secs, before_edit);
+        assert!(
+            app.test_toast_messages
+                .iter()
+                .any(|message| message == "No convertible plain links found.")
+        );
+    }
+
+    #[test]
+    fn cancelling_plain_link_conversion_only_clears_transient_state() {
+        let mut panel = NotePanel::from_note(empty_note("https://example.com"));
+        assert!(panel.start_plain_link_conversion());
+        let before = panel.note.clone();
+        let before_edit = panel.last_edit_at_secs;
+
+        panel.cancel_plain_link_conversion();
+
+        assert_eq!(panel.note.content, before.content);
+        assert_eq!(panel.note.path, before.path);
+        assert_eq!(panel.last_edit_at_secs, before_edit);
+        assert!(panel.pending_plain_link_conversion.is_none());
+        assert!(panel.focus_textedit_next_frame);
+    }
+
+    #[test]
+    fn confirming_plain_link_conversion_uses_mutation_invalidation_without_saving() {
+        let mut note = empty_note("# Title\n\nhttps://example.com");
+        note.path = PathBuf::from("not-written.md");
+        let mut panel = NotePanel::from_note(note);
+        let _ = panel.markdown_analysis();
+        panel.fast_derived_dirty = false;
+        panel.heavy_recompute_requested = false;
+        assert!(panel.start_plain_link_conversion());
+
+        assert_eq!(
+            panel.confirm_plain_link_conversion(42.0),
+            PlainLinkConfirmOutcome::Applied
+        );
+
+        assert_eq!(
+            panel.note.content,
+            "# Title\n\n[example.com](https://example.com)"
+        );
+        assert_eq!(panel.note.path, PathBuf::from("not-written.md"));
+        assert_eq!(panel.last_edit_at_secs, Some(42.0));
+        assert!(panel.markdown_analysis.is_none());
+        assert!(panel.markdown_analysis_source_hash.is_none());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert!(panel.focus_textedit_next_frame);
+        assert!(!Path::new("not-written.md").exists());
+    }
+
+    #[test]
+    fn stale_plain_link_confirmation_refreshes_then_requires_second_click() {
+        let mut panel = NotePanel::from_note(empty_note("https://one.example"));
+        assert!(panel.start_plain_link_conversion());
+        panel.note.content.push_str(" and https://two.example");
+
+        assert_eq!(
+            panel.confirm_plain_link_conversion(1.0),
+            PlainLinkConfirmOutcome::Refreshed
+        );
+        assert_eq!(
+            panel.note.content,
+            "https://one.example and https://two.example"
+        );
+        let refreshed = panel.pending_plain_link_conversion.as_ref().unwrap();
+        assert_eq!(refreshed.source, panel.note.content);
+        assert_eq!(refreshed.report.web_links, 2);
+        assert_eq!(panel.last_edit_at_secs, None);
+
+        assert_eq!(
+            panel.confirm_plain_link_conversion(2.0),
+            PlainLinkConfirmOutcome::Applied
+        );
+        assert_eq!(
+            panel.note.content,
+            "[one.example](https://one.example) and [two.example](https://two.example)"
+        );
+        assert_eq!(panel.last_edit_at_secs, Some(2.0));
+    }
+
+    #[test]
+    fn stale_plain_link_confirmation_closes_when_candidates_were_removed() {
+        let mut panel = NotePanel::from_note(empty_note("https://example.com"));
+        assert!(panel.start_plain_link_conversion());
+        panel.note.content = "intervening edit with no links".into();
+
+        assert_eq!(
+            panel.confirm_plain_link_conversion(3.0),
+            PlainLinkConfirmOutcome::NoCandidates
+        );
+        assert_eq!(panel.note.content, "intervening edit with no links");
+        assert!(panel.pending_plain_link_conversion.is_none());
+        assert_eq!(panel.last_edit_at_secs, None);
+    }
+
+    #[test]
+    fn converted_plain_links_are_idempotent() {
+        let mut panel = NotePanel::from_note(empty_note("https://example.com"));
+        assert!(panel.start_plain_link_conversion());
+        assert_eq!(
+            panel.confirm_plain_link_conversion(4.0),
+            PlainLinkConfirmOutcome::Applied
+        );
+        let converted = panel.note.content.clone();
+        let edit_time = panel.last_edit_at_secs;
+
+        assert!(!panel.start_plain_link_conversion());
+        assert_eq!(panel.note.content, converted);
+        assert_eq!(panel.last_edit_at_secs, edit_time);
     }
 
     #[test]
