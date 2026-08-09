@@ -260,6 +260,131 @@ impl TextComparisonResult {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowProjectionMode {
+    #[default]
+    All,
+    DifferencesOnly,
+}
+
+/// A presentation-only row map. Entries are logical indices into `rows`; the
+/// comparison and its stable row/hunk identities remain untouched.
+pub fn row_projection(
+    result: &TextComparisonResult,
+    mode: RowProjectionMode,
+    context: usize,
+) -> Vec<usize> {
+    if mode == RowProjectionMode::All {
+        return (0..result.rows.len()).collect();
+    }
+    let mut keep = vec![false; result.rows.len()];
+    for h in &result.hunks {
+        let start = h.start_row.saturating_sub(context);
+        let end = h.end_row.saturating_add(context).min(result.rows.len());
+        keep[start..end].fill(true);
+    }
+    keep.into_iter()
+        .enumerate()
+        .filter_map(|(i, yes)| yes.then_some(i))
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindScope {
+    Both,
+    Left,
+    Right,
+    CurrentSide,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FindMatch {
+    pub row: usize,
+    pub side: crate::diff::model::DiffSide,
+}
+
+pub fn find_matches(
+    result: &TextComparisonResult,
+    left: &str,
+    right: &str,
+    needle: &str,
+    scope: FindScope,
+    active: crate::diff::model::DiffSide,
+    case_sensitive: bool,
+    projection: Option<&[usize]>,
+) -> Vec<FindMatch> {
+    if needle.is_empty() {
+        return vec![];
+    }
+    let wanted = |side| match scope {
+        FindScope::Both => true,
+        FindScope::Left => side == crate::diff::model::DiffSide::Left,
+        FindScope::Right => side == crate::diff::model::DiffSide::Right,
+        FindScope::CurrentSide => side == active,
+    };
+    let query = if case_sensitive {
+        needle.to_owned()
+    } else {
+        needle.to_lowercase()
+    };
+    let allowed = |row: usize| projection.is_none_or(|p| p.binary_search(&row).is_ok());
+    let lines = |text: &str, n: usize| text.lines().nth(n).unwrap_or("").to_owned();
+    let mut out = vec![];
+    for (row, aligned) in result.rows.iter().enumerate().filter(|(i, _)| allowed(*i)) {
+        for (side, line) in [
+            (crate::diff::model::DiffSide::Left, aligned.left),
+            (crate::diff::model::DiffSide::Right, aligned.right),
+        ] {
+            if wanted(side)
+                && line.is_some_and(|n| {
+                    let text = lines(
+                        if side == crate::diff::model::DiffSide::Left {
+                            left
+                        } else {
+                            right
+                        },
+                        n,
+                    );
+                    if case_sensitive {
+                        text.contains(&query)
+                    } else {
+                        text.to_lowercase().contains(&query)
+                    }
+                })
+            {
+                out.push(FindMatch { row, side });
+            }
+        }
+    }
+    out
+}
+
+pub fn navigate_match(
+    matches: &[FindMatch],
+    current: Option<usize>,
+    forward: bool,
+) -> Option<usize> {
+    if matches.is_empty() {
+        return None;
+    }
+    if forward {
+        current
+            .and_then(|c| (c + 1 < matches.len()).then_some(c + 1))
+            .or(Some(0))
+    } else {
+        current
+            .and_then(|c| c.checked_sub(1))
+            .or(Some(matches.len() - 1))
+    }
+}
+
+/// Convert a y-coordinate in an aggregated overview to a logical row.
+pub fn overview_row(y: f32, height: f32, row_count: usize) -> Option<usize> {
+    if row_count == 0 || height <= 0.0 {
+        return None;
+    }
+    Some((((y.clamp(0.0, height) / height) * row_count as f32).floor() as usize).min(row_count - 1))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum NavigationDirection {
     Next,
@@ -528,5 +653,81 @@ mod tests {
                 .is_char_boundary(x.byte_start)
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    fn compared(left: &str, right: &str) -> TextComparisonResult {
+        compare(
+            left,
+            right,
+            0,
+            0,
+            &CompiledRules::compile(&Default::default()).unwrap(),
+            4096,
+        )
+    }
+    #[test]
+    fn context_projection_merges_nearby_hunks_and_clamps_boundaries() {
+        let c = compared("a\nb\nc\nd\ne\nf", "A\nb\nc\nD\ne\nF");
+        assert_eq!(
+            row_projection(&c, RowProjectionMode::DifferencesOnly, 0),
+            vec![0, 3, 5]
+        );
+        assert_eq!(
+            row_projection(&c, RowProjectionMode::DifferencesOnly, 1),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+    }
+    #[test]
+    fn projection_preserves_row_and_hunk_identity() {
+        let c = compared("a\nb\nc", "a\nB\nc");
+        let p = row_projection(&c, RowProjectionMode::DifferencesOnly, 0);
+        assert_eq!(c.rows[p[0]].id, c.rows[1].id);
+        assert_eq!(
+            c.hunks[c.navigation.row_to_hunk[p[0]].unwrap()].id,
+            c.hunks[0].id
+        );
+    }
+    #[test]
+    fn find_scopes_case_and_wrapping_are_independent() {
+        let c = compared("Needle\nx", "needle\ny");
+        let sensitive = find_matches(
+            &c,
+            "Needle\nx",
+            "needle\ny",
+            "Needle",
+            FindScope::Both,
+            crate::diff::model::DiffSide::Left,
+            true,
+            None,
+        );
+        assert_eq!(sensitive.len(), 1);
+        let insensitive = find_matches(
+            &c,
+            "Needle\nx",
+            "needle\ny",
+            "needle",
+            FindScope::CurrentSide,
+            crate::diff::model::DiffSide::Right,
+            false,
+            None,
+        );
+        assert_eq!(insensitive.len(), 1);
+        assert_eq!(navigate_match(&insensitive, None, true), Some(0));
+        assert_eq!(navigate_match(&insensitive, Some(0), true), Some(0));
+        assert_eq!(navigate_match(&insensitive, Some(0), false), Some(0));
+        assert_eq!(
+            c.navigate(None, NavigationDirection::First, false, true),
+            Some(0)
+        );
+    }
+    #[test]
+    fn overview_maps_coordinates() {
+        assert_eq!(overview_row(0.0, 100.0, 10), Some(0));
+        assert_eq!(overview_row(99.0, 100.0, 10), Some(9));
+        assert_eq!(overview_row(1.0, 0.0, 10), None);
     }
 }

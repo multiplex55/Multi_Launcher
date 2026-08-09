@@ -2,8 +2,8 @@ use crate::diff::folder_compare::FolderModel;
 use crate::diff::folder_scan::ScanRules;
 use crate::diff::settings::DiffConfigV1;
 use crate::diff::text_compare::{
-    self, AlignedDiffRow, CompiledRules, NavigationDirection, TextComparisonResult,
-    TextComparisonRules,
+    self, AlignedDiffRow, CompiledRules, FindMatch, FindScope, NavigationDirection,
+    RowProjectionMode, TextComparisonResult, TextComparisonRules,
 };
 use crate::diff::text_file::{LineEdit, TextDocument, load_text_file};
 use std::collections::BTreeSet;
@@ -450,8 +450,18 @@ pub struct TextViewModel {
     pub current_row: Option<usize>,
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
+    pub projection_mode: RowProjectionMode,
+    pub projection_context: usize,
+    pub find_open: bool,
+    pub find_query: String,
+    pub find_scope: FindScope,
+    pub find_case_sensitive: bool,
+    pub find_projection_only: bool,
+    pub find_matches: Vec<FindMatch>,
+    pub current_find_match: Option<usize>,
     pub wrap: bool,
     pub syntax: bool,
+    pub syntax_cache: crate::diff::syntax::SyntaxCache,
     pub large_file_tier: crate::diff::worker::LargeFileTier,
     pub splitter: f32,
     pub recalculate_at: Option<Instant>,
@@ -506,8 +516,18 @@ impl TextViewModel {
             active_side: DiffSide::Left,
             current_row: None,
             pending_scroll_row: None,
+            projection_mode: RowProjectionMode::All,
+            projection_context: 3,
+            find_open: false,
+            find_query: String::new(),
+            find_scope: FindScope::Both,
+            find_case_sensitive: false,
+            find_projection_only: false,
+            find_matches: vec![],
+            current_find_match: None,
             wrap,
             syntax: settings.syntax_highlighting && large_file_tier.syntax_enabled(),
+            syntax_cache: Default::default(),
             large_file_tier,
             splitter: validated_splitter(settings.pane_split),
             recalculate_at: Some(Instant::now()),
@@ -576,6 +596,43 @@ impl TextViewModel {
                 });
             }
         });
+    }
+    pub fn projected_rows(&self) -> Vec<usize> {
+        self.comparison.as_ref().map_or_else(Vec::new, |c| {
+            text_compare::row_projection(c, self.projection_mode, self.projection_context)
+        })
+    }
+    pub fn refresh_find(&mut self) {
+        let projection = self.find_projection_only.then(|| self.projected_rows());
+        self.find_matches = self.comparison.as_ref().map_or_else(Vec::new, |c| {
+            text_compare::find_matches(
+                c,
+                self.left.source(),
+                self.right.source(),
+                &self.find_query,
+                self.find_scope,
+                self.active_side,
+                self.find_case_sensitive,
+                projection.as_deref(),
+            )
+        });
+        self.current_find_match = None;
+    }
+    pub fn navigate_find(&mut self, forward: bool) {
+        self.current_find_match =
+            text_compare::navigate_match(&self.find_matches, self.current_find_match, forward);
+        if let Some(m) = self
+            .current_find_match
+            .and_then(|i| self.find_matches.get(i).copied())
+        {
+            self.active_side = m.side;
+            self.pending_scroll_row = Some(m.row);
+        }
+    }
+    pub fn request_overview_scroll(&mut self, y: f32, height: f32) {
+        if let Some(c) = &self.comparison {
+            self.pending_scroll_row = text_compare::overview_row(y, height, c.rows.len());
+        }
     }
     pub fn navigate(&mut self, direction: NavigationDirection) {
         if let Some(c) = &self.comparison {
