@@ -18,6 +18,7 @@ use crate::plugins::note::{
 use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
+use chrono::{DateTime, Local, TimeZone};
 use eframe::egui::{self, Color32, FontId, Key, RichText, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -3861,6 +3862,22 @@ fn extract_snippet_around(content: &str, needle: &str) -> String {
     }
 }
 
+fn format_note_editor_timestamp<Tz>(timestamp: DateTime<Tz>) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    format!(
+        "{}.{:03}",
+        timestamp.format("%Y%m%d-%H%M%S"),
+        timestamp.timestamp_subsec_millis()
+    )
+}
+
+fn format_note_editor_timestamp_now() -> String {
+    format_note_editor_timestamp(Local::now())
+}
+
 fn format_note_updated(note: &Note) -> String {
     std::fs::metadata(&note.path)
         .ok()
@@ -4055,6 +4072,7 @@ fn extract_wiki_links(content: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
+    use chrono::{FixedOffset, Timelike};
     use eframe::egui;
     use std::{
         fs,
@@ -4063,6 +4081,54 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn note_editor_timestamp_formats_milliseconds_exactly() {
+        let offset = FixedOffset::east_opt(5 * 60 * 60 + 30 * 60).expect("valid fixed offset");
+        let timestamp = offset
+            .with_ymd_and_hms(2026, 8, 8, 20, 25, 12)
+            .single()
+            .expect("valid fixed datetime")
+            .with_nanosecond(347_000_000)
+            .expect("valid nanoseconds");
+
+        assert_eq!(
+            format_note_editor_timestamp(timestamp),
+            "20260808-202512.347"
+        );
+    }
+
+    #[test]
+    fn note_editor_timestamp_zero_pads_single_digit_milliseconds() {
+        let timestamp = FixedOffset::west_opt(7 * 60 * 60)
+            .expect("valid fixed offset")
+            .with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
+            .single()
+            .expect("valid fixed datetime")
+            .with_nanosecond(7_000_000)
+            .expect("valid nanoseconds");
+
+        assert_eq!(
+            format_note_editor_timestamp(timestamp),
+            "20260102-030405.007"
+        );
+    }
+
+    #[test]
+    fn note_editor_timestamp_zero_pads_zero_milliseconds() {
+        let timestamp = FixedOffset::east_opt(0)
+            .expect("valid fixed offset")
+            .with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
+            .single()
+            .expect("valid fixed datetime")
+            .with_nanosecond(0)
+            .expect("valid nanoseconds");
+
+        assert_eq!(
+            format_note_editor_timestamp(timestamp),
+            "20260102-030405.000"
+        );
+    }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
