@@ -5575,7 +5575,7 @@ More text.
         assert_eq!(panel.note.content, "Hello 20260808-202512.347world");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        assert!(range.is_empty());
+        assert_eq!(range.primary.index, range.secondary.index);
         assert_eq!(range.primary.index, 6 + TIMESTAMP.chars().count());
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
@@ -5596,7 +5596,7 @@ More text.
         assert_eq!(panel.note.content, "Before 20260808-202512.347 after");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        assert!(range.is_empty());
+        assert_eq!(range.primary.index, range.secondary.index);
         assert_eq!(range.primary.index, 7 + TIMESTAMP.chars().count());
         assert!(panel.pending_selection.is_none());
     }
@@ -5614,7 +5614,7 @@ More text.
         assert_eq!(panel.note.content, "alpha 20260808-202512.347eta");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        assert!(range.is_empty());
+        assert_eq!(range.primary.index, range.secondary.index);
         assert_eq!(range.primary.index, 6 + TIMESTAMP.chars().count());
         assert!(panel.pending_selection.is_none());
     }
