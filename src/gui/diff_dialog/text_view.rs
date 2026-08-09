@@ -8,6 +8,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
     model.poll();
     shortcuts(ui, model);
     ui.horizontal_wrapped(|ui| {
+        super::export::text_menu(ui, model);
         if ui
             .button("Rules…")
             .on_hover_text("Comparison rules")

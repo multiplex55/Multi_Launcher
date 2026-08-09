@@ -203,6 +203,7 @@ pub(super) fn show(
     ));
     let mut action = FolderViewAction::Noop;
     ui.horizontal_wrapped(|ui| {
+        super::export::folder_menu(ui, state);
         for (label, filter) in [
             ("All", FolderDisplayFilter::All),
             ("Differences", FolderDisplayFilter::Differences),

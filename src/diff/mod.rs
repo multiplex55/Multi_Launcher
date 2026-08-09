@@ -7,6 +7,7 @@
 pub mod binary_compare;
 pub mod file_ops;
 pub mod folder_compare;
+pub mod folder_export;
 pub mod folder_runtime;
 pub mod folder_scan;
 pub mod model;
@@ -15,6 +16,7 @@ pub mod query;
 pub mod settings;
 pub mod syntax;
 pub mod text_compare;
+pub mod text_export;
 pub mod text_file;
 pub mod watch;
 pub mod worker;
