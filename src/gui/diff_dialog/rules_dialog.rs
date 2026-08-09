@@ -147,7 +147,6 @@ mod tests {
             left: Some(left),
             right: Some(right),
             relative_path: None,
-            kind: crate::diff::model::FileComparisonKind::Text,
         };
         let mut model = TextViewModel::load(&state, &Default::default()).unwrap();
         model.recalculate_at = None;

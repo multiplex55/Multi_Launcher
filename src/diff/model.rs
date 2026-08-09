@@ -121,22 +121,22 @@ impl FolderCompareState {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FileComparisonKind {
-    Text,
-    Binary,
-}
-#[derive(Debug, Clone, PartialEq)]
 pub struct TextCompareState {
     pub left: Option<PathBuf>,
     pub right: Option<PathBuf>,
     pub relative_path: Option<PathBuf>,
-    pub kind: FileComparisonKind,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryCompareState {
+    pub left: Option<PathBuf>,
+    pub right: Option<PathBuf>,
+    pub relative_path: Option<PathBuf>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffView {
     Start,
     TextCompare(TextCompareState),
-    BinaryCompare(TextCompareState),
+    BinaryCompare(BinaryCompareState),
     FolderCompare(FolderCompareState),
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -230,15 +230,18 @@ impl DiffWorkspace {
             }
         };
         let view = if lm.is_file() && rm.is_file() {
-            let state = TextCompareState {
-                left: Some(lp.clone()),
-                right: Some(rp.clone()),
-                relative_path: None,
-                kind: detect_kind(&lp, &rp),
-            };
-            match state.kind {
-                FileComparisonKind::Text => DiffView::TextCompare(state),
-                FileComparisonKind::Binary => DiffView::BinaryCompare(state),
+            if paths_are_binary(Some(&lp), Some(&rp)) {
+                DiffView::BinaryCompare(BinaryCompareState {
+                    left: Some(lp.clone()),
+                    right: Some(rp.clone()),
+                    relative_path: None,
+                })
+            } else {
+                DiffView::TextCompare(TextCompareState {
+                    left: Some(lp.clone()),
+                    right: Some(rp.clone()),
+                    relative_path: None,
+                })
             }
         } else if lm.is_dir() && rm.is_dir() {
             DiffView::FolderCompare(FolderCompareState {
@@ -277,21 +280,20 @@ impl DiffWorkspace {
         if left.is_none() && right.is_none() {
             return Err("A folder child must exist on at least one side".into());
         }
-        let kind = match (&left, &right) {
-            (Some(l), Some(r)) => detect_kind(l, r),
-            _ => FileComparisonKind::Text,
-        };
-        let state = TextCompareState {
-            left,
-            right,
-            relative_path: Some(relative_path),
-            kind,
-        };
         let next = RetainedView {
             id: id(),
-            view: match state.kind {
-                FileComparisonKind::Text => DiffView::TextCompare(state),
-                FileComparisonKind::Binary => DiffView::BinaryCompare(state),
+            view: if paths_are_binary(left.as_deref(), right.as_deref()) {
+                DiffView::BinaryCompare(BinaryCompareState {
+                    left,
+                    right,
+                    relative_path: Some(relative_path),
+                })
+            } else {
+                DiffView::TextCompare(TextCompareState {
+                    left,
+                    right,
+                    relative_path: Some(relative_path),
+                })
             },
         };
         let old = std::mem::replace(&mut self.current_view, next);
@@ -330,17 +332,26 @@ pub fn validated_window_geometry(
 fn metadata(path: &Path, side: &str) -> Result<fs::Metadata, String> {
     fs::metadata(path).map_err(|e| format!("{side} path '{}': {e}", path.display()))
 }
-fn detect_kind(left: &Path, right: &Path) -> FileComparisonKind {
+fn paths_are_binary(left: Option<&Path>, right: Option<&Path>) -> bool {
     let binary = |p: &Path| {
-        fs::read(p)
+        const ARCHIVES: &[&str] = &[
+            "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz", "jar", "war", "apk",
+            "cab", "arj", "iso", "dmg", "deb", "rpm",
+        ];
+        if p.extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|v| ARCHIVES.iter().any(|x| v.eq_ignore_ascii_case(x)))
+        {
+            return true;
+        }
+        let mut bytes = [0; 8192];
+        use std::io::Read;
+        fs::File::open(p)
             .ok()
-            .is_some_and(|b| b.iter().take(8192).any(|v| *v == 0))
+            .and_then(|mut f| f.read(&mut bytes).ok())
+            .is_some_and(|n| bytes[..n].contains(&0) || std::str::from_utf8(&bytes[..n]).is_err())
     };
-    if binary(left) || binary(right) {
-        FileComparisonKind::Binary
-    } else {
-        FileComparisonKind::Text
-    }
+    left.is_some_and(binary) || right.is_some_and(binary)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -903,6 +914,26 @@ mod tests {
             &workspace.current_view.view,
             DiffView::BinaryCompare(state)
                 if state.left.as_ref() == Some(&left) && state.right.as_ref() == Some(&right)
+        ));
+    }
+
+    #[test]
+    fn zip_routes_to_binary_without_content_inspection() {
+        let temp = tempfile::tempdir().unwrap();
+        let left = temp.path().join("left.zip");
+        let right = temp.path().join("right.zip");
+        fs::write(&left, "plain but archive-named").unwrap();
+        fs::write(&right, "also plain").unwrap();
+        let mut workspace = DiffWorkspace::default();
+        workspace
+            .open_paths(
+                left.to_string_lossy().into(),
+                right.to_string_lossy().into(),
+            )
+            .unwrap();
+        assert!(matches!(
+            workspace.current_view.view,
+            DiffView::BinaryCompare(_)
         ));
     }
 
