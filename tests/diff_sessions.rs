@@ -91,3 +91,90 @@ fn failed_atomic_update_preserves_memory_and_file() {
     assert!(p.named_sessions.is_empty());
     assert!(target.is_dir());
 }
+
+#[test]
+fn old_v1_defaults_new_optional_fields() {
+    let json = r#"{"version":1,"config":{},"recent_comparisons":[],"named_sessions":[{"id":"old","name":"old","left":"a","right":"b","pane_split":0.4,"wrap_text":true,"syntax_highlighting":false,"syntax_theme":"old"}],"replacement_rules":[],"unimportant_section_rules":[]}"#;
+    let loaded: DiffPersistenceV1 = serde_json::from_str(json).unwrap();
+    let session = &loaded.named_sessions[0];
+    assert_eq!(session.comparison_mode, ComparisonModeV1::Text);
+    assert!(session.case_sensitive);
+    assert_eq!(session.folder_display_filter, "all");
+    assert_eq!(
+        session.content_comparison,
+        ContentComparisonModeV1::OnDemand
+    );
+}
+
+#[test]
+fn every_recent_mode_is_recorded_separately() {
+    let mut p = DiffPersistenceV1::default();
+    for mode in [
+        ComparisonModeV1::Text,
+        ComparisonModeV1::Folder,
+        ComparisonModeV1::Binary,
+    ] {
+        record_recent_mode(&mut p, "left".into(), "right".into(), mode);
+    }
+    assert_eq!(p.recent_comparisons.len(), 3);
+}
+
+#[test]
+fn all_session_durable_fields_roundtrip_without_runtime_state() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("diff.json");
+    let mut p = DiffPersistenceV1::default();
+    p.window_size = Some([812.0, 612.0]);
+    p.window_position = Some([21.0, 34.0]);
+    let mut s = session("complete");
+    s.comparison_mode = ComparisonModeV1::Binary;
+    s.pane_split = 0.37;
+    s.wrap_text = true;
+    s.syntax_highlighting = false;
+    s.syntax_theme = "theme".into();
+    s.ignore_whitespace = true;
+    s.case_sensitive = false;
+    s.replacement_rules = vec![crate_rule("r")];
+    s.folder_includes = vec!["*.rs".into()];
+    s.folder_excludes = vec!["target".into()];
+    s.folder_display_filter = "differences".into();
+    s.content_comparison = ContentComparisonModeV1::Always;
+    p.named_sessions.push(s.clone());
+    save(&path, &p).unwrap();
+    let loaded = load(&path).unwrap().unwrap();
+    assert_eq!(loaded.named_sessions, vec![s]);
+    assert_eq!(loaded.window_size, p.window_size);
+    assert_eq!(loaded.window_position, p.window_position);
+    let json = std::fs::read_to_string(path).unwrap();
+    for forbidden in [
+        "computed",
+        "scan_handle",
+        "progress",
+        "watcher",
+        "undo",
+        "dirty",
+        "selection",
+        "operation_plan",
+    ] {
+        assert!(!json.contains(forbidden));
+    }
+}
+
+#[test]
+fn missing_recent_is_a_local_validation_error() {
+    let recent = DisplayPathPairV1 {
+        left: "missing-left".into(),
+        right: "missing-right".into(),
+        mode: ComparisonModeV1::Text,
+    };
+    assert!(matches!(
+        reopen_recent(&recent),
+        Err(SessionError::InvalidPath(_))
+    ));
+    let persisted = serde_json::to_string(&DiffPersistenceV1 {
+        recent_comparisons: vec![recent],
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(serde_json::from_str::<DiffPersistenceV1>(&persisted).is_ok());
+}
