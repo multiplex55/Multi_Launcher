@@ -174,7 +174,8 @@ impl DiffDialogState {
                             format!("Scan failures — left: {left}; right: {right}"),
                         );
                     }
-                    action = render_retained_folder(s, |state| folder_view::show(ui, state));
+                    action =
+                        render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
                 }
             }
             if let Some(error) = render_error {
@@ -275,6 +276,8 @@ fn poll_folder_runtime(
         runtime.right_root = Some(right_identity.clone());
         runtime.left_visited = 0;
         runtime.right_visited = 0;
+        runtime.comparison_queue.clear();
+        runtime.completed_comparisons = 0;
         runtime.left_error = None;
         runtime.right_error = None;
         state.left_scan_complete = false;
@@ -303,6 +306,10 @@ fn poll_folder_runtime(
         .unwrap_or_default();
     process_scan_events(state, runtime, true, &left_identity, left_events);
     process_scan_events(state, runtime, false, &right_identity, right_events);
+
+    let visible = folder_view::ordered_visible(state);
+    runtime.prioritize(state.primary_selection.as_ref(), &visible, &state.model);
+    runtime.pump(&mut state.model, &state.text_rules);
 
     fn process_scan_events(
         state: &mut crate::diff::model::FolderCompareState,

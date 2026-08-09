@@ -52,6 +52,8 @@ pub struct FolderCompareState {
     pub path_filter: String,
     pub sort: FolderSortState,
     pub scan_rules: ScanRules,
+    /// Rules used by asynchronous content refinement of text file pairs.
+    pub text_rules: TextComparisonRules,
     pub content_comparison: ContentComparisonMode,
     pub timestamp_tolerance: Duration,
     pub left_scan_complete: bool,
@@ -74,6 +76,7 @@ impl Default for FolderCompareState {
                 descending: false,
             },
             scan_rules: ScanRules::default(),
+            text_rules: TextComparisonRules::default(),
             content_comparison: ContentComparisonMode::default(),
             timestamp_tolerance: Duration::from_secs(2),
             left_scan_complete: false,
