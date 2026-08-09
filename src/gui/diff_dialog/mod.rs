@@ -2,6 +2,7 @@ use crate::diff::model::{DiffView, DiffWorkspace};
 use crate::diff::query::DiffOpenPayload;
 use eframe::egui;
 use std::collections::HashMap;
+mod folder_view;
 mod text_view;
 
 #[derive(Default)]
@@ -110,9 +111,16 @@ impl DiffDialogState {
                                 .map_or("(missing)".into(), |p| p.display().to_string())
                         ));
                     }
-                    DiffView::FolderCompare(s) => {
-                        ui.heading("Folder comparison");
-                        ui.label(format!("{} computed entries", s.content_statuses.len()));
+                    DiffView::FolderCompare(mut s) => {
+                        folder_view::show(ui, &mut s);
+                        // The view enum is cloned before rendering so text rendering can
+                        // freely access the rest of the workspace. Persist folder-view
+                        // interaction state back into the retained view after rendering.
+                        if let DiffView::FolderCompare(current) =
+                            &mut self.workspace.current_view.view
+                        {
+                            *current = s;
+                        }
                     }
                 }
             });
