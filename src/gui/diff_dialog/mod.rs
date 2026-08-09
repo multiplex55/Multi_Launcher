@@ -72,8 +72,7 @@ impl DiffDialogState {
         }
         let response = window.show(ctx, |ui| {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
-                self.workspace.back();
-                self.reconcile_runtime_resources();
+                self.navigate_back();
             }
             ui.horizontal(|ui| {
                 let left = ui.add(
@@ -112,8 +111,7 @@ impl DiffDialogState {
                 ui.colored_label(egui::Color32::RED, error);
             }
             if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
-                self.workspace.back();
-                self.reconcile_runtime_resources();
+                self.navigate_back();
             }
             ui.separator();
             // Copy only lightweight context before borrowing the retained view.
@@ -127,32 +125,35 @@ impl DiffDialogState {
                     ui.label("Choose two files or two folders to compare.");
                 }
                 DiffView::TextCompare(s) => {
-                    if matches!(s.kind, crate::diff::model::FileComparisonKind::Binary) {
-                        ui.heading(match s.kind {
-                            crate::diff::model::FileComparisonKind::Text => "Text comparison",
-                            crate::diff::model::FileComparisonKind::Binary => "Binary files",
-                        });
-                        ui.label(format!(
-                            "Left: {}",
-                            s.left
-                                .as_ref()
-                                .map_or("(missing)".into(), |p| p.display().to_string())
-                        ));
-                    } else {
-                        if !self.text_views.contains_key(&view_id) {
-                            match crate::diff::model::TextViewModel::load(&s, &settings) {
-                                Ok(m) => {
-                                    self.text_views.insert(view_id, m);
-                                }
-                                Err(e) => {
-                                    render_error = Some(e);
-                                }
+                    if !self.text_views.contains_key(&view_id) {
+                        match crate::diff::model::TextViewModel::load(s, &settings) {
+                            Ok(m) => {
+                                self.text_views.insert(view_id, m);
+                            }
+                            Err(e) => {
+                                render_error = Some(e);
                             }
                         }
-                        if let Some(m) = self.text_views.get_mut(&view_id) {
-                            text_view::show(ui, workspace_id, view_id, m);
-                        }
                     }
+                    if let Some(m) = self.text_views.get_mut(&view_id) {
+                        text_view::show(ui, workspace_id, view_id, m);
+                    }
+                    ui.label(format!(
+                        "Right: {}",
+                        s.right
+                            .as_ref()
+                            .map_or("(missing)".into(), |p| p.display().to_string())
+                    ));
+                }
+                DiffView::BinaryCompare(s) => {
+                    self.binary_views.entry(view_id).or_insert(());
+                    ui.heading("Binary comparison");
+                    ui.label(format!(
+                        "Left: {}",
+                        s.left
+                            .as_ref()
+                            .map_or("(missing)".into(), |p| p.display().to_string())
+                    ));
                     ui.label(format!(
                         "Right: {}",
                         s.right
@@ -245,7 +246,7 @@ impl DiffDialogState {
                 }
             }
             folder_view::FolderViewAction::NavigateBack => {
-                self.workspace.back();
+                self.navigate_back();
             }
             folder_view::FolderViewAction::RequestRescan => {
                 if let Some(runtime) = self.folder_runtimes.remove(&self.workspace.current_view.id)
@@ -256,6 +257,28 @@ impl DiffDialogState {
         }
         self.reconcile_runtime_resources();
     }
+
+    /// The single Back transition used by both keyboard and button activation.
+    fn navigate_back(&mut self) -> bool {
+        let changed_relative = match &self.workspace.current_view.view {
+            DiffView::TextCompare(state) => self
+                .text_views
+                .get(&self.workspace.current_view.id)
+                .filter(|model| model.saved_filesystem_mutation)
+                .and_then(|_| state.relative_path.clone()),
+            _ => None,
+        };
+        let moved = self.workspace.back();
+        if moved {
+            if let (Some(relative), DiffView::FolderCompare(folder)) =
+                (changed_relative, &mut self.workspace.current_view.view)
+            {
+                folder.stale_paths.insert(relative);
+            }
+            self.reconcile_runtime_resources();
+        }
+        moved
+    }
 }
 
 fn poll_folder_runtime(
@@ -264,6 +287,43 @@ fn poll_folder_runtime(
 ) {
     use crate::diff::folder_compare::PathKeyPolicy;
     use crate::diff::folder_scan::{RootIdentity, ScanEvent};
+
+    // A child editor can invalidate one row. Refresh it directly instead of
+    // discarding the retained folder model or restarting both root scans.
+    for relative in std::mem::take(&mut state.stale_paths) {
+        if let Some(entry) = state
+            .model
+            .entries
+            .values_mut()
+            .find(|entry| entry.relative_path == relative)
+        {
+            for side in [&mut entry.left, &mut entry.right].into_iter().flatten() {
+                match std::fs::metadata(&side.path) {
+                    Ok(metadata) => {
+                        let kind = side
+                            .metadata
+                            .as_ref()
+                            .map_or(crate::diff::folder_compare::EntryKind::File, |metadata| {
+                                metadata.kind
+                            });
+                        side.metadata = Some(crate::diff::folder_compare::EntryMetadata::from_fs(
+                            &metadata, kind,
+                        ));
+                        side.error = None;
+                    }
+                    Err(error) => side.error = Some(error.to_string()),
+                }
+            }
+            entry.metadata_status = crate::diff::folder_compare::fast_status(
+                entry.left.as_ref(),
+                entry.right.as_ref(),
+                state.timestamp_tolerance,
+            );
+            entry.effective_status = entry.metadata_status;
+            entry.content_checked = false;
+            state.model.revision = state.model.revision.wrapping_add(1);
+        }
+    }
 
     let left_identity = RootIdentity::new(state.left_root.clone());
     let right_identity = RootIdentity::new(state.right_root.clone());
@@ -455,5 +515,34 @@ mod tests {
             &dialog.workspace.current_view.view,
             DiffView::FolderCompare(state) if state.path_filter == "kept"
         ));
+    }
+
+    #[test]
+    fn alt_left_and_button_back_share_the_same_transition() {
+        fn opened_dialog() -> DiffDialogState {
+            let mut dialog = folder_dialog(71);
+            dialog.apply_folder_action(folder_view::FolderViewAction::OpenChild {
+                relative_path: "child.txt".into(),
+                left: Some("child.txt".into()),
+                right: None,
+            });
+            dialog
+        }
+
+        // The Alt+Left handler calls navigate_back directly; the button emits
+        // NavigateBack through apply_folder_action. Both must produce the same
+        // retained workspace transition.
+        let mut alt = opened_dialog();
+        let mut button = opened_dialog();
+        assert!(alt.navigate_back());
+        button.apply_folder_action(folder_view::FolderViewAction::NavigateBack);
+        assert_eq!(
+            alt.workspace.current_view.view,
+            button.workspace.current_view.view
+        );
+        assert_eq!(
+            alt.workspace.navigation_stack,
+            button.workspace.navigation_stack
+        );
     }
 }
