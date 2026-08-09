@@ -1572,40 +1572,45 @@ mod tests {
             egui::Pos2::ZERO,
             egui::vec2(1000.0, 800.0),
         ));
-        let _ = ctx.run(input, |ctx| {
-            let response = egui::Window::new("Diff layout regression")
-                .id(egui::Id::new("diff_layout_regression"))
-                .collapsible(false)
-                .resizable(true)
-                .default_pos(egui::pos2(40.0, 30.0))
-                .default_size(egui::vec2(640.0, 480.0))
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Left");
-                        ui.label("↔");
-                        ui.label("Right");
-                        ui.button("Compare");
-                    });
-                    ui.separator();
-                    allocate_remaining_workspace(ui, |ui| {
-                        workspace = ui.max_rect();
-                        workspace_clip = ui.clip_rect();
-                        match view {
-                            DiffView::Start => ui.label("Start"),
-                            DiffView::FolderCompare(_) => {
-                                for row in 0..folder_rows {
-                                    ui.label(format!("folder row {row}"));
+        // egui applies a new window's default geometry through memory during
+        // its first frame. Render a warm-up frame before observing geometry so
+        // the assertion measures the settled, user-visible window rectangle.
+        for input in [input.clone(), input] {
+            let _ = ctx.run(input, |ctx| {
+                let response = egui::Window::new("Diff layout regression")
+                    .id(egui::Id::new("diff_layout_regression"))
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_pos(egui::pos2(40.0, 30.0))
+                    .default_size(egui::vec2(640.0, 480.0))
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Left");
+                            ui.label("↔");
+                            ui.label("Right");
+                            ui.button("Compare");
+                        });
+                        ui.separator();
+                        allocate_remaining_workspace(ui, |ui| {
+                            workspace = ui.max_rect();
+                            workspace_clip = ui.clip_rect();
+                            match view {
+                                DiffView::Start => ui.label("Start"),
+                                DiffView::FolderCompare(_) => {
+                                    for row in 0..folder_rows {
+                                        ui.label(format!("folder row {row}"));
+                                    }
+                                    ui.label("Folder")
                                 }
-                                ui.label("Folder")
-                            }
-                            DiffView::TextCompare(_) => ui.label("Text"),
-                            DiffView::BinaryCompare(_) => ui.label("Binary"),
-                        };
-                    });
-                })
-                .unwrap();
-            outer = response.response.rect;
-        });
+                                DiffView::TextCompare(_) => ui.label("Text"),
+                                DiffView::BinaryCompare(_) => ui.label("Binary"),
+                            };
+                        });
+                    })
+                    .unwrap();
+                outer = response.response.rect;
+            });
+        }
         (outer, workspace, workspace_clip)
     }
 
