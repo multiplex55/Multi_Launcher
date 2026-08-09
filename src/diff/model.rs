@@ -1,8 +1,15 @@
 use crate::diff::settings::DiffConfigV1;
+use crate::diff::text_compare::{
+    self, AlignedDiffRow, CompiledRules, NavigationDirection, TextComparisonResult,
+    TextComparisonRules,
+};
+use crate::diff::text_file::{LineEdit, TextDocument, load_text_file};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 fn id() -> u64 {
@@ -238,6 +245,336 @@ fn detect_kind(left: &Path, right: &Path) -> FileComparisonKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiffSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePosition {
+    pub side: DiffSide,
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollAnchor {
+    pub side: DiffSide,
+    pub source_line: usize,
+    pub offset: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowMeasureKey {
+    pub left_revision: u64,
+    pub right_revision: u64,
+    pub comparison_revision: u64,
+    pub pane_width_bits: u32,
+    pub font_theme: u64,
+    pub wrap: bool,
+}
+
+/// Clamp persisted values as they cross the model boundary; NaN and corrupt
+/// values intentionally restore the documented 50/50 layout.
+pub fn validated_splitter(value: f32) -> f32 {
+    if value.is_finite() && (0.15..=0.85).contains(&value) {
+        value
+    } else {
+        0.5
+    }
+}
+
+pub fn visible_row_range(
+    heights: &[f32],
+    scroll_y: f32,
+    viewport: f32,
+    overscan: usize,
+) -> std::ops::Range<usize> {
+    if heights.is_empty() {
+        return 0..0;
+    }
+    let mut y = 0.0;
+    let mut first = 0;
+    while first < heights.len() && y + heights[first] <= scroll_y {
+        y += heights[first];
+        first += 1;
+    }
+    let mut end = first;
+    let limit = scroll_y + viewport;
+    while end < heights.len() && y < limit {
+        y += heights[end];
+        end += 1;
+    }
+    first.saturating_sub(overscan)..(end + overscan).min(heights.len())
+}
+
+pub fn visual_to_source(row: &AlignedDiffRow, side: DiffSide) -> Option<usize> {
+    match side {
+        DiffSide::Left => row.left,
+        DiffSide::Right => row.right,
+    }
+}
+
+pub fn restore_anchor(rows: &[AlignedDiffRow], anchor: ScrollAnchor) -> usize {
+    rows.iter()
+        .position(|r| visual_to_source(r, anchor.side) == Some(anchor.source_line))
+        .or_else(|| {
+            rows.iter().position(|r| {
+                visual_to_source(r, anchor.side).is_some_and(|n| n >= anchor.source_line)
+            })
+        })
+        .unwrap_or_else(|| rows.len().saturating_sub(1))
+}
+
+struct CompareMessage {
+    generation: u64,
+    result: TextComparisonResult,
+}
+
+/// Non-egui controller for a retained text comparison. The last accepted
+/// alignment remains available while `recalculating` is true.
+pub struct TextViewModel {
+    pub left_path: Option<PathBuf>,
+    pub right_path: Option<PathBuf>,
+    pub left: TextDocument,
+    pub right: TextDocument,
+    pub comparison: Option<TextComparisonResult>,
+    pub rules: TextComparisonRules,
+    pub active_side: DiffSide,
+    pub current_row: Option<usize>,
+    pub wrap: bool,
+    pub syntax: bool,
+    pub splitter: f32,
+    pub recalculate_at: Option<Instant>,
+    pub recalculating: bool,
+    pub left_error: Option<String>,
+    pub right_error: Option<String>,
+    pub external_conflict: [bool; 2],
+    pub cursor: Option<SourcePosition>,
+    generation: u64,
+    receiver: Option<Receiver<CompareMessage>>,
+}
+
+impl TextViewModel {
+    pub fn load(state: &TextCompareState, settings: &DiffConfigV1) -> Result<Self, String> {
+        fn doc(path: Option<&PathBuf>) -> Result<TextDocument, String> {
+            path.map(|p| {
+                load_text_file(p)
+                    .map_err(|e| format!("{}: {e}", p.display()))
+                    .and_then(|f| {
+                        TextDocument::from_loaded(&f)
+                            .ok_or_else(|| "binary content is not editable".into())
+                    })
+            })
+            .unwrap_or_else(|| Ok(TextDocument::empty()))
+        }
+        let left = doc(state.left.as_ref())?;
+        let right = doc(state.right.as_ref())?;
+        let wrap =
+            if crate::diff::syntax::code_like(state.left.as_deref().or(state.right.as_deref())) {
+                false
+            } else {
+                settings.wrap_text
+            };
+        let mut out = Self {
+            left_path: state.left.clone(),
+            right_path: state.right.clone(),
+            left,
+            right,
+            comparison: None,
+            rules: TextComparisonRules::default(),
+            active_side: DiffSide::Left,
+            current_row: None,
+            wrap,
+            syntax: settings.syntax_highlighting,
+            splitter: validated_splitter(settings.pane_split),
+            recalculate_at: Some(Instant::now()),
+            recalculating: true,
+            left_error: None,
+            right_error: None,
+            external_conflict: [false, false],
+            cursor: None,
+            generation: 0,
+            receiver: None,
+        };
+        out.start_compare();
+        Ok(out)
+    }
+    pub fn schedule_compare(&mut self) {
+        self.recalculate_at = Some(Instant::now() + Duration::from_millis(250));
+        self.recalculating = true;
+    }
+    pub fn poll(&mut self) {
+        if self.recalculate_at.is_some_and(|t| Instant::now() >= t) {
+            self.start_compare();
+        }
+        if let Some(rx) = &self.receiver {
+            if let Ok(m) = rx.try_recv() {
+                if m.generation == self.generation
+                    && !m.result.is_stale(
+                        self.left.revision,
+                        self.right.revision,
+                        self.rules.revision,
+                    )
+                {
+                    let anchor = self.cursor.map(|p| ScrollAnchor {
+                        side: p.side,
+                        source_line: p.line,
+                        offset: 0.0,
+                    });
+                    self.current_row = anchor
+                        .map(|a| restore_anchor(&m.result.rows, a))
+                        .or(self.current_row);
+                    self.comparison = Some(m.result);
+                    self.recalculating = false;
+                }
+            }
+        }
+    }
+    fn start_compare(&mut self) {
+        self.recalculate_at = None;
+        self.generation += 1;
+        let generation = self.generation;
+        let (l, r, lr, rr, rules) = (
+            self.left.source().to_owned(),
+            self.right.source().to_owned(),
+            self.left.revision,
+            self.right.revision,
+            self.rules.clone(),
+        );
+        let (tx, rx) = mpsc::channel();
+        self.receiver = Some(rx);
+        self.recalculating = true;
+        std::thread::spawn(move || {
+            if let Ok(c) = CompiledRules::compile(&rules) {
+                let _ = tx.send(CompareMessage {
+                    generation,
+                    result: text_compare::compare(&l, &r, lr, rr, &c, 4096),
+                });
+            }
+        });
+    }
+    pub fn navigate(&mut self, direction: NavigationDirection) {
+        if let Some(c) = &self.comparison {
+            self.current_row = c.navigate(self.current_row, direction, false, true);
+        }
+    }
+    pub fn undo(&mut self) -> bool {
+        let changed = match self.active_side {
+            DiffSide::Left => self.left.undo(),
+            DiffSide::Right => self.right.undo(),
+        };
+        if changed {
+            self.schedule_compare()
+        }
+        changed
+    }
+    pub fn redo(&mut self) -> bool {
+        let changed = match self.active_side {
+            DiffSide::Left => self.left.redo(),
+            DiffSide::Right => self.right.redo(),
+        };
+        if changed {
+            self.schedule_compare()
+        }
+        changed
+    }
+    pub fn copy_hunk(&mut self, from: DiffSide) -> Result<(), String> {
+        if self.external_conflict != [false, false] {
+            return Err("Resolve external-change conflict before merging".into());
+        }
+        let c = self
+            .comparison
+            .as_ref()
+            .ok_or("Comparison is still calculating")?;
+        let row = self.current_row.ok_or("Select a difference first")?;
+        let hi = c
+            .navigation
+            .row_to_hunk
+            .get(row)
+            .and_then(|x| *x)
+            .ok_or("Current row is not a difference")?;
+        let h = &c.hunks[hi];
+        let mut replacement = Vec::new();
+        let mut destination = Vec::new();
+        for r in &c.rows[h.start_row..h.end_row] {
+            if let Some(n) = visual_to_source(r, from) {
+                replacement.push(source_line(
+                    match from {
+                        DiffSide::Left => self.left.source(),
+                        DiffSide::Right => self.right.source(),
+                    },
+                    n,
+                ));
+            }
+            if let Some(n) = visual_to_source(r, other(from)) {
+                destination.push(n);
+            }
+        }
+        let start = destination
+            .first()
+            .copied()
+            .unwrap_or_else(|| insertion_line(&c.rows, h.start_row, other(from)));
+        let edit = LineEdit {
+            start,
+            delete_count: destination.len(),
+            replacement,
+        };
+        match other(from) {
+            DiffSide::Left => self.left.apply_edits(&[edit])?,
+            DiffSide::Right => self.right.apply_edits(&[edit])?,
+        };
+        self.schedule_compare();
+        Ok(())
+    }
+    pub fn save(&mut self, side: DiffSide) -> bool {
+        let (doc, path, err) = match side {
+            DiffSide::Left => (
+                &mut self.left,
+                self.left_path.as_deref(),
+                &mut self.left_error,
+            ),
+            DiffSide::Right => (
+                &mut self.right,
+                self.right_path.as_deref(),
+                &mut self.right_error,
+            ),
+        };
+        let result = path
+            .ok_or_else(|| anyhow::anyhow!("Choose a path before saving"))
+            .and_then(|p| doc.save(p));
+        *err = result.as_ref().err().map(ToString::to_string);
+        result.is_ok()
+    }
+    pub fn has_dirty(&self) -> bool {
+        self.left.is_dirty() || self.right.is_dirty()
+    }
+}
+fn other(s: DiffSide) -> DiffSide {
+    match s {
+        DiffSide::Left => DiffSide::Right,
+        DiffSide::Right => DiffSide::Left,
+    }
+}
+fn source_line(s: &str, n: usize) -> String {
+    s.lines().nth(n).unwrap_or_default().to_owned()
+}
+fn insertion_line(rows: &[AlignedDiffRow], at: usize, side: DiffSide) -> usize {
+    rows[..at]
+        .iter()
+        .rev()
+        .find_map(|r| visual_to_source(r, side))
+        .map_or(0, |n| n + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +605,44 @@ mod tests {
         assert!(w.back());
         assert_eq!(w.current_view.id, 99);
         assert!(matches!(&w.current_view.view,DiffView::FolderCompare(s) if s.path_filter=="rs"));
+    }
+    #[test]
+    fn splitter_and_virtual_range_are_bounded() {
+        assert_eq!(validated_splitter(f32::NAN), 0.5);
+        assert_eq!(validated_splitter(0.02), 0.5);
+        assert_eq!(validated_splitter(0.6), 0.6);
+        let heights = vec![20.0; 100_000];
+        let range = visible_row_range(&heights, 20_000.0, 400.0, 3);
+        assert!(
+            range.len() <= 27,
+            "only visible rows plus overscan are laid out"
+        );
+        assert!(range.start > 0);
+    }
+    #[test]
+    fn placeholder_mapping_and_anchor_use_source_coordinates() {
+        use crate::diff::text_compare::{AlignedDiffRow, ChangeImportance, DiffRowKind};
+        let row = AlignedDiffRow {
+            id: 1,
+            left: Some(4),
+            right: None,
+            kind: DiffRowKind::Deleted,
+            importance: ChangeImportance::Important,
+            left_ranges: vec![],
+            right_ranges: vec![],
+        };
+        assert_eq!(visual_to_source(&row, DiffSide::Left), Some(4));
+        assert_eq!(visual_to_source(&row, DiffSide::Right), None);
+        assert_eq!(
+            restore_anchor(
+                &[row],
+                ScrollAnchor {
+                    side: DiffSide::Left,
+                    source_line: 4,
+                    offset: 0.0
+                }
+            ),
+            0
+        );
     }
 }
