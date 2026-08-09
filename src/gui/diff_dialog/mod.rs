@@ -111,8 +111,16 @@ impl DiffDialogState {
                                 .map_or("(missing)".into(), |p| p.display().to_string())
                         ));
                     }
-                    DiffView::FolderCompare(s) => {
-                        folder_view::show(ui, s);
+                    DiffView::FolderCompare(mut s) => {
+                        folder_view::show(ui, &mut s);
+                        // The view enum is cloned before rendering so text rendering can
+                        // freely access the rest of the workspace. Persist folder-view
+                        // interaction state back into the retained view after rendering.
+                        if let DiffView::FolderCompare(current) =
+                            &mut self.workspace.current_view.view
+                        {
+                            *current = s;
+                        }
                     }
                 }
             });
