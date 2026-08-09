@@ -3252,6 +3252,11 @@ impl NotePanel {
                 state.store(ctx, id);
                 ui.close_menu();
             }
+            if ui.button("Insert Timestamp").clicked() {
+                let timestamp = format_note_editor_timestamp_now();
+                self.insert_text_at_cursor_or_selection(ctx, id, &timestamp);
+                ui.close_menu();
+            }
             if ui.button("Insert Link...").clicked() {
                 if let Some((start, end)) = self.resolve_selection(ctx, id) {
                     let (start, end) = char_range_to_byte_range(&self.note.content, start, end);
@@ -5545,6 +5550,72 @@ More text.
         panel.insert_text_at_cursor_or_selection(&ctx, id, "replacement");
 
         assert_eq!(panel.note.content, "alpha\nreplacement");
+        assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn timestamp_insertion_at_caret_preserves_surrounding_text_and_collapses_cursor() {
+        const TIMESTAMP: &str = "20260808-202512.347";
+        let ctx = egui::Context::default();
+        ctx.begin_frame(egui::RawInput {
+            time: Some(42.25),
+            ..Default::default()
+        });
+        let id = egui::Id::new("timestamp_at_caret");
+        let mut panel = NotePanel::from_note(empty_note("Hello world"));
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        collapse_cursor(&mut state, 6);
+        state.store(&ctx, id);
+        assert!(!panel.fast_derived_dirty);
+        assert!(!panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, None);
+
+        panel.insert_text_at_cursor_or_selection(&ctx, id, TIMESTAMP);
+
+        assert_eq!(panel.note.content, "Hello 20260808-202512.347world");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let range = state.cursor.char_range().unwrap();
+        assert_eq!(range.primary.index, range.secondary.index);
+        assert_eq!(range.primary.index, 6 + TIMESTAMP.chars().count());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, Some(42.25));
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn timestamp_replaces_pending_selection_and_clears_it() {
+        const TIMESTAMP: &str = "20260808-202512.347";
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("timestamp_selection");
+        let mut panel = NotePanel::from_note(empty_note("Before selected text after"));
+        panel.pending_selection = Some((7, 20));
+
+        panel.insert_text_at_cursor_or_selection(&ctx, id, TIMESTAMP);
+
+        assert_eq!(panel.note.content, "Before 20260808-202512.347 after");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let range = state.cursor.char_range().unwrap();
+        assert_eq!(range.primary.index, range.secondary.index);
+        assert_eq!(range.primary.index, 7 + TIMESTAMP.chars().count());
+        assert!(panel.pending_selection.is_none());
+    }
+
+    #[test]
+    fn timestamp_replacement_uses_character_indices_for_unicode_content() {
+        const TIMESTAMP: &str = "20260808-202512.347";
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("timestamp_unicode_selection");
+        let mut panel = NotePanel::from_note(empty_note("alpha 😀 βeta"));
+        panel.pending_selection = Some((6, 9));
+
+        panel.insert_text_at_cursor_or_selection(&ctx, id, TIMESTAMP);
+
+        assert_eq!(panel.note.content, "alpha 20260808-202512.347eta");
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let range = state.cursor.char_range().unwrap();
+        assert_eq!(range.primary.index, range.secondary.index);
+        assert_eq!(range.primary.index, 6 + TIMESTAMP.chars().count());
         assert!(panel.pending_selection.is_none());
     }
 
