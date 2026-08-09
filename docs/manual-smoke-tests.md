@@ -2,6 +2,39 @@
 
 This checklist covers behavior that depends on a real Windows desktop session, Win32 window handles, UI Automation, global hooks, or foreground-window focus. Keep these checks manual instead of forcing them into CI.
 
+## Diff acceptance matrix (25 criteria)
+
+Use two temporary roots containing text, binary, Unicode, read-only, missing,
+and deliberately large files. Repeat filesystem cases on Windows and Linux.
+
+| # | Scenario | Verify |
+|---:|---|---|
+| 1 | Run `diff`, `diff <left>`, and `diff <left> <right>`. | Start focus and visible path validation are correct; invalid/mixed paths show recoverable errors. |
+| 2 | Press Ctrl+O and choose another pair. | The replacement invalidates the old scan/compare immediately and receives focus. |
+| 3 | Compare equal and changed text. | Raw/rules equality, aligned rows, status, and progress are correct. |
+| 4 | Use F7 and F8. | Previous/next differences wrap and focus the active pane. |
+| 5 | Use both copy-direction actions, then undo. | The selected hunk copies in the requested direction, recomputes, and undo restores it. |
+| 6 | Press Ctrl+S and Ctrl+Shift+S. | Active/all dirty sides save; failures remain dirty with a visible error. |
+| 7 | Press Alt+Left from a folder child. | The exact parent selection, expansion, filter, sort, and scroll state return. |
+| 8 | Use focus-left and focus-right commands. | Keyboard editing moves to the requested pane after every invocation. |
+| 9 | Open a changed file from a folder and use Previous/Next Different File. | Navigation skips identical/filter-hidden files without losing the folder parent. |
+| 10 | Change status/display filters repeatedly. | Retained scan data is filtered without starting another scan. |
+| 11 | Compare roots with repeated directory and filenames. | Expansion, selection, scrolling, and row widgets never share state. |
+| 12 | Scroll very large text and folder results. | Only visible rows plus overscan are created; navigation still spans all retained data. |
+| 13 | Edit while comparison is running. | An old text result never replaces the new document revisions. |
+| 14 | Change include/exclude rules during a scan. | Old batches and content refinements never enter the new root/filter generation. |
+| 15 | Change comparison rules. | Text/content caches invalidate and results report the active rules revision. |
+| 16 | Resize panes, toggle wrapping, font, or theme. | Wrapped/syntax caches update without changing comparison meaning. |
+| 17 | Externally edit a clean file. | The watcher reload is generation checked and comparison refreshes. |
+| 18 | Externally edit a dirty file. | A conflict prompt preserves edits; reload/overwrite/cancel each behaves as labelled. |
+| 19 | Delete or rename an open file externally. | Missing state is visible, recoverable, and stale reloads are rejected. |
+| 20 | Copy one/many folder items in both directions. | Confirmation, containment, per-item cancellation/errors, cache invalidation, and rescan are correct. |
+| 21 | Delete to Recycle Bin and permanently. | The chosen mode is explicit; failures do not claim success; Windows Recycle Bin receives recycled files. |
+| 22 | Open a normal, large, and extremely large text file. | Status explains the active tier; large reduces expensive decoration; extreme is bounded/read-only and never advertises hex editing. |
+| 23 | Compare equal/different binary files. | Byte equality remains available and no text/hex editor is implied. |
+| 24 | Close Diff during scan/read/hash/mutation, then reopen a session. | Senders/watchers release promptly, no old event updates the new view, and focus is restored. |
+| 25 | Exercise permission errors, locked destinations, invalid regex, malformed UTF-8, UTF-16 save, symlink/reparse escape, and disk-full simulation. | Each failure is scoped and actionable; data is retained, atomic overwrite is used, and unrelated launcher plugins/routing still work. |
+
 ## MultiManager Win32 workflow
 
 1. Start Multi Launcher on Windows with at least two normal desktop applications open, such as Notepad and Windows Terminal.

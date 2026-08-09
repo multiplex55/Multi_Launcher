@@ -28,7 +28,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         let merge = model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
         if ui
             .add_enabled(merge, egui::Button::new("Copy →"))
-            .on_hover_text("Copy current difference left-to-right (Alt+Right)")
+            .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
             .clicked()
         {
             if let Err(e) = model.copy_hunk(DiffSide::Left) {
@@ -37,7 +37,9 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         }
         if ui
             .add_enabled(merge, egui::Button::new("← Copy"))
-            .on_hover_text("Copy current difference right-to-left (Alt+Left)")
+            .on_hover_text(
+                "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
+            )
             .clicked()
         {
             if let Err(e) = model.copy_hunk(DiffSide::Right) {
@@ -131,6 +133,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         if model.recalculating {
             ui.label("⏳ Recalculating… (showing last valid alignment)");
         }
+        ui.label(model.large_file_tier.explanation());
     });
 }
 fn pane(ui: &mut egui::Ui, workspace: u64, view: u64, side: DiffSide, model: &mut TextViewModel) {
@@ -257,6 +260,42 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
         }
         if i.consume_key(egui::Modifiers::CTRL, egui::Key::S) {
             m.save(m.active_side);
+        }
+        if i.consume_key(
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            },
+            egui::Key::S,
+        ) {
+            if m.left.is_dirty() {
+                m.save(DiffSide::Left);
+            }
+            if m.right.is_dirty() {
+                m.save(DiffSide::Right);
+            }
+        }
+        let copy_modifiers = egui::Modifiers {
+            alt: true,
+            ctrl: true,
+            ..Default::default()
+        };
+        if i.consume_key(copy_modifiers, egui::Key::ArrowRight) {
+            if let Err(error) = m.copy_hunk(DiffSide::Left) {
+                m.right_error = Some(error);
+            }
+        }
+        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft) {
+            if let Err(error) = m.copy_hunk(DiffSide::Right) {
+                m.left_error = Some(error);
+            }
+        }
+        if i.consume_key(egui::Modifiers::CTRL, egui::Key::Num1) {
+            m.active_side = DiffSide::Left;
+        }
+        if i.consume_key(egui::Modifiers::CTRL, egui::Key::Num2) {
+            m.active_side = DiffSide::Right;
         }
     });
 }
