@@ -161,7 +161,19 @@ impl DiffDialogState {
                     ));
                 }
                 DiffView::FolderCompare(s) => {
-                    self.folder_runtimes.entry(view_id).or_default();
+                    let runtime = self.folder_runtimes.entry(view_id).or_default();
+                    poll_folder_runtime(s, runtime);
+                    if runtime.is_active() {
+                        ctx.request_repaint();
+                    }
+                    if runtime.left_error.is_some() || runtime.right_error.is_some() {
+                        let left = runtime.left_error.as_deref().unwrap_or("none");
+                        let right = runtime.right_error.as_deref().unwrap_or("none");
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            format!("Scan failures — left: {left}; right: {right}"),
+                        );
+                    }
                     action = render_retained_folder(s, |state| folder_view::show(ui, state));
                 }
             }
@@ -242,6 +254,112 @@ impl DiffDialogState {
             }
         }
         self.reconcile_runtime_resources();
+    }
+}
+
+fn poll_folder_runtime(
+    state: &mut crate::diff::model::FolderCompareState,
+    runtime: &mut crate::diff::folder_runtime::FolderRuntime,
+) {
+    use crate::diff::folder_compare::PathKeyPolicy;
+    use crate::diff::folder_scan::{RootIdentity, ScanEvent};
+
+    let left_identity = RootIdentity::new(state.left_root.clone());
+    let right_identity = RootIdentity::new(state.right_root.clone());
+    if runtime.left_root.as_ref() != Some(&left_identity)
+        || runtime.right_root.as_ref() != Some(&right_identity)
+    {
+        runtime.cancel();
+        runtime.generation = crate::diff::folder_runtime::FolderRuntime::next_generation();
+        runtime.left_root = Some(left_identity.clone());
+        runtime.right_root = Some(right_identity.clone());
+        runtime.left_visited = 0;
+        runtime.right_visited = 0;
+        runtime.left_error = None;
+        runtime.right_error = None;
+        state.left_scan_complete = false;
+        state.right_scan_complete = false;
+        runtime.left_scan = Some(crate::diff::folder_scan::spawn_scan(
+            state.left_root.clone(),
+            runtime.generation,
+            state.scan_rules.clone(),
+        ));
+        runtime.right_scan = Some(crate::diff::folder_scan::spawn_scan(
+            state.right_root.clone(),
+            runtime.generation,
+            state.scan_rules.clone(),
+        ));
+    }
+
+    let left_events: Vec<_> = runtime
+        .left_scan
+        .as_ref()
+        .map(|h| h.receiver.try_iter().collect())
+        .unwrap_or_default();
+    let right_events: Vec<_> = runtime
+        .right_scan
+        .as_ref()
+        .map(|h| h.receiver.try_iter().collect())
+        .unwrap_or_default();
+    process_scan_events(state, runtime, true, &left_identity, left_events);
+    process_scan_events(state, runtime, false, &right_identity, right_events);
+
+    fn process_scan_events(
+        state: &mut crate::diff::model::FolderCompareState,
+        runtime: &mut crate::diff::folder_runtime::FolderRuntime,
+        left: bool,
+        expected: &RootIdentity,
+        events: Vec<ScanEvent>,
+    ) {
+        for event in events {
+            if !event.is_current(runtime.generation, expected) {
+                continue;
+            }
+            match event {
+                ScanEvent::ScanStarted { .. } => {}
+                ScanEvent::EntriesDiscovered { entries, .. }
+                | ScanEvent::EntriesUpdated { entries, .. } => {
+                    for item in entries {
+                        let _ = state.model.upsert(
+                            &item.relative_path,
+                            item.side,
+                            left,
+                            PathKeyPolicy::Platform,
+                            state.timestamp_tolerance,
+                        );
+                    }
+                }
+                ScanEvent::Progress { visited, .. } => {
+                    if left {
+                        runtime.left_visited = visited
+                    } else {
+                        runtime.right_visited = visited
+                    }
+                }
+                ScanEvent::Completed { visited, .. } | ScanEvent::Cancelled { visited, .. } => {
+                    if left {
+                        runtime.left_visited = visited;
+                        state.left_scan_complete = true;
+                        runtime.left_scan = None;
+                    } else {
+                        runtime.right_visited = visited;
+                        state.right_scan_complete = true;
+                        runtime.right_scan = None;
+                    }
+                }
+                ScanEvent::Failed { error, .. } => {
+                    if left {
+                        runtime.left_error = Some(error);
+                        state.left_scan_complete = true;
+                        runtime.left_scan = None;
+                    } else {
+                        runtime.right_error = Some(error);
+                        state.right_scan_complete = true;
+                        runtime.right_scan = None;
+                    }
+                }
+            }
+        }
     }
 }
 

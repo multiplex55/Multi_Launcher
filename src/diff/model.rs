@@ -1,10 +1,12 @@
+use crate::diff::folder_compare::FolderModel;
+use crate::diff::folder_scan::ScanRules;
 use crate::diff::settings::DiffConfigV1;
 use crate::diff::text_compare::{
     self, AlignedDiffRow, CompiledRules, NavigationDirection, TextComparisonResult,
     TextComparisonRules,
 };
 use crate::diff::text_file::{LineEdit, TextDocument, load_text_file};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,14 +18,6 @@ fn id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiffStatus {
-    Identical,
-    Modified,
-    LeftOnly,
-    RightOnly,
-    Error,
-}
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FolderDisplayFilter {
     #[default]
@@ -37,20 +31,40 @@ pub struct FolderSortState {
     pub column: String,
     pub descending: bool,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentComparisonMode {
+    Metadata,
+    #[default]
+    OnDemand,
+    Always,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderCompareState {
-    pub selected_relative_path: Option<PathBuf>,
+    pub left_root: PathBuf,
+    pub right_root: PathBuf,
+    pub model: FolderModel,
+    pub selected_paths: BTreeSet<PathBuf>,
+    pub primary_selection: Option<PathBuf>,
     pub expanded_nodes: BTreeSet<PathBuf>,
     pub scroll_anchor: Option<PathBuf>,
     pub display_filter: FolderDisplayFilter,
     pub path_filter: String,
     pub sort: FolderSortState,
-    pub content_statuses: BTreeMap<PathBuf, DiffStatus>,
+    pub scan_rules: ScanRules,
+    pub content_comparison: ContentComparisonMode,
+    pub timestamp_tolerance: Duration,
+    pub left_scan_complete: bool,
+    pub right_scan_complete: bool,
 }
 impl Default for FolderCompareState {
     fn default() -> Self {
         Self {
-            selected_relative_path: None,
+            left_root: PathBuf::new(),
+            right_root: PathBuf::new(),
+            model: FolderModel::default(),
+            selected_paths: BTreeSet::new(),
+            primary_selection: None,
             expanded_nodes: BTreeSet::new(),
             scroll_anchor: None,
             display_filter: FolderDisplayFilter::All,
@@ -59,7 +73,11 @@ impl Default for FolderCompareState {
                 column: "path".into(),
                 descending: false,
             },
-            content_statuses: BTreeMap::new(),
+            scan_rules: ScanRules::default(),
+            content_comparison: ContentComparisonMode::default(),
+            timestamp_tolerance: Duration::from_secs(2),
+            left_scan_complete: false,
+            right_scan_complete: false,
         }
     }
 }
@@ -180,7 +198,11 @@ impl DiffWorkspace {
                 kind: detect_kind(&lp, &rp),
             })
         } else if lm.is_dir() && rm.is_dir() {
-            DiffView::FolderCompare(FolderCompareState::default())
+            DiffView::FolderCompare(FolderCompareState {
+                left_root: lp,
+                right_root: rp,
+                ..FolderCompareState::default()
+            })
         } else {
             let msg = "Left and right paths must both be files or both be directories".to_string();
             self.error = Some(msg.clone());
@@ -738,6 +760,8 @@ mod tests {
         w.current_view = RetainedView {
             id: 99,
             view: DiffView::FolderCompare(FolderCompareState {
+                left_root: "/left".into(),
+                right_root: "/right".into(),
                 path_filter: "rs".into(),
                 ..Default::default()
             }),
@@ -746,7 +770,8 @@ mod tests {
             .unwrap();
         assert!(w.back());
         assert_eq!(w.current_view.id, 99);
-        assert!(matches!(&w.current_view.view,DiffView::FolderCompare(s) if s.path_filter=="rs"));
+        assert!(matches!(&w.current_view.view,DiffView::FolderCompare(s)
+            if s.path_filter=="rs" && s.left_root == Path::new("/left") && s.right_root == Path::new("/right")));
     }
     #[test]
     fn splitter_and_virtual_range_are_bounded() {
