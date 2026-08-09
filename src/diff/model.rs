@@ -352,6 +352,7 @@ pub struct TextViewModel {
     pub current_row: Option<usize>,
     pub wrap: bool,
     pub syntax: bool,
+    pub large_file_tier: crate::diff::worker::LargeFileTier,
     pub splitter: f32,
     pub recalculate_at: Option<Instant>,
     pub recalculating: bool,
@@ -384,6 +385,15 @@ impl TextViewModel {
             } else {
                 settings.wrap_text
             };
+        let bytes = left.source().len().saturating_add(right.source().len()) as u64;
+        let estimated_rows =
+            left.source()
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count()
+                .max(right.source().bytes().filter(|b| *b == b'\n').count()) as u64
+                + 1;
+        let large_file_tier = settings.large_file_policy().tier(bytes, estimated_rows);
         let mut out = Self {
             left_path: state.left.clone(),
             right_path: state.right.clone(),
@@ -394,7 +404,8 @@ impl TextViewModel {
             active_side: DiffSide::Left,
             current_row: None,
             wrap,
-            syntax: settings.syntax_highlighting,
+            syntax: settings.syntax_highlighting && large_file_tier.syntax_enabled(),
+            large_file_tier,
             splitter: validated_splitter(settings.pane_split),
             recalculate_at: Some(Instant::now()),
             recalculating: true,
@@ -488,6 +499,9 @@ impl TextViewModel {
         changed
     }
     pub fn copy_hunk(&mut self, from: DiffSide) -> Result<(), String> {
+        if !self.large_file_tier.editable() {
+            return Err(self.large_file_tier.explanation().into());
+        }
         if self.external_conflict != [false, false] {
             return Err("Resolve external-change conflict before merging".into());
         }

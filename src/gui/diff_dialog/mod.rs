@@ -29,6 +29,9 @@ impl DiffDialogState {
             .open(&mut open)
             .default_size([900.0, 650.0])
             .show(ctx, |ui| {
+                if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
+                    self.workspace.back();
+                }
                 ui.horizontal(|ui| {
                     let left = ui.add(
                         egui::TextEdit::singleline(&mut self.workspace.left_visible)
@@ -55,7 +58,12 @@ impl DiffDialogState {
                             self.workspace.right_visible = p.display().to_string();
                         }
                     }
-                    if ui.button("Compare").clicked() {
+                    if ui
+                        .button("Compare")
+                        .on_hover_text("Compare/change paths (Ctrl+O)")
+                        .clicked()
+                        || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
+                    {
                         let _ = self.workspace.open_paths(
                             self.workspace.left_visible.clone(),
                             self.workspace.right_visible.clone(),
