@@ -22,9 +22,13 @@ fn id() -> u64 {
 pub enum FolderDisplayFilter {
     #[default]
     All,
-    Changed,
+    Differences,
     Identical,
-    OneSided,
+    LeftOnly,
+    RightOnly,
+    LeftNewer,
+    RightNewer,
+    Errors,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FolderSortState {

@@ -2,7 +2,7 @@
 //! operation paths and metadata are deliberately retained per side.
 use crate::diff::text_compare::{CompiledRules, TextComparisonRules, project};
 use crate::diff::text_file::{LoadedContent, load_text_file};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -207,6 +207,124 @@ impl FolderModel {
                     && filter.matches(e.effective_status)
             })
             .collect()
+    }
+}
+
+/// One row in the presentation tree.  This is deliberately a value projection:
+/// changing view options cannot mutate, or cause work to be scheduled on, the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderProjectionRow {
+    pub path: PathBuf,
+    pub depth: usize,
+    pub has_children: bool,
+}
+
+/// Builds a tree from explicit parent/child links and then flattens its visible
+/// portion. This avoids deriving nesting from incidental ordering of path strings.
+pub fn project_folder_rows(
+    model: &FolderModel,
+    filter: crate::diff::model::FolderDisplayFilter,
+    path_filter: &str,
+    expanded: &BTreeSet<PathBuf>,
+    descending: bool,
+) -> Vec<FolderProjectionRow> {
+    use crate::diff::model::FolderDisplayFilter as F;
+    let query = path_filter.replace('\\', "/").to_lowercase();
+    let mut by_path = BTreeMap::<PathBuf, &FolderEntry>::new();
+    for entry in model.entries.values() {
+        by_path.insert(entry.relative_path.clone(), entry);
+    }
+    let mut children = BTreeMap::<Option<PathBuf>, Vec<PathBuf>>::new();
+    for path in by_path.keys() {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        let explicit_parent = parent
+            .filter(|p| by_path.contains_key(*p))
+            .map(Path::to_path_buf);
+        children
+            .entry(explicit_parent)
+            .or_default()
+            .push(path.clone());
+    }
+    fn matches(f: F, status: FolderStatus) -> bool {
+        match f {
+            F::All => true,
+            F::Differences => status.is_different(),
+            F::Identical => status == FolderStatus::Identical,
+            F::LeftOnly => status == FolderStatus::LeftOnly,
+            F::RightOnly => status == FolderStatus::RightOnly,
+            F::LeftNewer => status == FolderStatus::LeftNewer,
+            F::RightNewer => status == FolderStatus::RightNewer,
+            F::Errors => matches!(status, FolderStatus::Unreadable | FolderStatus::Error),
+        }
+    }
+    fn walk(
+        parent: Option<&Path>,
+        depth: usize,
+        by_path: &BTreeMap<PathBuf, &FolderEntry>,
+        children: &BTreeMap<Option<PathBuf>, Vec<PathBuf>>,
+        expanded: &BTreeSet<PathBuf>,
+        filter: F,
+        query: &str,
+        descending: bool,
+        out: &mut Vec<FolderProjectionRow>,
+    ) {
+        let key = parent.map(Path::to_path_buf);
+        let mut paths = children.get(&key).cloned().unwrap_or_default();
+        // Sorting siblings keeps a directory immediately before its subtree.
+        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        if descending {
+            paths.reverse();
+        }
+        for path in paths {
+            let entry = by_path[&path];
+            let has_children = children.contains_key(&Some(path.clone()));
+            let path_matches = path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_lowercase()
+                .contains(query);
+            if path_matches && matches(filter.clone(), entry.effective_status) {
+                out.push(FolderProjectionRow {
+                    path: path.clone(),
+                    depth,
+                    has_children,
+                });
+            }
+            if has_children && expanded.contains(&path) {
+                walk(
+                    Some(&path),
+                    depth + 1,
+                    by_path,
+                    children,
+                    expanded,
+                    filter.clone(),
+                    query,
+                    descending,
+                    out,
+                );
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    walk(
+        None, 0, &by_path, &children, expanded, filter, &query, descending, &mut rows,
+    );
+    rows
+}
+
+/// Expands every retained directory entry above `target`.
+pub fn expand_ancestors(model: &FolderModel, target: &Path, expanded: &mut BTreeSet<PathBuf>) {
+    let paths: BTreeSet<_> = model
+        .entries
+        .values()
+        .map(|e| e.relative_path.as_path())
+        .collect();
+    let mut parent = target.parent();
+    while let Some(path) = parent.filter(|p| !p.as_os_str().is_empty()) {
+        if paths.contains(path) {
+            expanded.insert(path.to_path_buf());
+        }
+        parent = path.parent();
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
