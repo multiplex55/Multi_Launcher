@@ -71,6 +71,9 @@ impl LauncherApp {
         if self.handle_file_search_action(&a.action) {
             return;
         }
+        if self.handle_diff_action(&a.action) {
+            return;
+        }
         if let Some(new_query) = query_override {
             self.query = new_query;
             self.last_timer_query =
@@ -1194,6 +1197,21 @@ impl LauncherApp {
             return true;
         }
         false
+    }
+
+    fn handle_diff_action(&mut self, action: &str) -> bool {
+        let Some(encoded) = action.strip_prefix(crate::diff::query::OPEN_PREFIX) else {
+            return false;
+        };
+        match crate::diff::query::decode_payload(encoded) {
+            Ok(payload) => {
+                if let Err(error) = self.diff_dialog.open_payload(payload) {
+                    self.report_error_message("diff", error);
+                }
+            }
+            Err(error) => self.report_error_message("diff", error),
+        }
+        true
     }
 
     fn report_file_search_action_error(&mut self, err: String) {

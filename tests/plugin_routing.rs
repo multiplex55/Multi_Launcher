@@ -228,6 +228,30 @@ fn builtin_search_filtered_routes_file_omni_and_folder_prefixes() {
 }
 
 #[test]
+fn diff_prefix_routes_only_to_diff_among_native_file_plugins() {
+    use multi_launcher::plugins::diff::DiffPlugin;
+    use multi_launcher::plugins::file_search::FileSearchPlugin;
+    use multi_launcher::plugins::folders::FoldersPlugin;
+    let mut pm = PluginManager::new();
+    pm.register(Box::new(DiffPlugin::default()));
+    pm.register(Box::new(FileSearchPlugin::default()));
+    pm.register(Box::new(FoldersPlugin::default()));
+    let results = pm.search_filtered("diff left right", None, None);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].action.starts_with("diff:open:"));
+    assert!(
+        pm.search_filtered("fs", None, None)
+            .iter()
+            .all(|a| !a.action.starts_with("diff:"))
+    );
+    assert!(
+        pm.search_filtered("folder", None, None)
+            .iter()
+            .all(|a| !a.action.starts_with("diff:"))
+    );
+}
+
+#[test]
 fn file_search_plugin_prefix_is_only_fs() {
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::file_search::FileSearchPlugin;

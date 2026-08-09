@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod clipboard_modify;
 pub mod color_picker;
 pub mod convert_panel;
+pub mod diff;
 pub mod dropcalc;
 pub mod emoji;
 pub mod fav;

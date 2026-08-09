@@ -1329,6 +1329,7 @@ impl eframe::App for LauncherApp {
         self.file_search_dialog
             .preview_dialog
             .ui(ctx, &self.file_search_dialog.settings);
+        self.diff_dialog.ui(ctx);
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
