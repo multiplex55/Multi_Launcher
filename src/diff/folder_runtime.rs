@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub struct FolderRuntime {
     pub left_scan: Option<ScanHandle>,
@@ -33,6 +33,7 @@ pub struct FolderRuntime {
     pub active_operation: Option<OperationHandle>,
     pub left_error: Option<String>,
     pub right_error: Option<String>,
+    pub restart_prepared: bool,
     // Filesystem watchers belong here when live refresh is implemented.
 }
 
@@ -80,13 +81,33 @@ impl Default for FolderRuntime {
             active_operation: None,
             left_error: None,
             right_error: None,
+            restart_prepared: false,
         }
     }
 }
 
 impl FolderRuntime {
     pub fn next_generation() -> u64 {
-        NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+        Self::next_generation_after(0)
+    }
+
+    fn next_generation_after(current: u64) -> u64 {
+        let mut observed = NEXT_GENERATION.load(Ordering::Relaxed);
+        loop {
+            let next = observed
+                .max(current)
+                .checked_add(1)
+                .expect("folder scan generation exhausted");
+            match NEXT_GENERATION.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => observed = actual,
+            }
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -204,6 +225,26 @@ impl FolderRuntime {
         if let Some(operation) = &self.active_operation {
             operation.cancel();
         }
+    }
+
+    /// Cancel every class of work and establish a new generation before a
+    /// replacement scan can emit events.
+    pub fn prepare_rescan(&mut self) {
+        self.cancel();
+        self.generation = Self::next_generation_after(self.generation);
+        self.restart_prepared = true;
+        self.left_root = None;
+        self.right_root = None;
+        self.left_scan = None;
+        self.right_scan = None;
+        self.comparison_queue.clear();
+        self.queued.clear();
+        self.in_flight.clear();
+        self.left_visited = 0;
+        self.right_visited = 0;
+        self.completed_comparisons = 0;
+        self.left_error = None;
+        self.right_error = None;
     }
 }
 
@@ -398,6 +439,23 @@ mod tests {
                 PathBuf::from("background")
             ]
         );
+    }
+
+    #[test]
+    fn prepare_rescan_cancels_work_clears_progress_and_increments_generation() {
+        let mut runtime = FolderRuntime::default();
+        runtime.generation = 10;
+        runtime.left_visited = 5;
+        runtime.right_visited = 6;
+        runtime.comparison_queue.push_back("queued".into());
+        runtime.in_flight.insert("running".into());
+        runtime.completed_comparisons = 2;
+        runtime.prepare_rescan();
+        assert!(runtime.generation > 10);
+        assert!(runtime.restart_prepared);
+        assert_eq!((runtime.left_visited, runtime.right_visited), (0, 0));
+        assert!(runtime.comparison_queue.is_empty() && runtime.in_flight.is_empty());
+        assert_eq!(runtime.completed_comparisons, 0);
     }
 
     #[test]

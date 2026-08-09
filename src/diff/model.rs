@@ -55,7 +55,10 @@ pub struct FolderCompareState {
     pub display_filter: FolderDisplayFilter,
     pub path_filter: String,
     pub sort: FolderSortState,
-    pub scan_rules: ScanRules,
+    /// Rules that produced `model`; drafts never mutate these implicitly.
+    pub applied_scan_rules: ScanRules,
+    pub draft_include_rules: String,
+    pub draft_exclude_rules: String,
     /// Rules used by asynchronous content refinement of text file pairs.
     pub text_rules: TextComparisonRules,
     pub content_comparison: ContentComparisonMode,
@@ -81,7 +84,9 @@ impl Default for FolderCompareState {
                 column: "path".into(),
                 descending: false,
             },
-            scan_rules: ScanRules::default(),
+            applied_scan_rules: ScanRules::default(),
+            draft_include_rules: String::new(),
+            draft_exclude_rules: String::new(),
             text_rules: TextComparisonRules::default(),
             content_comparison: ContentComparisonMode::default(),
             timestamp_tolerance: Duration::from_secs(2),
@@ -89,6 +94,29 @@ impl Default for FolderCompareState {
             right_scan_complete: false,
             stale_paths: BTreeSet::new(),
         }
+    }
+}
+
+impl FolderCompareState {
+    fn draft_lines(value: &str) -> Vec<String> {
+        value
+            .lines()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub fn validated_draft_scan_rules(&self) -> Result<ScanRules, String> {
+        ScanRules::validated(
+            Self::draft_lines(&self.draft_include_rules),
+            Self::draft_lines(&self.draft_exclude_rules),
+        )
+    }
+
+    pub fn rescan_required(&self) -> bool {
+        self.validated_draft_scan_rules()
+            .is_ok_and(|rules| rules != self.applied_scan_rules)
     }
 }
 
@@ -841,8 +869,8 @@ mod tests {
             .extend([PathBuf::from("a"), PathBuf::from("b")]);
         folder.primary_selection = Some("b".into());
         folder.scroll_anchor = Some("b".into());
-        folder.scan_rules.includes = vec!["*.txt".into()];
-        folder.scan_rules.excludes = vec!["target/".into()];
+        folder.applied_scan_rules.includes = vec!["*.txt".into()];
+        folder.applied_scan_rules.excludes = vec!["target/".into()];
         folder.model.entries.insert(
             "a".into(),
             FolderEntry {
@@ -872,6 +900,35 @@ mod tests {
             workspace.current_view.view,
             DiffView::FolderCompare(expected)
         );
+    }
+
+    #[test]
+    fn scan_rule_drafts_are_validated_without_mutating_applied_rules_or_model() {
+        use crate::diff::folder_compare::{FolderEntry, FolderStatus};
+        let mut folder = FolderCompareState::default();
+        folder.applied_scan_rules.excludes.push("target/".into());
+        folder.model.entries.insert(
+            "kept".into(),
+            FolderEntry {
+                relative_path: "kept".into(),
+                left: None,
+                right: None,
+                metadata_status: FolderStatus::Identical,
+                effective_status: FolderStatus::Identical,
+                content_checked: false,
+            },
+        );
+        let applied = folder.applied_scan_rules.clone();
+        folder.draft_include_rules = "../invalid".into();
+        assert!(folder.validated_draft_scan_rules().is_err());
+        assert!(!folder.rescan_required());
+        assert_eq!(folder.applied_scan_rules, applied);
+        assert!(folder.model.entries.contains_key("kept"));
+
+        folder.draft_include_rules = "*.tmp".into();
+        folder.draft_exclude_rules = "target/\n.git/".into();
+        assert!(folder.rescan_required());
+        assert_eq!(folder.applied_scan_rules, applied);
     }
     #[test]
     fn splitter_and_virtual_range_are_bounded() {

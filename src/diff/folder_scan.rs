@@ -97,6 +97,30 @@ pub struct ScanRules {
     pub excludes: Vec<String>,
 }
 impl ScanRules {
+    /// Validate user-authored glob rules before they are allowed to replace the
+    /// rules belonging to an active scan.
+    pub fn validated(includes: Vec<String>, excludes: Vec<String>) -> Result<Self, String> {
+        fn check(rule: &str) -> Result<(), String> {
+            if rule.is_empty() {
+                return Err("rules may not be empty".into());
+            }
+            if rule.starts_with('/') || rule.starts_with('\\') {
+                return Err(format!("absolute rule '{rule}' is not allowed"));
+            }
+            if rule.split(['/', '\\']).any(|part| part == "..") {
+                return Err(format!("parent traversal in rule '{rule}' is not allowed"));
+            }
+            if rule.contains(['[', ']', '\0']) {
+                return Err(format!("unsupported syntax in rule '{rule}' (use * and ?)"));
+            }
+            Ok(())
+        }
+        for rule in includes.iter().chain(&excludes) {
+            check(rule)?;
+        }
+        Ok(Self { includes, excludes })
+    }
+
     pub fn permits(&self, rel: &Path, is_dir: bool) -> bool {
         let p = rel
             .iter()
@@ -279,7 +303,9 @@ fn scan(
                 }
             };
             let ft = meta.file_type();
-            let kind = if ft.is_symlink() {
+            // Includes only decide visibility; they can never turn a filesystem
+            // indirection into a traversable directory.
+            let kind = if ft.is_symlink() || is_reparse_point(&meta) {
                 EntryKind::Symlink
             } else if ft.is_dir() {
                 EntryKind::Directory
@@ -380,6 +406,17 @@ fn identity(_: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+#[cfg(not(windows))]
+fn is_reparse_point(_: &fs::Metadata) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +430,44 @@ mod tests {
         assert!(!r.permits(Path::new("x/a.tmp"), false));
         assert!(!r.permits(Path::new("a/x.bak"), false));
         assert!(r.permits(Path::new("b/x.bak"), false));
+    }
+
+    #[test]
+    fn include_only_and_exclude_precedence() {
+        let rules = ScanRules::validated(vec!["*.tmp".into()], vec!["secret.tmp".into()]).unwrap();
+        assert!(rules.permits(Path::new("nested/keep.tmp"), false));
+        assert!(!rules.permits(Path::new("nested/no.txt"), false));
+        assert!(!rules.permits(Path::new("nested/secret.tmp"), false));
+        assert!(rules.permits(Path::new("nested"), true)); // traversal corridor
+    }
+
+    #[test]
+    fn common_directory_extension_and_nested_patterns() {
+        let rules = ScanRules::validated(
+            vec![],
+            vec![
+                ".git/".into(),
+                "target/".into(),
+                "*.tmp".into(),
+                "*.bak".into(),
+                "cache/nested/".into(),
+            ],
+        )
+        .unwrap();
+        for path in [".git", "src/.git", "target", "crate/target"] {
+            assert!(!rules.permits(Path::new(path), true), "{path}");
+        }
+        for path in ["a.tmp", "deep/a.bak"] {
+            assert!(!rules.permits(Path::new(path), false), "{path}");
+        }
+        assert!(!rules.permits(Path::new("cache/nested"), true));
+        assert!(rules.permits(Path::new("other/nested"), true));
+    }
+
+    #[test]
+    fn invalid_syntax_is_rejected() {
+        assert!(ScanRules::validated(vec!["../outside".into()], vec![]).is_err());
+        assert!(ScanRules::validated(vec!["[abc]".into()], vec![]).is_err());
     }
 
     #[test]

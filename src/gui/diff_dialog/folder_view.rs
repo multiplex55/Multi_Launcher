@@ -211,9 +211,31 @@ pub(super) fn show(
                 state.display_filter = filter;
             }
         }
-        if ui.button("Rescan").clicked() {
+        let draft = state.validated_draft_scan_rules();
+        let required = draft.as_ref().is_ok_and(|r| r != &state.applied_scan_rules);
+        if required {
+            ui.colored_label(egui::Color32::YELLOW, "Rescan required");
+        }
+        if ui
+            .add_enabled(required, egui::Button::new("Rescan"))
+            .clicked()
+        {
             action = FolderViewAction::RequestRescan;
         }
+    });
+    ui.collapsing("Scan rules", |ui| {
+        ui.columns(2, |columns| {
+            columns[0].label("Include (one pattern per line)");
+            columns[0]
+                .add(egui::TextEdit::multiline(&mut state.draft_include_rules).desired_rows(4));
+            columns[1].label("Exclude (one pattern per line)");
+            columns[1]
+                .add(egui::TextEdit::multiline(&mut state.draft_exclude_rules).desired_rows(4));
+        });
+        if let Err(error) = state.validated_draft_scan_rules() {
+            ui.colored_label(egui::Color32::RED, error);
+        }
+        ui.label("Examples: .git/  target/  *.tmp  *.bak");
     });
     ui.horizontal(|ui| {
         ui.label("Find path:");
