@@ -144,10 +144,10 @@ pub fn fast_status(
                 } else {
                     FolderStatus::Identical
                 }
+            } else if a > b {
+                FolderStatus::LeftNewer
             } else {
-                // A timestamp only describes recency; it cannot prove that the
-                // bytes differ. Keep files eligible for content refinement.
-                FolderStatus::PendingContentComparison
+                FolderStatus::RightNewer
             }
         }
         _ => {
@@ -342,7 +342,7 @@ mod tests {
                 Some(&file),
                 Duration::from_secs(2)
             ),
-            FolderStatus::PendingContentComparison
+            FolderStatus::LeftNewer
         );
         assert_eq!(
             fast_status(
