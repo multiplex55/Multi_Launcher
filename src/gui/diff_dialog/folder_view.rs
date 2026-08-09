@@ -195,58 +195,75 @@ pub(super) fn show(
     state: &mut FolderCompareState,
     runtime: &crate::diff::folder_runtime::FolderRuntime,
 ) -> FolderViewAction {
-    ui.heading("Folder comparison");
-    ui.label(format!(
-        "{} ↔ {}",
-        state.left_root.display(),
-        state.right_root.display()
-    ));
+    ui.label("Folder comparison");
+    egui::ScrollArea::horizontal()
+        .max_height(22.0)
+        .show(ui, |ui| {
+            ui.label(format!(
+                "{} ↔ {}",
+                state.left_root.display(),
+                state.right_root.display()
+            ));
+        });
     let mut action = FolderViewAction::Noop;
-    ui.horizontal_wrapped(|ui| {
-        super::export::folder_menu(ui, state);
-        for (label, filter) in [
-            ("All", FolderDisplayFilter::All),
-            ("Differences", FolderDisplayFilter::Differences),
-            ("Identical", FolderDisplayFilter::Identical),
-            ("Left only", FolderDisplayFilter::LeftOnly),
-            ("Right only", FolderDisplayFilter::RightOnly),
-            ("Left newer", FolderDisplayFilter::LeftNewer),
-            ("Right newer", FolderDisplayFilter::RightNewer),
-            ("Errors", FolderDisplayFilter::Errors),
-        ] {
+    let command_height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), command_height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            super::export::folder_menu(ui, state);
+            ui.menu_button("View", |ui| {
+                for (label, filter) in [
+                    ("All", FolderDisplayFilter::All),
+                    ("Differences", FolderDisplayFilter::Differences),
+                    ("Identical", FolderDisplayFilter::Identical),
+                    ("Left only", FolderDisplayFilter::LeftOnly),
+                    ("Right only", FolderDisplayFilter::RightOnly),
+                    ("Left newer", FolderDisplayFilter::LeftNewer),
+                    ("Right newer", FolderDisplayFilter::RightNewer),
+                    ("Errors", FolderDisplayFilter::Errors),
+                ] {
+                    if ui
+                        .selectable_label(state.display_filter == filter, label)
+                        .clicked()
+                    {
+                        state.display_filter = filter;
+                    }
+                }
+            });
+            let draft = state.validated_draft_scan_rules();
+            let required = draft.as_ref().is_ok_and(|r| r != &state.applied_scan_rules);
+            if required {
+                ui.colored_label(egui::Color32::YELLOW, "Rescan required");
+            }
             if ui
-                .selectable_label(state.display_filter == filter, label)
+                .add_enabled(required, egui::Button::new("Rescan"))
                 .clicked()
             {
-                state.display_filter = filter;
+                action = FolderViewAction::RequestRescan;
             }
-        }
-        let draft = state.validated_draft_scan_rules();
-        let required = draft.as_ref().is_ok_and(|r| r != &state.applied_scan_rules);
-        if required {
-            ui.colored_label(egui::Color32::YELLOW, "Rescan required");
-        }
-        if ui
-            .add_enabled(required, egui::Button::new("Rescan"))
-            .clicked()
-        {
-            action = FolderViewAction::RequestRescan;
-        }
-    });
-    ui.collapsing("Scan rules", |ui| {
-        ui.columns(2, |columns| {
-            columns[0].label("Include (one pattern per line)");
-            columns[0]
-                .add(egui::TextEdit::multiline(&mut state.draft_include_rules).desired_rows(4));
-            columns[1].label("Exclude (one pattern per line)");
-            columns[1]
-                .add(egui::TextEdit::multiline(&mut state.draft_exclude_rules).desired_rows(4));
+        },
+    );
+    egui::ScrollArea::vertical()
+        .max_height(110.0)
+        .show(ui, |ui| {
+            ui.collapsing("Scan rules", |ui| {
+                ui.columns(2, |columns| {
+                    columns[0].label("Include (one pattern per line)");
+                    columns[0].add(
+                        egui::TextEdit::multiline(&mut state.draft_include_rules).desired_rows(4),
+                    );
+                    columns[1].label("Exclude (one pattern per line)");
+                    columns[1].add(
+                        egui::TextEdit::multiline(&mut state.draft_exclude_rules).desired_rows(4),
+                    );
+                });
+                if let Err(error) = state.validated_draft_scan_rules() {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+                ui.label("Examples: .git/  target/  *.tmp  *.bak");
+            });
         });
-        if let Err(error) = state.validated_draft_scan_rules() {
-            ui.colored_label(egui::Color32::RED, error);
-        }
-        ui.label("Examples: .git/  target/  *.tmp  *.bak");
-    });
     ui.horizontal(|ui| {
         ui.label("Find path:");
         ui.text_edit_singleline(&mut state.path_filter);
@@ -314,34 +331,36 @@ pub(super) fn show(
     projected = projected_rows(state);
     paths = projected.iter().map(|r| r.path.clone()).collect();
     ui.separator();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("folder-results")
-            .striped(true)
-            .num_columns(6)
-            .show(ui, |ui| {
-                for heading in [
-                    "Left path",
-                    "Left size / modified",
-                    "Status",
-                    "Right path",
-                    "Right size / modified",
-                    "",
-                ] {
-                    ui.strong(heading);
-                }
-                ui.end_row();
-                for row in &projected {
-                    render_row(
-                        ui,
-                        state,
-                        &paths,
-                        row,
-                        runtime.mutation_active(),
-                        &mut action,
-                    );
-                }
-            });
-    });
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Grid::new("folder-results")
+                .striped(true)
+                .num_columns(6)
+                .show(ui, |ui| {
+                    for heading in [
+                        "Left path",
+                        "Left size / modified",
+                        "Status",
+                        "Right path",
+                        "Right size / modified",
+                        "",
+                    ] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    for row in &projected {
+                        render_row(
+                            ui,
+                            state,
+                            &paths,
+                            row,
+                            runtime.mutation_active(),
+                            &mut action,
+                        );
+                    }
+                });
+        });
     action
 }
 

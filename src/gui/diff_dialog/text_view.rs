@@ -7,121 +7,120 @@ use eframe::egui::{self, Color32, RichText};
 pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewModel) {
     model.poll();
     shortcuts(ui, model);
-    ui.horizontal_wrapped(|ui| {
-        super::export::text_menu(ui, model);
-        if ui
-            .button("Rules…")
-            .on_hover_text("Comparison rules")
-            .clicked()
-        {
-            ui.ctx().data_mut(|d| {
-                d.insert_temp(
-                    egui::Id::new(("diff-rules", view)),
-                    super::rules_dialog::RulesDialogState::new(&model.rules),
+    let command_height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), command_height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            if ui.button("◀ Previous (F7)").clicked() {
+                model.navigate(NavigationDirection::Previous)
+            }
+            if ui.button("Next (F8) ▶").clicked() {
+                model.navigate(NavigationDirection::Next)
+            }
+            let merge = model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
+            if ui
+                .add_enabled(merge, egui::Button::new("Copy →"))
+                .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
+                .clicked()
+            {
+                if let Err(e) = model.copy_hunk(DiffSide::Left) {
+                    model.right_error = Some(e)
+                }
+            }
+            if ui
+                .add_enabled(merge, egui::Button::new("← Copy"))
+                .on_hover_text(
+                    "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
                 )
+                .clicked()
+            {
+                if let Err(e) = model.copy_hunk(DiffSide::Right) {
+                    model.left_error = Some(e)
+                }
+            }
+            if ui.button("Find").clicked() {
+                model.find_open = true;
+            }
+            ui.menu_button("View", |ui| {
+                ui.checkbox(&mut model.wrap, "Wrap");
+                ui.add_enabled(
+                    model.large_file_tier.syntax_enabled(),
+                    egui::Checkbox::new(&mut model.syntax, "Syntax"),
+                );
+                ui.selectable_value(
+                    &mut model.projection_mode,
+                    RowProjectionMode::All,
+                    "All rows",
+                );
+                ui.selectable_value(
+                    &mut model.projection_mode,
+                    RowProjectionMode::DifferencesOnly,
+                    "Differences only",
+                );
+                let mut ignore = model.rules.ignore_all_whitespace;
+                if ui
+                    .selectable_value(&mut ignore, false, "All differences")
+                    .changed()
+                    || ui
+                        .selectable_value(&mut ignore, true, "Important differences")
+                        .changed()
+                {
+                    model.set_ignore_all_whitespace(ignore);
+                }
             });
-        }
-        ui.label("Differences:");
-        let mut ignore = model.rules.ignore_all_whitespace;
-        let all_changed = ui.selectable_value(&mut ignore, false, "All").changed();
-        let important_changed = ui
-            .selectable_value(&mut ignore, true, "Important")
-            .changed();
-        if all_changed || important_changed {
-            model.set_ignore_all_whitespace(ignore);
-        }
-        if ui.button("⏮ First").clicked() {
-            model.navigate(NavigationDirection::First)
-        }
-        if ui.button("◀ Previous (F7)").clicked() {
-            model.navigate(NavigationDirection::Previous)
-        }
-        if ui.button("Next (F8) ▶").clicked() {
-            model.navigate(NavigationDirection::Next)
-        }
-        if ui.button("Last ⏭").clicked() {
-            model.navigate(NavigationDirection::Last)
-        }
-        ui.checkbox(&mut model.wrap, "Wrap")
-            .on_hover_text("Keep both aligned cells at the larger measured row height");
-        ui.add_enabled(
-            model.large_file_tier.syntax_enabled(),
-            egui::Checkbox::new(&mut model.syntax, "Syntax"),
-        );
-        ui.separator();
-        ui.selectable_value(
-            &mut model.projection_mode,
-            RowProjectionMode::All,
-            "All rows",
-        );
-        ui.selectable_value(
-            &mut model.projection_mode,
-            RowProjectionMode::DifferencesOnly,
-            "Differences only",
-        );
-        if model.projection_mode == RowProjectionMode::DifferencesOnly {
-            egui::ComboBox::from_id_source((view, "context"))
-                .selected_text(format!("Context {}", model.projection_context))
-                .show_ui(ui, |ui| {
-                    for n in [0, 1, 3, 5, 10] {
-                        ui.selectable_value(&mut model.projection_context, n, n.to_string());
+            ui.menu_button("More", |ui| {
+                super::export::text_menu(ui, model);
+                if ui.button("Rules…").clicked() {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(
+                            egui::Id::new(("diff-rules", view)),
+                            super::rules_dialog::RulesDialogState::new(&model.rules),
+                        )
+                    });
+                    ui.close_menu();
+                }
+                if ui.button("First").clicked() {
+                    model.navigate(NavigationDirection::First);
+                }
+                if ui.button("Last").clicked() {
+                    model.navigate(NavigationDirection::Last);
+                }
+                if ui
+                    .add_enabled(
+                        model.left.can_undo() || model.right.can_undo(),
+                        egui::Button::new("Undo"),
+                    )
+                    .clicked()
+                {
+                    model.undo();
+                }
+                if ui
+                    .add_enabled(
+                        model.left.can_redo() || model.right.can_redo(),
+                        egui::Button::new("Redo"),
+                    )
+                    .clicked()
+                {
+                    model.redo();
+                }
+                if ui.button("Save Left").clicked() {
+                    model.save(DiffSide::Left);
+                }
+                if ui.button("Save Right").clicked() {
+                    model.save(DiffSide::Right);
+                }
+                if ui.button("Save All Modified").clicked() {
+                    if model.left.is_dirty() {
+                        model.save(DiffSide::Left);
                     }
-                });
-        }
-        let merge = model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
-        if ui
-            .add_enabled(merge, egui::Button::new("Copy →"))
-            .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
-            .clicked()
-        {
-            if let Err(e) = model.copy_hunk(DiffSide::Left) {
-                model.right_error = Some(e)
-            }
-        }
-        if ui
-            .add_enabled(merge, egui::Button::new("← Copy"))
-            .on_hover_text(
-                "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
-            )
-            .clicked()
-        {
-            if let Err(e) = model.copy_hunk(DiffSide::Right) {
-                model.left_error = Some(e)
-            }
-        }
-        if ui
-            .add_enabled(
-                model.left.can_undo() || model.right.can_undo(),
-                egui::Button::new("Undo"),
-            )
-            .clicked()
-        {
-            model.undo();
-        }
-        if ui
-            .add_enabled(
-                model.left.can_redo() || model.right.can_redo(),
-                egui::Button::new("Redo"),
-            )
-            .clicked()
-        {
-            model.redo();
-        }
-        if ui.button("Save Left").clicked() {
-            model.save(DiffSide::Left);
-        }
-        if ui.button("Save Right").clicked() {
-            model.save(DiffSide::Right);
-        }
-        if ui.button("Save All Modified").clicked() {
-            if model.left.is_dirty() {
-                model.save(DiffSide::Left);
-            }
-            if model.right.is_dirty() {
-                model.save(DiffSide::Right);
-            }
-        }
-    });
+                    if model.right.is_dirty() {
+                        model.save(DiffSide::Right);
+                    }
+                }
+            });
+        },
+    );
     if model.find_open {
         ui.horizontal(|ui| {
             ui.label("Find:");
@@ -162,29 +161,33 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             .current_row
             .and_then(|r| c.difference_number(r, false))
     });
-    ui.horizontal_wrapped(|ui| {
-        ui.label(number.map_or("Difference —/—".into(), |(n, t)| {
-            format!("Difference {n}/{t}")
-        }));
-        side_status(
-            ui,
-            "Left",
-            &model.left,
-            model.external_conflict[0],
-            model.left_error.as_deref(),
-        );
-        side_status(
-            ui,
-            "Right",
-            &model.right,
-            model.external_conflict[1],
-            model.right_error.as_deref(),
-        );
-        if model.recalculating {
-            ui.label("⏳ Recalculating… (showing last valid alignment)");
-        }
-        ui.label(model.large_file_tier.explanation());
-    });
+    egui::ScrollArea::horizontal()
+        .max_height(command_height)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(number.map_or("Difference —/—".into(), |(n, t)| {
+                    format!("Difference {n}/{t}")
+                }));
+                side_status(
+                    ui,
+                    "Left",
+                    &model.left,
+                    model.external_conflict[0],
+                    model.left_error.as_deref(),
+                );
+                side_status(
+                    ui,
+                    "Right",
+                    &model.right,
+                    model.external_conflict[1],
+                    model.right_error.as_deref(),
+                );
+                if model.recalculating {
+                    ui.label("⏳ Recalculating… (showing last valid alignment)");
+                }
+                ui.label(model.large_file_tier.explanation());
+            });
+        });
     ui.separator();
     let available = ui.available_width();
     let comparison_height = ui.available_height();
