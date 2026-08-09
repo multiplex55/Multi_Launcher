@@ -112,7 +112,7 @@ pub struct PreviewTotals {
     pub errors: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyPlan {
     pub direction: CopyDirection,
     pub source_root: CapturedRoot,
@@ -515,7 +515,10 @@ fn fresh(plan: &CopyPlan, item: &PlannedCopy, dirty: &HashSet<PathBuf>) -> Resul
     if FileIdentity::read(&src).map_err(|e| e.to_string())? != item.expected_source {
         return Err("source changed since confirmation".into());
     }
-    if dirty.contains(&dst) {
+    if dirty
+        .iter()
+        .any(|path| path == &dst || path.starts_with(&dst))
+    {
         return Err("destination has unsaved Diff changes".into());
     }
     let now = FileIdentity::read(&dst).ok();
@@ -688,13 +691,13 @@ pub enum DeleteMode {
     Recycle,
     Permanent,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedDelete {
     pub relative: PathBuf,
     pub target: PathBuf,
     pub expected: FileIdentity,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletePlan {
     pub root: CapturedRoot,
     pub generation: u64,
@@ -732,7 +735,28 @@ pub fn plan_delete(
     let root = root(root_path)?;
     let mut items = vec![];
     let mut errors = vec![];
+    let mut normalized = BTreeSet::new();
     for rel in selected {
+        match validate_relative(&rel) {
+            Ok(path) => {
+                normalized.insert(path);
+            }
+            Err(message) => errors.push(ValidationError {
+                relative: Some(rel),
+                message,
+                fatal: true,
+            }),
+        }
+    }
+    let all = normalized.clone();
+    normalized.retain(|path| {
+        !path
+            .ancestors()
+            .skip(1)
+            .filter(|ancestor| !ancestor.as_os_str().is_empty())
+            .any(|ancestor| all.contains(ancestor))
+    });
+    for rel in normalized {
         match validate_relative(&rel).and_then(|validated| {
             ensure_contained(&root, &validated).and_then(|target| {
                 FileIdentity::read(&target)
@@ -776,6 +800,21 @@ pub fn execute_delete(
 ) -> ExecutionReport {
     let mut results = vec![];
     let mut affected = vec![];
+    if !same_root_identity(&plan.root).unwrap_or(false) {
+        return ExecutionReport {
+            generation: plan.generation,
+            items: plan
+                .items
+                .iter()
+                .map(|item| ItemResult {
+                    relative: item.relative.clone(),
+                    outcome: ItemOutcome::Failed("comparison root identity changed".into()),
+                })
+                .collect(),
+            affected_subtree: None,
+            cancelled: false,
+        };
+    }
     for x in &plan.items {
         if cancel.load(Ordering::Acquire) {
             return ExecutionReport {
@@ -788,7 +827,7 @@ pub fn execute_delete(
         let validation = ensure_contained(&plan.root, &x.relative).and_then(|p| {
             if p != x.target {
                 Err("captured target changed".into())
-            } else if dirty.contains(&p) {
+            } else if dirty.iter().any(|path| path == &p || path.starts_with(&p)) {
                 Err("item has unsaved Diff changes".into())
             } else if FileIdentity::read(&p).map_err(|e| e.to_string())? != x.expected {
                 Err("item changed since confirmation".into())
@@ -823,4 +862,28 @@ pub fn execute_delete(
         affected_subtree: smallest_common_subtree(&affected),
         cancelled: false,
     }
+}
+
+/// Spawn execution of the already-confirmed recycle plan.  The GUI never
+/// constructs permanent plans; retaining the mode check here makes that
+/// boundary explicit even if a future caller is added accidentally.
+pub fn spawn_recycle_delete(
+    plan: DeletePlan,
+    dirty: HashSet<PathBuf>,
+    backend: Arc<dyn TrashBackend>,
+) -> Result<OperationHandle, String> {
+    if plan.mode != DeleteMode::Recycle {
+        return Err("GUI deletion only supports recycling".into());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let c = cancel.clone();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let report = execute_delete(&plan, &dirty, backend.as_ref(), &c);
+        let _ = tx.send(OperationEvent::Completed(report));
+    });
+    Ok(OperationHandle {
+        receiver: rx,
+        cancel,
+    })
 }
