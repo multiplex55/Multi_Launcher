@@ -8,4 +8,6 @@ pub mod model;
 pub mod persistence;
 pub mod query;
 pub mod settings;
+pub mod text_compare;
+pub mod text_file;
 pub mod worker;
