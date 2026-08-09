@@ -113,6 +113,8 @@ pub struct BinaryViewModel {
     pub splitter: f32,
     pub visible_byte_offset: u64,
     pub pending_scroll_offset: Option<u64>,
+    pub generation: u64,
+    pub stale: bool,
 }
 impl BinaryViewModel {
     pub fn load(state: &BinaryCompareState, splitter: f32) -> Result<Self, String> {
@@ -128,7 +130,17 @@ impl BinaryViewModel {
             splitter: validated_splitter(splitter),
             visible_byte_offset: 0,
             pending_scroll_offset: None,
+            generation: 1,
+            stale: false,
         })
+    }
+    /// Reopens both files and atomically publishes a completely rebuilt index.
+    pub fn refresh_external(&mut self, state: &BinaryCompareState) -> Result<(), String> {
+        self.stale = true;
+        let mut replacement = Self::load(state, self.splitter)?;
+        replacement.generation = self.generation.wrapping_add(1);
+        *self = replacement;
+        Ok(())
     }
     pub fn navigate(&mut self, direction: NavigationDirection) {
         let n = self.differences.ranges.len();
@@ -319,5 +331,26 @@ mod tests {
         assert_eq!(model.current_difference, Some(1));
         model.navigate(NavigationDirection::First);
         assert_eq!(model.current_difference, Some(0));
+    }
+    #[test]
+    fn external_refresh_rebuilds_index_and_advances_generation() {
+        let d = tempfile::tempdir().unwrap();
+        let left = d.path().join("left");
+        let right = d.path().join("right");
+        std::fs::write(&left, [1, 2, 3]).unwrap();
+        std::fs::write(&right, [1, 2, 3]).unwrap();
+        let state = BinaryCompareState {
+            left: Some(left),
+            right: Some(right.clone()),
+            relative_path: None,
+        };
+        let mut model = BinaryViewModel::load(&state, 0.5).unwrap();
+        let generation = model.generation;
+        assert!(model.differences.ranges.is_empty());
+        std::fs::write(right, [1, 9, 3]).unwrap();
+        model.refresh_external(&state).unwrap();
+        assert_eq!(model.generation, generation + 1);
+        assert!(!model.stale);
+        assert!(model.differences.contains(1));
     }
 }
