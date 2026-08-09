@@ -1224,7 +1224,7 @@ mod tests {
                 },
                 ScanEvent::Completed {
                     generation: 77,
-                    root: right_root,
+                    root: right_root.clone(),
                     visited: 1,
                 },
             ],
@@ -1272,13 +1272,15 @@ mod tests {
 
         // Capture a new selection, preview it, and pass the immutable plan to
         // an injected synchronous executor (no GUI click or worker timing).
-        let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
-            unreachable!()
-        };
-        state.path_filter.clear();
-        state.selected_paths.clear();
-        state.selected_paths.insert("copy.txt".into());
-        state.primary_selection = Some("copy.txt".into());
+        {
+            let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view else {
+                unreachable!()
+            };
+            state.path_filter.clear();
+            state.selected_paths.clear();
+            state.selected_paths.insert("copy.txt".into());
+            state.primary_selection = Some("copy.txt".into());
+        }
         dialog.plan_mutation(folder_view::MutationKind::CopyRight);
         let preview = dialog.operation_preview.take().expect("copy preview");
         let operation_preview::PreviewPlan::Copy(plan) = preview.plan else {
@@ -1292,7 +1294,15 @@ mod tests {
             "left version"
         );
 
-        let runtime = dialog.folder_runtimes.get_mut(&folder_id).unwrap();
+        let DiffDialogState {
+            workspace,
+            folder_runtimes,
+            ..
+        } = &mut dialog;
+        let DiffView::FolderCompare(state) = &mut workspace.current_view.view else {
+            unreachable!()
+        };
+        let runtime = folder_runtimes.get_mut(&folder_id).unwrap();
         refresh_after_mutation(state, runtime, report.affected_subtree);
         assert!(state.model.entries.is_empty());
         assert!(
