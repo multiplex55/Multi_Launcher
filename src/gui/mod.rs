@@ -13,6 +13,7 @@ mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
 mod dashboard_editor_dialog;
+mod diff_dialog;
 mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
@@ -57,6 +58,7 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
+pub use diff_dialog::DiffDialogState;
 pub use fav_dialog::FavDialog;
 pub use file_search_dialog::{
     FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
@@ -433,6 +435,7 @@ pub struct LauncherApp {
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
     file_search_dialog: FileSearchDialogState,
+    pub diff_dialog: DiffDialogState,
     file_search_coordinator: SearchCoordinator,
     notes_dialog: NotesDialog,
     note_graph_dialog: NoteGraphDialog,
@@ -1394,6 +1397,7 @@ impl LauncherApp {
                 ..FileSearchDialogState::default()
             },
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
+            diff_dialog: DiffDialogState::default(),
             notes_dialog: NotesDialog::default(),
             note_graph_dialog: NoteGraphDialog::default(),
             unused_assets_dialog: UnusedAssetsDialog::default(),

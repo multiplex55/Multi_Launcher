@@ -21,6 +21,7 @@ pub mod actions_editor;
 pub mod clipboard_modify;
 pub mod common;
 pub mod dashboard;
+pub mod diff;
 pub mod file_search;
 pub mod help_window;
 pub mod history;
