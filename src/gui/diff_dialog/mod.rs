@@ -609,8 +609,16 @@ mod tests {
         assert_eq!(state.applied_scan_rules.excludes, [".git/", "target/"]);
         assert!(state.model.entries.is_empty());
         assert_eq!(state.path_filter, "needle");
-        assert!(state.expanded_nodes.contains("expanded"));
-        assert!(state.selected_paths.contains("survivor.tmp"));
+        assert!(
+            state
+                .expanded_nodes
+                .contains(std::path::Path::new("expanded"))
+        );
+        assert!(
+            state
+                .selected_paths
+                .contains(std::path::Path::new("survivor.tmp"))
+        );
         let runtime = &dialog.folder_runtimes[&81];
         assert!(runtime.generation > 3 && runtime.restart_prepared);
         assert_eq!(runtime.left_visited, 0);
