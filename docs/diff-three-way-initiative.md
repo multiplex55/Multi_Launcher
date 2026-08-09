@@ -11,6 +11,7 @@ been reviewed.
 ## Scope
 
 The initiative adds a text-only, base-aware comparison and merge workflow. Its
+only planned product-scope addition is **three-way text comparison/merge**.
 planned integration points are:
 
 - `src/diff/three_way.rs` for the comparison and merge model;
