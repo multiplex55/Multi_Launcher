@@ -33,8 +33,165 @@ impl DiffDialogState {
     pub fn open_payload(&mut self, payload: DiffOpenPayload) -> Result<(), String> {
         self.open = true;
         self.clear_runtime_resources();
-        self.workspace = DiffWorkspace::default();
-        self.workspace.open_invocation(payload.left, payload.right)
+        self.workspace = DiffWorkspace::new(self.persistence.config.clone());
+        match (payload.left, payload.right) {
+            (Some(left), Some(right)) => self.open_and_record(left, right),
+            (left, right) => self.workspace.open_invocation(left, right),
+        }
+    }
+
+    fn open_and_record(&mut self, left: String, right: String) -> Result<(), String> {
+        self.workspace.open_paths(left.clone(), right.clone())?;
+        let mode = match self.workspace.current_view.view {
+            DiffView::TextCompare(_) => crate::diff::persistence::ComparisonModeV1::Text,
+            DiffView::BinaryCompare(_) => crate::diff::persistence::ComparisonModeV1::Binary,
+            DiffView::FolderCompare(_) => crate::diff::persistence::ComparisonModeV1::Folder,
+            DiffView::Start => return Err("comparison did not open".into()),
+        };
+        crate::diff::persistence::record_recent_mode(&mut self.persistence, left, right, mode);
+        self.reconcile_runtime_resources();
+        Ok(())
+    }
+
+    pub fn snapshot_session(
+        &self,
+        name: String,
+    ) -> Result<crate::diff::persistence::SavedDiffSessionV1, String> {
+        use crate::diff::persistence::{
+            ComparisonModeV1, ContentComparisonModeV1, SavedDiffSessionV1,
+        };
+        let (mode, includes, excludes, display, content) = match &self.workspace.current_view.view {
+            DiffView::TextCompare(_) => (
+                ComparisonModeV1::Text,
+                vec![],
+                vec![],
+                "all".into(),
+                ContentComparisonModeV1::OnDemand,
+            ),
+            DiffView::BinaryCompare(_) => (
+                ComparisonModeV1::Binary,
+                vec![],
+                vec![],
+                "all".into(),
+                ContentComparisonModeV1::OnDemand,
+            ),
+            DiffView::FolderCompare(folder) => (
+                ComparisonModeV1::Folder,
+                folder.applied_scan_rules.includes.clone(),
+                folder.applied_scan_rules.excludes.clone(),
+                folder_filter_name(&folder.display_filter).into(),
+                match folder.content_comparison {
+                    crate::diff::model::ContentComparisonMode::Metadata => {
+                        ContentComparisonModeV1::Metadata
+                    }
+                    crate::diff::model::ContentComparisonMode::OnDemand => {
+                        ContentComparisonModeV1::OnDemand
+                    }
+                    crate::diff::model::ContentComparisonMode::Always => {
+                        ContentComparisonModeV1::Always
+                    }
+                },
+            ),
+            DiffView::Start => return Err("open a comparison before saving a session".into()),
+        };
+        let text_model = self.text_views.get(&self.workspace.current_view.id);
+        let binary_model = self.binary_views.get(&self.workspace.current_view.id);
+        let pane_split = text_model
+            .map(|m| m.splitter)
+            .or_else(|| binary_model.map(|m| m.splitter))
+            .unwrap_or(self.workspace.settings.pane_split);
+        let wrap_text = text_model.map_or(self.workspace.settings.wrap_text, |m| m.wrap);
+        let syntax_highlighting =
+            text_model.map_or(self.workspace.settings.syntax_highlighting, |m| m.syntax);
+        let replacement_rules = text_model
+            .map(|m| {
+                m.rules
+                    .replacements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| crate::diff::settings::ReplacementRuleV1 {
+                        id: format!("replacement-{i}"),
+                        pattern: r.pattern.clone(),
+                        replacement: r.replacement.clone(),
+                        enabled: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| self.persistence.replacement_rules.clone());
+        let unimportant_section_rules = text_model
+            .map(|m| {
+                m.rules
+                    .unimportant_sections
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(i, pattern)| crate::diff::settings::UnimportantSectionRuleV1 {
+                            id: format!("section-{i}"),
+                            pattern: pattern.clone(),
+                            enabled: true,
+                        },
+                    )
+                    .collect()
+            })
+            .unwrap_or_else(|| self.persistence.unimportant_section_rules.clone());
+        Ok(SavedDiffSessionV1 {
+            id: String::new(),
+            name,
+            left: self.workspace.left_visible.clone(),
+            right: self.workspace.right_visible.clone(),
+            pane_split,
+            wrap_text,
+            syntax_highlighting,
+            syntax_theme: self.workspace.settings.syntax_theme.clone(),
+            comparison_mode: mode,
+            ignore_whitespace: self.workspace.settings.ignore_whitespace,
+            case_sensitive: self.workspace.settings.case_sensitive,
+            replacement_rules,
+            unimportant_section_rules,
+            folder_includes: includes,
+            folder_excludes: excludes,
+            folder_display_filter: display,
+            content_comparison: content,
+        })
+    }
+
+    pub fn reopen_saved_session(
+        &mut self,
+        session: &crate::diff::persistence::SavedDiffSessionV1,
+    ) -> Result<(), String> {
+        let (left, right) =
+            crate::diff::persistence::reopen_session(session).map_err(|e| e.to_string())?;
+        self.workspace.settings.pane_split = session.pane_split;
+        self.workspace.settings.wrap_text = session.wrap_text;
+        self.workspace.settings.syntax_highlighting = session.syntax_highlighting;
+        self.workspace.settings.syntax_theme = session.syntax_theme.clone();
+        self.workspace.settings.ignore_whitespace = session.ignore_whitespace;
+        self.workspace.settings.case_sensitive = session.case_sensitive;
+        self.persistence.replacement_rules = session.replacement_rules.clone();
+        self.persistence.unimportant_section_rules = session.unimportant_section_rules.clone();
+        self.open_and_record(left, right)?;
+        if let DiffView::FolderCompare(folder) = &mut self.workspace.current_view.view {
+            folder.draft_include_rules = session.folder_includes.join("\n");
+            folder.draft_exclude_rules = session.folder_excludes.join("\n");
+            folder.applied_scan_rules = crate::diff::folder_scan::ScanRules::validated(
+                session.folder_includes.clone(),
+                session.folder_excludes.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            folder.display_filter = parse_folder_filter(&session.folder_display_filter);
+            folder.content_comparison = match session.content_comparison {
+                crate::diff::persistence::ContentComparisonModeV1::Metadata => {
+                    crate::diff::model::ContentComparisonMode::Metadata
+                }
+                crate::diff::persistence::ContentComparisonModeV1::OnDemand => {
+                    crate::diff::model::ContentComparisonMode::OnDemand
+                }
+                crate::diff::persistence::ContentComparisonModeV1::Always => {
+                    crate::diff::model::ContentComparisonMode::Always
+                }
+            };
+        }
+        Ok(())
     }
 
     fn retained_view_ids(&self) -> HashSet<u64> {
@@ -104,13 +261,10 @@ impl DiffDialogState {
                     .clicked()
                     || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
                 {
-                    let result = self.workspace.open_paths(
+                    let _ = self.open_and_record(
                         self.workspace.left_visible.clone(),
                         self.workspace.right_visible.clone(),
                     );
-                    if result.is_ok() {
-                        self.reconcile_runtime_resources();
-                    }
                 }
             });
             if let Some(error) = &self.workspace.error {
@@ -126,14 +280,30 @@ impl DiffDialogState {
             let settings = self.workspace.settings.clone();
             let mut action = folder_view::FolderViewAction::Noop;
             let mut render_error = None;
+            let mut recent_to_open = None;
             match &mut self.workspace.current_view.view {
                 DiffView::Start => {
                     ui.label("Choose two files or two folders to compare.");
+                    if !self.persistence.recent_comparisons.is_empty() {
+                        ui.heading("Recent comparisons");
+                        let recents = self.persistence.recent_comparisons.clone();
+                        for recent in recents {
+                            let label = format!("{} ↔ {} ({:?})", recent.left, recent.right, recent.mode);
+                            if ui.button(label).clicked() {
+                                recent_to_open = Some(recent);
+                            }
+                        }
+                    }
                 }
                 DiffView::TextCompare(s) => {
                     if !self.text_views.contains_key(&view_id) {
                         match crate::diff::model::TextViewModel::load(s, &settings) {
-                            Ok(m) => {
+                            Ok(mut m) => {
+                                m.rules.ignore_all_whitespace = settings.ignore_whitespace;
+                                m.rules.case_sensitive = settings.case_sensitive;
+                                m.rules.replacements = self.persistence.replacement_rules.iter().filter(|r| r.enabled).map(|r| crate::diff::text_compare::RegexReplacement { pattern: r.pattern.clone(), replacement: r.replacement.clone() }).collect();
+                                m.rules.unimportant_sections = self.persistence.unimportant_section_rules.iter().filter(|r| r.enabled).map(|r| r.pattern.clone()).collect();
+                                m.schedule_compare();
                                 self.text_views.insert(view_id, m);
                             }
                             Err(e) => {
@@ -243,6 +413,12 @@ impl DiffDialogState {
             }
             if let Some(error) = render_error {
                 self.workspace.error = Some(error);
+            }
+            if let Some(recent) = recent_to_open {
+                match crate::diff::persistence::reopen_recent(&recent) {
+                    Ok((left, right)) => { let _ = self.open_and_record(left, right); }
+                    Err(error) => self.workspace.error = Some(error.to_string()),
+                }
             }
             self.apply_folder_action(action);
         });
@@ -520,6 +696,34 @@ impl DiffDialogState {
             self.reconcile_runtime_resources();
         }
         moved
+    }
+}
+
+fn folder_filter_name(value: &crate::diff::model::FolderDisplayFilter) -> &'static str {
+    use crate::diff::model::FolderDisplayFilter::*;
+    match value {
+        All => "all",
+        Differences => "differences",
+        Identical => "identical",
+        LeftOnly => "left_only",
+        RightOnly => "right_only",
+        LeftNewer => "left_newer",
+        RightNewer => "right_newer",
+        Errors => "errors",
+    }
+}
+
+fn parse_folder_filter(value: &str) -> crate::diff::model::FolderDisplayFilter {
+    use crate::diff::model::FolderDisplayFilter::*;
+    match value {
+        "differences" => Differences,
+        "identical" => Identical,
+        "left_only" => LeftOnly,
+        "right_only" => RightOnly,
+        "left_newer" => LeftNewer,
+        "right_newer" => RightNewer,
+        "errors" => Errors,
+        _ => All,
     }
 }
 

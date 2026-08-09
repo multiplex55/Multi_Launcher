@@ -19,6 +19,7 @@ pub enum ComparisonModeV1 {
     #[default]
     Text,
     Folder,
+    Binary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -62,7 +63,7 @@ pub struct SavedDiffSessionV1 {
     pub folder_includes: Vec<String>,
     #[serde(default)]
     pub folder_excludes: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_folder_display_filter")]
     pub folder_display_filter: String,
     #[serde(default)]
     pub content_comparison: ContentComparisonModeV1,
@@ -92,6 +93,9 @@ impl Default for SavedDiffSessionV1 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_folder_display_filter() -> String {
+    "all".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -325,15 +329,27 @@ pub fn update_atomic(
 }
 /// Validate sources at reopen time. Contents/results are absent from the
 /// persisted type and therefore necessarily recomputed by the workspace.
+pub fn reopen_recent(recent: &DisplayPathPairV1) -> Result<(String, String), SessionError> {
+    validate_path_pair(&recent.left, &recent.right, recent.mode)
+}
+
 pub fn reopen_session(session: &SavedDiffSessionV1) -> Result<(String, String), SessionError> {
-    let l = normalize_path(&session.left);
-    let r = normalize_path(&session.right);
+    validate_path_pair(&session.left, &session.right, session.comparison_mode)
+}
+
+fn validate_path_pair(
+    left: &str,
+    right: &str,
+    mode: ComparisonModeV1,
+) -> Result<(String, String), SessionError> {
+    let l = normalize_path(left);
+    let r = normalize_path(right);
     let lm = std::fs::metadata(&l)
         .map_err(|e| SessionError::InvalidPath(format!("{}: {e}", l.display())))?;
     let rm = std::fs::metadata(&r)
         .map_err(|e| SessionError::InvalidPath(format!("{}: {e}", r.display())))?;
-    let valid = match session.comparison_mode {
-        ComparisonModeV1::Text => lm.is_file() && rm.is_file(),
+    let valid = match mode {
+        ComparisonModeV1::Text | ComparisonModeV1::Binary => lm.is_file() && rm.is_file(),
         ComparisonModeV1::Folder => lm.is_dir() && rm.is_dir(),
     };
     if !valid {
@@ -341,7 +357,7 @@ pub fn reopen_session(session: &SavedDiffSessionV1) -> Result<(String, String), 
             "saved comparison mode no longer matches its paths".into(),
         ));
     }
-    Ok((session.left.clone(), session.right.clone()))
+    Ok((left.to_owned(), right.to_owned()))
 }
 
 #[cfg(test)]
