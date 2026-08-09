@@ -14,4 +14,5 @@ pub mod settings;
 pub mod syntax;
 pub mod text_compare;
 pub mod text_file;
+pub mod watch;
 pub mod worker;
