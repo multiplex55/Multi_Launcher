@@ -22,6 +22,7 @@ pub struct DiffDialogState {
     // Binary renderers will keep their ephemeral resources in this view-id map.
     binary_views: HashMap<u64, ()>,
     close_prompt: bool,
+    pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
 
 impl DiffDialogState {
@@ -55,118 +56,125 @@ impl DiffDialogState {
             return;
         }
         let mut open = self.open;
-        egui::Window::new("Diff")
+        let screen = ctx.input(|i| i.screen_rect());
+        let (initial_size, initial_position) = crate::diff::model::validated_window_geometry(
+            &self.persistence,
+            [screen.left(), screen.top(), screen.right(), screen.bottom()],
+        );
+        let mut window = egui::Window::new("Diff")
             .id(egui::Id::new(("diff_window", self.workspace.workspace_id)))
             .open(&mut open)
-            .default_size([900.0, 650.0])
-            .show(ctx, |ui| {
-                if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
-                    self.workspace.back();
-                    self.reconcile_runtime_resources();
+            .resizable(true)
+            .default_size(initial_size)
+            .min_size([600.0, 350.0]);
+        if let Some(position) = initial_position {
+            window = window.default_pos(position);
+        }
+        let response = window.show(ctx, |ui| {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
+                self.workspace.back();
+                self.reconcile_runtime_resources();
+            }
+            ui.horizontal(|ui| {
+                let left = ui.add(
+                    egui::TextEdit::singleline(&mut self.workspace.left_visible)
+                        .id(egui::Id::new((self.workspace.workspace_id, "left")))
+                        .hint_text("Left file or folder"),
+                );
+                if self.workspace.focus_left_requested {
+                    left.request_focus();
+                    self.workspace.focus_left_requested = false;
                 }
-                ui.horizontal(|ui| {
-                    let left = ui.add(
-                        egui::TextEdit::singleline(&mut self.workspace.left_visible)
-                            .id(egui::Id::new((self.workspace.workspace_id, "left")))
-                            .hint_text("Left file or folder"),
+                picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Left);
+                ui.label("↔");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.workspace.right_visible)
+                        .id(egui::Id::new((self.workspace.workspace_id, "right")))
+                        .hint_text("Right file or folder"),
+                );
+                picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Right);
+                if ui
+                    .button("Compare")
+                    .on_hover_text("Compare/change paths (Ctrl+O)")
+                    .clicked()
+                    || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
+                {
+                    let result = self.workspace.open_paths(
+                        self.workspace.left_visible.clone(),
+                        self.workspace.right_visible.clone(),
                     );
-                    if self.workspace.focus_left_requested {
-                        left.request_focus();
-                        self.workspace.focus_left_requested = false;
+                    if result.is_ok() {
+                        self.reconcile_runtime_resources();
                     }
-                    if ui.button("Browse…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            self.workspace.left_visible = p.display().to_string();
-                        }
-                    }
-                    ui.label("↔");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.workspace.right_visible)
-                            .id(egui::Id::new((self.workspace.workspace_id, "right")))
-                            .hint_text("Right file or folder"),
-                    );
-                    if ui.button("Browse…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
-                            self.workspace.right_visible = p.display().to_string();
-                        }
-                    }
-                    if ui
-                        .button("Compare")
-                        .on_hover_text("Compare/change paths (Ctrl+O)")
-                        .clicked()
-                        || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
-                    {
-                        let result = self.workspace.open_paths(
-                            self.workspace.left_visible.clone(),
-                            self.workspace.right_visible.clone(),
-                        );
-                        if result.is_ok() {
-                            self.reconcile_runtime_resources();
-                        }
-                    }
-                });
-                if let Some(error) = &self.workspace.error {
-                    ui.colored_label(egui::Color32::RED, error);
                 }
-                if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
-                    self.workspace.back();
-                    self.reconcile_runtime_resources();
+            });
+            if let Some(error) = &self.workspace.error {
+                ui.colored_label(egui::Color32::RED, error);
+            }
+            if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
+                self.workspace.back();
+                self.reconcile_runtime_resources();
+            }
+            ui.separator();
+            // Copy only lightweight context before borrowing the retained view.
+            let workspace_id = self.workspace.workspace_id;
+            let view_id = self.workspace.current_view.id;
+            let settings = self.workspace.settings.clone();
+            let mut action = folder_view::FolderViewAction::Noop;
+            let mut render_error = None;
+            match &mut self.workspace.current_view.view {
+                DiffView::Start => {
+                    ui.label("Choose two files or two folders to compare.");
                 }
-                ui.separator();
-                // Copy only lightweight context before borrowing the retained view.
-                let workspace_id = self.workspace.workspace_id;
-                let view_id = self.workspace.current_view.id;
-                let settings = self.workspace.settings.clone();
-                let mut action = folder_view::FolderViewAction::Noop;
-                let mut render_error = None;
-                match &mut self.workspace.current_view.view {
-                    DiffView::Start => {
-                        ui.label("Choose two files or two folders to compare.");
-                    }
-                    DiffView::TextCompare(s) => {
-                        if matches!(s.kind, crate::diff::model::FileComparisonKind::Binary) {
-                            ui.heading(match s.kind {
-                                crate::diff::model::FileComparisonKind::Text => "Text comparison",
-                                crate::diff::model::FileComparisonKind::Binary => "Binary files",
-                            });
-                            ui.label(format!(
-                                "Left: {}",
-                                s.left
-                                    .as_ref()
-                                    .map_or("(missing)".into(), |p| p.display().to_string())
-                            ));
-                        } else {
-                            if !self.text_views.contains_key(&view_id) {
-                                match crate::diff::model::TextViewModel::load(&s, &settings) {
-                                    Ok(m) => {
-                                        self.text_views.insert(view_id, m);
-                                    }
-                                    Err(e) => {
-                                        render_error = Some(e);
-                                    }
-                                }
-                            }
-                            if let Some(m) = self.text_views.get_mut(&view_id) {
-                                text_view::show(ui, workspace_id, view_id, m);
-                            }
-                        }
+                DiffView::TextCompare(s) => {
+                    if matches!(s.kind, crate::diff::model::FileComparisonKind::Binary) {
+                        ui.heading(match s.kind {
+                            crate::diff::model::FileComparisonKind::Text => "Text comparison",
+                            crate::diff::model::FileComparisonKind::Binary => "Binary files",
+                        });
                         ui.label(format!(
-                            "Right: {}",
-                            s.right
+                            "Left: {}",
+                            s.left
                                 .as_ref()
                                 .map_or("(missing)".into(), |p| p.display().to_string())
                         ));
+                    } else {
+                        if !self.text_views.contains_key(&view_id) {
+                            match crate::diff::model::TextViewModel::load(&s, &settings) {
+                                Ok(m) => {
+                                    self.text_views.insert(view_id, m);
+                                }
+                                Err(e) => {
+                                    render_error = Some(e);
+                                }
+                            }
+                        }
+                        if let Some(m) = self.text_views.get_mut(&view_id) {
+                            text_view::show(ui, workspace_id, view_id, m);
+                        }
                     }
-                    DiffView::FolderCompare(s) => {
-                        self.folder_runtimes.entry(view_id).or_default();
-                        action = render_retained_folder(s, |state| folder_view::show(ui, state));
-                    }
+                    ui.label(format!(
+                        "Right: {}",
+                        s.right
+                            .as_ref()
+                            .map_or("(missing)".into(), |p| p.display().to_string())
+                    ));
                 }
-                if let Some(error) = render_error {
-                    self.workspace.error = Some(error);
+                DiffView::FolderCompare(s) => {
+                    self.folder_runtimes.entry(view_id).or_default();
+                    action = render_retained_folder(s, |state| folder_view::show(ui, state));
                 }
-                self.apply_folder_action(action);
-            });
+            }
+            if let Some(error) = render_error {
+                self.workspace.error = Some(error);
+            }
+            self.apply_folder_action(action);
+        });
+        if let Some(response) = response {
+            let rect = response.response.rect;
+            self.persistence.window_size = Some([rect.width(), rect.height()]);
+            self.persistence.window_position = Some([rect.left(), rect.top()]);
+        }
         if !open && self.text_views.values().any(|m| m.has_dirty()) {
             self.close_prompt = true;
             open = true;
@@ -235,6 +243,23 @@ impl DiffDialogState {
         }
         self.reconcile_runtime_resources();
     }
+}
+
+fn picker_menu(
+    ui: &mut egui::Ui,
+    workspace: &mut DiffWorkspace,
+    side: crate::diff::model::DiffSide,
+) {
+    ui.menu_button("Browse ▾", |ui| {
+        if ui.button("Select File…").clicked() {
+            workspace.assign_selected_path(side, rfd::FileDialog::new().pick_file());
+            ui.close_menu();
+        }
+        if ui.button("Select Folder…").clicked() {
+            workspace.assign_selected_path(side, rfd::FileDialog::new().pick_folder());
+            ui.close_menu();
+        }
+    });
 }
 
 #[cfg(test)]

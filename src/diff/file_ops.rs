@@ -579,7 +579,7 @@ pub fn execute_copy(
                 });
                 affected.push(d.relative.clone())
             }
-            Err(e) if d.target.is_dir() => {}
+            Err(_e) if d.target.is_dir() => {}
             Err(e) => items.push(ItemResult {
                 relative: d.relative.clone(),
                 outcome: ItemOutcome::Failed(e),

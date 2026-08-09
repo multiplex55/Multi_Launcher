@@ -193,6 +193,15 @@ impl DiffWorkspace {
         self.status = Some("Comparison ready".into());
         Ok(())
     }
+    /// Assigns a picker result without starting or disturbing a comparison.
+    pub fn assign_selected_path(&mut self, side: DiffSide, selected: Option<PathBuf>) {
+        let Some(path) = selected else { return };
+        let display = path.as_os_str().to_string_lossy().into_owned();
+        match side {
+            DiffSide::Left => self.left_visible = display,
+            DiffSide::Right => self.right_visible = display,
+        }
+    }
     /// Opens a folder child; either side may be absent without weakening root validation.
     pub fn push_file_compare(
         &mut self,
@@ -228,6 +237,26 @@ impl DiffWorkspace {
             false
         }
     }
+}
+
+/// Returns safe initial window geometry. A position is accepted when at least
+/// part of the window intersects the available screen.
+pub fn validated_window_geometry(
+    persistence: &crate::diff::persistence::DiffPersistenceV1,
+    screen: [f32; 4],
+) -> ([f32; 2], Option<[f32; 2]>) {
+    let size = persistence
+        .window_size
+        .filter(|s| s.iter().all(|v| v.is_finite()) && s[0] >= 600.0 && s[1] >= 350.0)
+        .unwrap_or([900.0, 650.0]);
+    let position = persistence.window_position.filter(|p| {
+        p.iter().all(|v| v.is_finite())
+            && p[0] + size[0] > screen[0]
+            && p[1] + size[1] > screen[1]
+            && p[0] < screen[2]
+            && p[1] < screen[3]
+    });
+    (size, position)
 }
 fn metadata(path: &Path, side: &str) -> Result<fs::Metadata, String> {
     fs::metadata(path).map_err(|e| format!("{side} path '{}': {e}", path.display()))
@@ -350,6 +379,8 @@ pub struct TextViewModel {
     pub rules: TextComparisonRules,
     pub active_side: DiffSide,
     pub current_row: Option<usize>,
+    /// A model-row navigation target waiting to be consumed by the view.
+    pub pending_scroll_row: Option<usize>,
     pub wrap: bool,
     pub syntax: bool,
     pub large_file_tier: crate::diff::worker::LargeFileTier,
@@ -403,6 +434,7 @@ impl TextViewModel {
             rules: TextComparisonRules::default(),
             active_side: DiffSide::Left,
             current_row: None,
+            pending_scroll_row: None,
             wrap,
             syntax: settings.syntax_highlighting && large_file_tier.syntax_enabled(),
             large_file_tier,
@@ -475,7 +507,28 @@ impl TextViewModel {
     }
     pub fn navigate(&mut self, direction: NavigationDirection) {
         if let Some(c) = &self.comparison {
-            self.current_row = c.navigate(self.current_row, direction, false, true);
+            let row = c.navigate(self.current_row, direction, false, true);
+            self.current_row = row;
+            self.pending_scroll_row = row;
+        }
+    }
+    pub fn set_current_row(&mut self, row: Option<usize>) {
+        self.current_row = row;
+        self.pending_scroll_row = row;
+    }
+    pub fn set_ignore_all_whitespace(&mut self, value: bool) {
+        if self.rules.ignore_all_whitespace != value {
+            self.rules.ignore_all_whitespace = value;
+            self.rules.revision = self.rules.revision.wrapping_add(1);
+            self.schedule_compare();
+        }
+    }
+    pub fn set_rules(&mut self, mut rules: TextComparisonRules) {
+        rules.revision = self.rules.revision;
+        if rules != self.rules {
+            rules.revision = self.rules.revision.wrapping_add(1);
+            self.rules = rules;
+            self.schedule_compare();
         }
     }
     pub fn undo(&mut self) -> bool {
@@ -603,6 +656,81 @@ mod tests {
                 .is_err()
         );
         assert_eq!(w.left_visible, f.display().to_string());
+    }
+    #[test]
+    fn picker_assignment_is_side_specific_exact_and_cancellation_is_noop() {
+        let mut w = DiffWorkspace::default();
+        w.left_visible = "left old".into();
+        w.right_visible = "right old".into();
+        w.left_normalized = Some("normalized-left".into());
+        let view_id = w.current_view.id;
+        w.assign_selected_path(DiffSide::Left, Some(PathBuf::from("folder/a file.txt")));
+        assert_eq!(
+            w.left_visible,
+            PathBuf::from("folder/a file.txt").to_string_lossy()
+        );
+        assert_eq!(w.right_visible, "right old");
+        w.assign_selected_path(DiffSide::Right, Some(PathBuf::from(r"\\server\share\a b")));
+        assert_eq!(w.right_visible, r"\\server\share\a b");
+        let snapshot = (
+            w.left_visible.clone(),
+            w.right_visible.clone(),
+            w.left_normalized.clone(),
+            w.current_view.id,
+        );
+        w.assign_selected_path(DiffSide::Left, None);
+        assert_eq!(
+            snapshot,
+            (w.left_visible, w.right_visible, w.left_normalized, view_id)
+        );
+    }
+    #[test]
+    fn validates_file_file_folder_folder_and_rejects_mixed() {
+        let d = tempfile::tempdir().unwrap();
+        let dirs = [d.path().join("a"), d.path().join("b")];
+        fs::create_dir_all(&dirs[0]).unwrap();
+        fs::create_dir_all(&dirs[1]).unwrap();
+        let files = [d.path().join("a.txt"), d.path().join("b.txt")];
+        fs::write(&files[0], "a").unwrap();
+        fs::write(&files[1], "b").unwrap();
+        let mut w = DiffWorkspace::default();
+        assert!(
+            w.open_paths(
+                files[0].to_string_lossy().into(),
+                files[1].to_string_lossy().into()
+            )
+            .is_ok()
+        );
+        assert!(
+            w.open_paths(
+                dirs[0].to_string_lossy().into(),
+                dirs[1].to_string_lossy().into()
+            )
+            .is_ok()
+        );
+        assert!(
+            w.open_paths(
+                files[0].to_string_lossy().into(),
+                dirs[0].to_string_lossy().into()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn persisted_geometry_round_trips_and_corruption_falls_back() {
+        let mut p = crate::diff::persistence::DiffPersistenceV1::default();
+        p.window_size = Some([1000.0, 700.0]);
+        p.window_position = Some([20.0, 30.0]);
+        assert_eq!(
+            validated_window_geometry(&p, [0.0, 0.0, 1920.0, 1080.0]),
+            ([1000.0, 700.0], Some([20.0, 30.0]))
+        );
+        p.window_size = Some([f32::NAN, 1.0]);
+        p.window_position = Some([5000.0, 5000.0]);
+        assert_eq!(
+            validated_window_geometry(&p, [0.0, 0.0, 1920.0, 1080.0]),
+            ([900.0, 650.0], None)
+        );
     }
     #[test]
     fn push_back_restores_same_folder_state() {
