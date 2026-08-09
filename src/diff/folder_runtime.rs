@@ -117,6 +117,12 @@ impl FolderRuntime {
             || !self.in_flight.is_empty()
     }
 
+    /// Mutation previews and plans deliberately live in dialog state; this
+    /// runtime owns only the currently executing operation handle.
+    pub fn mutation_active(&self) -> bool {
+        self.active_operation.is_some()
+    }
+
     /// Rebuild the deduplicated queue in user-visible priority order.
     pub fn prioritize(
         &mut self,

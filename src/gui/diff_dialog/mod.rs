@@ -4,6 +4,7 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
 mod folder_view;
+mod operation_preview;
 mod text_view;
 
 fn render_retained_folder(
@@ -19,6 +20,7 @@ pub struct DiffDialogState {
     pub workspace: DiffWorkspace,
     text_views: HashMap<u64, crate::diff::model::TextViewModel>,
     folder_runtimes: HashMap<u64, crate::diff::folder_runtime::FolderRuntime>,
+    operation_preview: Option<operation_preview::OperationPreview>,
     // Binary renderers will keep their ephemeral resources in this view-id map.
     binary_views: HashMap<u64, ()>,
     close_prompt: bool,
@@ -184,6 +186,7 @@ impl DiffDialogState {
             }
             self.apply_folder_action(action);
         });
+        self.show_operation_preview(ctx);
         if let Some(response) = response {
             let rect = response.response.rect;
             self.persistence.window_size = Some([rect.width(), rect.height()]);
@@ -267,8 +270,174 @@ impl DiffDialogState {
                     }
                 }
             }
+            folder_view::FolderViewAction::RequestMutation(kind) => self.plan_mutation(kind),
         }
         self.reconcile_runtime_resources();
+    }
+
+    fn plan_mutation(&mut self, kind: folder_view::MutationKind) {
+        use crate::diff::file_ops::{CopyDirection, DeleteMode};
+        let view_id = self.workspace.current_view.id;
+        let Some(runtime) = self.folder_runtimes.get(&view_id) else {
+            return;
+        };
+        if runtime.mutation_active() {
+            return;
+        }
+        let DiffView::FolderCompare(state) = &self.workspace.current_view.view else {
+            return;
+        };
+        // Capture once. Filtering also ensures a command is never routed for a
+        // selection which exists only on the other side.
+        let mut captured = folder_view::selection_snapshot(state);
+        let source_is_left = matches!(
+            kind,
+            folder_view::MutationKind::CopyRight | folder_view::MutationKind::DeleteLeft
+        );
+        captured.retain(|path| {
+            state.model.entries.values().any(|entry| {
+                &entry.relative_path == path
+                    && if source_is_left {
+                        entry.left.is_some()
+                    } else {
+                        entry.right.is_some()
+                    }
+            })
+        });
+        if captured.is_empty() {
+            return;
+        }
+        let generation = runtime.generation;
+        let planned = match kind {
+            folder_view::MutationKind::CopyRight => crate::diff::file_ops::plan_copy(
+                &state.left_root,
+                &state.right_root,
+                CopyDirection::LeftToRight,
+                captured,
+                generation,
+            )
+            .map(operation_preview::PreviewPlan::Copy),
+            folder_view::MutationKind::CopyLeft => crate::diff::file_ops::plan_copy(
+                &state.right_root,
+                &state.left_root,
+                CopyDirection::RightToLeft,
+                captured,
+                generation,
+            )
+            .map(operation_preview::PreviewPlan::Copy),
+            folder_view::MutationKind::DeleteLeft => crate::diff::file_ops::plan_delete(
+                &state.left_root,
+                "Left",
+                captured,
+                generation,
+                DeleteMode::Recycle,
+            )
+            .map(operation_preview::PreviewPlan::Delete),
+            folder_view::MutationKind::DeleteRight => crate::diff::file_ops::plan_delete(
+                &state.right_root,
+                "Right",
+                captured,
+                generation,
+                DeleteMode::Recycle,
+            )
+            .map(operation_preview::PreviewPlan::Delete),
+        };
+        let dirty = self.dirty_paths();
+        match planned {
+            Ok(plan) => {
+                let conflicts: Vec<_> = match &plan {
+                    operation_preview::PreviewPlan::Copy(copy) => copy
+                        .copies
+                        .iter()
+                        .filter(|item| {
+                            crate::diff::file_ops::mutation_contains_dirty_path(
+                                &item.target,
+                                &dirty,
+                            )
+                        })
+                        .map(|item| item.relative.display().to_string())
+                        .collect(),
+                    operation_preview::PreviewPlan::Delete(delete) => delete
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            crate::diff::file_ops::mutation_contains_dirty_path(
+                                &item.target,
+                                &dirty,
+                            )
+                        })
+                        .map(|item| item.relative.display().to_string())
+                        .collect(),
+                };
+                self.operation_preview = Some(operation_preview::OperationPreview {
+                    view_id,
+                    plan,
+                    planning_error: (!conflicts.is_empty()).then(|| {
+                        format!(
+                            "Blocked: unsaved Diff changes would be overwritten or deleted at {}",
+                            conflicts.join(", ")
+                        )
+                    }),
+                })
+            }
+            Err(error) => {
+                self.workspace.error = Some(format!("Cannot plan folder operation: {error}"))
+            }
+        }
+    }
+
+    fn dirty_paths(&self) -> HashSet<std::path::PathBuf> {
+        let mut paths = HashSet::new();
+        for model in self.text_views.values() {
+            if model.left.is_dirty() {
+                if let Some(path) = &model.left_path {
+                    paths.insert(path.clone());
+                }
+            }
+            if model.right.is_dirty() {
+                if let Some(path) = &model.right_path {
+                    paths.insert(path.clone());
+                }
+            }
+        }
+        paths
+    }
+
+    fn show_operation_preview(&mut self, ctx: &egui::Context) {
+        let active = self
+            .operation_preview
+            .as_ref()
+            .and_then(|p| self.folder_runtimes.get(&p.view_id))
+            .is_some_and(|runtime| runtime.mutation_active());
+        let response = self.operation_preview.as_mut().map(|p| p.show(ctx, active));
+        match response {
+            Some(operation_preview::PreviewResponse::Cancel) => self.operation_preview = None,
+            Some(operation_preview::PreviewResponse::Execute) => {
+                let dirty = self.dirty_paths();
+                let preview = self.operation_preview.take().expect("preview exists");
+                let handle = match preview.plan {
+                    operation_preview::PreviewPlan::Copy(plan) => {
+                        Ok(crate::diff::file_ops::spawn_copy(plan, dirty))
+                    }
+                    operation_preview::PreviewPlan::Delete(plan) => {
+                        crate::diff::file_ops::spawn_recycle_delete(
+                            plan,
+                            dirty,
+                            std::sync::Arc::new(crate::diff::file_ops::SystemTrash),
+                        )
+                    }
+                };
+                match handle {
+                    Ok(handle) => {
+                        if let Some(runtime) = self.folder_runtimes.get_mut(&preview.view_id) {
+                            runtime.active_operation = Some(handle);
+                        }
+                    }
+                    Err(error) => self.workspace.error = Some(error),
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The single Back transition used by both keyboard and button activation.
@@ -300,6 +469,21 @@ fn poll_folder_runtime(
 ) {
     use crate::diff::folder_compare::PathKeyPolicy;
     use crate::diff::folder_scan::{RootIdentity, ScanEvent};
+
+    let completed = runtime.active_operation.as_ref().and_then(|operation| {
+        operation.receiver.try_iter().find_map(|event| match event {
+            crate::diff::file_ops::OperationEvent::Completed(report)
+                if report.generation == runtime.generation =>
+            {
+                Some(report)
+            }
+            _ => None,
+        })
+    });
+    if let Some(report) = completed {
+        runtime.active_operation = None;
+        refresh_after_mutation(state, runtime, report.affected_subtree);
+    }
 
     // A child editor can invalidate one row. Refresh it directly instead of
     // discarding the retained folder model or restarting both root scans.
@@ -469,6 +653,22 @@ fn poll_folder_runtime(
             }
         }
     }
+}
+
+/// Refresh boundary intentionally accepts the affected subtree even though the
+/// first implementation performs a generation-safe full comparison scan.
+fn refresh_after_mutation(
+    state: &mut crate::diff::model::FolderCompareState,
+    runtime: &mut crate::diff::folder_runtime::FolderRuntime,
+    _affected_subtree: Option<std::path::PathBuf>,
+) {
+    state.model = Default::default();
+    state.left_scan_complete = false;
+    state.right_scan_complete = false;
+    state.stale_paths.clear();
+    // selected_paths, primary_selection, and scroll_anchor deliberately
+    // survive until completed scans reconcile them against surviving rows.
+    runtime.prepare_rescan();
 }
 
 fn picker_menu(

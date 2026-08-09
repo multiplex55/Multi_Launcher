@@ -19,6 +19,15 @@ pub(super) enum FolderViewAction {
     },
     NavigateBack,
     RequestRescan,
+    RequestMutation(MutationKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MutationKind {
+    CopyRight,
+    CopyLeft,
+    DeleteLeft,
+    DeleteRight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +250,7 @@ pub(super) fn show(
         ui.label("Find path:");
         ui.text_edit_singleline(&mut state.path_filter);
     });
+    mutation_buttons(ui, state, runtime, &mut action);
     let scans_done = state.left_scan_complete && state.right_scan_complete;
     ui.label(format!(
         "Scanned entries: left {} ({}) / right {} ({})",
@@ -320,7 +330,14 @@ pub(super) fn show(
                 }
                 ui.end_row();
                 for row in &projected {
-                    render_row(ui, state, &paths, row, &mut action);
+                    render_row(
+                        ui,
+                        state,
+                        &paths,
+                        row,
+                        runtime.mutation_active(),
+                        &mut action,
+                    );
                 }
             });
     });
@@ -332,6 +349,7 @@ fn render_row(
     state: &mut FolderCompareState,
     paths: &[PathBuf],
     row: &FolderProjectionRow,
+    operation_active: bool,
     action: &mut FolderViewAction,
 ) {
     let entry = state
@@ -362,6 +380,7 @@ fn render_row(
             .map(|_| row.path.display().to_string())
             .unwrap_or_default();
         let response = ui.selectable_label(selected, name);
+        response.context_menu(|ui| mutation_menu(ui, state, operation_active, action));
         if response.clicked() {
             let modifiers = ui.input(|i| i.modifiers);
             apply_selection(
@@ -392,6 +411,7 @@ fn render_row(
         .map(|_| row.path.display().to_string())
         .unwrap_or_default();
     let right_response = ui.selectable_label(selected, right_name);
+    right_response.context_menu(|ui| mutation_menu(ui, state, operation_active, action));
     if right_response.clicked() {
         let modifiers = ui.input(|i| i.modifiers);
         apply_selection(
@@ -422,6 +442,71 @@ fn render_row(
         *action = activate_entry(state, &entry);
     }
     ui.end_row();
+}
+
+fn applicable(state: &FolderCompareState, left: bool) -> bool {
+    !state.selected_paths.is_empty()
+        && state.selected_paths.iter().any(|path| {
+            state.model.entries.values().any(|entry| {
+                &entry.relative_path == path
+                    && if left {
+                        entry.left.is_some()
+                    } else {
+                        entry.right.is_some()
+                    }
+            })
+        })
+}
+
+fn mutation_buttons(
+    ui: &mut egui::Ui,
+    state: &FolderCompareState,
+    runtime: &crate::diff::folder_runtime::FolderRuntime,
+    action: &mut FolderViewAction,
+) {
+    ui.horizontal(|ui| {
+        for (label, kind, left) in [
+            ("Copy →", MutationKind::CopyRight, true),
+            ("← Copy", MutationKind::CopyLeft, false),
+            ("Delete Left…", MutationKind::DeleteLeft, true),
+            ("Delete Right…", MutationKind::DeleteRight, false),
+        ] {
+            if ui
+                .add_enabled(
+                    !runtime.mutation_active() && applicable(state, left),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                *action = FolderViewAction::RequestMutation(kind);
+            }
+        }
+    });
+}
+
+fn mutation_menu(
+    ui: &mut egui::Ui,
+    state: &FolderCompareState,
+    operation_active: bool,
+    action: &mut FolderViewAction,
+) {
+    for (label, kind, left) in [
+        ("Copy →", MutationKind::CopyRight, true),
+        ("← Copy", MutationKind::CopyLeft, false),
+        ("Delete Left…", MutationKind::DeleteLeft, true),
+        ("Delete Right…", MutationKind::DeleteRight, false),
+    ] {
+        if ui
+            .add_enabled(
+                !operation_active && applicable(state, left),
+                egui::Button::new(label),
+            )
+            .clicked()
+        {
+            *action = FolderViewAction::RequestMutation(kind);
+            ui.close_menu();
+        }
+    }
 }
 
 fn is_directory(entry: &FolderEntry) -> bool {

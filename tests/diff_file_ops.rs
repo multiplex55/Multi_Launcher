@@ -116,3 +116,71 @@ fn recycle_failure_never_falls_back_to_permanent_delete() {
     );
     assert!(d.path().join("x").exists());
 }
+
+#[test]
+fn right_to_left_plan_retains_direction_and_executes_previewed_object() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    fs::write(right.path().join("from-right"), "content").unwrap();
+    let preview = plan_copy(
+        right.path(),
+        left.path(),
+        CopyDirection::RightToLeft,
+        [PathBuf::from("from-right")],
+        42,
+    )
+    .unwrap();
+    let executed = preview.clone();
+    assert_eq!(executed, preview);
+    let report = execute_copy(&executed, &HashSet::new(), &AtomicBool::new(false));
+    assert!(matches!(report.items[0].outcome, ItemOutcome::Copied));
+    assert_eq!(
+        fs::read_to_string(left.path().join("from-right")).unwrap(),
+        "content"
+    );
+}
+
+#[test]
+fn delete_normalizes_parent_child_and_dirty_descendant_blocks_parent() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("folder")).unwrap();
+    fs::write(root.path().join("folder/dirty"), "unsaved on screen").unwrap();
+    let plan = plan_delete(
+        root.path(),
+        "Left",
+        [PathBuf::from("folder"), PathBuf::from("folder/dirty")],
+        8,
+        DeleteMode::Recycle,
+    )
+    .unwrap();
+    assert_eq!(plan.items.len(), 1);
+    let backend = FakeTrash::default();
+    let dirty = HashSet::from([root.path().join("folder/dirty")]);
+    let report = execute_delete(&plan, &dirty, &backend, &AtomicBool::new(false));
+    assert!(
+        matches!(&report.items[0].outcome, ItemOutcome::Failed(message)
+        if message.contains("unsaved Diff changes"))
+    );
+    assert_eq!(backend.recycle.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn gui_spawn_boundary_rejects_permanent_deletion() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("x"), "x").unwrap();
+    let plan = plan_delete(
+        root.path(),
+        "Left",
+        [PathBuf::from("x")],
+        1,
+        DeleteMode::Permanent,
+    )
+    .unwrap();
+    let result = spawn_recycle_delete(
+        plan,
+        HashSet::new(),
+        std::sync::Arc::new(FakeTrash::default()),
+    );
+    assert!(result.is_err());
+    assert!(root.path().join("x").exists());
+}
