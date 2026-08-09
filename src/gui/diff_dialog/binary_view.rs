@@ -37,18 +37,22 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut BinaryView
             (model.visible_byte_offset / model.bytes_per_row as u64) as f32 * row_height,
         );
     }
-    scroll.show_rows(ui, row_height, rows, |ui, range| {
-        for row_index in range {
-            let offset = row_index as u64 * model.bytes_per_row as u64;
-            if let Ok(row) = model.row(offset) {
-                ui.horizontal(|ui| {
-                    side(ui, row.offset, &row.left);
-                    ui.separator();
-                    side(ui, row.offset, &row.right);
-                });
-            }
-        }
-    });
+    egui::ScrollArea::horizontal()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            scroll.show_rows(ui, row_height, rows, |ui, range| {
+                for row_index in range {
+                    let offset = row_index as u64 * model.bytes_per_row as u64;
+                    if let Ok(row) = model.row(offset) {
+                        ui.horizontal(|ui| {
+                            side(ui, row.offset, &row.left);
+                            ui.separator();
+                            side(ui, row.offset, &row.right);
+                        });
+                    }
+                }
+            });
+        });
 }
 
 fn side(ui: &mut egui::Ui, offset: u64, cells: &[BinaryCell]) {

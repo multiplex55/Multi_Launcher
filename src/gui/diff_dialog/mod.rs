@@ -230,7 +230,10 @@ impl DiffDialogState {
             .open(&mut open)
             .resizable(true)
             .default_size(initial_size)
-            .min_size([600.0, 350.0]);
+            .min_size([
+                400.0_f32.min(screen.width()),
+                250.0_f32.min(screen.height()),
+            ]);
         if let Some(position) = initial_position {
             window = window.default_pos(position);
         }
@@ -238,7 +241,11 @@ impl DiffDialogState {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
                 self.navigate_back();
             }
-            ui.horizontal(|ui| {
+            let header_height = ui.spacing().interact_size.y;
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), header_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                 let left = ui.add(
                     egui::TextEdit::singleline(&mut self.workspace.left_visible)
                         .id(egui::Id::new((self.workspace.workspace_id, "left")))
@@ -267,14 +274,25 @@ impl DiffDialogState {
                         self.workspace.right_visible.clone(),
                     );
                 }
-            });
+                },
+            );
             if let Some(error) = &self.workspace.error {
-                ui.colored_label(egui::Color32::RED, error);
+                egui::ScrollArea::vertical().max_height(48.0).show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.colored_label(egui::Color32::RED, error);
+                });
             }
             if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
                 self.navigate_back();
             }
             ui.separator();
+            let workspace_rect = ui.available_rect_before_wrap();
+            let mut workspace_ui = ui.child_ui(
+                workspace_rect,
+                egui::Layout::top_down(egui::Align::Min),
+            );
+            workspace_ui.set_clip_rect(workspace_rect);
+            let ui = &mut workspace_ui;
             // Copy only lightweight context before borrowing the retained view.
             let workspace_id = self.workspace.workspace_id;
             let view_id = self.workspace.current_view.id;
@@ -968,6 +986,35 @@ mod tests {
             view: DiffView::FolderCompare(FolderCompareState::default()),
         };
         dialog
+    }
+
+    #[test]
+    fn geometry_is_independent_of_view_metadata_and_latest_update_wins() {
+        let mut dialog = folder_dialog(7);
+        dialog.persistence.window_size = Some([600.0, 350.0]);
+        dialog.persistence.window_position = Some([12.0, 24.0]);
+        let before = crate::diff::model::validated_window_geometry(
+            &dialog.persistence,
+            [0.0, 0.0, 1600.0, 1000.0],
+        );
+        dialog.workspace.current_view.view = DiffView::Start;
+        assert_eq!(
+            before,
+            crate::diff::model::validated_window_geometry(
+                &dialog.persistence,
+                [0.0, 0.0, 1600.0, 1000.0]
+            )
+        );
+        dialog.persistence.window_size = Some([777.0, 555.0]);
+        dialog.persistence.window_size = Some([888.0, 666.0]);
+        assert_eq!(
+            crate::diff::model::validated_window_geometry(
+                &dialog.persistence,
+                [0.0, 0.0, 1600.0, 1000.0]
+            )
+            .0,
+            [888.0, 666.0]
+        );
     }
 
     #[test]
