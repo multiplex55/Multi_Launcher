@@ -219,7 +219,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                     let y = rect.top() + pixel as f32;
                     ui.painter().line_segment(
                         [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                        egui::Stroke::new(1.0, color),
+                        egui::Stroke::new(1.0_f32, color),
                     );
                 }
             }
@@ -227,7 +227,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 let y = rect.top() + rect.height() * row as f32 / c.rows.len().max(1) as f32;
                 ui.painter().line_segment(
                     [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(2.0, Color32::WHITE),
+                    egui::Stroke::new(2.0_f32, Color32::WHITE),
                 );
             }
         }
@@ -369,7 +369,7 @@ fn pane(
                                 format.background =
                                     Color32::from_rgba_unmultiplied(255, 190, 40, 75);
                                 format.underline =
-                                    egui::Stroke::new(1.5, Color32::from_rgb(255, 210, 80));
+                                    egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 210, 80));
                             }
                             job.append(&fragment.text, 0.0, format);
                         }

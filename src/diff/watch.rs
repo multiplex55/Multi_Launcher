@@ -103,8 +103,14 @@ impl ViewWatchRuntime {
             },
         }
     }
-    /// Test/back-end injection boundary. Events are still checked at drain time.
+    /// Deterministic test/back-end injection boundary.
+    ///
+    /// The first injected event detaches the live OS watcher. Otherwise a real
+    /// notification for the same test write can arrive during `poll`, extend
+    /// the coalescing deadline, and make an injected-clock test nondeterministic.
+    /// Production code never calls this method.
     pub fn inject(&mut self, now: Instant, event: WatchEvent) {
+        self.watcher = None;
         self.coalescer.push(now, event);
     }
     pub fn poll(&mut self, now: Instant, dirty: [bool; 2]) -> Vec<ViewWatchAction> {
