@@ -3297,6 +3297,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trash",
+ "unicode-segmentation",
  "url",
  "urlencoding",
  "walkdir",
