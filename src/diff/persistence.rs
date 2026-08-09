@@ -377,4 +377,18 @@ mod tests {
         assert_eq!(s.recent_comparisons.len(), 1);
         assert_eq!(s.recent_comparisons[0].left, "./a");
     }
+    #[test]
+    fn runtime_resources_are_absent_from_serialization() {
+        let json = serde_json::to_string(&DiffPersistenceV1::default()).unwrap();
+        for runtime_field in [
+            "folder_runtimes",
+            "scan_handle",
+            "receiver",
+            "active_operation",
+            "comparison_queue",
+            "comparison_cache",
+        ] {
+            assert!(!json.contains(runtime_field), "serialized {runtime_field}");
+        }
+    }
 }

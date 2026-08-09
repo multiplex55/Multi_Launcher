@@ -6,6 +6,7 @@
 
 pub mod file_ops;
 pub mod folder_compare;
+pub mod folder_runtime;
 pub mod folder_scan;
 pub mod model;
 pub mod persistence;
