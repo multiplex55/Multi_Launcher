@@ -17,6 +17,24 @@ fn render_retained_folder(
     render(state)
 }
 
+struct WorkspaceRenderOutcome {
+    folder_action: folder_view::FolderViewAction,
+    error: Option<String>,
+    recent_to_open: Option<crate::diff::persistence::RecentComparisonV1>,
+}
+
+fn allocate_remaining_workspace<R>(
+    ui: &mut egui::Ui,
+    render: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let workspace_size = ui.available_size();
+    ui.allocate_ui_with_layout(
+        workspace_size,
+        egui::Layout::top_down(egui::Align::Min),
+        render,
+    )
+}
+
 #[derive(Default)]
 pub struct DiffDialogState {
     pub open: bool,
@@ -228,6 +246,7 @@ impl DiffDialogState {
         let mut window = egui::Window::new("Diff")
             .id(egui::Id::new(("diff_window", self.workspace.workspace_id)))
             .open(&mut open)
+            .collapsible(false)
             .resizable(true)
             .default_size(initial_size)
             .min_size([
@@ -246,200 +265,62 @@ impl DiffDialogState {
                 egui::vec2(ui.available_width(), header_height),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                let left = ui.add(
-                    egui::TextEdit::singleline(&mut self.workspace.left_visible)
-                        .id(egui::Id::new((self.workspace.workspace_id, "left")))
-                        .hint_text("Left file or folder"),
-                );
-                if self.workspace.focus_left_requested {
-                    left.request_focus();
-                    self.workspace.focus_left_requested = false;
-                }
-                picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Left);
-                ui.label("↔");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.workspace.right_visible)
-                        .id(egui::Id::new((self.workspace.workspace_id, "right")))
-                        .hint_text("Right file or folder"),
-                );
-                picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Right);
-                if ui
-                    .button("Compare")
-                    .on_hover_text("Compare/change paths (Ctrl+O)")
-                    .clicked()
-                    || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
-                {
-                    let _ = self.open_and_record(
-                        self.workspace.left_visible.clone(),
-                        self.workspace.right_visible.clone(),
+                    let left = ui.add(
+                        egui::TextEdit::singleline(&mut self.workspace.left_visible)
+                            .id(egui::Id::new((self.workspace.workspace_id, "left")))
+                            .hint_text("Left file or folder"),
                     );
-                }
+                    if self.workspace.focus_left_requested {
+                        left.request_focus();
+                        self.workspace.focus_left_requested = false;
+                    }
+                    picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Left);
+                    ui.label("↔");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.workspace.right_visible)
+                            .id(egui::Id::new((self.workspace.workspace_id, "right")))
+                            .hint_text("Right file or folder"),
+                    );
+                    picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Right);
+                    if ui
+                        .button("Compare")
+                        .on_hover_text("Compare/change paths (Ctrl+O)")
+                        .clicked()
+                        || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
+                    {
+                        let _ = self.open_and_record(
+                            self.workspace.left_visible.clone(),
+                            self.workspace.right_visible.clone(),
+                        );
+                    }
                 },
             );
             if let Some(error) = &self.workspace.error {
-                egui::ScrollArea::vertical().max_height(48.0).show(ui, |ui| {
-                    ui.set_max_width(ui.available_width());
-                    ui.colored_label(egui::Color32::RED, error);
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(48.0)
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
+                        ui.colored_label(egui::Color32::RED, error);
+                    });
             }
             if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
                 self.navigate_back();
             }
             ui.separator();
-            let workspace_rect = ui.available_rect_before_wrap();
-            let mut workspace_ui = ui.child_ui(
-                workspace_rect,
-                egui::Layout::top_down(egui::Align::Min),
-            );
-            workspace_ui.set_clip_rect(workspace_rect);
-            let ui = &mut workspace_ui;
-            // Copy only lightweight context before borrowing the retained view.
-            let workspace_id = self.workspace.workspace_id;
-            let view_id = self.workspace.current_view.id;
-            let settings = self.workspace.settings.clone();
-            let mut action = folder_view::FolderViewAction::Noop;
-            let mut render_error = None;
-            let mut recent_to_open = None;
-            match &mut self.workspace.current_view.view {
-                DiffView::Start => {
-                    ui.label("Choose two files or two folders to compare.");
-                    if !self.persistence.recent_comparisons.is_empty() {
-                        ui.heading("Recent comparisons");
-                        let recents = self.persistence.recent_comparisons.clone();
-                        for recent in recents {
-                            let label = format!("{} ↔ {} ({:?})", recent.left, recent.right, recent.mode);
-                            if ui.button(label).clicked() {
-                                recent_to_open = Some(recent);
-                            }
-                        }
-                    }
-                }
-                DiffView::TextCompare(s) => {
-                    if !self.text_views.contains_key(&view_id) {
-                        match crate::diff::model::TextViewModel::load(s, &settings) {
-                            Ok(mut m) => {
-                                m.rules.ignore_all_whitespace = settings.ignore_whitespace;
-                                m.rules.case_sensitive = settings.case_sensitive;
-                                m.rules.replacements = self.persistence.replacement_rules.iter().filter(|r| r.enabled).map(|r| crate::diff::text_compare::RegexReplacement { pattern: r.pattern.clone(), replacement: r.replacement.clone() }).collect();
-                                m.rules.unimportant_sections = self.persistence.unimportant_section_rules.iter().filter(|r| r.enabled).map(|r| r.pattern.clone()).collect();
-                                m.schedule_compare();
-                                self.text_views.insert(view_id, m);
-                            }
-                            Err(e) => {
-                                render_error = Some(e);
-                            }
-                        }
-                    }
-                    let tag = crate::diff::watch::WatchTag { workspace: workspace_id, view: view_id, generation: 1 };
-                    if self.watch_views.get(&view_id).is_none_or(|watch| watch.tag != tag) {
-                        self.watch_views.insert(view_id, crate::diff::watch::ViewWatchRuntime::text(tag, s.left.clone(), s.right.clone()));
-                    }
-                    if let Some(m) = self.text_views.get_mut(&view_id) {
-                        let dirty = [m.left.is_dirty(), m.right.is_dirty()];
-                        let actions = self.watch_views.get_mut(&view_id).map(|w| w.poll(std::time::Instant::now(), dirty)).unwrap_or_default();
-                        for action in actions {
-                            match action {
-                                crate::diff::watch::ViewWatchAction::TextReload { side, loaded } => { if let Err(e) = m.reload_external(side, &loaded) { render_error = Some(e); } }
-                                crate::diff::watch::ViewWatchAction::TextConflict { side, .. } => m.external_conflict[if side == crate::diff::model::DiffSide::Left { 0 } else { 1 }] = true,
-                                _ => {}
-                            }
-                        }
-                        for (index, side, label) in [(0, crate::diff::model::DiffSide::Left, "Left"), (1, crate::diff::model::DiffSide::Right, "Right")] {
-                            if m.external_conflict[index] {
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(egui::Color32::YELLOW, format!("{label} changed on disk; in-memory edits were preserved."));
-                                    if ui.button("Reload / discard edits").clicked() {
-                                        if let Some(loaded) = self.watch_views.get_mut(&view_id).and_then(|w| w.resolve_text_conflict(side, true)) { let _ = m.reload_external(side, &loaded); }
-                                    }
-                                    if ui.button("Keep current").clicked() {
-                                        if let Some(w) = self.watch_views.get_mut(&view_id) { w.resolve_text_conflict(side, false); }
-                                        m.external_conflict[index] = false;
-                                    }
-                                });
-                            }
-                        }
-                        text_view::show(ui, workspace_id, view_id, m);
-                    }
-                    ui.label(format!(
-                        "Right: {}",
-                        s.right
-                            .as_ref()
-                            .map_or("(missing)".into(), |p| p.display().to_string())
-                    ));
-                }
-                DiffView::BinaryCompare(s) => {
-                    if !self.binary_views.contains_key(&view_id) {
-                        match crate::diff::binary_compare::BinaryViewModel::load(
-                            s,
-                            settings.pane_split,
-                        ) {
-                            Ok(model) => {
-                                self.binary_views.insert(view_id, model);
-                            }
-                            Err(error) => {
-                                render_error = Some(error);
-                            }
-                        }
-                    }
-                    let tag = crate::diff::watch::WatchTag { workspace: workspace_id, view: view_id, generation: 1 };
-                    if self.watch_views.get(&view_id).is_none_or(|watch| watch.tag != tag) {
-                        self.watch_views.insert(view_id, crate::diff::watch::ViewWatchRuntime::binary(tag, s.left.clone(), s.right.clone()));
-                    }
-                    let refresh = self.watch_views.get_mut(&view_id).is_some_and(|watch| watch.poll(std::time::Instant::now(), [false; 2]).into_iter().any(|a| matches!(a, crate::diff::watch::ViewWatchAction::BinaryRefresh)));
-                    if refresh {
-                        if let Some(model) = self.binary_views.get_mut(&view_id) {
-                            if let Err(error) = model.refresh_external(s) {
-                                render_error = Some(format!("Binary view is stale: {error}"));
-                            }
-                        }
-                    }
-                    if let Some(model) = self.binary_views.get_mut(&view_id) {
-                        binary_view::show(ui, workspace_id, view_id, model);
-                    }
-                }
-                DiffView::FolderCompare(s) => {
-                    let runtime = self.folder_runtimes.entry(view_id).or_default();
-                    poll_folder_runtime(s, runtime);
-                    let tag = crate::diff::watch::WatchTag { workspace: workspace_id, view: view_id, generation: runtime.generation };
-                    if self.watch_views.get(&view_id).is_none_or(|watch| watch.tag != tag) {
-                        self.watch_views.insert(view_id, crate::diff::watch::ViewWatchRuntime::folder(tag, s.left_root.clone(), s.right_root.clone()));
-                    }
-                    let changes = self.watch_views.get_mut(&view_id).map(|w| w.poll(std::time::Instant::now(), [false; 2])).unwrap_or_default();
-                    for change in changes {
-                        if let crate::diff::watch::ViewWatchAction::FolderChanged { subtree, .. } = change {
-                            for entry in s.model.entries.values() {
-                                if entry.relative_path.starts_with(&subtree) { s.stale_paths.insert(entry.relative_path.clone()); }
-                            }
-                            // A bounded replacement scan discovers additions/removals; it
-                            // never performs synchronization or filesystem mutation.
-                            runtime.prepare_rescan();
-                        }
-                    }
-                    if runtime.is_active() {
-                        ctx.request_repaint();
-                    }
-                    if runtime.left_error.is_some() || runtime.right_error.is_some() {
-                        let left = runtime.left_error.as_deref().unwrap_or("none");
-                        let right = runtime.right_error.as_deref().unwrap_or("none");
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            format!("Scan failures — left: {left}; right: {right}"),
-                        );
-                    }
-                    action =
-                        render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
-                }
-            }
-            if let Some(error) = render_error {
+            let outcome =
+                allocate_remaining_workspace(ui, |ui| self.render_workspace(ctx, ui)).inner;
+            if let Some(error) = outcome.error {
                 self.workspace.error = Some(error);
             }
-            if let Some(recent) = recent_to_open {
+            if let Some(recent) = outcome.recent_to_open {
                 match crate::diff::persistence::reopen_recent(&recent) {
-                    Ok((left, right)) => { let _ = self.open_and_record(left, right); }
+                    Ok((left, right)) => {
+                        let _ = self.open_and_record(left, right);
+                    }
                     Err(error) => self.workspace.error = Some(error.to_string()),
                 }
             }
-            self.apply_folder_action(action);
+            self.apply_folder_action(outcome.folder_action);
         });
         self.show_operation_preview(ctx);
         if let Some(response) = response {
@@ -488,6 +369,258 @@ impl DiffDialogState {
         self.open = open;
         if !self.open {
             self.clear_runtime_resources();
+        }
+    }
+
+    /// Renders the retained active view and defers workspace mutations until its
+    /// mutable borrow has ended in the caller.
+    fn render_workspace(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+    ) -> WorkspaceRenderOutcome {
+        // Copy only lightweight context before borrowing the retained view.
+        let workspace_id = self.workspace.workspace_id;
+        let view_id = self.workspace.current_view.id;
+        let settings = self.workspace.settings.clone();
+        let mut action = folder_view::FolderViewAction::Noop;
+        let mut render_error = None;
+        let mut recent_to_open = None;
+        match &mut self.workspace.current_view.view {
+            DiffView::Start => {
+                ui.label("Choose two files or two folders to compare.");
+                if !self.persistence.recent_comparisons.is_empty() {
+                    ui.heading("Recent comparisons");
+                    let recents = self.persistence.recent_comparisons.clone();
+                    for recent in recents {
+                        let label =
+                            format!("{} ↔ {} ({:?})", recent.left, recent.right, recent.mode);
+                        if ui.button(label).clicked() {
+                            recent_to_open = Some(recent);
+                        }
+                    }
+                }
+            }
+            DiffView::TextCompare(s) => {
+                if !self.text_views.contains_key(&view_id) {
+                    match crate::diff::model::TextViewModel::load(s, &settings) {
+                        Ok(mut m) => {
+                            m.rules.ignore_all_whitespace = settings.ignore_whitespace;
+                            m.rules.case_sensitive = settings.case_sensitive;
+                            m.rules.replacements = self
+                                .persistence
+                                .replacement_rules
+                                .iter()
+                                .filter(|r| r.enabled)
+                                .map(|r| crate::diff::text_compare::RegexReplacement {
+                                    pattern: r.pattern.clone(),
+                                    replacement: r.replacement.clone(),
+                                })
+                                .collect();
+                            m.rules.unimportant_sections = self
+                                .persistence
+                                .unimportant_section_rules
+                                .iter()
+                                .filter(|r| r.enabled)
+                                .map(|r| r.pattern.clone())
+                                .collect();
+                            m.schedule_compare();
+                            self.text_views.insert(view_id, m);
+                        }
+                        Err(e) => {
+                            render_error = Some(e);
+                        }
+                    }
+                }
+                let tag = crate::diff::watch::WatchTag {
+                    workspace: workspace_id,
+                    view: view_id,
+                    generation: 1,
+                };
+                if self
+                    .watch_views
+                    .get(&view_id)
+                    .is_none_or(|watch| watch.tag != tag)
+                {
+                    self.watch_views.insert(
+                        view_id,
+                        crate::diff::watch::ViewWatchRuntime::text(
+                            tag,
+                            s.left.clone(),
+                            s.right.clone(),
+                        ),
+                    );
+                }
+                if let Some(m) = self.text_views.get_mut(&view_id) {
+                    let dirty = [m.left.is_dirty(), m.right.is_dirty()];
+                    let actions = self
+                        .watch_views
+                        .get_mut(&view_id)
+                        .map(|w| w.poll(std::time::Instant::now(), dirty))
+                        .unwrap_or_default();
+                    for action in actions {
+                        match action {
+                            crate::diff::watch::ViewWatchAction::TextReload { side, loaded } => {
+                                if let Err(e) = m.reload_external(side, &loaded) {
+                                    render_error = Some(e);
+                                }
+                            }
+                            crate::diff::watch::ViewWatchAction::TextConflict { side, .. } => {
+                                m.external_conflict[if side == crate::diff::model::DiffSide::Left {
+                                    0
+                                } else {
+                                    1
+                                }] = true
+                            }
+                            _ => {}
+                        }
+                    }
+                    for (index, side, label) in [
+                        (0, crate::diff::model::DiffSide::Left, "Left"),
+                        (1, crate::diff::model::DiffSide::Right, "Right"),
+                    ] {
+                        if m.external_conflict[index] {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!(
+                                        "{label} changed on disk; in-memory edits were preserved."
+                                    ),
+                                );
+                                if ui.button("Reload / discard edits").clicked() {
+                                    if let Some(loaded) = self
+                                        .watch_views
+                                        .get_mut(&view_id)
+                                        .and_then(|w| w.resolve_text_conflict(side, true))
+                                    {
+                                        let _ = m.reload_external(side, &loaded);
+                                    }
+                                }
+                                if ui.button("Keep current").clicked() {
+                                    if let Some(w) = self.watch_views.get_mut(&view_id) {
+                                        w.resolve_text_conflict(side, false);
+                                    }
+                                    m.external_conflict[index] = false;
+                                }
+                            });
+                        }
+                    }
+                    text_view::show(ui, workspace_id, view_id, m);
+                }
+                ui.label(format!(
+                    "Right: {}",
+                    s.right
+                        .as_ref()
+                        .map_or("(missing)".into(), |p| p.display().to_string())
+                ));
+            }
+            DiffView::BinaryCompare(s) => {
+                if !self.binary_views.contains_key(&view_id) {
+                    match crate::diff::binary_compare::BinaryViewModel::load(s, settings.pane_split)
+                    {
+                        Ok(model) => {
+                            self.binary_views.insert(view_id, model);
+                        }
+                        Err(error) => {
+                            render_error = Some(error);
+                        }
+                    }
+                }
+                let tag = crate::diff::watch::WatchTag {
+                    workspace: workspace_id,
+                    view: view_id,
+                    generation: 1,
+                };
+                if self
+                    .watch_views
+                    .get(&view_id)
+                    .is_none_or(|watch| watch.tag != tag)
+                {
+                    self.watch_views.insert(
+                        view_id,
+                        crate::diff::watch::ViewWatchRuntime::binary(
+                            tag,
+                            s.left.clone(),
+                            s.right.clone(),
+                        ),
+                    );
+                }
+                let refresh = self.watch_views.get_mut(&view_id).is_some_and(|watch| {
+                    watch
+                        .poll(std::time::Instant::now(), [false; 2])
+                        .into_iter()
+                        .any(|a| matches!(a, crate::diff::watch::ViewWatchAction::BinaryRefresh))
+                });
+                if refresh {
+                    if let Some(model) = self.binary_views.get_mut(&view_id) {
+                        if let Err(error) = model.refresh_external(s) {
+                            render_error = Some(format!("Binary view is stale: {error}"));
+                        }
+                    }
+                }
+                if let Some(model) = self.binary_views.get_mut(&view_id) {
+                    binary_view::show(ui, workspace_id, view_id, model);
+                }
+            }
+            DiffView::FolderCompare(s) => {
+                let runtime = self.folder_runtimes.entry(view_id).or_default();
+                poll_folder_runtime(s, runtime);
+                let tag = crate::diff::watch::WatchTag {
+                    workspace: workspace_id,
+                    view: view_id,
+                    generation: runtime.generation,
+                };
+                if self
+                    .watch_views
+                    .get(&view_id)
+                    .is_none_or(|watch| watch.tag != tag)
+                {
+                    self.watch_views.insert(
+                        view_id,
+                        crate::diff::watch::ViewWatchRuntime::folder(
+                            tag,
+                            s.left_root.clone(),
+                            s.right_root.clone(),
+                        ),
+                    );
+                }
+                let changes = self
+                    .watch_views
+                    .get_mut(&view_id)
+                    .map(|w| w.poll(std::time::Instant::now(), [false; 2]))
+                    .unwrap_or_default();
+                for change in changes {
+                    if let crate::diff::watch::ViewWatchAction::FolderChanged { subtree, .. } =
+                        change
+                    {
+                        for entry in s.model.entries.values() {
+                            if entry.relative_path.starts_with(&subtree) {
+                                s.stale_paths.insert(entry.relative_path.clone());
+                            }
+                        }
+                        // A bounded replacement scan discovers additions/removals; it
+                        // never performs synchronization or filesystem mutation.
+                        runtime.prepare_rescan();
+                    }
+                }
+                if runtime.is_active() {
+                    ctx.request_repaint();
+                }
+                if runtime.left_error.is_some() || runtime.right_error.is_some() {
+                    let left = runtime.left_error.as_deref().unwrap_or("none");
+                    let right = runtime.right_error.as_deref().unwrap_or("none");
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Scan failures — left: {left}; right: {right}"),
+                    );
+                }
+                action = render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
+            }
+        }
+        WorkspaceRenderOutcome {
+            folder_action: action,
+            error: render_error,
+            recent_to_open,
         }
     }
 
@@ -1406,5 +1539,111 @@ mod tests {
             unreachable!()
         };
         assert_eq!(plan.mode, crate::diff::file_ops::DeleteMode::Recycle);
+    }
+
+    fn lightweight_view(kind: usize) -> DiffView {
+        match kind {
+            0 => DiffView::Start,
+            1 => DiffView::FolderCompare(FolderCompareState::default()),
+            2 => DiffView::TextCompare(crate::diff::model::TextCompareState {
+                left: None,
+                right: None,
+                relative_path: None,
+            }),
+            3 => DiffView::BinaryCompare(crate::diff::model::BinaryCompareState {
+                left: None,
+                right: None,
+                relative_path: None,
+            }),
+            _ => unreachable!(),
+        }
+    }
+
+    fn render_layout_frame(
+        ctx: &egui::Context,
+        view: &DiffView,
+        folder_rows: usize,
+    ) -> (egui::Rect, egui::Rect, egui::Rect) {
+        let mut outer = egui::Rect::NOTHING;
+        let mut workspace = egui::Rect::NOTHING;
+        let mut workspace_clip = egui::Rect::NOTHING;
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 800.0),
+        ));
+        let _ = ctx.run(input, |ctx| {
+            let response = egui::Window::new("Diff layout regression")
+                .id(egui::Id::new("diff_layout_regression"))
+                .collapsible(false)
+                .resizable(true)
+                .default_pos(egui::pos2(40.0, 30.0))
+                .default_size(egui::vec2(640.0, 480.0))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Left");
+                        ui.label("↔");
+                        ui.label("Right");
+                        ui.button("Compare");
+                    });
+                    ui.separator();
+                    let inner = allocate_remaining_workspace(ui, |ui| {
+                        workspace = ui.max_rect();
+                        workspace_clip = ui.clip_rect();
+                        match view {
+                            DiffView::Start => ui.label("Start"),
+                            DiffView::FolderCompare(_) => {
+                                for row in 0..folder_rows {
+                                    ui.label(format!("folder row {row}"));
+                                }
+                                ui.label("Folder")
+                            }
+                            DiffView::TextCompare(_) => ui.label("Text"),
+                            DiffView::BinaryCompare(_) => ui.label("Binary"),
+                        };
+                    });
+                    assert_eq!(inner.response.rect.size(), workspace.size());
+                })
+                .unwrap();
+            outer = response.response.rect;
+        });
+        (outer, workspace, workspace_clip)
+    }
+
+    fn assert_rect_close(actual: egui::Rect, expected: egui::Rect) {
+        let tolerance = 0.5;
+        assert!((actual.min.x - expected.min.x).abs() <= tolerance);
+        assert!((actual.min.y - expected.min.y).abs() <= tolerance);
+        assert!((actual.max.x - expected.max.x).abs() <= tolerance);
+        assert!((actual.max.y - expected.max.y).abs() <= tolerance);
+    }
+
+    #[test]
+    fn workspace_views_retain_requested_window_geometry_and_parent_clip() {
+        let ctx = egui::Context::default();
+        let mut expected = None;
+        for kind in 0..4 {
+            let (outer, workspace, clip) = render_layout_frame(&ctx, &lightweight_view(kind), 1);
+            assert!((outer.height() - 480.0).abs() <= 0.5, "{outer:?}");
+            assert!(outer.contains_rect(workspace));
+            assert!(outer.contains_rect(clip));
+            assert!(clip.contains_rect(workspace));
+            if let Some(expected) = expected {
+                assert_rect_close(outer, expected);
+            } else {
+                expected = Some(outer);
+            }
+        }
+    }
+
+    #[test]
+    fn folder_content_amount_does_not_resize_outer_window() {
+        let ctx = egui::Context::default();
+        let view = lightweight_view(1);
+        let (short, _, _) = render_layout_frame(&ctx, &view, 0);
+        let (long, workspace, clip) = render_layout_frame(&ctx, &view, 100);
+        assert_rect_close(long, short);
+        assert!(long.contains_rect(workspace));
+        assert!(long.contains_rect(clip));
     }
 }
