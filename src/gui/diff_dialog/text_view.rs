@@ -8,8 +8,14 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
     ui.horizontal_wrapped(|ui| {
         ui.button("Rules…").on_hover_text("Comparison rules");
         ui.label("Differences:");
-        ui.selectable_value(&mut model.rules.ignore_all_whitespace, false, "All");
-        ui.selectable_value(&mut model.rules.ignore_all_whitespace, true, "Important");
+        let mut ignore = model.rules.ignore_all_whitespace;
+        let all_changed = ui.selectable_value(&mut ignore, false, "All").changed();
+        let important_changed = ui
+            .selectable_value(&mut ignore, true, "Important")
+            .changed();
+        if all_changed || important_changed {
+            model.set_ignore_all_whitespace(ignore);
+        }
         if ui.button("⏮ First").clicked() {
             model.navigate(NavigationDirection::First)
         }
@@ -80,38 +86,11 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         }
     });
     ui.separator();
-    let available = ui.available_width();
-    model.splitter = crate::diff::model::validated_splitter(model.splitter);
-    let left_width = (available - 8.0) * model.splitter;
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(left_width, ui.available_height() - 30.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| pane(ui, workspace, view, DiffSide::Left, model),
-        );
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(8.0, ui.available_height() - 30.0),
-            egui::Sense::drag(),
-        );
-        ui.painter()
-            .rect_filled(rect, 2.0, ui.visuals().widgets.inactive.bg_fill);
-        if response.dragged() {
-            model.splitter = crate::diff::model::validated_splitter(
-                model.splitter + response.drag_delta().x / available,
-            );
-        }
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), ui.available_height() - 30.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| pane(ui, workspace, view, DiffSide::Right, model),
-        );
-    });
     let number = model.comparison.as_ref().and_then(|c| {
         model
             .current_row
             .and_then(|r| c.difference_number(r, false))
     });
-    ui.separator();
     ui.horizontal_wrapped(|ui| {
         ui.label(number.map_or("Difference —/—".into(), |(n, t)| {
             format!("Difference {n}/{t}")
@@ -135,13 +114,51 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         }
         ui.label(model.large_file_tier.explanation());
     });
+    ui.separator();
+    let available = ui.available_width();
+    let comparison_height = ui.available_height();
+    model.splitter = crate::diff::model::validated_splitter(model.splitter);
+    let left_width = (available - 8.0) * model.splitter;
+    let pending = model.pending_scroll_row;
+    let mut scroll_accepted = pending.is_none();
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(left_width, comparison_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| scroll_accepted &= pane(ui, workspace, view, DiffSide::Left, model, pending),
+        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(8.0, comparison_height), egui::Sense::drag());
+        ui.painter()
+            .rect_filled(rect, 2.0, ui.visuals().widgets.inactive.bg_fill);
+        if response.dragged() {
+            model.splitter = crate::diff::model::validated_splitter(
+                model.splitter + response.drag_delta().x / available,
+            );
+        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), comparison_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| scroll_accepted &= pane(ui, workspace, view, DiffSide::Right, model, pending),
+        );
+    });
+    if scroll_accepted {
+        model.pending_scroll_row = None;
+    }
 }
-fn pane(ui: &mut egui::Ui, workspace: u64, view: u64, side: DiffSide, model: &mut TextViewModel) {
+fn pane(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    side: DiffSide,
+    model: &mut TextViewModel,
+    pending: Option<usize>,
+) -> bool {
     let Some(c) = model.comparison.as_ref() else {
         ui.centered_and_justified(|ui| {
             ui.spinner();
         });
-        return;
+        return false;
     };
     let source = match side {
         DiffSide::Left => model.left.source(),
@@ -149,72 +166,73 @@ fn pane(ui: &mut egui::Ui, workspace: u64, view: u64, side: DiffSide, model: &mu
     };
     let rows = &c.rows;
     let row_height = if model.wrap { 34.0 } else { 20.0 };
-    egui::ScrollArea::vertical()
-        .id_source((workspace, view, "shared_diff_scroll"))
-        .show_rows(ui, row_height, rows.len(), |ui, range| {
-            for i in range {
-                let row = &rows[i];
-                let current = model.current_row == Some(i);
-                let bg = match (row.kind, row.importance) {
-                    (_, ChangeImportance::Unimportant) => Color32::from_rgb(70, 65, 35),
-                    (DiffRowKind::Equal, _) => Color32::TRANSPARENT,
-                    (DiffRowKind::Inserted, _) => Color32::from_rgb(28, 70, 42),
-                    (DiffRowKind::Deleted, _) => Color32::from_rgb(80, 35, 35),
-                    (DiffRowKind::Modified, _) => Color32::from_rgb(65, 55, 25),
-                };
-                let frame =
-                    egui::Frame::none().fill(if current { bg.gamma_multiply(1.5) } else { bg });
-                frame.show(ui, |ui| {
-                    ui.set_min_height(row_height);
-                    ui.horizontal(|ui| {
-                        let line = crate::diff::model::visual_to_source(row, side);
-                        ui.label(
-                            RichText::new(line.map_or("·".into(), |n| (n + 1).to_string()))
-                                .monospace()
-                                .weak(),
-                        );
-                        let semantic = match row.kind {
-                            DiffRowKind::Equal => "equal",
-                            DiffRowKind::Inserted => "inserted",
-                            DiffRowKind::Deleted => "deleted",
-                            DiffRowKind::Modified => "modified",
-                        };
-                        ui.label(
-                            RichText::new(match side {
-                                DiffSide::Left => "L",
-                                DiffSide::Right => "R",
-                            })
-                            .strong(),
-                        )
-                        .on_hover_text(semantic);
-                        if let Some(n) = line {
-                            let text = source.lines().nth(n).unwrap_or("");
-                            let id = egui::Id::new((
-                                workspace,
-                                view,
-                                side,
-                                row.id,
-                                c.navigation.row_to_hunk[i],
-                            ));
-                            ui.push_id(id, |ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(text).monospace())
-                                        .wrap(model.wrap),
-                                )
-                                .on_hover_text(format!("{semantic} line"));
-                            });
-                        } else if ui
-                            .button("＋ Insert line")
-                            .on_hover_text("Missing on this side; insert real source text")
-                            .clicked()
-                        {
-                            model.active_side = side;
-                            model.current_row = Some(i);
-                        }
-                    });
+    let mut scroll = egui::ScrollArea::vertical().id_source((workspace, view, side, "diff_scroll"));
+    if let Some(row_index) = pending {
+        scroll = scroll.vertical_scroll_offset(row_index as f32 * row_height);
+    }
+    scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
+        for i in range {
+            let row = &rows[i];
+            let current = model.current_row == Some(i);
+            let bg = match (row.kind, row.importance) {
+                (_, ChangeImportance::Unimportant) => Color32::from_rgb(70, 65, 35),
+                (DiffRowKind::Equal, _) => Color32::TRANSPARENT,
+                (DiffRowKind::Inserted, _) => Color32::from_rgb(28, 70, 42),
+                (DiffRowKind::Deleted, _) => Color32::from_rgb(80, 35, 35),
+                (DiffRowKind::Modified, _) => Color32::from_rgb(65, 55, 25),
+            };
+            let frame = egui::Frame::none().fill(if current { bg.gamma_multiply(1.5) } else { bg });
+            frame.show(ui, |ui| {
+                ui.set_min_height(row_height);
+                ui.horizontal(|ui| {
+                    let line = crate::diff::model::visual_to_source(row, side);
+                    ui.label(
+                        RichText::new(line.map_or("·".into(), |n| (n + 1).to_string()))
+                            .monospace()
+                            .weak(),
+                    );
+                    let semantic = match row.kind {
+                        DiffRowKind::Equal => "equal",
+                        DiffRowKind::Inserted => "inserted",
+                        DiffRowKind::Deleted => "deleted",
+                        DiffRowKind::Modified => "modified",
+                    };
+                    ui.label(
+                        RichText::new(match side {
+                            DiffSide::Left => "L",
+                            DiffSide::Right => "R",
+                        })
+                        .strong(),
+                    )
+                    .on_hover_text(semantic);
+                    if let Some(n) = line {
+                        let text = source.lines().nth(n).unwrap_or("");
+                        let id = egui::Id::new((
+                            workspace,
+                            view,
+                            side,
+                            row.id,
+                            c.navigation.row_to_hunk[i],
+                        ));
+                        ui.push_id(id, |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(text).monospace()).wrap(model.wrap),
+                            )
+                            .on_hover_text(format!("{semantic} line"));
+                        });
+                    } else if ui
+                        .button("＋ Insert line")
+                        .on_hover_text("Missing on this side; insert real source text")
+                        .clicked()
+                    {
+                        model.active_side = side;
+                        model.set_current_row(Some(i));
+                    }
                 });
-            }
-        });
+            });
+        }
+    });
+    true
 }
 fn side_status(
     ui: &mut egui::Ui,
