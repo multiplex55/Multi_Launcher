@@ -1,6 +1,7 @@
 //! Folder tree presentation. Every view operation is a pure projection of retained data.
 use crate::diff::folder_compare::{
-    FolderProjectionRow, FolderStatus, expand_ancestors, project_folder_rows,
+    EntryKind, FolderEntry, FolderProjectionRow, FolderStatus, expand_ancestors,
+    project_folder_rows,
 };
 use crate::diff::model::{FolderCompareState, FolderDisplayFilter};
 use eframe::egui;
@@ -354,28 +355,77 @@ fn render_row(
                 },
             );
         }
+        if response.double_clicked() {
+            *action = activate_entry(state, &entry);
+        }
         if state.scroll_anchor.as_ref() == Some(&row.path) {
             response.scroll_to_me(Some(egui::Align::Center));
         }
     });
     ui.label(side_details(entry.left.as_ref()));
     ui.label(status_label(entry.effective_status));
-    ui.label(
-        entry
-            .right
-            .as_ref()
-            .map(|_| row.path.display().to_string())
-            .unwrap_or_default(),
-    );
+    let right_name = entry
+        .right
+        .as_ref()
+        .map(|_| row.path.display().to_string())
+        .unwrap_or_default();
+    let right_response = ui.selectable_label(selected, right_name);
+    if right_response.clicked() {
+        let modifiers = ui.input(|i| i.modifiers);
+        apply_selection(
+            state,
+            paths,
+            Some(&row.path),
+            if modifiers.shift {
+                SelectionGesture::Range
+            } else if modifiers.command {
+                SelectionGesture::Toggle
+            } else {
+                SelectionGesture::Click
+            },
+        );
+    }
+    if right_response.double_clicked() {
+        *action = activate_entry(state, &entry);
+    }
     ui.label(side_details(entry.right.as_ref()));
-    if ui.small_button("Open").clicked() {
-        *action = FolderViewAction::OpenChild {
-            relative_path: row.path.clone(),
-            left: entry.left.map(|s| s.path),
-            right: entry.right.map(|s| s.path),
-        };
+    if ui
+        .small_button(if is_directory(&entry) {
+            "Toggle"
+        } else {
+            "Open"
+        })
+        .clicked()
+    {
+        *action = activate_entry(state, &entry);
     }
     ui.end_row();
+}
+
+fn is_directory(entry: &FolderEntry) -> bool {
+    entry
+        .left
+        .as_ref()
+        .or(entry.right.as_ref())
+        .and_then(|side| side.metadata.as_ref())
+        .is_some_and(|metadata| metadata.kind == EntryKind::Directory)
+}
+
+/// Converts activation into a workspace action without deriving operation paths
+/// from the relative/display path.
+fn activate_entry(state: &mut FolderCompareState, entry: &FolderEntry) -> FolderViewAction {
+    if is_directory(entry) {
+        if !state.expanded_nodes.remove(&entry.relative_path) {
+            state.expanded_nodes.insert(entry.relative_path.clone());
+        }
+        FolderViewAction::Noop
+    } else {
+        FolderViewAction::OpenChild {
+            relative_path: entry.relative_path.clone(),
+            left: entry.left.as_ref().map(|side| side.path.clone()),
+            right: entry.right.as_ref().map(|side| side.path.clone()),
+        }
+    }
 }
 fn side_details(side: Option<&crate::diff::folder_compare::EntrySide>) -> String {
     let Some(metadata) = side.and_then(|s| s.metadata.as_ref()) else {
@@ -424,7 +474,8 @@ pub(crate) fn selection_snapshot(state: &FolderCompareState) -> BTreeSet<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::folder_compare::FolderEntry;
+    use crate::diff::folder_compare::{EntryMetadata, EntrySide, FolderEntry};
+    use std::time::SystemTime;
 
     fn state(items: &[(&str, FolderStatus)]) -> FolderCompareState {
         let mut state = FolderCompareState::default();
@@ -445,6 +496,70 @@ mod tests {
     }
     fn paths(state: &FolderCompareState) -> Vec<PathBuf> {
         ordered_visible(state)
+    }
+
+    fn side(path: &str, kind: EntryKind) -> EntrySide {
+        EntrySide {
+            path: path.into(),
+            metadata: Some(EntryMetadata {
+                kind,
+                size: 0,
+                modified: Some(SystemTime::UNIX_EPOCH),
+                identity: None,
+            }),
+            error: None,
+        }
+    }
+
+    fn entry(
+        relative: &str,
+        left: Option<&str>,
+        right: Option<&str>,
+        kind: EntryKind,
+    ) -> FolderEntry {
+        FolderEntry {
+            relative_path: relative.into(),
+            left: left.map(|path| side(path, kind)),
+            right: right.map(|path| side(path, kind)),
+            metadata_status: FolderStatus::Different,
+            effective_status: FolderStatus::Different,
+            content_checked: false,
+        }
+    }
+
+    #[test]
+    fn child_actions_use_stored_paired_and_one_sided_paths() {
+        for (left, right) in [
+            (Some("/actual-left/name"), Some("/actual-right/name")),
+            (Some("/actual-left/only"), None),
+            (None, Some("/actual-right/only")),
+        ] {
+            let mut state = FolderCompareState::default();
+            let entry = entry("display/name", left, right, EntryKind::File);
+            assert_eq!(
+                activate_entry(&mut state, &entry),
+                FolderViewAction::OpenChild {
+                    relative_path: "display/name".into(),
+                    left: left.map(Into::into),
+                    right: right.map(Into::into),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn directory_activation_only_toggles_expansion() {
+        let mut state = FolderCompareState::default();
+        let entry = entry(
+            "directory",
+            Some("/left/directory"),
+            None,
+            EntryKind::Directory,
+        );
+        assert_eq!(activate_entry(&mut state, &entry), FolderViewAction::Noop);
+        assert!(state.expanded_nodes.contains(Path::new("directory")));
+        assert_eq!(activate_entry(&mut state, &entry), FolderViewAction::Noop);
+        assert!(!state.expanded_nodes.contains(Path::new("directory")));
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub struct FolderCompareState {
     pub timestamp_tolerance: Duration,
     pub left_scan_complete: bool,
     pub right_scan_complete: bool,
+    /// Children changed by an editor and awaiting a targeted metadata refresh.
+    pub stale_paths: BTreeSet<PathBuf>,
 }
 impl Default for FolderCompareState {
     fn default() -> Self {
@@ -85,6 +87,7 @@ impl Default for FolderCompareState {
             timestamp_tolerance: Duration::from_secs(2),
             left_scan_complete: false,
             right_scan_complete: false,
+            stale_paths: BTreeSet::new(),
         }
     }
 }
@@ -105,6 +108,7 @@ pub struct TextCompareState {
 pub enum DiffView {
     Start,
     TextCompare(TextCompareState),
+    BinaryCompare(TextCompareState),
     FolderCompare(FolderCompareState),
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -198,12 +202,16 @@ impl DiffWorkspace {
             }
         };
         let view = if lm.is_file() && rm.is_file() {
-            DiffView::TextCompare(TextCompareState {
+            let state = TextCompareState {
                 left: Some(lp.clone()),
                 right: Some(rp.clone()),
                 relative_path: None,
                 kind: detect_kind(&lp, &rp),
-            })
+            };
+            match state.kind {
+                FileComparisonKind::Text => DiffView::TextCompare(state),
+                FileComparisonKind::Binary => DiffView::BinaryCompare(state),
+            }
         } else if lm.is_dir() && rm.is_dir() {
             DiffView::FolderCompare(FolderCompareState {
                 left_root: lp,
@@ -245,14 +253,18 @@ impl DiffWorkspace {
             (Some(l), Some(r)) => detect_kind(l, r),
             _ => FileComparisonKind::Text,
         };
+        let state = TextCompareState {
+            left,
+            right,
+            relative_path: Some(relative_path),
+            kind,
+        };
         let next = RetainedView {
             id: id(),
-            view: DiffView::TextCompare(TextCompareState {
-                left,
-                right,
-                relative_path: Some(relative_path),
-                kind,
-            }),
+            view: match state.kind {
+                FileComparisonKind::Text => DiffView::TextCompare(state),
+                FileComparisonKind::Binary => DiffView::BinaryCompare(state),
+            },
         };
         let old = std::mem::replace(&mut self.current_view, next);
         self.navigation_stack.push(old);
@@ -420,6 +432,8 @@ pub struct TextViewModel {
     pub right_error: Option<String>,
     pub external_conflict: [bool; 2],
     pub cursor: Option<SourcePosition>,
+    /// Set only after a successful write, so returning without saving is inert.
+    pub saved_filesystem_mutation: bool,
     generation: u64,
     receiver: Option<Receiver<CompareMessage>>,
 }
@@ -474,6 +488,7 @@ impl TextViewModel {
             right_error: None,
             external_conflict: [false, false],
             cursor: None,
+            saved_filesystem_mutation: false,
             generation: 0,
             receiver: None,
         };
@@ -644,10 +659,14 @@ impl TextViewModel {
                 &mut self.right_error,
             ),
         };
+        let was_dirty = doc.is_dirty();
         let result = path
             .ok_or_else(|| anyhow::anyhow!("Choose a path before saving"))
             .and_then(|p| doc.save(p));
         *err = result.as_ref().err().map(ToString::to_string);
+        if result.is_ok() && was_dirty {
+            self.saved_filesystem_mutation = true;
+        }
         result.is_ok()
     }
     pub fn has_dirty(&self) -> bool {
@@ -779,6 +798,80 @@ mod tests {
         assert_eq!(w.current_view.id, 99);
         assert!(matches!(&w.current_view.view,DiffView::FolderCompare(s)
             if s.path_filter=="rs" && s.left_root == Path::new("/left") && s.right_root == Path::new("/right")));
+    }
+    #[test]
+    fn paired_binary_child_routes_to_binary_compare() {
+        let temp = tempfile::tempdir().unwrap();
+        let left = temp.path().join("left.bin");
+        let right = temp.path().join("right.bin");
+        fs::write(&left, [0, 1, 2]).unwrap();
+        fs::write(&right, [3, 0, 4]).unwrap();
+        let mut workspace = DiffWorkspace::default();
+        workspace.current_view = RetainedView {
+            id: 100,
+            view: DiffView::FolderCompare(FolderCompareState::default()),
+        };
+        workspace
+            .push_file_compare("pair.bin".into(), Some(left.clone()), Some(right.clone()))
+            .unwrap();
+        assert!(matches!(
+            &workspace.current_view.view,
+            DiffView::BinaryCompare(state)
+                if state.left.as_ref() == Some(&left) && state.right.as_ref() == Some(&right)
+        ));
+    }
+
+    #[test]
+    fn complete_folder_state_is_retained_unchanged_across_child_back() {
+        use crate::diff::folder_compare::{FolderEntry, FolderStatus};
+        let mut folder = FolderCompareState {
+            left_root: "/left".into(),
+            right_root: "/right".into(),
+            path_filter: "needle".into(),
+            display_filter: FolderDisplayFilter::RightOnly,
+            sort: FolderSortState {
+                column: "size".into(),
+                descending: true,
+            },
+            ..Default::default()
+        };
+        folder.expanded_nodes.insert("dir".into());
+        folder
+            .selected_paths
+            .extend([PathBuf::from("a"), PathBuf::from("b")]);
+        folder.primary_selection = Some("b".into());
+        folder.scroll_anchor = Some("b".into());
+        folder.scan_rules.includes = vec!["*.txt".into()];
+        folder.scan_rules.excludes = vec!["target/".into()];
+        folder.model.entries.insert(
+            "a".into(),
+            FolderEntry {
+                relative_path: "a".into(),
+                left: None,
+                right: None,
+                metadata_status: FolderStatus::LeftOnly,
+                effective_status: FolderStatus::LeftOnly,
+                content_checked: true,
+            },
+        );
+        let expected = folder.clone();
+        let mut workspace = DiffWorkspace::default();
+        workspace.current_view = RetainedView {
+            id: 101,
+            view: DiffView::FolderCompare(folder),
+        };
+        workspace
+            .push_file_compare("child.txt".into(), Some("/left/child.txt".into()), None)
+            .unwrap();
+        assert_eq!(
+            workspace.navigation_stack[0].view,
+            DiffView::FolderCompare(expected.clone())
+        );
+        assert!(workspace.back());
+        assert_eq!(
+            workspace.current_view.view,
+            DiffView::FolderCompare(expected)
+        );
     }
     #[test]
     fn splitter_and_virtual_range_are_bounded() {
