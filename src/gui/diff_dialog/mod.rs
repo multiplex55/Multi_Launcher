@@ -249,9 +249,22 @@ impl DiffDialogState {
                 self.navigate_back();
             }
             folder_view::FolderViewAction::RequestRescan => {
-                if let Some(runtime) = self.folder_runtimes.remove(&self.workspace.current_view.id)
-                {
-                    runtime.cancel();
+                if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view {
+                    if let Ok(rules) = state.validated_draft_scan_rules() {
+                        if rules != state.applied_scan_rules {
+                            state.applied_scan_rules = rules;
+                            state.model = Default::default();
+                            state.left_scan_complete = false;
+                            state.right_scan_complete = false;
+                            state.stale_paths.clear();
+                            // Keep view controls and selection. Non-surviving paths are
+                            // naturally harmless until the replacement model arrives.
+                            self.folder_runtimes
+                                .entry(self.workspace.current_view.id)
+                                .or_default()
+                                .prepare_rescan();
+                        }
+                    }
                 }
             }
         }
@@ -331,7 +344,11 @@ fn poll_folder_runtime(
         || runtime.right_root.as_ref() != Some(&right_identity)
     {
         runtime.cancel();
-        runtime.generation = crate::diff::folder_runtime::FolderRuntime::next_generation();
+        if runtime.restart_prepared {
+            runtime.restart_prepared = false;
+        } else {
+            runtime.generation = crate::diff::folder_runtime::FolderRuntime::next_generation();
+        }
         runtime.left_root = Some(left_identity.clone());
         runtime.right_root = Some(right_identity.clone());
         runtime.left_visited = 0;
@@ -345,12 +362,12 @@ fn poll_folder_runtime(
         runtime.left_scan = Some(crate::diff::folder_scan::spawn_scan(
             state.left_root.clone(),
             runtime.generation,
-            state.scan_rules.clone(),
+            state.applied_scan_rules.clone(),
         ));
         runtime.right_scan = Some(crate::diff::folder_scan::spawn_scan(
             state.right_root.clone(),
             runtime.generation,
-            state.scan_rules.clone(),
+            state.applied_scan_rules.clone(),
         ));
     }
 
@@ -366,6 +383,30 @@ fn poll_folder_runtime(
         .unwrap_or_default();
     process_scan_events(state, runtime, true, &left_identity, left_events);
     process_scan_events(state, runtime, false, &right_identity, right_events);
+
+    if state.left_scan_complete && state.right_scan_complete {
+        let surviving: HashSet<_> = state
+            .model
+            .entries
+            .values()
+            .map(|entry| entry.relative_path.clone())
+            .collect();
+        state.selected_paths.retain(|path| surviving.contains(path));
+        if state
+            .primary_selection
+            .as_ref()
+            .is_some_and(|path| !surviving.contains(path))
+        {
+            state.primary_selection = state.selected_paths.iter().next().cloned();
+        }
+        if state
+            .scroll_anchor
+            .as_ref()
+            .is_some_and(|path| !surviving.contains(path))
+        {
+            state.scroll_anchor = state.primary_selection.clone();
+        }
+    }
 
     let visible = folder_view::ordered_visible(state);
     runtime.prioritize(state.primary_selection.as_ref(), &visible, &state.model);
@@ -544,5 +585,34 @@ mod tests {
             alt.workspace.navigation_stack,
             button.workspace.navigation_stack
         );
+    }
+
+    #[test]
+    fn valid_rescan_applies_draft_clears_scan_data_and_retains_view_controls() {
+        let mut dialog = folder_dialog(81);
+        let runtime = dialog.folder_runtimes.entry(81).or_default();
+        runtime.generation = 3;
+        runtime.left_visited = 9;
+        if let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view {
+            state.draft_include_rules = "*.tmp".into();
+            state.draft_exclude_rules = ".git/\ntarget/".into();
+            state.path_filter = "needle".into();
+            state.display_filter = crate::diff::model::FolderDisplayFilter::Differences;
+            state.expanded_nodes.insert("expanded".into());
+            state.selected_paths.insert("survivor.tmp".into());
+        }
+        dialog.apply_folder_action(folder_view::FolderViewAction::RequestRescan);
+        let DiffView::FolderCompare(state) = &dialog.workspace.current_view.view else {
+            unreachable!()
+        };
+        assert_eq!(state.applied_scan_rules.includes, ["*.tmp"]);
+        assert_eq!(state.applied_scan_rules.excludes, [".git/", "target/"]);
+        assert!(state.model.entries.is_empty());
+        assert_eq!(state.path_filter, "needle");
+        assert!(state.expanded_nodes.contains("expanded"));
+        assert!(state.selected_paths.contains("survivor.tmp"));
+        let runtime = &dialog.folder_runtimes[&81];
+        assert!(runtime.generation > 3 && runtime.restart_prepared);
+        assert_eq!(runtime.left_visited, 0);
     }
 }
