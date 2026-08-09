@@ -17,7 +17,11 @@ pub(super) enum FolderViewAction {
     RequestRescan,
 }
 
-pub(super) fn show(ui: &mut egui::Ui, state: &mut FolderCompareState) -> FolderViewAction {
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    state: &mut FolderCompareState,
+    runtime: &crate::diff::folder_runtime::FolderRuntime,
+) -> FolderViewAction {
     ui.heading("Folder comparison");
     ui.label(format!(
         "{} ↔ {}",
@@ -47,10 +51,28 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut FolderCompareState) -> FolderV
         ui.label("Find path:");
         ui.text_edit_singleline(&mut state.path_filter);
     });
+    let scans_done = state.left_scan_complete && state.right_scan_complete;
     ui.label(format!(
-        "Scanned: left {} / right {}",
+        "Scanned entries: left {} ({}) / right {} ({})",
+        runtime.left_visited,
         complete(state.left_scan_complete),
+        runtime.right_visited,
         complete(state.right_scan_complete)
+    ));
+    ui.label(format!(
+        "Scanning: {}; content checking: {}; compared paths: {}{}",
+        if scans_done { "idle" } else { "active" },
+        if runtime.is_active() && scans_done {
+            "active"
+        } else {
+            "idle"
+        },
+        runtime.completed_comparisons,
+        if scans_done {
+            format!(" / {} total", state.model.entries.len())
+        } else {
+            String::new()
+        }
     ));
     ui.separator();
     let rows = ordered_visible(state);
