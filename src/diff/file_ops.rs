@@ -149,8 +149,8 @@ fn root(path: &Path) -> Result<CapturedRoot, String> {
     })
 }
 
-/// Normalize an untrusted comparison identity. Both slash styles are rejected
-/// rather than interpreted, making the behavior identical on every platform.
+/// Normalize an untrusted comparison identity. Comparison identities use `/`;
+/// alternative separators are rejected rather than interpreted.
 pub fn validate_relative(path: &Path) -> Result<PathBuf, String> {
     let raw = path.to_string_lossy();
     if raw.is_empty() {
@@ -175,7 +175,11 @@ pub fn validate_relative(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn ensure_contained(root: &CapturedRoot, relative: &Path) -> Result<PathBuf, String> {
-    let rel = validate_relative(relative)?;
+    // `relative` is already a captured identity here. On Windows a validated
+    // slash-delimited selection is represented by `PathBuf` with native `\`
+    // separators after components are joined during recursive expansion. Do
+    // not reapply the raw-input separator rule to that internal value.
+    let rel = validate_captured_relative(relative)?;
     let target = root.canonical.join(&rel);
     let mut ancestor = target.as_path();
     while !ancestor.exists() {
@@ -186,6 +190,20 @@ fn ensure_contained(root: &CapturedRoot, relative: &Path) -> Result<PathBuf, Str
         return Err("path escapes comparison root through a symbolic link".into());
     }
     Ok(target)
+}
+
+fn validate_captured_relative(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err("empty relative path".into());
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) if !value.is_empty() => out.push(value),
+            _ => return Err("root, prefix, '.', and '..' components are forbidden".into()),
+        }
+    }
+    Ok(out)
 }
 
 pub fn plan_copy(
@@ -715,14 +733,16 @@ pub fn plan_delete(
     let mut items = vec![];
     let mut errors = vec![];
     for rel in selected {
-        match ensure_contained(&root, &rel).and_then(|target| {
-            FileIdentity::read(&target)
-                .map(|expected| PlannedDelete {
-                    relative: validate_relative(&rel).unwrap(),
-                    target,
-                    expected,
-                })
-                .map_err(|e| e.to_string())
+        match validate_relative(&rel).and_then(|validated| {
+            ensure_contained(&root, &validated).and_then(|target| {
+                FileIdentity::read(&target)
+                    .map(|expected| PlannedDelete {
+                        relative: validated,
+                        target,
+                        expected,
+                    })
+                    .map_err(|e| e.to_string())
+            })
         }) {
             Ok(x) => items.push(x),
             Err(message) => errors.push(ValidationError {
