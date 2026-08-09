@@ -2,6 +2,7 @@ use crate::diff::model::{DiffView, DiffWorkspace};
 use crate::diff::query::DiffOpenPayload;
 use eframe::egui;
 use std::collections::HashMap;
+mod folder_view;
 mod text_view;
 
 #[derive(Default)]
@@ -111,8 +112,7 @@ impl DiffDialogState {
                         ));
                     }
                     DiffView::FolderCompare(s) => {
-                        ui.heading("Folder comparison");
-                        ui.label(format!("{} computed entries", s.content_statuses.len()));
+                        folder_view::show(ui, s);
                     }
                 }
             });

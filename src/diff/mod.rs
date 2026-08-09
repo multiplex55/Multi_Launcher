@@ -4,6 +4,8 @@
 //! folders, Git-specific UI, media/image comparison, cloud protocols, fuzzy
 //! filename pairing, and a hex editor.
 
+pub mod folder_compare;
+pub mod folder_scan;
 pub mod model;
 pub mod persistence;
 pub mod query;
