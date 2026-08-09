@@ -20,7 +20,7 @@ fn render_retained_folder(
 struct WorkspaceRenderOutcome {
     folder_action: folder_view::FolderViewAction,
     error: Option<String>,
-    recent_to_open: Option<crate::diff::persistence::RecentComparisonV1>,
+    recent_to_open: Option<crate::diff::persistence::DisplayPathPairV1>,
 }
 
 fn allocate_remaining_workspace<R>(
