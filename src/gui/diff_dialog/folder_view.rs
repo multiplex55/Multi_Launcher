@@ -334,145 +334,15 @@ pub(super) fn show(
     projected = projected_rows(state);
     paths = projected.iter().map(|r| r.path.clone()).collect();
     ui.separator();
-    let results_size = folder_results_size(ui.available_size());
-    ui.allocate_ui(results_size, |ui| {
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Grid::new("folder-results")
-                    .striped(true)
-                    .num_columns(6)
-                    .show(ui, |ui| {
-                        for heading in [
-                            "Left path",
-                            "Left size / modified",
-                            "Status",
-                            "Right path",
-                            "Right size / modified",
-                            "",
-                        ] {
-                            ui.strong(heading);
-                        }
-                        ui.end_row();
-                        for row in &projected {
-                            render_row(
-                                ui,
-                                state,
-                                &paths,
-                                row,
-                                runtime.mutation_active(),
-                                &mut action,
-                            );
-                        }
-                    });
-            });
-    });
+    super::folder_table::show(
+        ui,
+        state,
+        &paths,
+        &projected,
+        runtime.mutation_active(),
+        &mut action,
+    );
     action
-}
-
-/// The results viewport consumes exactly the workspace left by the controls.
-fn folder_results_size(available: egui::Vec2) -> egui::Vec2 {
-    egui::vec2(available.x.max(0.0), available.y.max(0.0))
-}
-
-fn render_row(
-    ui: &mut egui::Ui,
-    state: &mut FolderCompareState,
-    paths: &[PathBuf],
-    row: &FolderProjectionRow,
-    operation_active: bool,
-    action: &mut FolderViewAction,
-) {
-    let entry = state
-        .model
-        .entries
-        .values()
-        .find(|e| e.relative_path == row.path)
-        .expect("projected row")
-        .clone();
-    let selected = state.selected_paths.contains(&row.path);
-    ui.horizontal(|ui| {
-        ui.add_space(row.depth as f32 * 14.0);
-        if row.has_children {
-            let open = state.expanded_nodes.contains(&row.path);
-            if ui.small_button(if open { "▼" } else { "▶" }).clicked() {
-                if open {
-                    state.expanded_nodes.remove(&row.path);
-                } else {
-                    state.expanded_nodes.insert(row.path.clone());
-                }
-            }
-        } else {
-            ui.add_space(22.0);
-        }
-        let name = entry
-            .left
-            .as_ref()
-            .map(|_| row.path.display().to_string())
-            .unwrap_or_default();
-        let response = ui.selectable_label(selected, name);
-        response.context_menu(|ui| mutation_menu(ui, state, operation_active, action));
-        if response.clicked() {
-            let modifiers = ui.input(|i| i.modifiers);
-            apply_selection(
-                state,
-                paths,
-                Some(&row.path),
-                if modifiers.shift {
-                    SelectionGesture::Range
-                } else if modifiers.command {
-                    SelectionGesture::Toggle
-                } else {
-                    SelectionGesture::Click
-                },
-            );
-        }
-        if response.double_clicked() {
-            *action = activate_entry(state, &entry);
-        }
-        if state.scroll_anchor.as_ref() == Some(&row.path) {
-            response.scroll_to_me(Some(egui::Align::Center));
-        }
-    });
-    ui.label(side_details(entry.left.as_ref()));
-    ui.label(status_label(entry.effective_status));
-    let right_name = entry
-        .right
-        .as_ref()
-        .map(|_| row.path.display().to_string())
-        .unwrap_or_default();
-    let right_response = ui.selectable_label(selected, right_name);
-    right_response.context_menu(|ui| mutation_menu(ui, state, operation_active, action));
-    if right_response.clicked() {
-        let modifiers = ui.input(|i| i.modifiers);
-        apply_selection(
-            state,
-            paths,
-            Some(&row.path),
-            if modifiers.shift {
-                SelectionGesture::Range
-            } else if modifiers.command {
-                SelectionGesture::Toggle
-            } else {
-                SelectionGesture::Click
-            },
-        );
-    }
-    if right_response.double_clicked() {
-        *action = activate_entry(state, &entry);
-    }
-    ui.label(side_details(entry.right.as_ref()));
-    if ui
-        .small_button(if is_directory(&entry) {
-            "Toggle"
-        } else {
-            "Open"
-        })
-        .clicked()
-    {
-        *action = activate_entry(state, &entry);
-    }
-    ui.end_row();
 }
 
 fn applicable(state: &FolderCompareState, left: bool) -> bool {
@@ -515,7 +385,7 @@ fn mutation_buttons(
     });
 }
 
-fn mutation_menu(
+pub(super) fn mutation_menu(
     ui: &mut egui::Ui,
     state: &FolderCompareState,
     operation_active: bool,
@@ -540,7 +410,7 @@ fn mutation_menu(
     }
 }
 
-fn is_directory(entry: &FolderEntry) -> bool {
+pub(super) fn is_directory(entry: &FolderEntry) -> bool {
     entry
         .left
         .as_ref()
@@ -551,7 +421,10 @@ fn is_directory(entry: &FolderEntry) -> bool {
 
 /// Converts activation into a workspace action without deriving operation paths
 /// from the relative/display path.
-fn activate_entry(state: &mut FolderCompareState, entry: &FolderEntry) -> FolderViewAction {
+pub(super) fn activate_entry(
+    state: &mut FolderCompareState,
+    entry: &FolderEntry,
+) -> FolderViewAction {
     if is_directory(entry) {
         if !state.expanded_nodes.remove(&entry.relative_path) {
             state.expanded_nodes.insert(entry.relative_path.clone());
@@ -565,7 +438,7 @@ fn activate_entry(state: &mut FolderCompareState, entry: &FolderEntry) -> Folder
         }
     }
 }
-fn side_details(side: Option<&crate::diff::folder_compare::EntrySide>) -> String {
+pub(super) fn side_details(side: Option<&crate::diff::folder_compare::EntrySide>) -> String {
     let Some(metadata) = side.and_then(|s| s.metadata.as_ref()) else {
         return String::new();
     };
@@ -579,7 +452,7 @@ fn side_details(side: Option<&crate::diff::folder_compare::EntrySide>) -> String
 fn complete(value: bool) -> &'static str {
     if value { "complete" } else { "running" }
 }
-fn status_label(status: FolderStatus) -> &'static str {
+pub(super) fn status_label(status: FolderStatus) -> &'static str {
     match status {
         FolderStatus::Identical => "✓ Identical",
         FolderStatus::Different => "≠ Different",
@@ -614,20 +487,6 @@ mod tests {
     use super::*;
     use crate::diff::folder_compare::{EntryMetadata, EntrySide, FolderEntry};
     use std::time::SystemTime;
-
-    #[test]
-    fn result_viewport_is_bounded_and_independent_of_row_count() {
-        for size in [(400.0, 250.0), (900.0, 650.0), (1600.0, 1000.0)] {
-            let one = folder_results_size(egui::vec2(size.0, size.1));
-            let many = folder_results_size(egui::vec2(size.0, size.1));
-            assert_eq!(one, many);
-            assert!(one.x <= size.0 && one.y <= size.1);
-        }
-        assert_eq!(
-            folder_results_size(egui::vec2(-5.0, -9.0)),
-            egui::Vec2::ZERO
-        );
-    }
 
     fn state(items: &[(&str, FolderStatus)]) -> FolderCompareState {
         let mut state = FolderCompareState::default();
