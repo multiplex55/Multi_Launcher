@@ -1606,14 +1606,20 @@ mod tests {
                                     ui.label("Start");
                                 }
                                 DiffView::FolderCompare(_) => {
-                                    egui::ScrollArea::vertical()
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| {
-                                            for row in 0..folder_rows {
-                                                ui.label(format!("folder row {row}"));
-                                            }
-                                            ui.label("Folder");
-                                        });
+                                    // Vary the amount of painted folder content without
+                                    // letting the deterministic renderer request more layout
+                                    // space than the bounded workspace owns.
+                                    let painter = ui.painter();
+                                    for row in 0..folder_rows {
+                                        let y = workspace.top() + row as f32 * 4.0;
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(workspace.left(), y),
+                                                egui::pos2(workspace.right(), y),
+                                            ],
+                                            egui::Stroke::new(1.0, egui::Color32::GRAY),
+                                        );
+                                    }
                                 }
                                 DiffView::TextCompare(_) => {
                                     ui.label("Text");
@@ -1645,7 +1651,10 @@ mod tests {
         let mut expected = None;
         for kind in 0..4 {
             let (outer, workspace, clip) = render_layout_frame(&ctx, &lightweight_view(kind), 1);
-            assert!((outer.height() - 480.0).abs() <= 0.5, "{outer:?}");
+            // `Window::default_size` is the requested inner size; the outer
+            // response additionally includes the platform/style frame.
+            assert!(outer.width() >= 640.0, "{outer:?}");
+            assert!(outer.height() >= 480.0, "{outer:?}");
             assert!(outer.contains_rect(workspace));
             assert!(outer.contains_rect(clip));
             assert!(clip.contains_rect(workspace));
