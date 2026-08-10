@@ -508,7 +508,7 @@ impl TextScrollState {
     }
 
     pub fn drive_measured(&mut self, side: DiffSide, x: f32, y: f32, cache: &RowMeasurementCache) {
-        let (projected, within) = cache.row_at_offset(y);
+        let (projected, within) = cache.row_at_offset(y as f64);
         self.drive(side, x, y, MIN_VISUAL_LINE_HEIGHT, true);
         self.aligned_row = cache
             .projected_to_comparison
@@ -526,7 +526,7 @@ impl TextScrollState {
             .unwrap_or_else(|| comparison_row.min(cache.heights.len()));
         self.aligned_row = comparison_row;
         self.within_row = 0.0;
-        let y = cache.offset_for_row(projected);
+        let y = cache.offset_for_row(projected) as f32;
         self.left_vertical = y;
         self.right_vertical = y;
     }
@@ -576,7 +576,9 @@ pub const MIN_VISUAL_LINE_HEIGHT: f32 = 20.0;
 pub struct RowMeasurementCache {
     pub key: Option<RowMeasureKey>,
     pub heights: Vec<f32>,
-    pub offsets: Vec<f32>,
+    /// Double precision prevents prefix accumulation from losing individual
+    /// pixels once very large comparisons exceed f32's exact-integer range.
+    pub offsets: Vec<f64>,
     pub projected_to_comparison: Vec<usize>,
     pub comparison_to_projected: Vec<Option<usize>>,
 }
@@ -637,20 +639,21 @@ impl RowMeasurementCache {
         self.offsets.reserve(self.heights.len() + 1);
         self.offsets.push(0.0);
         for &height in &self.heights {
-            self.offsets
-                .push(self.offsets.last().copied().unwrap_or(0.0) + Self::valid_height(height));
+            self.offsets.push(
+                self.offsets.last().copied().unwrap_or(0.0) + Self::valid_height(height) as f64,
+            );
         }
     }
-    pub fn total_height(&self) -> f32 {
+    pub fn total_height(&self) -> f64 {
         self.offsets.last().copied().unwrap_or(0.0)
     }
-    pub fn offset_for_row(&self, row: usize) -> f32 {
+    pub fn offset_for_row(&self, row: usize) -> f64 {
         self.offsets
             .get(row.min(self.heights.len()))
             .copied()
             .unwrap_or(0.0)
     }
-    pub fn row_at_offset(&self, y: f32) -> (usize, f32) {
+    pub fn row_at_offset(&self, y: f64) -> (usize, f32) {
         if self.heights.is_empty() {
             return (0, 0.0);
         }
@@ -664,7 +667,12 @@ impl RowMeasurementCache {
             .partition_point(|&offset| offset <= y)
             .saturating_sub(1)
             .min(self.heights.len() - 1);
-        (row, (y - self.offsets[row]).max(0.0).min(self.heights[row]))
+        (
+            row,
+            (y - self.offsets[row])
+                .max(0.0)
+                .min(self.heights[row] as f64) as f32,
+        )
     }
     pub fn visible_range(
         &self,
@@ -675,8 +683,8 @@ impl RowMeasurementCache {
         if self.heights.is_empty() {
             return 0..0;
         }
-        let first = self.row_at_offset(scroll_y).0;
-        let end_y = (scroll_y.max(0.0) + viewport.max(0.0)).min(self.total_height());
+        let first = self.row_at_offset(scroll_y as f64).0;
+        let end_y = ((scroll_y.max(0.0) + viewport.max(0.0)) as f64).min(self.total_height());
         let end = self
             .offsets
             .partition_point(|&offset| offset < end_y)
@@ -1460,7 +1468,7 @@ mod tests {
         empty.rebuild(measure_key(true, 1.0, 1.0), vec![], 0, []);
         assert_eq!(empty.offsets, [0.0]);
         assert_eq!(empty.visible_range(100.0, 20.0, 4), 0..0);
-        assert_eq!(empty.row_at_offset(f32::NAN), (0, 0.0));
+        assert_eq!(empty.row_at_offset(f64::NAN), (0, 0.0));
 
         let mut corrupt = RowMeasurementCache::default();
         corrupt.rebuild(

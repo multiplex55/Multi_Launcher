@@ -474,7 +474,7 @@ fn render_pane_contents(
             .binary_search(&row_index)
             .unwrap_or_else(|i| i.min(projected.len().saturating_sub(1)));
         let offset = if wrapped {
-            model.row_measurements.offset_for_row(visual)
+            model.row_measurements.offset_for_row(visual) as f32
         } else {
             visual as f32 * row_height
         };
@@ -621,9 +621,9 @@ fn render_pane_contents(
             let before = measured_offsets.get(range.start).copied().unwrap_or(0.0);
             let after = measurement_cache.total_height()
                 - measured_offsets.get(range.end).copied().unwrap_or(0.0);
-            ui.add_space(before);
+            ui.add_space(before as f32);
             render_range(ui, range);
-            ui.add_space(after.max(0.0));
+            ui.add_space(after.max(0.0) as f32);
         })
     } else {
         scroll.show_rows(ui, row_height, projected.len(), |ui, range| {
@@ -666,7 +666,7 @@ fn render_pane_contents(
             model.scroll.drive(side, new_x, new_y, row_height, false);
         }
         let visual = if wrapped {
-            model.row_measurements.row_at_offset(new_y).0
+            model.row_measurements.row_at_offset(new_y as f64).0
         } else {
             (new_y / row_height.max(1.0)) as usize
         };
