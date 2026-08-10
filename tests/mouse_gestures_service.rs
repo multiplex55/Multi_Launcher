@@ -132,12 +132,14 @@ impl RightClickBackend for TestRightClickBackend {
 
 struct TestCursorProvider {
     position: Mutex<Option<(f32, f32)>>,
+    reads: AtomicUsize,
 }
 
 impl TestCursorProvider {
     fn new(pos: (f32, f32)) -> Self {
         Self {
             position: Mutex::new(Some(pos)),
+            reads: AtomicUsize::new(0),
         }
     }
 
@@ -146,11 +148,28 @@ impl TestCursorProvider {
             *guard = Some(pos);
         }
     }
+
+    fn read_count(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    fn wait_for_read_after(&self, previous: usize, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.read_count() > previous {
+                return true;
+            }
+            sleep(Duration::from_millis(1));
+        }
+        false
+    }
 }
 
 impl CursorPositionProvider for TestCursorProvider {
     fn cursor_position(&self) -> Option<(f32, f32)> {
-        self.position.lock().ok().and_then(|guard| *guard)
+        let position = self.position.lock().ok().and_then(|guard| *guard);
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        position
     }
 }
 
@@ -693,7 +712,12 @@ fn numeric_selection_updates_hint_text() {
     config.recognition_interval_ms = 1;
     service.update_config(config);
 
+    let reads_before_down = cursor_provider.read_count();
     assert!(handle.emit(HookEvent::RButtonDown));
+    assert!(
+        cursor_provider.wait_for_read_after(reads_before_down, Duration::from_secs(2)),
+        "worker did not capture the gesture start position"
+    );
     cursor_provider.set_position((50.0, 0.0));
 
     // Wait for recognition to publish the exact gesture before selecting a
