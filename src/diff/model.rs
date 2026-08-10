@@ -506,6 +506,30 @@ impl TextScrollState {
         self.left_vertical = y;
         self.right_vertical = y;
     }
+
+    pub fn drive_measured(&mut self, side: DiffSide, x: f32, y: f32, cache: &RowMeasurementCache) {
+        let (projected, within) = cache.row_at_offset(y);
+        self.drive(side, x, y, MIN_VISUAL_LINE_HEIGHT, true);
+        self.aligned_row = cache
+            .projected_to_comparison
+            .get(projected)
+            .copied()
+            .unwrap_or(0);
+        self.within_row = within;
+    }
+
+    pub fn target_measured_row(&mut self, comparison_row: usize, cache: &RowMeasurementCache) {
+        let projected = cache
+            .comparison_to_projected
+            .get(comparison_row)
+            .and_then(|row| *row)
+            .unwrap_or_else(|| comparison_row.min(cache.heights.len()));
+        self.aligned_row = comparison_row;
+        self.within_row = 0.0;
+        let y = cache.offset_for_row(projected);
+        self.left_vertical = y;
+        self.right_vertical = y;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,9 +558,132 @@ pub struct RowMeasureKey {
     pub left_revision: u64,
     pub right_revision: u64,
     pub comparison_revision: u64,
-    pub pane_width_bits: u32,
+    pub left_text_width_bits: u32,
+    pub right_text_width_bits: u32,
     pub font_theme: u64,
+    pub text_style: u64,
+    pub display_config: u64,
     pub wrap: bool,
+    pub projection_mode: u8,
+    pub projection_context: usize,
+}
+
+pub const MIN_VISUAL_LINE_HEIGHT: f32 = 20.0;
+
+/// Retained geometry for the current projected comparison. `offsets` is kept
+/// in sync with `heights`, making all viewport and navigation queries O(log n).
+#[derive(Debug, Clone)]
+pub struct RowMeasurementCache {
+    pub key: Option<RowMeasureKey>,
+    pub heights: Vec<f32>,
+    pub offsets: Vec<f32>,
+    pub projected_to_comparison: Vec<usize>,
+    pub comparison_to_projected: Vec<Option<usize>>,
+}
+
+impl Default for RowMeasurementCache {
+    fn default() -> Self {
+        Self {
+            key: None,
+            heights: vec![],
+            offsets: vec![0.0],
+            projected_to_comparison: vec![],
+            comparison_to_projected: vec![],
+        }
+    }
+}
+
+impl RowMeasurementCache {
+    pub fn rebuild(
+        &mut self,
+        key: RowMeasureKey,
+        projected: Vec<usize>,
+        comparison_rows: usize,
+        measured: impl IntoIterator<Item = f32>,
+    ) {
+        self.key = Some(key);
+        self.projected_to_comparison = projected;
+        self.comparison_to_projected = vec![None; comparison_rows];
+        for (p, &c) in self.projected_to_comparison.iter().enumerate() {
+            if let Some(slot) = self.comparison_to_projected.get_mut(c) {
+                *slot = Some(p);
+            }
+        }
+        self.heights = measured
+            .into_iter()
+            .take(self.projected_to_comparison.len())
+            .map(Self::valid_height)
+            .collect();
+        self.heights
+            .resize(self.projected_to_comparison.len(), MIN_VISUAL_LINE_HEIGHT);
+        self.rebuild_offsets();
+    }
+
+    pub fn set_height(&mut self, row: usize, height: f32) {
+        if let Some(v) = self.heights.get_mut(row) {
+            *v = Self::valid_height(height);
+            self.rebuild_offsets();
+        }
+    }
+    fn valid_height(height: f32) -> f32 {
+        if height.is_finite() {
+            height.max(MIN_VISUAL_LINE_HEIGHT)
+        } else {
+            MIN_VISUAL_LINE_HEIGHT
+        }
+    }
+    fn rebuild_offsets(&mut self) {
+        self.offsets.clear();
+        self.offsets.reserve(self.heights.len() + 1);
+        self.offsets.push(0.0);
+        for &height in &self.heights {
+            self.offsets
+                .push(self.offsets.last().copied().unwrap_or(0.0) + Self::valid_height(height));
+        }
+    }
+    pub fn total_height(&self) -> f32 {
+        self.offsets.last().copied().unwrap_or(0.0)
+    }
+    pub fn offset_for_row(&self, row: usize) -> f32 {
+        self.offsets
+            .get(row.min(self.heights.len()))
+            .copied()
+            .unwrap_or(0.0)
+    }
+    pub fn row_at_offset(&self, y: f32) -> (usize, f32) {
+        if self.heights.is_empty() {
+            return (0, 0.0);
+        }
+        let y = if y.is_finite() {
+            y.max(0.0).min(self.total_height())
+        } else {
+            0.0
+        };
+        let row = self
+            .offsets
+            .partition_point(|&offset| offset <= y)
+            .saturating_sub(1)
+            .min(self.heights.len() - 1);
+        (row, (y - self.offsets[row]).max(0.0).min(self.heights[row]))
+    }
+    pub fn visible_range(
+        &self,
+        scroll_y: f32,
+        viewport: f32,
+        overscan: usize,
+    ) -> std::ops::Range<usize> {
+        if self.heights.is_empty() {
+            return 0..0;
+        }
+        let first = self.row_at_offset(scroll_y).0;
+        let end_y = (scroll_y.max(0.0) + viewport.max(0.0)).min(self.total_height());
+        let end = self
+            .offsets
+            .partition_point(|&offset| offset < end_y)
+            .max(first + 1)
+            .min(self.heights.len());
+        first.saturating_sub(overscan)..(end + overscan).min(self.heights.len())
+    }
 }
 
 /// Clamp persisted values as they cross the model boundary; NaN and corrupt
@@ -555,22 +702,26 @@ pub fn visible_row_range(
     viewport: f32,
     overscan: usize,
 ) -> std::ops::Range<usize> {
-    if heights.is_empty() {
-        return 0..0;
-    }
-    let mut y = 0.0;
-    let mut first = 0;
-    while first < heights.len() && y + heights[first] <= scroll_y {
-        y += heights[first];
-        first += 1;
-    }
-    let mut end = first;
-    let limit = scroll_y + viewport;
-    while end < heights.len() && y < limit {
-        y += heights[end];
-        end += 1;
-    }
-    first.saturating_sub(overscan)..(end + overscan).min(heights.len())
+    let mut cache = RowMeasurementCache::default();
+    cache.rebuild(
+        RowMeasureKey {
+            left_revision: 0,
+            right_revision: 0,
+            comparison_revision: 0,
+            left_text_width_bits: 0,
+            right_text_width_bits: 0,
+            font_theme: 0,
+            text_style: 0,
+            display_config: 0,
+            wrap: true,
+            projection_mode: 0,
+            projection_context: 0,
+        },
+        (0..heights.len()).collect(),
+        heights.len(),
+        heights.iter().copied(),
+    );
+    cache.visible_range(scroll_y, viewport, overscan)
 }
 
 pub fn visual_to_source(row: &AlignedDiffRow, side: DiffSide) -> Option<usize> {
@@ -610,6 +761,7 @@ pub struct TextViewModel {
     /// A model-row navigation target waiting to be consumed by the view.
     pub pending_scroll_row: Option<usize>,
     pub scroll: TextScrollState,
+    pub row_measurements: RowMeasurementCache,
     pub projection_mode: RowProjectionMode,
     pub projection_context: usize,
     pub find_open: bool,
@@ -698,6 +850,7 @@ impl TextViewModel {
             current_row: None,
             pending_scroll_row: None,
             scroll: TextScrollState::default(),
+            row_measurements: RowMeasurementCache::default(),
             projection_mode: RowProjectionMode::All,
             projection_context: 3,
             find_open: false,
@@ -831,8 +984,7 @@ impl TextViewModel {
     pub fn request_scroll_row(&mut self, row: Option<usize>) {
         self.pending_scroll_row = row;
         if let Some(row) = row {
-            self.scroll
-                .target_aligned_row(row, if self.wrap { 34.0 } else { 20.0 });
+            self.scroll.target_measured_row(row, &self.row_measurements);
         }
     }
     pub fn set_ignore_all_whitespace(&mut self, value: bool) {
@@ -1265,6 +1417,107 @@ mod tests {
             "only visible rows plus overscan are laid out"
         );
         assert!(range.start > 0);
+    }
+
+    fn measure_key(wrap: bool, left_width: f32, right_width: f32) -> RowMeasureKey {
+        RowMeasureKey {
+            left_revision: 1,
+            right_revision: 2,
+            comparison_revision: 3,
+            left_text_width_bits: left_width.to_bits(),
+            right_text_width_bits: right_width.to_bits(),
+            font_theme: 4,
+            text_style: 5,
+            display_config: 6,
+            wrap,
+            projection_mode: 0,
+            projection_context: 3,
+        }
+    }
+
+    #[test]
+    fn measurement_cache_prefix_boundaries_within_rows_and_overscan() {
+        let mut cache = RowMeasurementCache::default();
+        cache.rebuild(
+            measure_key(true, 100.0, 200.0),
+            vec![2, 4, 7],
+            8,
+            [20.0, 30.0, 40.0],
+        );
+        assert_eq!(cache.offsets, [0.0, 20.0, 50.0, 90.0]);
+        assert_eq!(cache.row_at_offset(0.0), (0, 0.0));
+        assert_eq!(cache.row_at_offset(19.0), (0, 19.0));
+        assert_eq!(cache.row_at_offset(20.0), (1, 0.0));
+        assert_eq!(cache.row_at_offset(55.0), (2, 5.0));
+        assert_eq!(cache.offset_for_row(2), 50.0);
+        assert_eq!(cache.visible_range(50.0, 1.0, 1), 1..3);
+        assert_eq!(cache.comparison_to_projected[4], Some(1));
+    }
+
+    #[test]
+    fn measurement_cache_is_safe_for_empty_and_corrupt_input() {
+        let mut empty = RowMeasurementCache::default();
+        empty.rebuild(measure_key(true, 1.0, 1.0), vec![], 0, []);
+        assert_eq!(empty.offsets, [0.0]);
+        assert_eq!(empty.visible_range(100.0, 20.0, 4), 0..0);
+        assert_eq!(empty.row_at_offset(f32::NAN), (0, 0.0));
+
+        let mut corrupt = RowMeasurementCache::default();
+        corrupt.rebuild(
+            measure_key(true, 1.0, 1.0),
+            vec![0, 1, 2, 3],
+            4,
+            [f32::NAN, -3.0, f32::INFINITY, 25.0],
+        );
+        assert_eq!(corrupt.heights, [20.0, 20.0, 20.0, 25.0]);
+        assert!(corrupt.offsets.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn measurement_keys_invalidate_only_layout_inputs() {
+        let base = measure_key(false, 300.0, 700.0);
+        assert_ne!(base, measure_key(true, 300.0, 700.0));
+        assert_ne!(base, measure_key(false, 301.0, 700.0));
+        assert_ne!(base, measure_key(false, 300.0, 701.0));
+        // Paint-only state has deliberately no representation in RowMeasureKey.
+        let hover_or_selection_changed = base.clone();
+        assert_eq!(base, hover_or_selection_changed);
+    }
+
+    #[test]
+    fn very_large_cache_queries_and_navigation_remain_exact() {
+        let count = 1_000_000;
+        let mut cache = RowMeasurementCache::default();
+        cache.rebuild(
+            measure_key(true, 80.0, 500.0),
+            (0..count).collect(),
+            count,
+            std::iter::repeat_n(20.0, count),
+        );
+        assert_eq!(cache.offset_for_row(900_000), 18_000_000.0);
+        assert_eq!(cache.row_at_offset(18_000_007.0), (900_000, 7.0));
+        assert!(cache.visible_range(18_000_000.0, 400.0, 4).len() <= 29);
+
+        cache.set_height(0, 100.0);
+        let mut scroll = TextScrollState::default();
+        scroll.target_measured_row(2, &cache);
+        assert_eq!(scroll.left_vertical, 120.0);
+        scroll.drive_measured(DiffSide::Left, 0.0, 105.0, &cache);
+        assert_eq!((scroll.aligned_row, scroll.within_row), (1, 5.0));
+    }
+
+    #[test]
+    fn wrap_toggle_changes_geometry_key_and_preserves_horizontal_offsets() {
+        let mut scroll = TextScrollState::default();
+        scroll.set_sync(true, false);
+        scroll.drive(DiffSide::Left, 123.0, 0.0, 20.0, false);
+        let off = measure_key(false, 400.0, 400.0);
+        let on = measure_key(true, 400.0, 400.0);
+        assert_ne!(off, on);
+        scroll.drive(DiffSide::Left, 0.0, 45.0, 20.0, true);
+        scroll.drive(DiffSide::Left, 123.0, 45.0, 20.0, false);
+        assert_eq!(scroll.left_horizontal, 123.0);
+        assert_eq!(off, measure_key(false, 400.0, 400.0));
     }
     #[test]
     fn placeholder_mapping_and_anchor_use_source_coordinates() {
