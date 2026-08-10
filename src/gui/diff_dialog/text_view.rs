@@ -3,6 +3,7 @@ use crate::diff::text_compare::{
     ChangeImportance, DiffRowKind, FindScope, NavigationDirection, RowProjectionMode,
 };
 use eframe::egui::{self, Color32, RichText};
+use std::hash::{Hash, Hasher};
 
 pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewModel) {
     model.poll();
@@ -207,6 +208,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
     model.splitter = crate::diff::model::validated_splitter(model.splitter);
     let (left_width, splitter_width, right_width) =
         comparison_dimensions(available, comparison_height, model.splitter);
+    prepare_row_measurements(ui, model, left_width, right_width);
     let pending = model.pending_scroll_row;
     let mut scroll_accepted = pending.is_none();
     ui.horizontal(|ui| {
@@ -270,6 +272,83 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         model.pending_scroll_row = None;
     }
     super::rules_dialog::show(ui.ctx(), view, model);
+}
+
+const TEXT_INSET: f32 = 72.0;
+
+fn prepare_row_measurements(
+    ui: &egui::Ui,
+    model: &mut TextViewModel,
+    left_pane: f32,
+    right_pane: f32,
+) {
+    let Some(c) = model.comparison.as_ref() else {
+        model.row_measurements = Default::default();
+        return;
+    };
+    let left_width = (left_pane - TEXT_INSET).max(1.0);
+    let right_width = (right_pane - TEXT_INSET).max(1.0);
+    let projected = crate::diff::text_compare::row_projection(
+        c,
+        model.projection_mode,
+        model.projection_context,
+    );
+    let mut identity = std::collections::hash_map::DefaultHasher::new();
+    ui.visuals().dark_mode.hash(&mut identity);
+    egui::FontId::monospace(14.0).family.hash(&mut identity);
+    let key = crate::diff::model::RowMeasureKey {
+        left_revision: model.left.revision,
+        right_revision: model.right.revision,
+        comparison_revision: c.rules_revision,
+        left_text_width_bits: left_width.to_bits(),
+        right_text_width_bits: right_width.to_bits(),
+        font_theme: identity.finish(),
+        text_style: 14.0f32.to_bits() as u64,
+        display_config: ((model.syntax as u64) << 1)
+            | model.large_file_tier.syntax_enabled() as u64,
+        wrap: model.wrap,
+        projection_mode: match model.projection_mode {
+            RowProjectionMode::All => 0,
+            RowProjectionMode::DifferencesOnly => 1,
+        },
+        projection_context: model.projection_context,
+    };
+    if model.row_measurements.key.as_ref() == Some(&key) {
+        return;
+    }
+    let left_source = model.left.source();
+    let right_source = model.right.source();
+    let heights: Vec<f32> = projected
+        .iter()
+        .map(|&comparison_row| {
+            let row = &c.rows[comparison_row];
+            let measure = |side: DiffSide, width: f32| {
+                let source = if side == DiffSide::Left {
+                    left_source
+                } else {
+                    right_source
+                };
+                let line = crate::diff::model::visual_to_source(row, side)
+                    .and_then(|n| source.lines().nth(n))
+                    .unwrap_or("");
+                if !model.wrap {
+                    return crate::diff::model::MIN_VISUAL_LINE_HEIGHT;
+                }
+                let mut job = egui::text::LayoutJob::simple(
+                    line.replace('\t', "    "),
+                    egui::FontId::monospace(14.0),
+                    ui.visuals().text_color(),
+                    width,
+                );
+                job.wrap.max_width = width;
+                ui.fonts(|fonts| fonts.layout_job(job).size().y)
+            };
+            measure(DiffSide::Left, left_width).max(measure(DiffSide::Right, right_width))
+        })
+        .collect();
+    model
+        .row_measurements
+        .rebuild(key, projected, c.rows.len(), heights);
 }
 
 /// Allocates the pane before laying out any of its content. The child can grow
@@ -369,7 +448,10 @@ fn render_pane_contents(
         model.projection_context,
     );
     let rows = &c.rows;
-    let row_height = if wrapped { 34.0 } else { 20.0 };
+    let row_height = crate::diff::model::MIN_VISUAL_LINE_HEIGHT;
+    let measured_heights = model.row_measurements.heights.clone();
+    let measured_offsets = model.row_measurements.offsets.clone();
+    let measurement_cache = model.row_measurements.clone();
     let axis_id = if wrapped {
         "vertical"
     } else {
@@ -391,12 +473,17 @@ fn render_pane_contents(
         let visual = projected
             .binary_search(&row_index)
             .unwrap_or_else(|i| i.min(projected.len().saturating_sub(1)));
-        scroll = scroll.vertical_scroll_offset(visual as f32 * row_height);
+        let offset = if wrapped {
+            model.row_measurements.offset_for_row(visual) as f32
+        } else {
+            visual as f32 * row_height
+        };
+        scroll = scroll.vertical_scroll_offset(offset);
     }
     // Defer model mutation until after the scroll callback releases its
     // immutable borrow of the retained comparison.
     let mut selected_row = None;
-    let output = scroll.show_rows(ui, row_height, projected.len(), |ui, range| {
+    let mut render_range = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
         if !wrapped {
             let canvas_width = source
                 .lines()
@@ -417,7 +504,14 @@ fn render_pane_contents(
             };
             let frame = egui::Frame::none().fill(if current { bg.gamma_multiply(1.5) } else { bg });
             frame.show(ui, |ui| {
-                ui.set_min_height(row_height);
+                ui.set_min_height(if wrapped {
+                    measured_heights
+                        .get(projected_i)
+                        .copied()
+                        .unwrap_or(row_height)
+                } else {
+                    row_height
+                });
                 ui.horizontal(|ui| {
                     let line = crate::diff::model::visual_to_source(row, side);
                     ui.label(
@@ -502,6 +596,10 @@ fn render_pane_contents(
                             // canvas instead of negotiating a wider parent pane.
                             if !wrapped {
                                 job.wrap.max_width = f32::INFINITY;
+                            } else {
+                                // Force breaking even for uninterrupted tokens;
+                                // wrapped content never negotiates a wider pane.
+                                job.wrap.max_width = ui.available_width().max(1.0);
                             }
                             ui.add(egui::Label::new(job).wrap(wrapped))
                                 .on_hover_text(format!("{semantic} line"));
@@ -516,7 +614,22 @@ fn render_pane_contents(
                 });
             });
         }
-    });
+    };
+    let output = if wrapped {
+        scroll.show_viewport(ui, |ui, viewport| {
+            let range = measurement_cache.visible_range(viewport.top(), viewport.height(), 4);
+            let before = measured_offsets.get(range.start).copied().unwrap_or(0.0);
+            let after = measurement_cache.total_height()
+                - measured_offsets.get(range.end).copied().unwrap_or(0.0);
+            ui.add_space(before as f32);
+            render_range(ui, range);
+            ui.add_space(after.max(0.0) as f32);
+        })
+    } else {
+        scroll.show_rows(ui, row_height, projected.len(), |ui, range| {
+            render_range(ui, range)
+        })
+    };
     let new_x = output.state.offset.x;
     let new_y = output.state.offset.y;
     let focus_id = egui::Id::new((workspace, view, side, axis_id, "focus"));
@@ -545,8 +658,18 @@ fn render_pane_contents(
                 })
         });
     if offset_changed || directly_interacting {
-        model.scroll.drive(side, new_x, new_y, row_height, wrapped);
-        let visual = (new_y / row_height.max(1.0)) as usize;
+        if wrapped {
+            model
+                .scroll
+                .drive_measured(side, new_x, new_y, &model.row_measurements);
+        } else {
+            model.scroll.drive(side, new_x, new_y, row_height, false);
+        }
+        let visual = if wrapped {
+            model.row_measurements.row_at_offset(new_y as f64).0
+        } else {
+            (new_y / row_height.max(1.0)) as usize
+        };
         if let Some(&aligned) = projected.get(visual.min(projected.len().saturating_sub(1))) {
             model.scroll.aligned_row = aligned;
         }
