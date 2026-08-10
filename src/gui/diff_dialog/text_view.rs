@@ -598,7 +598,7 @@ mod tests {
         input.screen_rect = Some(screen);
         let measured = Rc::new(RefCell::new(None));
         let captured = measured.clone();
-        context.run(input, |ctx| {
+        let _ = context.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.allocate_ui(egui::vec2(300.0, 200.0), |ui| {
                     let json = format!(r#"{{"payload":"{}"}}"#, "x".repeat(100_000));

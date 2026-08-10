@@ -1674,7 +1674,7 @@ mod tests {
                             ui.label("Left");
                             ui.label("↔");
                             ui.label("Right");
-                            ui.button("Compare");
+                            let _ = ui.button("Compare");
                         });
                         ui.separator();
                         allocate_remaining_workspace(ui, |ui| {
@@ -1696,7 +1696,7 @@ mod tests {
                                                 egui::pos2(workspace.left(), y),
                                                 egui::pos2(workspace.right(), y),
                                             ],
-                                            egui::Stroke::new(1.0, egui::Color32::GRAY),
+                                            egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
                                         );
                                     }
                                 }
