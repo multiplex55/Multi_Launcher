@@ -202,10 +202,11 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             });
         });
     ui.separator();
-    let available = ui.available_width();
-    let comparison_height = ui.available_height();
+    let available = ui.available_width().max(0.0);
+    let comparison_height = ui.available_height().max(0.0);
     model.splitter = crate::diff::model::validated_splitter(model.splitter);
-    let left_width = (available - 8.0) * model.splitter;
+    let (left_width, splitter_width, right_width) =
+        comparison_dimensions(available, comparison_height, model.splitter);
     let pending = model.pending_scroll_row;
     let mut scroll_accepted = pending.is_none();
     ui.horizontal(|ui| {
@@ -214,8 +215,10 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             egui::Layout::top_down(egui::Align::Min),
             |ui| scroll_accepted &= pane(ui, workspace, view, DiffSide::Left, model, pending),
         );
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(8.0, comparison_height), egui::Sense::drag());
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(splitter_width, comparison_height),
+            egui::Sense::drag(),
+        );
         ui.painter()
             .rect_filled(rect, 2.0, ui.visuals().widgets.inactive.bg_fill);
         if let Some(c) = &model.comparison {
@@ -259,7 +262,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             );
         }
         ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), comparison_height),
+            egui::vec2(right_width, comparison_height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| scroll_accepted &= pane(ui, workspace, view, DiffSide::Right, model, pending),
         );
@@ -268,6 +271,15 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         model.pending_scroll_row = None;
     }
     super::rules_dialog::show(ui.ctx(), view, model);
+}
+
+fn comparison_dimensions(width: f32, height: f32, splitter: f32) -> (f32, f32, f32) {
+    let width = width.max(0.0);
+    let _height = height.max(0.0);
+    let splitter_width = 8.0_f32.min(width);
+    let pane_width = (width - splitter_width).max(0.0);
+    let left = pane_width * splitter.clamp(0.0, 1.0);
+    (left, splitter_width, (pane_width - left).max(0.0))
 }
 fn pane(
     ui: &mut egui::Ui,
@@ -564,6 +576,21 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     #[test]
+    fn comparison_allocations_are_non_negative_and_bounded() {
+        for (width, height) in [
+            (400.0, 250.0),
+            (900.0, 650.0),
+            (1600.0, 1000.0),
+            (3.0, -2.0),
+        ] {
+            let (left, splitter, right) = comparison_dimensions(width, height, 0.5);
+            assert!(left >= 0.0 && splitter >= 0.0 && right >= 0.0);
+            assert!(left + splitter + right <= width.max(0.0));
+            assert!(height.max(0.0) >= 0.0);
+        }
+    }
+
+    #[test]
     fn minified_json_long_line_is_clipped_to_pane_and_scrolls_horizontally() {
         let context = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
@@ -571,7 +598,7 @@ mod tests {
         input.screen_rect = Some(screen);
         let measured = Rc::new(RefCell::new(None));
         let captured = measured.clone();
-        context.run(input, |ctx| {
+        let _ = context.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.allocate_ui(egui::vec2(300.0, 200.0), |ui| {
                     let json = format!(r#"{{"payload":"{}"}}"#, "x".repeat(100_000));

@@ -287,7 +287,10 @@ impl DiffDialogState {
                 egui::vec2(ui.available_width(), header_height),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    let left = ui.add(
+                    let path_width =
+                        header_path_width(ui.available_width(), ui.spacing().item_spacing.x);
+                    let left = ui.add_sized(
+                        [path_width, header_height],
                         egui::TextEdit::singleline(&mut self.workspace.left_visible)
                             .id(egui::Id::new((self.workspace.workspace_id, "left")))
                             .hint_text("Left file or folder"),
@@ -298,7 +301,8 @@ impl DiffDialogState {
                     }
                     picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Left);
                     ui.label("↔");
-                    ui.add(
+                    ui.add_sized(
+                        [path_width, header_height],
                         egui::TextEdit::singleline(&mut self.workspace.right_visible)
                             .id(egui::Id::new((self.workspace.workspace_id, "right")))
                             .hint_text("Right file or folder"),
@@ -876,6 +880,12 @@ impl DiffDialogState {
         }
         moved
     }
+}
+
+/// Leaves a conservative fixed budget for two Browse menus, the arrow, Compare,
+/// and inter-widget spacing, then shares all flexible width between path editors.
+fn header_path_width(available_width: f32, spacing: f32) -> f32 {
+    ((available_width.max(0.0) - 230.0 - spacing.max(0.0) * 6.0) / 2.0).max(24.0)
 }
 
 fn folder_filter_name(value: &crate::diff::model::FolderDisplayFilter) -> &'static str {
@@ -1638,6 +1648,7 @@ mod tests {
         ctx: &egui::Context,
         view: &DiffView,
         folder_rows: usize,
+        requested_size: egui::Vec2,
     ) -> (egui::Rect, egui::Rect, egui::Rect) {
         let mut outer = egui::Rect::NOTHING;
         let mut workspace = egui::Rect::NOTHING;
@@ -1645,7 +1656,7 @@ mod tests {
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(1000.0, 800.0),
+            requested_size + egui::vec2(200.0, 200.0),
         ));
         // egui applies a new window's default geometry through memory during
         // its first frame. Render a warm-up frame before observing geometry so
@@ -1657,13 +1668,13 @@ mod tests {
                     .collapsible(false)
                     .resizable(true)
                     .default_pos(egui::pos2(40.0, 30.0))
-                    .default_size(egui::vec2(640.0, 480.0))
+                    .default_size(requested_size)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Left");
                             ui.label("↔");
                             ui.label("Right");
-                            ui.button("Compare");
+                            let _ = ui.button("Compare");
                         });
                         ui.separator();
                         allocate_remaining_workspace(ui, |ui| {
@@ -1685,7 +1696,7 @@ mod tests {
                                                 egui::pos2(workspace.left(), y),
                                                 egui::pos2(workspace.right(), y),
                                             ],
-                                            egui::Stroke::new(1.0, egui::Color32::GRAY),
+                                            egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
                                         );
                                     }
                                 }
@@ -1715,28 +1726,39 @@ mod tests {
 
     #[test]
     fn workspace_views_retain_requested_window_geometry_and_parent_clip() {
-        let ctx = egui::Context::default();
-        let mut expected = None;
-        for kind in 0..4 {
-            let (outer, workspace, clip) = render_layout_frame(&ctx, &lightweight_view(kind), 1);
-            // `Window::default_size` is the requested inner size; the outer
-            // response additionally includes the platform/style frame.
-            assert!(outer.width() >= 640.0, "{outer:?}");
-            assert!(outer.height() >= 480.0, "{outer:?}");
-            assert!(outer.contains_rect(workspace));
-            assert!(outer.contains_rect(clip));
-            assert!(clip.contains_rect(workspace));
-            // `InnerResponse::response` describes the widgets' content and may
-            // shrink to a short label. The allocated UI's max rect is the
-            // layout boundary that must reserve the remaining window space.
-            // The workspace spans the requested inner width. The outer rect
-            // is wider because it also includes the window frame.
-            assert!((workspace.width() - 640.0).abs() <= 0.5, "{workspace:?}");
-            assert!(workspace.height() > 400.0, "{workspace:?}");
-            if let Some(expected) = expected {
-                assert_rect_close(outer, expected);
-            } else {
-                expected = Some(outer);
+        for requested in [
+            egui::vec2(400.0, 250.0),
+            egui::vec2(900.0, 650.0),
+            egui::vec2(1600.0, 1000.0),
+        ] {
+            let ctx = egui::Context::default();
+            let mut expected = None;
+            for kind in 0..4 {
+                let (outer, workspace, clip) =
+                    render_layout_frame(&ctx, &lightweight_view(kind), 1, requested);
+                // `Window::default_size` is the requested inner size; the outer
+                // response additionally includes the platform/style frame.
+                assert!(outer.width() >= requested.x, "{outer:?}");
+                assert!(outer.height() >= requested.y, "{outer:?}");
+                assert!(outer.contains_rect(workspace));
+                assert!(outer.contains_rect(clip));
+                assert!(clip.contains_rect(workspace));
+                // `InnerResponse::response` describes the widgets' content and may
+                // shrink to a short label. The allocated UI's max rect is the
+                // layout boundary that must reserve the remaining window space.
+                // The workspace spans the requested inner width. The outer rect
+                // is wider because it also includes the window frame.
+                assert!(
+                    (workspace.width() - requested.x).abs() <= 0.5,
+                    "{workspace:?}"
+                );
+                assert!(workspace.height() <= requested.y, "{workspace:?}");
+                assert!(workspace.height() >= 0.0, "{workspace:?}");
+                if let Some(expected) = expected {
+                    assert_rect_close(outer, expected);
+                } else {
+                    expected = Some(outer);
+                }
             }
         }
     }
@@ -1745,10 +1767,21 @@ mod tests {
     fn folder_content_amount_does_not_resize_outer_window() {
         let ctx = egui::Context::default();
         let view = lightweight_view(1);
-        let (short, _, _) = render_layout_frame(&ctx, &view, 0);
-        let (long, workspace, clip) = render_layout_frame(&ctx, &view, 100);
+        let size = egui::vec2(640.0, 480.0);
+        let (short, _, _) = render_layout_frame(&ctx, &view, 0, size);
+        let (long, workspace, clip) = render_layout_frame(&ctx, &view, 100, size);
         assert_rect_close(long, short);
         assert!(long.contains_rect(workspace));
         assert!(long.contains_rect(clip));
+    }
+
+    #[test]
+    fn header_editors_share_only_flexible_width() {
+        assert_eq!(header_path_width(-1.0, 8.0), 24.0);
+        for width in [400.0, 900.0, 1600.0] {
+            let editor = header_path_width(width, 8.0);
+            assert!(editor >= 24.0);
+            assert!(editor * 2.0 <= width.max(48.0));
+        }
     }
 }

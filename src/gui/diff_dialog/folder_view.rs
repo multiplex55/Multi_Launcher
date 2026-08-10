@@ -196,15 +196,18 @@ pub(super) fn show(
     runtime: &crate::diff::folder_runtime::FolderRuntime,
 ) -> FolderViewAction {
     ui.label("Folder comparison");
-    egui::ScrollArea::horizontal()
-        .max_height(22.0)
-        .show(ui, |ui| {
-            ui.label(format!(
-                "{} ↔ {}",
-                state.left_root.display(),
-                state.right_root.display()
-            ));
-        });
+    let root_row = egui::vec2(ui.available_width().max(0.0), 22.0);
+    ui.allocate_ui(root_row, |ui| {
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.label(format!(
+                    "{} ↔ {}",
+                    state.left_root.display(),
+                    state.right_root.display()
+                ));
+            });
+    });
     let mut action = FolderViewAction::Noop;
     let command_height = ui.spacing().interact_size.y;
     ui.allocate_ui_with_layout(
@@ -331,37 +334,45 @@ pub(super) fn show(
     projected = projected_rows(state);
     paths = projected.iter().map(|r| r.path.clone()).collect();
     ui.separator();
-    egui::ScrollArea::both()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            egui::Grid::new("folder-results")
-                .striped(true)
-                .num_columns(6)
-                .show(ui, |ui| {
-                    for heading in [
-                        "Left path",
-                        "Left size / modified",
-                        "Status",
-                        "Right path",
-                        "Right size / modified",
-                        "",
-                    ] {
-                        ui.strong(heading);
-                    }
-                    ui.end_row();
-                    for row in &projected {
-                        render_row(
-                            ui,
-                            state,
-                            &paths,
-                            row,
-                            runtime.mutation_active(),
-                            &mut action,
-                        );
-                    }
-                });
-        });
+    let results_size = folder_results_size(ui.available_size());
+    ui.allocate_ui(results_size, |ui| {
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("folder-results")
+                    .striped(true)
+                    .num_columns(6)
+                    .show(ui, |ui| {
+                        for heading in [
+                            "Left path",
+                            "Left size / modified",
+                            "Status",
+                            "Right path",
+                            "Right size / modified",
+                            "",
+                        ] {
+                            ui.strong(heading);
+                        }
+                        ui.end_row();
+                        for row in &projected {
+                            render_row(
+                                ui,
+                                state,
+                                &paths,
+                                row,
+                                runtime.mutation_active(),
+                                &mut action,
+                            );
+                        }
+                    });
+            });
+    });
     action
+}
+
+/// The results viewport consumes exactly the workspace left by the controls.
+fn folder_results_size(available: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(available.x.max(0.0), available.y.max(0.0))
 }
 
 fn render_row(
@@ -603,6 +614,20 @@ mod tests {
     use super::*;
     use crate::diff::folder_compare::{EntryMetadata, EntrySide, FolderEntry};
     use std::time::SystemTime;
+
+    #[test]
+    fn result_viewport_is_bounded_and_independent_of_row_count() {
+        for size in [(400.0, 250.0), (900.0, 650.0), (1600.0, 1000.0)] {
+            let one = folder_results_size(egui::vec2(size.0, size.1));
+            let many = folder_results_size(egui::vec2(size.0, size.1));
+            assert_eq!(one, many);
+            assert!(one.x <= size.0 && one.y <= size.1);
+        }
+        assert_eq!(
+            folder_results_size(egui::vec2(-5.0, -9.0)),
+            egui::Vec2::ZERO
+        );
+    }
 
     fn state(items: &[(&str, FolderStatus)]) -> FolderCompareState {
         let mut state = FolderCompareState::default();

@@ -1101,6 +1101,17 @@ impl Plugin for TodoPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // TODO_DATA is intentionally process-wide. Tests which replace its contents
+    // must not overlap when the suite is run with multiple test threads.
+    static TODO_DATA_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn lock_todo_data() -> std::sync::MutexGuard<'static, ()> {
+        TODO_DATA_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn set_todos(entries: Vec<TodoEntry>) -> Vec<TodoEntry> {
         let original = TODO_DATA.read().unwrap().clone();
@@ -1111,6 +1122,7 @@ mod tests {
 
     #[test]
     fn list_filters_by_tags_and_text() {
+        let _lock = lock_todo_data();
         let original = set_todos(vec![
             TodoEntry {
                 text: "foo alpha".into(),
@@ -1193,6 +1205,7 @@ mod tests {
 
     #[test]
     fn tag_command_lists_tags_and_filters() {
+        let _lock = lock_todo_data();
         let original = set_todos(vec![
             TodoEntry {
                 text: "foo alpha".into(),
@@ -1351,6 +1364,7 @@ mod tests {
 
     #[test]
     fn todo_links_no_match_and_ambiguous_paths() {
+        let _lock = lock_todo_data();
         let original = set_todos(vec![
             TodoEntry {
                 id: "t-1".into(),
@@ -1392,6 +1406,7 @@ mod tests {
 
     #[test]
     fn todo_links_reuses_cached_index_between_queries() {
+        let _lock = lock_todo_data();
         reset_todo_links_index_cache_state();
         let original = set_todos(vec![TodoEntry {
             id: "t-cache".into(),
@@ -1438,6 +1453,7 @@ mod tests {
 
     #[test]
     fn todo_links_json_output_prefixes_machine_readable_row() {
+        let _lock = lock_todo_data();
         let original = set_todos(vec![TodoEntry {
             id: "t-3".into(),
             text: "write docs".into(),

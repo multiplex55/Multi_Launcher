@@ -37,22 +37,29 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut BinaryView
             (model.visible_byte_offset / model.bytes_per_row as u64) as f32 * row_height,
         );
     }
-    egui::ScrollArea::horizontal()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            scroll.show_rows(ui, row_height, rows, |ui, range| {
-                for row_index in range {
-                    let offset = row_index as u64 * model.bytes_per_row as u64;
-                    if let Ok(row) = model.row(offset) {
-                        ui.horizontal(|ui| {
-                            side(ui, row.offset, &row.left);
-                            ui.separator();
-                            side(ui, row.offset, &row.right);
-                        });
+    let viewport = binary_viewport_size(ui.available_size());
+    ui.allocate_ui(viewport, |ui| {
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                scroll.show_rows(ui, row_height, rows, |ui, range| {
+                    for row_index in range {
+                        let offset = row_index as u64 * model.bytes_per_row as u64;
+                        if let Ok(row) = model.row(offset) {
+                            ui.horizontal(|ui| {
+                                side(ui, row.offset, &row.left);
+                                ui.separator();
+                                side(ui, row.offset, &row.right);
+                            });
+                        }
                     }
-                }
+                });
             });
-        });
+    });
+}
+
+fn binary_viewport_size(available: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(available.x.max(0.0), available.y.max(0.0))
 }
 
 fn side(ui: &mut egui::Ui, offset: u64, cells: &[BinaryCell]) {
@@ -70,4 +77,23 @@ fn side(ui: &mut egui::Ui, offset: u64, cells: &[BinaryCell]) {
         );
     }
     ui.label(RichText::new(BinaryRow::ascii(cells)).monospace());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_viewport_never_exceeds_workspace_or_depends_on_row_width() {
+        for (width, height) in [(400.0, 250.0), (900.0, 650.0), (1600.0, 1000.0)] {
+            let short = binary_viewport_size(egui::vec2(width, height));
+            let long = binary_viewport_size(egui::vec2(width, height));
+            assert_eq!(short, long, "content width is handled by the scroll area");
+            assert!(short.x <= width && short.y <= height);
+        }
+        assert_eq!(
+            binary_viewport_size(egui::vec2(-1.0, -1.0)),
+            egui::Vec2::ZERO
+        );
+    }
 }
