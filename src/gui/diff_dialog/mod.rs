@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 mod binary_view;
 mod export;
+mod folder_table;
 mod folder_view;
 mod operation_preview;
 mod rules_dialog;
