@@ -31,7 +31,14 @@ fn allocate_remaining_workspace<R>(
     ui.allocate_ui_with_layout(
         workspace_size,
         egui::Layout::top_down(egui::Align::Min),
-        render,
+        |ui| {
+            let result = render(ui);
+            // egui 0.27 advances the parent by the child UI's used `min_rect`,
+            // not by the size requested above. Consume any unused workspace so
+            // short views still reserve the complete remaining window area.
+            ui.allocate_space(ui.available_size());
+            result
+        },
     )
 }
 
@@ -1595,15 +1602,25 @@ mod tests {
                             workspace = ui.max_rect();
                             workspace_clip = ui.clip_rect();
                             match view {
-                                DiffView::Start => ui.label("Start"),
-                                DiffView::FolderCompare(_) => {
-                                    for row in 0..folder_rows {
-                                        ui.label(format!("folder row {row}"));
-                                    }
-                                    ui.label("Folder")
+                                DiffView::Start => {
+                                    ui.label("Start");
                                 }
-                                DiffView::TextCompare(_) => ui.label("Text"),
-                                DiffView::BinaryCompare(_) => ui.label("Binary"),
+                                DiffView::FolderCompare(_) => {
+                                    egui::ScrollArea::vertical()
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            for row in 0..folder_rows {
+                                                ui.label(format!("folder row {row}"));
+                                            }
+                                            ui.label("Folder");
+                                        });
+                                }
+                                DiffView::TextCompare(_) => {
+                                    ui.label("Text");
+                                }
+                                DiffView::BinaryCompare(_) => {
+                                    ui.label("Binary");
+                                }
                             };
                         });
                     })
