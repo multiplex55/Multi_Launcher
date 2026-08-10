@@ -35,23 +35,45 @@ struct WorkspaceRenderOutcome {
     recent_to_open: Option<crate::diff::persistence::DisplayPathPairV1>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DiffViewport {
+    rect: egui::Rect,
+    size: egui::Vec2,
+}
+
+impl DiffViewport {
+    fn remaining(ui: &egui::Ui) -> Self {
+        let available = ui.available_size();
+        let bounded = |value: f32| {
+            if value.is_finite() {
+                value.max(0.0)
+            } else {
+                0.0
+            }
+        };
+        let size = egui::vec2(bounded(available.x), bounded(available.y));
+        Self {
+            rect: egui::Rect::from_min_size(ui.next_widget_position(), size),
+            size,
+        }
+    }
+}
+
 fn allocate_remaining_workspace<R>(
     ui: &mut egui::Ui,
     render: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let workspace_size = ui.available_size();
-    ui.allocate_ui_with_layout(
-        workspace_size,
+    let viewport = DiffViewport::remaining(ui);
+    // Allocate the outer rectangle before rendering. Content may enlarge an
+    // inner scroll extent, but it must never enlarge the workspace or Diff window.
+    let response = ui.allocate_rect(viewport.rect, egui::Sense::hover());
+    let mut child = ui.child_ui(
+        egui::Rect::from_min_size(viewport.rect.min, viewport.size),
         egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            let result = render(ui);
-            // egui 0.27 advances the parent by the child UI's used `min_rect`,
-            // not by the size requested above. Consume any unused workspace so
-            // short views still reserve the complete remaining window area.
-            ui.allocate_space(ui.available_size());
-            result
-        },
-    )
+    );
+    child.set_clip_rect(ui.clip_rect().intersect(viewport.rect));
+    let inner = render(&mut child);
+    egui::InnerResponse { inner, response }
 }
 
 #[derive(Default)]
@@ -1768,11 +1790,33 @@ mod tests {
         let ctx = egui::Context::default();
         let view = lightweight_view(1);
         let size = egui::vec2(640.0, 480.0);
-        let (short, _, _) = render_layout_frame(&ctx, &view, 0, size);
-        let (long, workspace, clip) = render_layout_frame(&ctx, &view, 100, size);
-        assert_rect_close(long, short);
-        assert!(long.contains_rect(workspace));
-        assert!(long.contains_rect(clip));
+        let (baseline, _, _) = render_layout_frame(&ctx, &view, 1, size);
+        for rows in [15, 1_000] {
+            let (outer, workspace, clip) = render_layout_frame(&ctx, &view, rows, size);
+            assert_rect_close(outer, baseline);
+            assert!(workspace.contains_rect(clip.intersect(workspace)));
+            assert!(clip.contains_rect(workspace));
+        }
+    }
+
+    #[test]
+    fn user_resize_grows_workspace_instead_of_using_content_size() {
+        let view = lightweight_view(0);
+        let (_, small, _) = render_layout_frame(
+            &egui::Context::default(),
+            &view,
+            0,
+            egui::vec2(640.0, 480.0),
+        );
+        let (_, large, clip) = render_layout_frame(
+            &egui::Context::default(),
+            &view,
+            0,
+            egui::vec2(1_000.0, 720.0),
+        );
+        assert!(large.width() > small.width());
+        assert!(large.height() > small.height());
+        assert!(clip.contains_rect(large));
     }
 
     #[test]
