@@ -310,6 +310,20 @@ impl DiffWorkspace {
     }
 }
 
+/// Preferred and minimum Diff window sizes, before adapting them to the work area.
+pub const DIFF_DEFAULT_SIZE: [f32; 2] = [900.0, 650.0];
+pub const DIFF_MIN_SIZE: [f32; 2] = [400.0, 250.0];
+
+/// Returns the minimum Diff window size that fits in the current work area.
+pub fn diff_window_min_size(screen: [f32; 4]) -> [f32; 2] {
+    let screen_width = (screen[2] - screen[0]).max(1.0);
+    let screen_height = (screen[3] - screen[1]).max(1.0);
+    [
+        DIFF_MIN_SIZE[0].min(screen_width),
+        DIFF_MIN_SIZE[1].min(screen_height),
+    ]
+}
+
 /// Returns safe initial window geometry for the current work area.
 ///
 /// This is deliberately the only policy used when restoring a diff window.
@@ -321,8 +335,11 @@ pub fn validated_window_geometry(
 ) -> ([f32; 2], Option<[f32; 2]>) {
     let screen_width = (screen[2] - screen[0]).max(1.0);
     let screen_height = (screen[3] - screen[1]).max(1.0);
-    let effective_min = [400.0_f32.min(screen_width), 250.0_f32.min(screen_height)];
-    let default = [900.0_f32.min(screen_width), 650.0_f32.min(screen_height)];
+    let effective_min = diff_window_min_size(screen);
+    let default = [
+        DIFF_DEFAULT_SIZE[0].min(screen_width),
+        DIFF_DEFAULT_SIZE[1].min(screen_height),
+    ];
     let size = persistence
         .window_size
         .filter(|s| {
@@ -1041,7 +1058,7 @@ mod tests {
     #[test]
     fn geometry_accepts_nominal_minimum_and_rejects_invalid_dimensions() {
         let screen = [0.0, 0.0, 1920.0, 1080.0];
-        for size in [[400.0, 250.0], [1000.0, 700.0]] {
+        for size in [DIFF_MIN_SIZE, [800.0, 250.0], [1000.0, 700.0]] {
             let mut p = crate::diff::persistence::DiffPersistenceV1::default();
             p.window_size = Some(size);
             p.window_position = Some([30.0, 40.0]);
@@ -1055,10 +1072,27 @@ mod tests {
             [f32::INFINITY, 250.0],
             [0.0, 250.0],
             [-1.0, 250.0],
+            [800.0, 72.0],
+            [800.0, 249.0],
+            [399.0, 250.0],
         ] {
             let mut p = crate::diff::persistence::DiffPersistenceV1::default();
             p.window_size = Some(invalid);
-            assert_eq!(validated_window_geometry(&p, screen).0, [900.0, 650.0]);
+            assert_eq!(validated_window_geometry(&p, screen).0, DIFF_DEFAULT_SIZE);
+        }
+    }
+
+    #[test]
+    fn geometry_rejects_non_finite_positions_and_clamps_oversized_sizes() {
+        let screen = [10.0, 20.0, 1210.0, 820.0];
+        let mut persistence = crate::diff::persistence::DiffPersistenceV1::default();
+        persistence.window_size = Some([2000.0, 1000.0]);
+        for position in [[f32::NAN, 30.0], [30.0, f32::INFINITY]] {
+            persistence.window_position = Some(position);
+            assert_eq!(
+                validated_window_geometry(&persistence, screen),
+                ([1200.0, 800.0], None)
+            );
         }
     }
     #[test]
@@ -1066,6 +1100,12 @@ mod tests {
         let mut p = crate::diff::persistence::DiffPersistenceV1::default();
         p.window_size = Some([900.0, 650.0]);
         p.window_position = Some([5000.0, -5000.0]);
+        assert_eq!(
+            validated_window_geometry(&p, [10.0, 20.0, 310.0, 220.0]),
+            ([300.0, 200.0], Some([10.0, 20.0]))
+        );
+        p.window_size = Some([300.0, 200.0]);
+        p.window_position = Some([10.0, 20.0]);
         assert_eq!(
             validated_window_geometry(&p, [10.0, 20.0, 310.0, 220.0]),
             ([300.0, 200.0], Some([10.0, 20.0]))

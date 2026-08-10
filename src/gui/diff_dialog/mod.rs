@@ -10,6 +10,18 @@ mod operation_preview;
 mod rules_dialog;
 mod text_view;
 
+/// Captures a complete, persistable runtime rectangle or rejects it atomically.
+fn runtime_window_geometry(rect: egui::Rect, screen: [f32; 4]) -> Option<([f32; 2], [f32; 2])> {
+    let coordinates = [rect.min.x, rect.min.y, rect.max.x, rect.max.y];
+    let size = [rect.width(), rect.height()];
+    let minimum = crate::diff::model::diff_window_min_size(screen);
+    (coordinates.iter().all(|value| value.is_finite())
+        && size.iter().all(|value| value.is_finite())
+        && size[0] >= minimum[0]
+        && size[1] >= minimum[1])
+        .then_some((size, [rect.left(), rect.top()]))
+}
+
 fn render_retained_folder(
     state: &mut crate::diff::model::FolderCompareState,
     render: impl FnOnce(&mut crate::diff::model::FolderCompareState) -> folder_view::FolderViewAction,
@@ -250,16 +262,19 @@ impl DiffDialogState {
             &self.persistence,
             [screen.left(), screen.top(), screen.right(), screen.bottom()],
         );
+        let minimum_size = crate::diff::model::diff_window_min_size([
+            screen.left(),
+            screen.top(),
+            screen.right(),
+            screen.bottom(),
+        ]);
         let mut window = egui::Window::new("Diff")
             .id(egui::Id::new(("diff_window", self.workspace.workspace_id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size(initial_size)
-            .min_size([
-                400.0_f32.min(screen.width()),
-                250.0_f32.min(screen.height()),
-            ]);
+            .min_size(minimum_size);
         if let Some(position) = initial_position {
             window = window.default_pos(position);
         }
@@ -332,8 +347,13 @@ impl DiffDialogState {
         self.show_operation_preview(ctx);
         if let Some(response) = response {
             let rect = response.response.rect;
-            self.persistence.window_size = Some([rect.width(), rect.height()]);
-            self.persistence.window_position = Some([rect.left(), rect.top()]);
+            if let Some((size, position)) = runtime_window_geometry(
+                rect,
+                [screen.left(), screen.top(), screen.right(), screen.bottom()],
+            ) {
+                self.persistence.window_size = Some(size);
+                self.persistence.window_position = Some(position);
+            }
         }
         if !open && self.text_views.values().any(|m| m.has_dirty()) {
             self.close_prompt = true;
@@ -1155,6 +1175,54 @@ mod tests {
             .0,
             [888.0, 666.0]
         );
+    }
+
+    #[test]
+    fn runtime_geometry_accepts_valid_and_effective_minimum_rectangles() {
+        let screen = [0.0, 0.0, 1920.0, 1080.0];
+        assert_eq!(
+            runtime_window_geometry(
+                egui::Rect::from_min_size(egui::pos2(12.0, 24.0), egui::vec2(1000.0, 700.0)),
+                screen,
+            ),
+            Some(([1000.0, 700.0], [12.0, 24.0]))
+        );
+        assert_eq!(
+            runtime_window_geometry(
+                egui::Rect::from_min_size(egui::pos2(3.0, 4.0), egui::vec2(400.0, 250.0)),
+                screen,
+            ),
+            Some((crate::diff::model::DIFF_MIN_SIZE, [3.0, 4.0]))
+        );
+        assert!(
+            runtime_window_geometry(
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0)),
+                [0.0, 0.0, 300.0, 200.0],
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn runtime_geometry_rejects_incomplete_rectangles_without_partial_persistence() {
+        let screen = [0.0, 0.0, 1920.0, 1080.0];
+        let rejected = [
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 61.0)),
+            egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(9.0, 260.0)),
+            egui::Rect::from_min_max(egui::pos2(f32::NAN, 0.0), egui::pos2(900.0, 650.0)),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(f32::INFINITY, 650.0)),
+        ];
+        let mut persistence = crate::diff::persistence::DiffPersistenceV1::default();
+        persistence.window_size = Some([1000.0, 700.0]);
+        persistence.window_position = Some([20.0, 30.0]);
+        for rect in rejected {
+            if let Some((size, position)) = runtime_window_geometry(rect, screen) {
+                persistence.window_size = Some(size);
+                persistence.window_position = Some(position);
+            }
+            assert_eq!(persistence.window_size, Some([1000.0, 700.0]));
+            assert_eq!(persistence.window_position, Some([20.0, 30.0]));
+        }
     }
 
     #[test]
