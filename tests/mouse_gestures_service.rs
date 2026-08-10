@@ -694,14 +694,20 @@ fn numeric_selection_updates_hint_text() {
     service.update_config(config);
 
     assert!(handle.emit(HookEvent::RButtonDown));
-    sleep(Duration::from_millis(5));
     cursor_provider.set_position((50.0, 0.0));
-    sleep(Duration::from_millis(20));
+
+    // Wait for recognition to publish the exact gesture before selecting a
+    // binding. Fixed sleeps race the worker when the full suite is under load.
+    wait_for_hint_matching(&hint_state, Duration::from_secs(2), |hint| {
+        hint.lines()
+            .next()
+            .is_some_and(|first_line| first_line.contains("First"))
+    })
+    .expect("initial recognized hint text");
 
     assert!(handle.emit(HookEvent::SelectBinding(1)));
-    sleep(Duration::from_millis(10));
 
-    let last = wait_for_hint_matching(&hint_state, Duration::from_millis(500), |hint| {
+    let last = wait_for_hint_matching(&hint_state, Duration::from_secs(2), |hint| {
         hint.lines()
             .next()
             .is_some_and(|first_line| first_line.contains("Second"))
