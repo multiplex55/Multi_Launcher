@@ -1661,7 +1661,9 @@ mod tests {
             // `InnerResponse::response` describes the widgets' content and may
             // shrink to a short label. The allocated UI's max rect is the
             // layout boundary that must reserve the remaining window space.
-            assert!((workspace.width() - outer.width()).abs() <= 0.5);
+            // The workspace spans the requested inner width. The outer rect
+            // is wider because it also includes the window frame.
+            assert!((workspace.width() - 640.0).abs() <= 0.5, "{workspace:?}");
             assert!(workspace.height() > 400.0, "{workspace:?}");
             if let Some(expected) = expected {
                 assert_rect_close(outer, expected);
