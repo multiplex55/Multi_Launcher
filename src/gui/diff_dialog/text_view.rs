@@ -210,11 +210,12 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
     let pending = model.pending_scroll_row;
     let mut scroll_accepted = pending.is_none();
     ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(left_width, comparison_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| scroll_accepted &= pane(ui, workspace, view, DiffSide::Left, model, pending),
-        );
+        // `comparison_dimensions` accounts for every pixel; no implicit item
+        // spacing may be inserted around the dedicated splitter.
+        ui.spacing_mut().item_spacing.x = 0.0;
+        scroll_accepted &= exact_pane(ui, egui::vec2(left_width, comparison_height), |ui| {
+            pane(ui, workspace, view, DiffSide::Left, model, pending)
+        });
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(splitter_width, comparison_height),
             egui::Sense::drag(),
@@ -261,16 +262,23 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 model.splitter + response.drag_delta().x / available,
             );
         }
-        ui.allocate_ui_with_layout(
-            egui::vec2(right_width, comparison_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| scroll_accepted &= pane(ui, workspace, view, DiffSide::Right, model, pending),
-        );
+        scroll_accepted &= exact_pane(ui, egui::vec2(right_width, comparison_height), |ui| {
+            pane(ui, workspace, view, DiffSide::Right, model, pending)
+        });
     });
     if scroll_accepted {
         model.pending_scroll_row = None;
     }
     super::rules_dialog::show(ui.ctx(), view, model);
+}
+
+/// Allocates the pane before laying out any of its content. The child can grow
+/// a scroll canvas, but its viewport and paint clip remain exactly `size`.
+fn exact_pane<R>(ui: &mut egui::Ui, size: egui::Vec2, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
+    child.set_clip_rect(ui.clip_rect().intersect(rect));
+    add(&mut child)
 }
 
 fn comparison_dimensions(width: f32, height: f32, splitter: f32) -> (f32, f32, f32) {
@@ -281,6 +289,24 @@ fn comparison_dimensions(width: f32, height: f32, splitter: f32) -> (f32, f32, f
     let left = pane_width * splitter.clamp(0.0, 1.0);
     (left, splitter_width, (pane_width - left).max(0.0))
 }
+
+/// Conservative geometry used to size the unwrapped virtual canvas before a
+/// galley is painted. Tabs use the same four-column stops as the text pane.
+fn unwrapped_content_width(text: &str, glyph_width: f32, gutter_width: f32) -> f32 {
+    let mut columns = 0usize;
+    for character in text.chars() {
+        if character == '\t' {
+            columns += 4 - columns % 4;
+        } else {
+            columns += 1;
+        }
+    }
+    gutter_width + columns as f32 * glyph_width.max(0.0)
+}
+
+fn horizontal_scroll_range(pane_width: f32, content_width: f32) -> f32 {
+    (content_width - pane_width.max(0.0)).max(0.0)
+}
 fn pane(
     ui: &mut egui::Ui,
     workspace: u64,
@@ -288,6 +314,44 @@ fn pane(
     side: DiffSide,
     model: &mut TextViewModel,
     pending: Option<usize>,
+) -> bool {
+    if model.wrap {
+        render_wrapped_pane(ui, workspace, view, side, model, pending)
+    } else {
+        render_unwrapped_pane(ui, workspace, view, side, model, pending)
+    }
+}
+
+fn render_unwrapped_pane(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    side: DiffSide,
+    model: &mut TextViewModel,
+    pending: Option<usize>,
+) -> bool {
+    render_pane_contents(ui, workspace, view, side, model, pending, false)
+}
+
+fn render_wrapped_pane(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    side: DiffSide,
+    model: &mut TextViewModel,
+    pending: Option<usize>,
+) -> bool {
+    render_pane_contents(ui, workspace, view, side, model, pending, true)
+}
+
+fn render_pane_contents(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    side: DiffSide,
+    model: &mut TextViewModel,
+    pending: Option<usize>,
+    wrapped: bool,
 ) -> bool {
     let Some(c) = model.comparison.as_ref() else {
         ui.centered_and_justified(|ui| {
@@ -305,21 +369,22 @@ fn pane(
         model.projection_context,
     );
     let rows = &c.rows;
-    let row_height = if model.wrap { 34.0 } else { 20.0 };
-    let axis_id = if model.wrap {
+    let row_height = if wrapped { 34.0 } else { 20.0 };
+    let axis_id = if wrapped {
         "vertical"
     } else {
         "horizontal_vertical"
     };
     let (stored_x, stored_y) = model.scroll.offsets(side);
-    let mut scroll = if model.wrap {
+    let mut scroll = if wrapped {
         egui::ScrollArea::vertical()
     } else {
         egui::ScrollArea::both()
     }
+    .auto_shrink([false, false])
     .id_source((workspace, view, side, axis_id))
     .vertical_scroll_offset(stored_y);
-    if !model.wrap {
+    if !wrapped {
         scroll = scroll.horizontal_scroll_offset(stored_x);
     }
     if let Some(row_index) = pending {
@@ -332,6 +397,13 @@ fn pane(
     // immutable borrow of the retained comparison.
     let mut selected_row = None;
     let output = scroll.show_rows(ui, row_height, projected.len(), |ui, range| {
+        if !wrapped {
+            let canvas_width = source
+                .lines()
+                .map(|line| unwrapped_content_width(line, 8.5, 72.0))
+                .fold(ui.available_width(), f32::max);
+            ui.set_min_width(canvas_width);
+        }
         for projected_i in range {
             let i = projected[projected_i];
             let row = &rows[i];
@@ -425,7 +497,13 @@ fn pane(
                             c.navigation.row_to_hunk[i],
                         ));
                         ui.push_id(id, |ui| {
-                            ui.add(egui::Label::new(job).wrap(model.wrap))
+                            // Both the job and the widget reject wrapping. This is
+                            // essential: the galley must define the horizontal
+                            // canvas instead of negotiating a wider parent pane.
+                            if !wrapped {
+                                job.wrap.max_width = f32::INFINITY;
+                            }
+                            ui.add(egui::Label::new(job).wrap(wrapped))
                                 .on_hover_text(format!("{semantic} line"));
                         });
                     } else if ui
@@ -447,7 +525,7 @@ fn pane(
         pane_response.request_focus();
     }
     let offset_changed =
-        (new_y - stored_y).abs() > 0.25 || (!model.wrap && (new_x - stored_x).abs() > 0.25);
+        (new_y - stored_y).abs() > 0.25 || (!wrapped && (new_x - stored_x).abs() > 0.25);
     let directly_interacting = (pane_response.hovered() || pane_response.has_focus())
         && ui.input(|input| {
             input.pointer.any_down()
@@ -467,9 +545,7 @@ fn pane(
                 })
         });
     if offset_changed || directly_interacting {
-        model
-            .scroll
-            .drive(side, new_x, new_y, row_height, model.wrap);
+        model.scroll.drive(side, new_x, new_y, row_height, wrapped);
         let visual = (new_y / row_height.max(1.0)) as usize;
         if let Some(&aligned) = projected.get(visual.min(projected.len().saturating_sub(1))) {
             model.scroll.aligned_row = aligned;
@@ -587,6 +663,75 @@ mod tests {
             assert!(left >= 0.0 && splitter >= 0.0 && right >= 0.0);
             assert!(left + splitter + right <= width.max(0.0));
             assert!(height.max(0.0) >= 0.0);
+        }
+    }
+
+    #[test]
+    fn pane_widths_are_exact_across_ratios_and_workspace_sizes() {
+        for width in [4.0, 640.0, 8192.0] {
+            for ratio in [0.15, 0.50, 0.85] {
+                let (left, splitter, right) = comparison_dimensions(width, 480.0, ratio);
+                assert_eq!(splitter, width.min(8.0));
+                assert!((left + splitter + right - width).abs() < f32::EPSILON * width.max(1.0));
+                let available = (width - splitter).max(0.0);
+                assert!((left - available * ratio).abs() < 0.001);
+                assert!((right - available * (1.0 - ratio)).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn unwrapped_content_geometry_handles_extreme_lines_and_real_world_tokens() {
+        let pane = 300.0;
+        let cases = [
+            "x".repeat(10),
+            "x".repeat(1_000),
+            "x".repeat(100_000),
+            "x".repeat(500_000),
+            format!(r#"{{\"payload\":\"{}\"}}"#, "x".repeat(100_000)),
+            format!(
+                "https://example.invalid/{}?token={}",
+                "path/".repeat(200),
+                "a".repeat(4_000)
+            ),
+            "uninterrupted_token".repeat(1_000),
+            "\tlet\tvalue\t=\t".repeat(1_000),
+            format!(
+                "fn highlighted() {{ {} }}",
+                "Some(value).unwrap();".repeat(1_000)
+            ),
+        ];
+        for (index, line) in cases.iter().enumerate() {
+            let content = unwrapped_content_width(line, 8.5, 72.0);
+            assert!(content >= 72.0 + line.chars().count() as f32 * 8.5);
+            if index > 0 {
+                assert!(content > pane);
+                assert!(horizontal_scroll_range(pane, content) > 0.0);
+            }
+            assert_eq!(pane, 300.0, "content must not alter its pane");
+        }
+    }
+
+    #[test]
+    fn either_or_both_long_sides_only_expand_their_content_canvas() {
+        let pane = 420.0;
+        for (left, right) in [
+            ("x".repeat(10_000), "short".into()),
+            ("short".into(), "x".repeat(10_000)),
+            ("x".repeat(10_000), "y".repeat(20_000)),
+        ] {
+            let left_content = unwrapped_content_width(&left, 8.5, 72.0);
+            let right_content = unwrapped_content_width(&right, 8.5, 72.0);
+            assert_eq!(pane, 420.0);
+            assert_eq!(pane, 420.0);
+            assert_eq!(
+                horizontal_scroll_range(pane, left_content) > 0.0,
+                left.len() > 5
+            );
+            assert_eq!(
+                horizontal_scroll_range(pane, right_content) > 0.0,
+                right.len() > 5
+            );
         }
     }
 

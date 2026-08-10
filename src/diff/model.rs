@@ -1351,6 +1351,54 @@ mod tests {
     }
 
     #[test]
+    fn x_offsets_remain_independent_and_follow_the_selected_driver_when_resynced() {
+        let mut scroll = TextScrollState::default();
+        scroll.set_sync(true, false);
+        scroll.drive(DiffSide::Left, 125.0, 20.0, 20.0, false);
+        scroll.drive(DiffSide::Right, 875.0, 40.0, 20.0, false);
+        assert_eq!(
+            (scroll.left_horizontal, scroll.right_horizontal),
+            (125.0, 875.0)
+        );
+        assert_eq!(scroll.active_driver, DiffSide::Right);
+
+        scroll.set_sync(true, true);
+        assert_eq!(
+            (scroll.left_horizontal, scroll.right_horizontal),
+            (875.0, 875.0)
+        );
+        scroll.set_sync(true, false);
+        scroll.set_driver(DiffSide::Left);
+        scroll.drive(DiffSide::Left, 240.0, 60.0, 20.0, false);
+        scroll.set_sync(true, true);
+        assert_eq!(
+            (scroll.left_horizontal, scroll.right_horizontal),
+            (240.0, 240.0)
+        );
+    }
+
+    #[test]
+    fn wrapping_hides_x_offsets_and_unwrapping_restores_both_sides() {
+        let mut scroll = TextScrollState::default();
+        scroll.set_sync(true, false);
+        scroll.drive(DiffSide::Left, 111.0, 0.0, 20.0, false);
+        scroll.drive(DiffSide::Right, 999.0, 0.0, 20.0, false);
+        scroll.drive(DiffSide::Left, 0.0, 34.0, 34.0, true);
+        scroll.drive(DiffSide::Right, 0.0, 68.0, 34.0, true);
+        assert!(scroll.wrapped);
+        assert_eq!(
+            (scroll.left_horizontal, scroll.right_horizontal),
+            (111.0, 999.0)
+        );
+        scroll.drive(DiffSide::Right, 999.0, 68.0, 20.0, false);
+        assert!(!scroll.wrapped);
+        assert_eq!(
+            (scroll.left_horizontal, scroll.right_horizontal),
+            (111.0, 999.0)
+        );
+    }
+
+    #[test]
     fn all_navigation_sources_share_an_aligned_target() {
         let mut scroll = TextScrollState::default();
         for target in [3, 17, 42] {
