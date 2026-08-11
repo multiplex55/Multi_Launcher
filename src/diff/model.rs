@@ -18,6 +18,17 @@ fn id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FolderStatusFilter {
+    Identical,
+    Differences,
+    LeftOnly,
+    RightOnly,
+    LeftNewer,
+    RightNewer,
+    Errors,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FolderDisplayFilter {
     #[default]
@@ -29,6 +40,42 @@ pub enum FolderDisplayFilter {
     LeftNewer,
     RightNewer,
     Errors,
+    LeftChanges,
+    RightChanges,
+    Orphans,
+    Changes,
+    /// Union of independently selected status categories.
+    Combined(BTreeSet<FolderStatusFilter>),
+}
+impl FolderDisplayFilter {
+    pub fn matches(&self, status: crate::diff::folder_compare::FolderStatus) -> bool {
+        use crate::diff::folder_compare::FolderStatus as S;
+        use FolderDisplayFilter as F;
+        use FolderStatusFilter as C;
+        let criterion = |c: &C| match c {
+            C::Identical => status == S::Identical,
+            C::Differences => status.is_different(),
+            C::LeftOnly => status == S::LeftOnly,
+            C::RightOnly => status == S::RightOnly,
+            C::LeftNewer => status == S::LeftNewer,
+            C::RightNewer => status == S::RightNewer,
+            C::Errors => matches!(status, S::Unreadable | S::Error),
+        };
+        match self {
+            F::All => true,
+            F::Differences | F::Changes => status.is_different(),
+            F::Identical => status == S::Identical,
+            F::LeftOnly => status == S::LeftOnly,
+            F::RightOnly => status == S::RightOnly,
+            F::LeftNewer => status == S::LeftNewer,
+            F::RightNewer => status == S::RightNewer,
+            F::Errors => matches!(status, S::Unreadable | S::Error),
+            F::LeftChanges => matches!(status, S::LeftOnly | S::LeftNewer),
+            F::RightChanges => matches!(status, S::RightOnly | S::RightNewer),
+            F::Orphans => matches!(status, S::LeftOnly | S::RightOnly),
+            F::Combined(criteria) => criteria.is_empty() || criteria.iter().any(criterion),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FolderSortState {
@@ -41,6 +88,37 @@ pub enum ContentComparisonMode {
     #[default]
     OnDemand,
     Always,
+}
+
+/// Complete, editable folder comparison configuration.  This is deliberately
+/// separate from the fields which produced the current model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderRulesDraft {
+    pub compare_file_size: bool,
+    pub compare_modified_timestamps: bool,
+    /// Text is retained while editing so NaN, infinity and negative input can
+    /// be reported without ever entering the applied configuration.
+    pub timestamp_tolerance_seconds: String,
+    pub content_comparison: ContentComparisonMode,
+    pub use_text_compare_rules: bool,
+    pub text_rules: TextComparisonRules,
+    pub include_rules: String,
+    pub exclude_rules: String,
+}
+
+impl Default for FolderRulesDraft {
+    fn default() -> Self {
+        Self {
+            compare_file_size: true,
+            compare_modified_timestamps: true,
+            timestamp_tolerance_seconds: "2".into(),
+            content_comparison: ContentComparisonMode::default(),
+            use_text_compare_rules: true,
+            text_rules: TextComparisonRules::default(),
+            include_rules: String::new(),
+            exclude_rules: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,12 +135,16 @@ pub struct FolderCompareState {
     pub sort: FolderSortState,
     /// Rules that produced `model`; drafts never mutate these implicitly.
     pub applied_scan_rules: ScanRules,
-    pub draft_include_rules: String,
-    pub draft_exclude_rules: String,
+    pub draft_rules: FolderRulesDraft,
     /// Rules used by asynchronous content refinement of text file pairs.
     pub text_rules: TextComparisonRules,
     pub content_comparison: ContentComparisonMode,
     pub timestamp_tolerance: Duration,
+    pub compare_file_size: bool,
+    pub compare_modified_timestamps: bool,
+    pub use_text_compare_rules: bool,
+    pub folder_rules_open: bool,
+    pub folder_rules_cancel_snapshot: Option<FolderRulesDraft>,
     pub left_scan_complete: bool,
     pub right_scan_complete: bool,
     /// Children changed by an editor and awaiting a targeted metadata refresh.
@@ -85,11 +167,15 @@ impl Default for FolderCompareState {
                 descending: false,
             },
             applied_scan_rules: ScanRules::default(),
-            draft_include_rules: String::new(),
-            draft_exclude_rules: String::new(),
+            draft_rules: FolderRulesDraft::default(),
             text_rules: TextComparisonRules::default(),
             content_comparison: ContentComparisonMode::default(),
             timestamp_tolerance: Duration::from_secs(2),
+            compare_file_size: true,
+            compare_modified_timestamps: true,
+            use_text_compare_rules: true,
+            folder_rules_open: false,
+            folder_rules_cancel_snapshot: None,
             left_scan_complete: false,
             right_scan_complete: false,
             stale_paths: BTreeSet::new(),
@@ -109,14 +195,92 @@ impl FolderCompareState {
 
     pub fn validated_draft_scan_rules(&self) -> Result<ScanRules, String> {
         ScanRules::validated(
-            Self::draft_lines(&self.draft_include_rules),
-            Self::draft_lines(&self.draft_exclude_rules),
+            Self::draft_lines(&self.draft_rules.include_rules),
+            Self::draft_lines(&self.draft_rules.exclude_rules),
         )
     }
 
+    pub fn validated_draft_tolerance(&self) -> Result<Duration, String> {
+        const MAX_SECONDS: f64 = 86_400.0;
+        let value: f64 = self
+            .draft_rules
+            .timestamp_tolerance_seconds
+            .trim()
+            .parse()
+            .map_err(|_| "Timestamp tolerance must be a number".to_owned())?;
+        if !value.is_finite() {
+            return Err("Timestamp tolerance must be finite".into());
+        }
+        if value < 0.0 {
+            return Err("Timestamp tolerance cannot be negative".into());
+        }
+        if value > MAX_SECONDS {
+            return Err("Timestamp tolerance cannot exceed 24 hours".into());
+        }
+        Ok(Duration::from_secs_f64(value))
+    }
+
+    pub fn validate_draft(&self) -> Result<(ScanRules, Duration), String> {
+        Ok((
+            self.validated_draft_scan_rules()?,
+            self.validated_draft_tolerance()?,
+        ))
+    }
+
+    pub fn apply_draft(&mut self) -> Result<(), String> {
+        let (rules, tolerance) = self.validate_draft()?;
+        self.applied_scan_rules = rules;
+        self.timestamp_tolerance = tolerance;
+        self.content_comparison = self.draft_rules.content_comparison;
+        self.text_rules = self.draft_rules.text_rules.clone();
+        self.compare_file_size = self.draft_rules.compare_file_size;
+        self.compare_modified_timestamps = self.draft_rules.compare_modified_timestamps;
+        self.use_text_compare_rules = self.draft_rules.use_text_compare_rules;
+        Ok(())
+    }
+
     pub fn rescan_required(&self) -> bool {
-        self.validated_draft_scan_rules()
-            .is_ok_and(|rules| rules != self.applied_scan_rules)
+        self.validate_draft().is_ok_and(|(rules, tolerance)| {
+            rules != self.applied_scan_rules
+                || tolerance != self.timestamp_tolerance
+                || self.draft_rules.content_comparison != self.content_comparison
+                || self.draft_rules.text_rules != self.text_rules
+                || self.draft_rules.compare_file_size != self.compare_file_size
+                || self.draft_rules.compare_modified_timestamps != self.compare_modified_timestamps
+                || self.draft_rules.use_text_compare_rules != self.use_text_compare_rules
+        })
+    }
+}
+
+#[cfg(test)]
+mod folder_rule_tests {
+    use super::*;
+    #[test]
+    fn invalid_draft_is_rejected_without_model_or_applied_mutation() {
+        let mut state = FolderCompareState::default();
+        state.model.revision = 7;
+        let applied = state.applied_scan_rules.clone();
+        for invalid in ["NaN", "inf", "-1", "86401"] {
+            state.draft_rules.timestamp_tolerance_seconds = invalid.into();
+            assert!(state.apply_draft().is_err());
+            assert_eq!(state.model.revision, 7);
+            assert_eq!(state.applied_scan_rules, applied);
+        }
+        state.draft_rules.timestamp_tolerance_seconds = "2".into();
+        state.draft_rules.exclude_rules = "../secret".into();
+        assert!(state.apply_draft().is_err());
+    }
+
+    #[test]
+    fn successful_apply_and_rescan_required_transitions_are_atomic() {
+        let mut state = FolderCompareState::default();
+        assert!(!state.rescan_required());
+        state.draft_rules.exclude_rules = "*.tmp".into();
+        assert!(state.rescan_required());
+        assert!(state.applied_scan_rules.excludes.is_empty());
+        state.apply_draft().unwrap();
+        assert_eq!(state.applied_scan_rules.excludes, ["*.tmp"]);
+        assert!(!state.rescan_required());
     }
 }
 
@@ -1402,14 +1566,14 @@ mod tests {
             },
         );
         let applied = folder.applied_scan_rules.clone();
-        folder.draft_include_rules = "../invalid".into();
+        folder.draft_rules.include_rules = "../invalid".into();
         assert!(folder.validated_draft_scan_rules().is_err());
         assert!(!folder.rescan_required());
         assert_eq!(folder.applied_scan_rules, applied);
         assert!(folder.model.entries.contains_key("kept"));
 
-        folder.draft_include_rules = "*.tmp".into();
-        folder.draft_exclude_rules = "target/\n.git/".into();
+        folder.draft_rules.include_rules = "*.tmp".into();
+        folder.draft_rules.exclude_rules = "target/\n.git/".into();
         assert!(folder.rescan_required());
         assert_eq!(folder.applied_scan_rules, applied);
     }

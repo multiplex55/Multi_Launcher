@@ -165,16 +165,7 @@ fn status(s: FolderStatus) -> &'static str {
     }
 }
 fn status_matches(f: &FolderDisplayFilter, s: FolderStatus) -> bool {
-    match f {
-        FolderDisplayFilter::All => true,
-        FolderDisplayFilter::Differences => s.is_different(),
-        FolderDisplayFilter::Identical => s == FolderStatus::Identical,
-        FolderDisplayFilter::LeftOnly => s == FolderStatus::LeftOnly,
-        FolderDisplayFilter::RightOnly => s == FolderStatus::RightOnly,
-        FolderDisplayFilter::LeftNewer => s == FolderStatus::LeftNewer,
-        FolderDisplayFilter::RightNewer => s == FolderStatus::RightNewer,
-        FolderDisplayFilter::Errors => matches!(s, FolderStatus::Unreadable | FolderStatus::Error),
-    }
+    f.matches(s)
 }
 fn optional(v: Option<u64>) -> String {
     v.map(|x| x.to_string()).unwrap_or_default()

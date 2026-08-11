@@ -225,6 +225,10 @@ pub(super) fn show(
                     ("Left newer", FolderDisplayFilter::LeftNewer),
                     ("Right newer", FolderDisplayFilter::RightNewer),
                     ("Errors", FolderDisplayFilter::Errors),
+                    ("Left changes", FolderDisplayFilter::LeftChanges),
+                    ("Right changes", FolderDisplayFilter::RightChanges),
+                    ("Orphans", FolderDisplayFilter::Orphans),
+                    ("All changes", FolderDisplayFilter::Changes),
                 ] {
                     if ui
                         .selectable_label(state.display_filter == filter, label)
@@ -234,8 +238,18 @@ pub(super) fn show(
                     }
                 }
             });
-            let draft = state.validated_draft_scan_rules();
-            let required = draft.as_ref().is_ok_and(|r| r != &state.applied_scan_rules);
+            if ui.button("Folder Rules…").clicked() {
+                super::folder_rules_dialog::open(state);
+            }
+            let required = state.rescan_required();
+            ui.label(format!(
+                "Rules: {}",
+                if state.applied_scan_rules == Default::default() {
+                    "Default"
+                } else {
+                    "Custom"
+                }
+            ));
             if required {
                 ui.colored_label(egui::Color32::YELLOW, "Rescan required");
             }
@@ -247,26 +261,9 @@ pub(super) fn show(
             }
         },
     );
-    egui::ScrollArea::vertical()
-        .max_height(110.0)
-        .show(ui, |ui| {
-            ui.collapsing("Scan rules", |ui| {
-                ui.columns(2, |columns| {
-                    columns[0].label("Include (one pattern per line)");
-                    columns[0].add(
-                        egui::TextEdit::multiline(&mut state.draft_include_rules).desired_rows(4),
-                    );
-                    columns[1].label("Exclude (one pattern per line)");
-                    columns[1].add(
-                        egui::TextEdit::multiline(&mut state.draft_exclude_rules).desired_rows(4),
-                    );
-                });
-                if let Err(error) = state.validated_draft_scan_rules() {
-                    ui.colored_label(egui::Color32::RED, error);
-                }
-                ui.label("Examples: .git/  target/  *.tmp  *.bak");
-            });
-        });
+    if super::folder_rules_dialog::show(ui.ctx(), state) {
+        action = FolderViewAction::RequestRescan;
+    }
     ui.horizontal(|ui| {
         ui.label("Find path:");
         ui.text_edit_singleline(&mut state.path_filter);
@@ -280,6 +277,7 @@ pub(super) fn show(
         runtime.right_visited,
         complete(state.right_scan_complete)
     ));
+    status_summary(ui, state);
     ui.label(format!(
         "Scanning: {}; content checking: {}; compared paths: {}{}",
         if scans_done { "idle" } else { "active" },
@@ -345,6 +343,89 @@ pub(super) fn show(
     action
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FolderStatusCounts {
+    pub total: usize,
+    pub same: usize,
+    pub different: usize,
+    pub left_only: usize,
+    pub right_only: usize,
+    pub left_newer: usize,
+    pub right_newer: usize,
+    pub errors: usize,
+}
+pub(crate) fn status_counts(state: &FolderCompareState) -> FolderStatusCounts {
+    let mut c = FolderStatusCounts::default();
+    for entry in state.model.entries.values() {
+        c.total += 1;
+        match entry.effective_status {
+            FolderStatus::Identical => c.same += 1,
+            FolderStatus::LeftOnly => c.left_only += 1,
+            FolderStatus::RightOnly => c.right_only += 1,
+            FolderStatus::LeftNewer => c.left_newer += 1,
+            FolderStatus::RightNewer => c.right_newer += 1,
+            FolderStatus::Unreadable | FolderStatus::Error => c.errors += 1,
+            FolderStatus::Different | FolderStatus::PendingContentComparison => {}
+        }
+        if entry.effective_status.is_different() {
+            c.different += 1;
+        }
+    }
+    c
+}
+fn status_summary(ui: &mut egui::Ui, state: &mut FolderCompareState) {
+    let c = status_counts(state);
+    ui.horizontal_wrapped(|ui| {
+        for (label, count, filter) in [
+            ("Total", c.total, FolderDisplayFilter::All),
+            ("Same", c.same, FolderDisplayFilter::Identical),
+            ("Different", c.different, FolderDisplayFilter::Differences),
+            ("Left only", c.left_only, FolderDisplayFilter::LeftOnly),
+            ("Right only", c.right_only, FolderDisplayFilter::RightOnly),
+            ("Left newer", c.left_newer, FolderDisplayFilter::LeftNewer),
+            (
+                "Right newer",
+                c.right_newer,
+                FolderDisplayFilter::RightNewer,
+            ),
+            ("Errors", c.errors, FolderDisplayFilter::Errors),
+        ] {
+            if ui.small_button(format!("{label}: {count}")).clicked() {
+                state.display_filter = filter;
+            }
+        }
+    });
+}
+
+pub(crate) fn exclude_exact(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+pub(crate) fn exclude_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .filter(|x| !x.is_empty())
+        .map(|x| format!("*.{}", x.to_string_lossy()))
+}
+pub(crate) fn exclude_subtree(path: &Path) -> String {
+    format!(
+        "{}/",
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+    )
+}
+fn append_excludes(state: &mut FolderCompareState, patterns: impl IntoIterator<Item = String>) {
+    let mut existing: BTreeSet<String> = state
+        .draft_rules
+        .exclude_rules
+        .lines()
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_owned)
+        .collect();
+    existing.extend(patterns);
+    state.draft_rules.exclude_rules = existing.into_iter().collect::<Vec<_>>().join("\n");
+}
+
 fn applicable(state: &FolderCompareState, left: bool) -> bool {
     !state.selected_paths.is_empty()
         && state.selected_paths.iter().any(|path| {
@@ -387,7 +468,7 @@ fn mutation_buttons(
 
 pub(super) fn mutation_menu(
     ui: &mut egui::Ui,
-    state: &FolderCompareState,
+    state: &mut FolderCompareState,
     operation_active: bool,
     action: &mut FolderViewAction,
 ) {
@@ -407,6 +488,59 @@ pub(super) fn mutation_menu(
             *action = FolderViewAction::RequestMutation(kind);
             ui.close_menu();
         }
+    }
+    ui.separator();
+    if ui.button("Exclude exact relative path").clicked() {
+        append_excludes(
+            state,
+            state
+                .selected_paths
+                .iter()
+                .map(|p| exclude_exact(p))
+                .collect::<Vec<_>>(),
+        );
+        ui.close_menu();
+    }
+    let extensions: Vec<_> = state
+        .selected_paths
+        .iter()
+        .filter_map(|p| exclude_extension(p))
+        .collect();
+    if ui
+        .add_enabled(
+            !extensions.is_empty(),
+            egui::Button::new("Exclude matching extension"),
+        )
+        .clicked()
+    {
+        append_excludes(state, extensions);
+        ui.close_menu();
+    }
+    let folders: Vec<_> = state
+        .selected_paths
+        .iter()
+        .filter(|path| {
+            state
+                .model
+                .entries
+                .values()
+                .any(|e| &e.relative_path == *path && is_directory(e))
+        })
+        .map(|p| exclude_subtree(p))
+        .collect();
+    if ui
+        .add_enabled(
+            !folders.is_empty(),
+            egui::Button::new("Exclude selected folder subtree"),
+        )
+        .clicked()
+    {
+        append_excludes(state, folders);
+        ui.close_menu();
+    }
+    if ui.button("Edit filters…").clicked() {
+        super::folder_rules_dialog::open(state);
+        ui.close_menu();
     }
 }
 
@@ -507,6 +641,73 @@ mod tests {
     }
     fn paths(state: &FolderCompareState) -> Vec<PathBuf> {
         ordered_visible(state)
+    }
+
+    #[test]
+    fn every_individual_and_combined_status_filter_projects_without_mutating_model() {
+        use crate::diff::model::FolderStatusFilter as C;
+        let mut s = state(&[
+            ("same", FolderStatus::Identical),
+            ("lo", FolderStatus::LeftOnly),
+            ("ro", FolderStatus::RightOnly),
+            ("ln", FolderStatus::LeftNewer),
+            ("rn", FolderStatus::RightNewer),
+            ("bad", FolderStatus::Error),
+        ]);
+        let original = s.model.clone();
+        for (filter, expected) in [
+            (FolderDisplayFilter::Identical, 1),
+            (FolderDisplayFilter::Differences, 5),
+            (FolderDisplayFilter::LeftOnly, 1),
+            (FolderDisplayFilter::RightOnly, 1),
+            (FolderDisplayFilter::LeftNewer, 1),
+            (FolderDisplayFilter::RightNewer, 1),
+            (FolderDisplayFilter::Errors, 1),
+            (FolderDisplayFilter::LeftChanges, 2),
+            (FolderDisplayFilter::RightChanges, 2),
+            (FolderDisplayFilter::Orphans, 2),
+            (FolderDisplayFilter::Changes, 5),
+        ] {
+            s.display_filter = filter;
+            assert_eq!(paths(&s).len(), expected);
+        }
+        s.display_filter =
+            FolderDisplayFilter::Combined([C::LeftOnly, C::Errors].into_iter().collect());
+        assert_eq!(paths(&s).len(), 2);
+        assert_eq!(s.model, original);
+    }
+
+    #[test]
+    fn exclude_patterns_cover_file_extension_and_folder() {
+        assert_eq!(exclude_exact(Path::new("src/main.rs")), "src/main.rs");
+        assert_eq!(
+            exclude_extension(Path::new("src/main.rs")).as_deref(),
+            Some("*.rs")
+        );
+        assert_eq!(exclude_extension(Path::new("README")), None);
+        assert_eq!(exclude_subtree(Path::new("target/debug")), "target/debug/");
+    }
+
+    #[test]
+    fn summary_counts_complete_model_not_projection() {
+        let mut s = state(&[
+            ("same", FolderStatus::Identical),
+            ("lo", FolderStatus::LeftOnly),
+            ("err", FolderStatus::Unreadable),
+        ]);
+        s.display_filter = FolderDisplayFilter::Identical;
+        assert_eq!(paths(&s).len(), 1);
+        assert_eq!(
+            status_counts(&s),
+            FolderStatusCounts {
+                total: 3,
+                same: 1,
+                different: 2,
+                left_only: 1,
+                errors: 1,
+                ..Default::default()
+            }
+        );
     }
 
     fn side(path: &str, kind: EntryKind) -> EntrySide {

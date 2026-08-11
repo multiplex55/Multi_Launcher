@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 mod binary_view;
 mod export;
+mod folder_rules_dialog;
 mod folder_table;
 mod folder_view;
 mod operation_preview;
@@ -232,8 +233,8 @@ impl DiffDialogState {
         self.persistence.unimportant_section_rules = session.unimportant_section_rules.clone();
         self.open_and_record(left, right)?;
         if let DiffView::FolderCompare(folder) = &mut self.workspace.current_view.view {
-            folder.draft_include_rules = session.folder_includes.join("\n");
-            folder.draft_exclude_rules = session.folder_excludes.join("\n");
+            folder.draft_rules.include_rules = session.folder_includes.join("\n");
+            folder.draft_rules.exclude_rules = session.folder_excludes.join("\n");
             folder.applied_scan_rules = crate::diff::folder_scan::ScanRules::validated(
                 session.folder_includes.clone(),
                 session.folder_excludes.clone(),
@@ -251,6 +252,10 @@ impl DiffDialogState {
                     crate::diff::model::ContentComparisonMode::Always
                 }
             };
+            folder.draft_rules.content_comparison = folder.content_comparison;
+            folder.draft_rules.text_rules = folder.text_rules.clone();
+            folder.draft_rules.timestamp_tolerance_seconds =
+                folder.timestamp_tolerance.as_secs_f64().to_string();
         }
         Ok(())
     }
@@ -695,20 +700,17 @@ impl DiffDialogState {
             }
             folder_view::FolderViewAction::RequestRescan => {
                 if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view {
-                    if let Ok(rules) = state.validated_draft_scan_rules() {
-                        if rules != state.applied_scan_rules {
-                            state.applied_scan_rules = rules;
-                            state.model = Default::default();
-                            state.left_scan_complete = false;
-                            state.right_scan_complete = false;
-                            state.stale_paths.clear();
-                            // Keep view controls and selection. Non-surviving paths are
-                            // naturally harmless until the replacement model arrives.
-                            self.folder_runtimes
-                                .entry(self.workspace.current_view.id)
-                                .or_default()
-                                .prepare_rescan();
-                        }
+                    if state.apply_draft().is_ok() {
+                        state.model = Default::default();
+                        state.left_scan_complete = false;
+                        state.right_scan_complete = false;
+                        state.stale_paths.clear();
+                        // Keep view controls and selection. Non-surviving paths are
+                        // naturally harmless until the replacement model arrives.
+                        self.folder_runtimes
+                            .entry(self.workspace.current_view.id)
+                            .or_default()
+                            .prepare_rescan();
                     }
                 }
             }
@@ -922,6 +924,11 @@ fn folder_filter_name(value: &crate::diff::model::FolderDisplayFilter) -> &'stat
         LeftNewer => "left_newer",
         RightNewer => "right_newer",
         Errors => "errors",
+        LeftChanges => "left_changes",
+        RightChanges => "right_changes",
+        Orphans => "orphans",
+        Changes => "changes",
+        Combined(_) => "combined",
     }
 }
 
@@ -935,6 +942,10 @@ fn parse_folder_filter(value: &str) -> crate::diff::model::FolderDisplayFilter {
         "left_newer" => LeftNewer,
         "right_newer" => RightNewer,
         "errors" => Errors,
+        "left_changes" => LeftChanges,
+        "right_changes" => RightChanges,
+        "orphans" => Orphans,
+        "changes" => Changes,
         _ => All,
     }
 }
@@ -1384,8 +1395,8 @@ mod tests {
         runtime.generation = 3;
         runtime.left_visited = 9;
         if let DiffView::FolderCompare(state) = &mut dialog.workspace.current_view.view {
-            state.draft_include_rules = "*.tmp".into();
-            state.draft_exclude_rules = ".git/\ntarget/".into();
+            state.draft_rules.include_rules = "*.tmp".into();
+            state.draft_rules.exclude_rules = ".git/\ntarget/".into();
             state.path_filter = "needle".into();
             state.display_filter = crate::diff::model::FolderDisplayFilter::Differences;
             state.expanded_nodes.insert("expanded".into());
