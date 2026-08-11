@@ -10,7 +10,30 @@ use crate::diff::settings::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderAlignmentOverrideV1 {
+    pub left_relative: PathBuf,
+    pub right_relative: PathBuf,
+}
+
+impl From<&crate::diff::folder_compare::FolderAlignmentOverride> for FolderAlignmentOverrideV1 {
+    fn from(v: &crate::diff::folder_compare::FolderAlignmentOverride) -> Self {
+        Self {
+            left_relative: v.left_relative.clone(),
+            right_relative: v.right_relative.clone(),
+        }
+    }
+}
+impl From<&FolderAlignmentOverrideV1> for crate::diff::folder_compare::FolderAlignmentOverride {
+    fn from(v: &FolderAlignmentOverrideV1) -> Self {
+        Self {
+            left_relative: v.left_relative.clone(),
+            right_relative: v.right_relative.clone(),
+        }
+    }
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -67,6 +90,8 @@ pub struct SavedDiffSessionV1 {
     pub folder_display_filter: String,
     #[serde(default)]
     pub content_comparison: ContentComparisonModeV1,
+    #[serde(default)]
+    pub folder_alignment_overrides: Vec<FolderAlignmentOverrideV1>,
 }
 impl Default for SavedDiffSessionV1 {
     fn default() -> Self {
@@ -88,6 +113,7 @@ impl Default for SavedDiffSessionV1 {
             folder_excludes: vec![],
             folder_display_filter: "all".into(),
             content_comparison: Default::default(),
+            folder_alignment_overrides: vec![],
         }
     }
 }
@@ -406,5 +432,23 @@ mod tests {
         ] {
             assert!(!json.contains(runtime_field), "serialized {runtime_field}");
         }
+    }
+    #[test]
+    fn old_session_defaults_alignment_and_new_session_roundtrips_it() {
+        let old = r#"{"id":"1","name":"old","left":"l","right":"r","pane_split":0.5,"wrap_text":false,"syntax_highlighting":true,"syntax_theme":"x"}"#;
+        let parsed: SavedDiffSessionV1 = serde_json::from_str(old).unwrap();
+        assert!(parsed.folder_alignment_overrides.is_empty());
+        let mut session = SavedDiffSessionV1::default();
+        session
+            .folder_alignment_overrides
+            .push(FolderAlignmentOverrideV1 {
+                left_relative: "old.txt".into(),
+                right_relative: "new.txt".into(),
+            });
+        let json = serde_json::to_string(&session).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SavedDiffSessionV1>(&json).unwrap(),
+            session
+        );
     }
 }

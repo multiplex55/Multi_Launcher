@@ -70,8 +70,10 @@ pub(super) fn show(
 
     state.column_widths = state.column_widths.validated();
     let layout = table_layout(state.column_widths);
-    let entry_keys: HashMap<PathBuf, String> = state
+    let aligned_model = state
         .model
+        .with_alignment_overrides(&state.alignment_overrides);
+    let entry_keys: HashMap<PathBuf, String> = aligned_model
         .entries
         .iter()
         .map(|(key, entry)| (entry.relative_path.clone(), key.clone()))
@@ -116,6 +118,7 @@ pub(super) fn show(
                         row_rect,
                         layout,
                         state,
+                        &aligned_model,
                         paths,
                         &rows[index],
                         entry_keys.get(&rows[index].path),
@@ -228,6 +231,7 @@ fn render_row(
     rect: egui::Rect,
     layout: TableLayout,
     state: &mut FolderCompareState,
+    aligned_model: &crate::diff::folder_compare::FolderModel,
     paths: &[PathBuf],
     row: &FolderProjectionRow,
     entry_key: Option<&String>,
@@ -236,7 +240,7 @@ fn render_row(
     index: usize,
 ) {
     let Some(entry) = entry_key
-        .and_then(|key| state.model.entries.get(key))
+        .and_then(|key| aligned_model.entries.get(key))
         .cloned()
     else {
         return;
@@ -368,15 +372,82 @@ fn render_path_cell(
     } else {
         entry.right.is_some()
     };
-    let text = present
-        .then(|| row.path.display().to_string())
-        .unwrap_or_default();
+    let mapping = state
+        .alignment_overrides
+        .iter()
+        .find(|m| m.left_relative == row.path);
+    let side_relative = mapping
+        .map(|m| {
+            if left {
+                &m.left_relative
+            } else {
+                &m.right_relative
+            }
+        })
+        .cloned()
+        .unwrap_or_else(|| row.path.clone());
+    let text = if present {
+        format!(
+            "{}{}",
+            if mapping.is_some() { "⛓ " } else { "" },
+            side_relative.display()
+        )
+    } else if mapping.is_some() {
+        format!("⚠ missing: {}", side_relative.display())
+    } else {
+        String::new()
+    };
     cell.style_mut().wrap = Some(false);
     let response = cell.add(egui::SelectableLabel::new(
         state.selected_paths.contains(&row.path),
         text,
     ));
-    response.context_menu(|ui| folder_view::mutation_menu(ui, state, operation_active, action));
+    response.clone().context_menu(|ui| {
+        if present && ui.button("Align With…").clicked() {
+            state.pending_alignment = Some((left, side_relative.clone()));
+            ui.close_menu();
+        }
+        if let Some(index) = state
+            .alignment_overrides
+            .iter()
+            .position(|m| m.left_relative == row.path)
+        {
+            if ui.button("Remove alignment override").clicked() {
+                state.alignment_overrides.remove(index);
+                state.pending_alignment = None;
+                ui.close_menu();
+            }
+        }
+        if let Some((source_left, source)) = state.pending_alignment.clone() {
+            if source_left != left
+                && present
+                && ui
+                    .button(format!("Confirm alignment with {}", source.display()))
+                    .clicked()
+            {
+                let value = if source_left {
+                    crate::diff::folder_compare::FolderAlignmentOverride {
+                        left_relative: source,
+                        right_relative: side_relative.clone(),
+                    }
+                } else {
+                    crate::diff::folder_compare::FolderAlignmentOverride {
+                        left_relative: side_relative.clone(),
+                        right_relative: source,
+                    }
+                };
+                let mut candidate = state.alignment_overrides.clone();
+                candidate.push(value);
+                if crate::diff::folder_compare::validate_alignment_overrides(&candidate).is_ok() {
+                    state.alignment_overrides = candidate;
+                }
+                state.pending_alignment = None;
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        folder_view::mutation_menu(ui, state, operation_active, action);
+    });
     if response.clicked() {
         let modifiers = cell.input(|i| i.modifiers);
         folder_view::apply_selection(

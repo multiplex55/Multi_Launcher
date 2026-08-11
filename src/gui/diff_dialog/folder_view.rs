@@ -622,8 +622,11 @@ pub(super) fn status_label(status: FolderStatus) -> &'static str {
     }
 }
 pub(crate) fn projected_rows(state: &FolderCompareState) -> Vec<FolderProjectionRow> {
+    let aligned = state
+        .model
+        .with_alignment_overrides(&state.alignment_overrides);
     project_folder_rows(
-        &state.model,
+        &aligned,
         state.display_filter.clone(),
         &state.path_filter,
         &state.expanded_nodes,

@@ -214,6 +214,12 @@ impl DiffDialogState {
             folder_excludes: excludes,
             folder_display_filter: display,
             content_comparison: content,
+            folder_alignment_overrides: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(folder) => {
+                    folder.alignment_overrides.iter().map(Into::into).collect()
+                }
+                _ => vec![],
+            },
         })
     }
 
@@ -233,6 +239,14 @@ impl DiffDialogState {
         self.persistence.unimportant_section_rules = session.unimportant_section_rules.clone();
         self.open_and_record(left, right)?;
         if let DiffView::FolderCompare(folder) = &mut self.workspace.current_view.view {
+            folder.alignment_overrides = crate::diff::folder_compare::validate_alignment_overrides(
+                &session
+                    .folder_alignment_overrides
+                    .iter()
+                    .map(Into::into)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| format!("invalid folder alignment override: {e}"))?;
             folder.draft_rules.include_rules = session.folder_includes.join("\n");
             folder.draft_rules.exclude_rules = session.folder_excludes.join("\n");
             folder.applied_scan_rules = crate::diff::folder_scan::ScanRules::validated(

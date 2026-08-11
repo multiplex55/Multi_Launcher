@@ -78,6 +78,41 @@ pub struct FolderEntry {
     pub effective_status: FolderStatus,
     pub content_checked: bool,
 }
+
+/// A durable, presentation-only pairing between two paths below the compared
+/// roots. It never changes either path on disk or the scanner's raw entries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FolderAlignmentOverride {
+    pub left_relative: PathBuf,
+    pub right_relative: PathBuf,
+}
+
+pub fn validate_alignment_overrides(
+    values: &[FolderAlignmentOverride],
+) -> Result<Vec<FolderAlignmentOverride>, String> {
+    let mut left = BTreeSet::new();
+    let mut right = BTreeSet::new();
+    values
+        .iter()
+        .map(|value| {
+            let l = normalized_relative(&value.left_relative)?;
+            let r = normalized_relative(&value.right_relative)?;
+            if l.as_os_str().is_empty() || r.as_os_str().is_empty() {
+                return Err("alignment paths cannot be empty".into());
+            }
+            if !left.insert(l.clone()) {
+                return Err(format!("duplicate left alignment: {}", l.display()));
+            }
+            if !right.insert(r.clone()) {
+                return Err(format!("duplicate right alignment: {}", r.display()));
+            }
+            Ok(FolderAlignmentOverride {
+                left_relative: l,
+                right_relative: r,
+            })
+        })
+        .collect()
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKeyPolicy {
     Platform,
@@ -165,6 +200,54 @@ pub struct FolderModel {
     pub revision: u64,
 }
 impl FolderModel {
+    /// Builds the derived alignment model. The retained scan model is untouched;
+    /// missing endpoints are represented as harmless one-sided/error rows.
+    pub fn with_alignment_overrides(&self, overrides: &[FolderAlignmentOverride]) -> Self {
+        let Ok(overrides) = validate_alignment_overrides(overrides) else {
+            return self.clone();
+        };
+        let mut result = self.clone();
+        for mapping in overrides {
+            let left_key = result
+                .entries
+                .iter()
+                .find(|(_, e)| e.relative_path == mapping.left_relative)
+                .map(|(k, _)| k.clone());
+            let right_key = result
+                .entries
+                .iter()
+                .find(|(_, e)| e.relative_path == mapping.right_relative)
+                .map(|(k, _)| k.clone());
+            let left = left_key
+                .as_ref()
+                .and_then(|k| result.entries.get(k))
+                .and_then(|e| e.left.clone());
+            let right = right_key
+                .as_ref()
+                .and_then(|k| result.entries.get(k))
+                .and_then(|e| e.right.clone());
+            if let Some(k) = left_key {
+                result.entries.remove(&k);
+            }
+            if let Some(k) = right_key {
+                result.entries.remove(&k);
+            }
+            let metadata_status =
+                fast_status(left.as_ref(), right.as_ref(), Duration::from_secs(2));
+            result.entries.insert(
+                format!("override:{}", mapping.left_relative.display()),
+                FolderEntry {
+                    relative_path: mapping.left_relative.clone(),
+                    left,
+                    right,
+                    metadata_status,
+                    effective_status: metadata_status,
+                    content_checked: false,
+                },
+            );
+        }
+        result
+    }
     pub fn upsert(
         &mut self,
         relative: &Path,
@@ -572,5 +655,67 @@ mod tests {
                 .len(),
             10_001
         );
+    }
+
+    #[test]
+    fn alignment_validation_rejects_bad_and_duplicate_endpoints() {
+        let ov = |l: &str, r: &str| FolderAlignmentOverride {
+            left_relative: l.into(),
+            right_relative: r.into(),
+        };
+        assert!(validate_alignment_overrides(&[ov("/absolute", "b")]).is_err());
+        assert!(validate_alignment_overrides(&[ov("../outside", "b")]).is_err());
+        assert!(validate_alignment_overrides(&[ov("a", "x"), ov("a", "y")]).is_err());
+        assert!(validate_alignment_overrides(&[ov("a", "x"), ov("b", "x")]).is_err());
+    }
+
+    #[test]
+    fn alignment_pairs_different_names_without_mutating_scan_or_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lp = dir.path().join("left-name.txt");
+        let rp = dir.path().join("right-name.txt");
+        fs::write(&lp, "same bytes").unwrap();
+        fs::write(&rp, "same bytes").unwrap();
+        let mut model = FolderModel::default();
+        model
+            .upsert(
+                Path::new("left-name.txt"),
+                EntrySide {
+                    path: lp.clone(),
+                    metadata: None,
+                    error: None,
+                },
+                true,
+                PathKeyPolicy::Sensitive,
+                Duration::ZERO,
+            )
+            .unwrap();
+        model
+            .upsert(
+                Path::new("right-name.txt"),
+                EntrySide {
+                    path: rp.clone(),
+                    metadata: None,
+                    error: None,
+                },
+                false,
+                PathKeyPolicy::Sensitive,
+                Duration::ZERO,
+            )
+            .unwrap();
+        let original = model.clone();
+        let mapping = FolderAlignmentOverride {
+            left_relative: "left-name.txt".into(),
+            right_relative: "right-name.txt".into(),
+        };
+        let aligned = model.with_alignment_overrides(std::slice::from_ref(&mapping));
+        assert_eq!(aligned.entries.len(), 1);
+        let row = aligned.entries.values().next().unwrap();
+        assert!(row.left.is_some() && row.right.is_some());
+        assert_eq!(model, original);
+        assert_eq!(fs::read_to_string(lp).unwrap(), "same bytes");
+        assert_eq!(fs::read_to_string(rp).unwrap(), "same bytes");
+        let missing = FolderModel::default().with_alignment_overrides(&[mapping]);
+        assert_eq!(missing.entries.len(), 1);
     }
 }
