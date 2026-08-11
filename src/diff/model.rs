@@ -2,8 +2,9 @@ use crate::diff::folder_compare::{FolderAlignmentOverride, FolderModel};
 use crate::diff::folder_scan::ScanRules;
 use crate::diff::settings::{DiffConfigV1, FolderColumnWidthsV1, FolderSortColumn};
 use crate::diff::text_compare::{
-    self, AlignedDiffRow, CompiledRules, FindMatch, FindScope, NavigationDirection,
-    RowProjectionMode, TextComparisonResult, TextComparisonRules,
+    self, AlignedDiffRow, CompiledRules, FindMatch, FindScope, IntralineLocation,
+    ManualTextAlignment, NavigationDirection, RowProjectionMode, TextComparisonResult,
+    TextComparisonRules,
 };
 use crate::diff::text_file::{LineEdit, TextDocument, load_text_file};
 use std::collections::BTreeSet;
@@ -488,6 +489,92 @@ impl DiffWorkspace {
             false
         }
     }
+
+    /// Replaces a folder child with the adjacent differing file from the
+    /// retained parent's current visible projection. The parent itself is not
+    /// rebuilt or popped, so selection, expansion, filters and scan state stay intact.
+    pub fn navigate_different_file(&mut self, next: bool) -> Result<bool, String> {
+        let current = match &self.current_view.view {
+            DiffView::TextCompare(s) => s.relative_path.as_ref(),
+            DiffView::BinaryCompare(s) => s.relative_path.as_ref(),
+            _ => None,
+        }
+        .ok_or("Current comparison has no Folder Compare parent")?
+        .clone();
+        let parent = self
+            .navigation_stack
+            .last()
+            .and_then(|v| match &v.view {
+                DiffView::FolderCompare(s) => Some(s),
+                _ => None,
+            })
+            .ok_or("Current comparison has no Folder Compare parent")?;
+        let query = parent.path_filter.to_lowercase();
+        let mut entries: Vec<_> = parent
+            .model
+            .with_alignment_overrides(&parent.alignment_overrides)
+            .entries
+            .into_values()
+            .filter(|entry| {
+                parent.display_filter.matches(entry.effective_status)
+                    && entry.effective_status.is_different()
+                    && !matches!(
+                        entry.effective_status,
+                        crate::diff::folder_compare::FolderStatus::Unreadable
+                            | crate::diff::folder_compare::FolderStatus::Error
+                    )
+                    && (query.is_empty()
+                        || entry
+                            .relative_path
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains(&query))
+                    && entry
+                        .left
+                        .as_ref()
+                        .or(entry.right.as_ref())
+                        .and_then(|s| s.metadata.as_ref())
+                        .is_some_and(|m| m.kind == crate::diff::folder_compare::EntryKind::File)
+                    && entry.left.as_ref().is_none_or(|s| s.error.is_none())
+                    && entry.right.as_ref().is_none_or(|s| s.error.is_none())
+            })
+            .collect();
+        entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        if parent.sort.descending {
+            entries.reverse();
+        }
+        let Some(index) = entries.iter().position(|e| e.relative_path == current) else {
+            return Ok(false);
+        };
+        let target = if next {
+            entries.get(index + 1)
+        } else {
+            index.checked_sub(1).and_then(|i| entries.get(i))
+        };
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        let relative_path = target.relative_path.clone();
+        let left = target.left.as_ref().map(|s| s.path.clone());
+        let right = target.right.as_ref().map(|s| s.path.clone());
+        self.current_view = RetainedView {
+            id: id(),
+            view: if paths_are_binary(left.as_deref(), right.as_deref()) {
+                DiffView::BinaryCompare(BinaryCompareState {
+                    left,
+                    right,
+                    relative_path: Some(relative_path),
+                })
+            } else {
+                DiffView::TextCompare(TextCompareState {
+                    left,
+                    right,
+                    relative_path: Some(relative_path),
+                })
+            },
+        };
+        Ok(true)
+    }
 }
 
 /// Preferred and minimum Diff window sizes, before adapting them to the work area.
@@ -961,6 +1048,14 @@ pub struct TextViewModel {
     pub current_find_match: Option<usize>,
     pub wrap: bool,
     pub syntax: bool,
+    pub visible_whitespace: bool,
+    pub visible_line_endings: bool,
+    pub text_details_open: bool,
+    pub text_details_height: f32,
+    pub manual_alignments: Vec<ManualTextAlignment>,
+    pub pending_alignment: Option<(DiffSide, usize)>,
+    pub alignment_error: Option<String>,
+    pub current_intraline: Option<IntralineLocation>,
     pub syntax_cache: crate::diff::syntax::SyntaxCache,
     pub large_file_tier: crate::diff::worker::LargeFileTier,
     pub splitter: f32,
@@ -1050,6 +1145,14 @@ impl TextViewModel {
             current_find_match: None,
             wrap,
             syntax: settings.syntax_highlighting && large_file_tier.syntax_enabled(),
+            visible_whitespace: false,
+            visible_line_endings: false,
+            text_details_open: false,
+            text_details_height: 140.0,
+            manual_alignments: vec![],
+            pending_alignment: None,
+            alignment_error: None,
+            current_intraline: None,
             syntax_cache: Default::default(),
             large_file_tier,
             splitter: validated_splitter(settings.pane_split),
@@ -1101,22 +1204,24 @@ impl TextViewModel {
         self.recalculate_at = None;
         self.generation += 1;
         let generation = self.generation;
-        let (l, r, lr, rr, rules) = (
+        let (l, r, lr, rr, rules, anchors) = (
             self.left.source().to_owned(),
             self.right.source().to_owned(),
             self.left.revision,
             self.right.revision,
             self.rules.clone(),
+            self.manual_alignments.clone(),
         );
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         self.recalculating = true;
         std::thread::spawn(move || {
             if let Ok(c) = CompiledRules::compile(&rules) {
-                let _ = tx.send(CompareMessage {
-                    generation,
-                    result: text_compare::compare(&l, &r, lr, rr, &c, 4096),
-                });
+                if let Ok(result) =
+                    text_compare::compare_with_alignments(&l, &r, lr, rr, &c, 4096, &anchors)
+                {
+                    let _ = tx.send(CompareMessage { generation, result });
+                }
             }
         });
     }
@@ -1163,6 +1268,46 @@ impl TextViewModel {
             let row = c.navigate(self.current_row, direction, false, true);
             self.current_row = row;
             self.request_scroll_row(row);
+        }
+    }
+    pub fn navigate_intraline(&mut self, direction: NavigationDirection) {
+        if let Some(c) = &self.comparison {
+            self.current_intraline = c.navigate_intraline(self.current_intraline, direction, false);
+            if let Some(location) = self.current_intraline {
+                self.active_side = location.side;
+                self.current_row = Some(location.row);
+                self.request_scroll_row(Some(location.row));
+            }
+        }
+    }
+    pub fn set_manual_alignments(
+        &mut self,
+        anchors: Vec<ManualTextAlignment>,
+    ) -> Result<(), String> {
+        let left_lines = self.left.source().lines().count();
+        let right_lines = self.right.source().lines().count();
+        let anchors = text_compare::validate_manual_alignments(&anchors, left_lines, right_lines)?;
+        self.manual_alignments = anchors;
+        self.alignment_error = None;
+        self.row_measurements = Default::default();
+        self.pending_scroll_row = self.current_row.or(Some(self.scroll.aligned_row));
+        self.schedule_compare();
+        Ok(())
+    }
+    pub fn add_manual_alignment(&mut self, anchor: ManualTextAlignment) -> Result<(), String> {
+        let mut anchors = self.manual_alignments.clone();
+        anchors.push(anchor);
+        self.set_manual_alignments(anchors)
+    }
+    pub fn remove_manual_alignment(&mut self, anchor: ManualTextAlignment) -> bool {
+        let before = self.manual_alignments.len();
+        self.manual_alignments.retain(|a| *a != anchor);
+        if self.manual_alignments.len() != before {
+            self.row_measurements = Default::default();
+            self.schedule_compare();
+            true
+        } else {
+            false
         }
     }
     pub fn set_current_row(&mut self, row: Option<usize>) {
