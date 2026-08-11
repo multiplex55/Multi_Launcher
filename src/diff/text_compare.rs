@@ -104,6 +104,58 @@ pub struct TextProjection {
     pub lines: Vec<ProjectedLine>,
 }
 
+/// A user supplied, presentation-only constraint saying that two source lines
+/// must occupy the same aligned row. Line numbers are zero based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ManualTextAlignment {
+    pub left_line: usize,
+    pub right_line: usize,
+}
+
+pub fn validate_manual_alignments(
+    anchors: &[ManualTextAlignment],
+    left_lines: usize,
+    right_lines: usize,
+) -> Result<Vec<ManualTextAlignment>, String> {
+    let mut ordered = anchors.to_vec();
+    ordered.sort_by_key(|a| a.left_line);
+    for (i, anchor) in ordered.iter().enumerate() {
+        if anchor.left_line >= left_lines || anchor.right_line >= right_lines {
+            return Err(format!(
+                "manual alignment ({}, {}) is out of bounds (left {}, right {})",
+                anchor.left_line + 1,
+                anchor.right_line + 1,
+                left_lines,
+                right_lines
+            ));
+        }
+        if let Some(previous) = i.checked_sub(1).and_then(|i| ordered.get(i)) {
+            if previous.left_line == anchor.left_line {
+                return Err(format!(
+                    "duplicate left anchor at line {}",
+                    anchor.left_line + 1
+                ));
+            }
+            if previous.right_line == anchor.right_line {
+                return Err(format!(
+                    "duplicate right anchor at line {}",
+                    anchor.right_line + 1
+                ));
+            }
+            if previous.right_line > anchor.right_line {
+                return Err(format!(
+                    "crossing manual anchors: left lines {} and {} map to right lines {} and {}",
+                    previous.left_line + 1,
+                    anchor.left_line + 1,
+                    previous.right_line + 1,
+                    anchor.right_line + 1
+                ));
+            }
+        }
+    }
+    Ok(ordered)
+}
+
 /// Rule order is deterministic: line endings, enabled trim/whitespace options,
 /// case folding, then replacements in user order. Earlier overlapping
 /// replacements therefore consume text before later rules. Unimportant regexes
@@ -157,6 +209,29 @@ fn split_lines(text: &str, equivalent: bool) -> Vec<String> {
     }
 }
 
+/// Expands otherwise invisible characters for display only. The returned text
+/// must never be written back to a document or used as a comparison key.
+pub fn visible_whitespace(text: &str, show_line_ending: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            ' ' => out.push('·'),
+            '\t' => out.push_str("→   "),
+            '\r' => {}
+            '\n' => {
+                if show_line_ending {
+                    out.push('↵')
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    if show_line_ending && !text.ends_with(['\n', '\r']) {
+        out.push('¶');
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiffRowKind {
     Equal,
@@ -200,6 +275,14 @@ pub struct NavigationIndex {
     pub important_difference_rows: Vec<usize>,
     pub hunk_boundaries: Vec<usize>,
     pub row_to_hunk: Vec<Option<usize>>,
+    /// Deterministic row/side/range order, independent from hunk navigation.
+    pub intraline_ranges: Vec<IntralineLocation>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntralineLocation {
+    pub row: usize,
+    pub side: crate::diff::model::DiffSide,
+    pub range: usize,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextComparisonResult {
@@ -258,6 +341,51 @@ impl TextComparisonResult {
                     .or_else(|| wrap.then(|| *v.last().unwrap()))
             }
         }
+    }
+    pub fn navigate_intraline(
+        &self,
+        current: Option<IntralineLocation>,
+        direction: NavigationDirection,
+        wrap: bool,
+    ) -> Option<IntralineLocation> {
+        let values = &self.navigation.intraline_ranges;
+        if values.is_empty() {
+            return None;
+        }
+        let position = current.and_then(|c| values.iter().position(|x| *x == c));
+        match direction {
+            NavigationDirection::First => values.first().copied(),
+            NavigationDirection::Last => values.last().copied(),
+            NavigationDirection::Next => position
+                .and_then(|i| values.get(i + 1).copied())
+                .or_else(|| {
+                    current.and_then(|c| {
+                        values.iter().copied().find(|x| {
+                            (x.row, side_order(x.side), x.range)
+                                > (c.row, side_order(c.side), c.range)
+                        })
+                    })
+                })
+                .or_else(|| wrap.then(|| values[0])),
+            NavigationDirection::Previous => position
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| values.get(i).copied())
+                .or_else(|| {
+                    current.and_then(|c| {
+                        values.iter().rev().copied().find(|x| {
+                            (x.row, side_order(x.side), x.range)
+                                < (c.row, side_order(c.side), c.range)
+                        })
+                    })
+                })
+                .or_else(|| wrap.then(|| *values.last().unwrap())),
+        }
+    }
+}
+fn side_order(side: crate::diff::model::DiffSide) -> u8 {
+    match side {
+        crate::diff::model::DiffSide::Left => 0,
+        crate::diff::model::DiffSide::Right => 1,
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -401,12 +529,124 @@ pub fn compare(
     c: &CompiledRules,
     intraline_limit: usize,
 ) -> TextComparisonResult {
+    compare_with_alignments(
+        left,
+        right,
+        left_revision,
+        right_revision,
+        c,
+        intraline_limit,
+        &[],
+    )
+    .expect("an unconstrained comparison is always valid")
+}
+
+pub fn compare_with_alignments(
+    left: &str,
+    right: &str,
+    left_revision: u64,
+    right_revision: u64,
+    c: &CompiledRules,
+    intraline_limit: usize,
+    anchors: &[ManualTextAlignment],
+) -> Result<TextComparisonResult, String> {
     let lp = project(left, c);
     let rp = project(right, c);
+    let left_count = split_lines(left, c.rules.line_ending_equivalence).len();
+    let right_count = split_lines(right, c.rules.line_ending_equivalence).len();
+    let anchors = validate_manual_alignments(anchors, left_count, right_count)?;
     let lk: Vec<_> = lp.lines.iter().map(|x| x.key.as_str()).collect();
     let rk: Vec<_> = rp.lines.iter().map(|x| x.key.as_str()).collect();
-    let ops = capture_diff_slices(Algorithm::Myers, &lk, &rk);
     let mut rows = vec![];
+    let mut old_start = 0;
+    let mut new_start = 0;
+    for anchor in anchors.iter().copied() {
+        let old_anchor = lp
+            .lines
+            .iter()
+            .position(|l| l.source_line == anchor.left_line)
+            .ok_or_else(|| {
+                format!(
+                    "left anchor line {} is excluded by comparison rules",
+                    anchor.left_line + 1
+                )
+            })?;
+        let new_anchor = rp
+            .lines
+            .iter()
+            .position(|l| l.source_line == anchor.right_line)
+            .ok_or_else(|| {
+                format!(
+                    "right anchor line {} is excluded by comparison rules",
+                    anchor.right_line + 1
+                )
+            })?;
+        append_ops(
+            &mut rows,
+            &lp.lines,
+            &rp.lines,
+            old_start,
+            old_anchor,
+            new_start,
+            new_anchor,
+            intraline_limit,
+        );
+        let kind = if lp.lines[old_anchor].raw == rp.lines[new_anchor].raw {
+            DiffRowKind::Equal
+        } else {
+            DiffRowKind::Modified
+        };
+        push_row(
+            &mut rows,
+            Some(&lp.lines[old_anchor]),
+            Some(&rp.lines[new_anchor]),
+            kind,
+            intraline_limit,
+        );
+        old_start = old_anchor + 1;
+        new_start = new_anchor + 1;
+    }
+    append_ops(
+        &mut rows,
+        &lp.lines,
+        &rp.lines,
+        old_start,
+        lp.lines.len(),
+        new_start,
+        rp.lines.len(),
+        intraline_limit,
+    );
+    Ok(finish_comparison(
+        left,
+        right,
+        left_revision,
+        right_revision,
+        c,
+        lk,
+        rk,
+        rows,
+    ))
+}
+
+fn append_ops(
+    rows: &mut Vec<AlignedDiffRow>,
+    lp: &[ProjectedLine],
+    rp: &[ProjectedLine],
+    old_start: usize,
+    old_end: usize,
+    new_start: usize,
+    new_end: usize,
+    intraline_limit: usize,
+) {
+    let lk: Vec<_> = lp[old_start..old_end]
+        .iter()
+        .map(|x| x.key.as_str())
+        .collect();
+    let rk: Vec<_> = rp[new_start..new_end]
+        .iter()
+        .map(|x| x.key.as_str())
+        .collect();
+    let ops = capture_diff_slices(Algorithm::Myers, &lk, &rk);
     for op in ops {
         match op {
             DiffOp::Equal {
@@ -415,15 +655,17 @@ pub fn compare(
                 len,
             } => {
                 for z in 0..len {
-                    let kind = if lp.lines[old_index + z].raw == rp.lines[new_index + z].raw {
+                    let old_index = old_start + old_index;
+                    let new_index = new_start + new_index;
+                    let kind = if lp[old_index + z].raw == rp[new_index + z].raw {
                         DiffRowKind::Equal
                     } else {
                         DiffRowKind::Modified
                     };
                     push_row(
-                        &mut rows,
-                        Some(&lp.lines[old_index + z]),
-                        Some(&rp.lines[new_index + z]),
+                        rows,
+                        Some(&lp[old_index + z]),
+                        Some(&rp[new_index + z]),
                         kind,
                         intraline_limit,
                     )
@@ -434,10 +676,11 @@ pub fn compare(
                 old_len,
                 new_index: _,
             } => {
+                let old_index = old_start + old_index;
                 for z in 0..old_len {
                     push_row(
-                        &mut rows,
-                        Some(&lp.lines[old_index + z]),
+                        rows,
+                        Some(&lp[old_index + z]),
                         None,
                         DiffRowKind::Deleted,
                         intraline_limit,
@@ -449,11 +692,12 @@ pub fn compare(
                 new_index,
                 new_len,
             } => {
+                let new_index = new_start + new_index;
                 for z in 0..new_len {
                     push_row(
-                        &mut rows,
+                        rows,
                         None,
-                        Some(&rp.lines[new_index + z]),
+                        Some(&rp[new_index + z]),
                         DiffRowKind::Inserted,
                         intraline_limit,
                     )
@@ -465,20 +709,22 @@ pub fn compare(
                 new_index,
                 new_len,
             } => {
+                let old_index = old_start + old_index;
+                let new_index = new_start + new_index;
                 let paired = old_len.min(new_len);
                 for z in 0..paired {
                     push_row(
-                        &mut rows,
-                        Some(&lp.lines[old_index + z]),
-                        Some(&rp.lines[new_index + z]),
+                        rows,
+                        Some(&lp[old_index + z]),
+                        Some(&rp[new_index + z]),
                         DiffRowKind::Modified,
                         intraline_limit,
                     )
                 }
                 for z in paired..old_len {
                     push_row(
-                        &mut rows,
-                        Some(&lp.lines[old_index + z]),
+                        rows,
+                        Some(&lp[old_index + z]),
                         None,
                         DiffRowKind::Deleted,
                         intraline_limit,
@@ -486,9 +732,9 @@ pub fn compare(
                 }
                 for z in paired..new_len {
                     push_row(
-                        &mut rows,
+                        rows,
                         None,
-                        Some(&rp.lines[new_index + z]),
+                        Some(&rp[new_index + z]),
                         DiffRowKind::Inserted,
                         intraline_limit,
                     )
@@ -496,6 +742,18 @@ pub fn compare(
             }
         }
     }
+}
+
+fn finish_comparison(
+    left: &str,
+    right: &str,
+    left_revision: u64,
+    right_revision: u64,
+    c: &CompiledRules,
+    lk: Vec<&str>,
+    rk: Vec<&str>,
+    mut rows: Vec<AlignedDiffRow>,
+) -> TextComparisonResult {
     for (i, r) in rows.iter_mut().enumerate() {
         r.id = stable_id(&(r.left, r.right, r.kind, i));
     }
@@ -534,6 +792,22 @@ pub fn compare(
             }
         }
     }
+    for (row, value) in rows.iter().enumerate() {
+        for range in 0..value.left_ranges.len() {
+            nav.intraline_ranges.push(IntralineLocation {
+                row,
+                side: crate::diff::model::DiffSide::Left,
+                range,
+            });
+        }
+        for range in 0..value.right_ranges.len() {
+            nav.intraline_ranges.push(IntralineLocation {
+                row,
+                side: crate::diff::model::DiffSide::Right,
+                range,
+            });
+        }
+    }
     TextComparisonResult {
         left_revision,
         right_revision,
@@ -545,6 +819,7 @@ pub fn compare(
         navigation: nav,
     }
 }
+
 fn push_row(
     rows: &mut Vec<AlignedDiffRow>,
     l: Option<&ProjectedLine>,
@@ -624,6 +899,63 @@ fn stable_id<T: Hash>(v: &T) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn manual_anchor_validation_rejects_duplicates_bounds_and_crossing() {
+        let a = |l, r| ManualTextAlignment {
+            left_line: l,
+            right_line: r,
+        };
+        assert!(
+            validate_manual_alignments(&[a(0, 0), a(0, 1)], 3, 3)
+                .unwrap_err()
+                .contains("duplicate left")
+        );
+        assert!(
+            validate_manual_alignments(&[a(3, 0)], 3, 3)
+                .unwrap_err()
+                .contains("out of bounds")
+        );
+        assert!(
+            validate_manual_alignments(&[a(0, 2), a(2, 0)], 3, 3)
+                .unwrap_err()
+                .contains("crossing")
+        );
+    }
+
+    #[test]
+    fn anchors_constrain_segments_without_mutating_sources() {
+        let left = "start\nalpha\nbeta\nend".to_owned();
+        let right = "start\nbeta\nalpha\nend".to_owned();
+        let before = (left.clone(), right.clone());
+        let c = CompiledRules::compile(&TextComparisonRules::default()).unwrap();
+        let result = compare_with_alignments(
+            &left,
+            &right,
+            1,
+            1,
+            &c,
+            4096,
+            &[ManualTextAlignment {
+                left_line: 1,
+                right_line: 2,
+            }],
+        )
+        .unwrap();
+        assert!(
+            result
+                .rows
+                .iter()
+                .any(|r| r.left == Some(1) && r.right == Some(2))
+        );
+        assert_eq!((left, right), before);
+    }
+
+    #[test]
+    fn visible_whitespace_is_presentation_only() {
+        let source = "a b\tc";
+        assert_eq!(visible_whitespace(source, true), "a·b→   c¶");
+        assert_eq!(source, "a b\tc");
+    }
     #[test]
     fn projection_does_not_mutate() {
         let s = " A \n\nB".to_string();

@@ -62,6 +62,11 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                     model.large_file_tier.syntax_enabled(),
                     egui::Checkbox::new(&mut model.syntax, "Syntax"),
                 );
+                ui.checkbox(&mut model.visible_whitespace, "Visible Whitespace");
+                ui.add_enabled_ui(model.visible_whitespace, |ui| {
+                    ui.checkbox(&mut model.visible_line_endings, "Line Endings");
+                });
+                ui.checkbox(&mut model.text_details_open, "Text Details");
                 ui.selectable_value(
                     &mut model.projection_mode,
                     RowProjectionMode::All,
@@ -99,6 +104,12 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 }
                 if ui.button("Last").clicked() {
                     model.navigate(NavigationDirection::Last);
+                }
+                if ui.button("Previous Intraline Difference").clicked() {
+                    model.navigate_intraline(NavigationDirection::Previous);
+                }
+                if ui.button("Next Intraline Difference").clicked() {
+                    model.navigate_intraline(NavigationDirection::Next);
                 }
                 if ui
                     .add_enabled(
@@ -204,7 +215,15 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         });
     ui.separator();
     let available = ui.available_width().max(0.0);
-    let comparison_height = ui.available_height().max(0.0);
+    let total_height = ui.available_height().max(0.0);
+    let details_height = if model.text_details_open {
+        model
+            .text_details_height
+            .clamp(72.0, (total_height * 0.45).max(72.0))
+    } else {
+        0.0
+    };
+    let comparison_height = (total_height - details_height).max(0.0);
     model.splitter = crate::diff::model::validated_splitter(model.splitter);
     let (left_width, splitter_width, right_width) =
         comparison_dimensions(available, comparison_height, model.splitter);
@@ -271,6 +290,9 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
     if scroll_accepted {
         model.pending_scroll_row = None;
     }
+    if model.text_details_open {
+        text_details(ui, model, details_height);
+    }
     super::rules_dialog::show(ui.ctx(), view, model);
 }
 
@@ -304,7 +326,9 @@ fn prepare_row_measurements(
         right_text_width_bits: right_width.to_bits(),
         font_theme: identity.finish(),
         text_style: 14.0f32.to_bits() as u64,
-        display_config: ((model.syntax as u64) << 1)
+        display_config: ((model.syntax as u64) << 3)
+            | ((model.visible_whitespace as u64) << 2)
+            | ((model.visible_line_endings as u64) << 1)
             | model.large_file_tier.syntax_enabled() as u64,
         wrap: model.wrap,
         projection_mode: match model.projection_mode {
@@ -331,11 +355,16 @@ fn prepare_row_measurements(
                 let line = crate::diff::model::visual_to_source(row, side)
                     .and_then(|n| source.lines().nth(n))
                     .unwrap_or("");
+                let displayed = if model.visible_whitespace {
+                    crate::diff::text_compare::visible_whitespace(line, model.visible_line_endings)
+                } else {
+                    line.to_owned()
+                };
                 if !model.wrap {
                     return crate::diff::model::MIN_VISUAL_LINE_HEIGHT;
                 }
                 let mut job = egui::text::LayoutJob::simple(
-                    line.replace('\t', "    "),
+                    displayed.replace('\t', "    "),
                     egui::FontId::monospace(14.0),
                     ui.visuals().text_color(),
                     width,
@@ -483,6 +512,8 @@ fn render_pane_contents(
     // Defer model mutation until after the scroll callback releases its
     // immutable borrow of the retained comparison.
     let mut selected_row = None;
+    let mut alignment_action: Option<(DiffSide, usize)> = None;
+    let mut remove_anchor = None;
     let mut render_range = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
         if !wrapped {
             let canvas_width = source
@@ -581,7 +612,23 @@ fn render_pane_contents(
                                 format.underline =
                                     egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 210, 80));
                             }
-                            job.append(&fragment.text, 0.0, format);
+                            let displayed = if model.visible_whitespace {
+                                crate::diff::text_compare::visible_whitespace(&fragment.text, false)
+                            } else {
+                                fragment.text
+                            };
+                            job.append(&displayed, 0.0, format);
+                        }
+                        if model.visible_whitespace && model.visible_line_endings {
+                            job.append(
+                                "¶",
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: egui::FontId::monospace(14.0),
+                                    color: Color32::LIGHT_BLUE,
+                                    ..Default::default()
+                                },
+                            );
                         }
                         let id = egui::Id::new((
                             workspace,
@@ -601,8 +648,46 @@ fn render_pane_contents(
                                 // wrapped content never negotiates a wider pane.
                                 job.wrap.max_width = ui.available_width().max(1.0);
                             }
-                            ui.add(egui::Label::new(job).wrap(wrapped))
+                            let response = ui
+                                .add(egui::Label::new(job).wrap(wrapped))
                                 .on_hover_text(format!("{semantic} line"));
+                            if model.manual_alignments.iter().any(|a| match side {
+                                DiffSide::Left => a.left_line == n,
+                                DiffSide::Right => a.right_line == n,
+                            }) {
+                                ui.label(RichText::new("⚓").color(Color32::LIGHT_BLUE));
+                            }
+                            response.context_menu(|ui| {
+                                if let Some((origin_side, _origin_line)) = model.pending_alignment {
+                                    if origin_side != side
+                                        && ui.button("Preview / confirm alignment").clicked()
+                                    {
+                                        alignment_action = Some(match side {
+                                            DiffSide::Left => (DiffSide::Left, n),
+                                            DiffSide::Right => (DiffSide::Right, n),
+                                        });
+                                        ui.close_menu();
+                                    }
+                                } else if ui.button("Align With…").clicked() {
+                                    model.pending_alignment = Some((side, n));
+                                    ui.close_menu();
+                                }
+                                if let Some(anchor) =
+                                    model
+                                        .manual_alignments
+                                        .iter()
+                                        .copied()
+                                        .find(|a| match side {
+                                            DiffSide::Left => a.left_line == n,
+                                            DiffSide::Right => a.right_line == n,
+                                        })
+                                {
+                                    if ui.button("Remove alignment").clicked() {
+                                        remove_anchor = Some(anchor);
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
                         });
                     } else if ui
                         .button("＋ Insert line")
@@ -680,7 +765,74 @@ fn render_pane_contents(
         model.active_side = side;
         model.set_current_row(Some(row));
     }
+    if let Some((target_side, target_line)) = alignment_action {
+        if let Some((origin_side, origin_line)) = model.pending_alignment.take() {
+            let anchor = crate::diff::text_compare::ManualTextAlignment {
+                left_line: if origin_side == DiffSide::Left {
+                    origin_line
+                } else {
+                    target_line
+                },
+                right_line: if origin_side == DiffSide::Right {
+                    origin_line
+                } else {
+                    target_line
+                },
+            };
+            if let Err(error) = model.add_manual_alignment(anchor) {
+                model.alignment_error = Some(error);
+            }
+        }
+        let _ = target_side;
+    }
+    if let Some(anchor) = remove_anchor {
+        model.remove_manual_alignment(anchor);
+    }
     true
+}
+
+fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.strong("Text Details");
+        ui.add(
+            egui::DragValue::new(&mut model.text_details_height)
+                .clamp_range(72.0..=400.0)
+                .suffix(" px"),
+        );
+    });
+    let row = model
+        .current_row
+        .and_then(|i| model.comparison.as_ref()?.rows.get(i));
+    let value = |side| {
+        row.and_then(|r| crate::diff::model::visual_to_source(r, side))
+            .map(|n| {
+                let source = if side == DiffSide::Left {
+                    model.left.source()
+                } else {
+                    model.right.source()
+                };
+                source.lines().nth(n).unwrap_or("").to_owned()
+            })
+            .unwrap_or_default()
+    };
+    ui.allocate_ui(
+        egui::vec2(ui.available_width(), (height - 30.0).max(1.0)),
+        |ui| {
+            ui.columns(2, |columns| {
+                for (column, side) in columns.iter_mut().zip([DiffSide::Left, DiffSide::Right]) {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(column, |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(value(side)).monospace())
+                                    .wrap(false),
+                            );
+                        });
+                }
+            });
+        },
+    );
 }
 fn side_status(
     ui: &mut egui::Ui,
