@@ -245,18 +245,6 @@ pub fn project_folder_rows(
             .or_default()
             .push(path.clone());
     }
-    fn matches(f: F, status: FolderStatus) -> bool {
-        match f {
-            F::All => true,
-            F::Differences => status.is_different(),
-            F::Identical => status == FolderStatus::Identical,
-            F::LeftOnly => status == FolderStatus::LeftOnly,
-            F::RightOnly => status == FolderStatus::RightOnly,
-            F::LeftNewer => status == FolderStatus::LeftNewer,
-            F::RightNewer => status == FolderStatus::RightNewer,
-            F::Errors => matches!(status, FolderStatus::Unreadable | FolderStatus::Error),
-        }
-    }
     fn walk(
         parent: Option<&Path>,
         depth: usize,
@@ -283,7 +271,7 @@ pub fn project_folder_rows(
                 .replace('\\', "/")
                 .to_lowercase()
                 .contains(query);
-            if path_matches && matches(filter.clone(), entry.effective_status) {
+            if path_matches && filter.matches(entry.effective_status) {
                 out.push(FolderProjectionRow {
                     path: path.clone(),
                     depth,
