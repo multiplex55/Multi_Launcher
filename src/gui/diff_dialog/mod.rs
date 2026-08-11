@@ -674,6 +674,14 @@ impl DiffDialogState {
                     );
                 }
                 action = render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
+                let sort = crate::diff::settings::FolderSortStateV1 {
+                    column: s.sort.column,
+                    descending: s.sort.descending,
+                };
+                self.workspace.settings.folder_sort = sort;
+                self.workspace.settings.folder_column_widths = s.column_widths.validated();
+                self.persistence.config.folder_sort = sort;
+                self.persistence.config.folder_column_widths = s.column_widths.validated();
             }
         }
         WorkspaceRenderOutcome {
