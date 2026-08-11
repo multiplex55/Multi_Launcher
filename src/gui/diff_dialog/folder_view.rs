@@ -3,7 +3,8 @@ use crate::diff::folder_compare::{
     EntryKind, FolderEntry, FolderProjectionRow, FolderStatus, expand_ancestors,
     project_folder_rows,
 };
-use crate::diff::model::{FolderCompareState, FolderDisplayFilter};
+use crate::diff::model::{FolderCompareState, FolderDisplayFilter, FolderSortState};
+use crate::diff::settings::FolderSortColumn;
 use eframe::egui;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -574,14 +575,36 @@ pub(super) fn activate_entry(
 }
 pub(super) fn side_details(side: Option<&crate::diff::folder_compare::EntrySide>) -> String {
     let Some(metadata) = side.and_then(|s| s.metadata.as_ref()) else {
-        return String::new();
+        return "—".into();
     };
     let modified = metadata
         .modified
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs().to_string())
+        .map(|t| {
+            chrono::DateTime::<chrono::Local>::from(t)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| "—".into());
-    format!("{} B / {}", metadata.size, modified)
+    format!("{} / {}", format_size(metadata.size), modified)
+}
+pub(super) fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+pub(super) fn format_modified(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(time)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 fn complete(value: bool) -> &'static str {
     if value { "complete" } else { "running" }
@@ -604,7 +627,7 @@ pub(crate) fn projected_rows(state: &FolderCompareState) -> Vec<FolderProjection
         state.display_filter.clone(),
         &state.path_filter,
         &state.expanded_nodes,
-        state.sort.descending,
+        state.sort.clone(),
     )
 }
 pub(crate) fn ordered_visible(state: &FolderCompareState) -> Vec<PathBuf> {
@@ -757,6 +780,68 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn every_raw_sort_column_works_both_directions_with_stable_missing_ties() {
+        fn rich(path: &str, size: u64, modified: u64, status: FolderStatus) -> FolderEntry {
+            let mut e = entry(path, Some(path), Some(path), EntryKind::File);
+            for side in [&mut e.left, &mut e.right] {
+                let m = side.as_mut().unwrap().metadata.as_mut().unwrap();
+                m.size = size;
+                m.modified =
+                    Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(modified));
+            }
+            e.effective_status = status;
+            e
+        }
+        let mut s = FolderCompareState::default();
+        s.model
+            .entries
+            .insert("b".into(), rich("b", 20, 200, FolderStatus::RightOnly));
+        s.model
+            .entries
+            .insert("a".into(), rich("a", 10, 100, FolderStatus::Identical));
+        s.model.entries.insert(
+            "missing".into(),
+            FolderEntry {
+                relative_path: "missing".into(),
+                left: None,
+                right: None,
+                metadata_status: FolderStatus::Error,
+                effective_status: FolderStatus::Error,
+                content_checked: false,
+            },
+        );
+        let original = s.model.clone();
+        for column in [
+            FolderSortColumn::Path,
+            FolderSortColumn::Status,
+            FolderSortColumn::LeftSize,
+            FolderSortColumn::RightSize,
+            FolderSortColumn::LeftModified,
+            FolderSortColumn::RightModified,
+        ] {
+            s.sort = FolderSortState {
+                column,
+                descending: false,
+            };
+            let asc = paths(&s);
+            s.sort.descending = true;
+            let desc = paths(&s);
+            assert_eq!(asc.len(), 3);
+            assert_eq!(desc.len(), 3);
+            assert_ne!(asc, desc, "{column:?}");
+        }
+        assert_eq!(
+            s.model, original,
+            "sorting must only reorder projection rows"
+        );
+        s.sort = FolderSortState {
+            column: FolderSortColumn::LeftSize,
+            descending: false,
+        };
+        assert_eq!(paths(&s)[0], PathBuf::from("missing"));
     }
 
     #[test]

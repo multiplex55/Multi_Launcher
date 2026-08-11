@@ -226,7 +226,7 @@ pub fn project_folder_rows(
     filter: crate::diff::model::FolderDisplayFilter,
     path_filter: &str,
     expanded: &BTreeSet<PathBuf>,
-    descending: bool,
+    sort: crate::diff::model::FolderSortState,
 ) -> Vec<FolderProjectionRow> {
     use crate::diff::model::FolderDisplayFilter as F;
     let query = path_filter.replace('\\', "/").to_lowercase();
@@ -253,16 +253,46 @@ pub fn project_folder_rows(
         expanded: &BTreeSet<PathBuf>,
         filter: F,
         query: &str,
-        descending: bool,
+        sort: crate::diff::model::FolderSortState,
         out: &mut Vec<FolderProjectionRow>,
     ) {
         let key = parent.map(Path::to_path_buf);
         let mut paths = children.get(&key).cloned().unwrap_or_default();
-        // Sorting siblings keeps a directory immediately before its subtree.
-        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-        if descending {
-            paths.reverse();
-        }
+        // Sort siblings only: a directory remains immediately before its subtree.
+        use crate::diff::settings::FolderSortColumn as C;
+        let metadata = |e: &FolderEntry, left: bool| {
+            (if left { &e.left } else { &e.right })
+                .as_ref()
+                .and_then(|s| s.metadata.as_ref())
+        };
+        let normalized = |p: &PathBuf| p.to_string_lossy().replace('\\', "/").to_lowercase();
+        paths.sort_by(|a, b| {
+            let (ea, eb) = (by_path[a], by_path[b]);
+            let primary = match sort.column {
+                C::Path => normalized(a).cmp(&normalized(b)),
+                C::Status => {
+                    status_rank(ea.effective_status).cmp(&status_rank(eb.effective_status))
+                }
+                C::LeftSize => metadata(ea, true)
+                    .map(|m| m.size)
+                    .cmp(&metadata(eb, true).map(|m| m.size)),
+                C::RightSize => metadata(ea, false)
+                    .map(|m| m.size)
+                    .cmp(&metadata(eb, false).map(|m| m.size)),
+                C::LeftModified => metadata(ea, true)
+                    .and_then(|m| m.modified)
+                    .cmp(&metadata(eb, true).and_then(|m| m.modified)),
+                C::RightModified => metadata(ea, false)
+                    .and_then(|m| m.modified)
+                    .cmp(&metadata(eb, false).and_then(|m| m.modified)),
+            };
+            let primary = if sort.descending {
+                primary.reverse()
+            } else {
+                primary
+            };
+            primary.then_with(|| normalized(a).cmp(&normalized(b)))
+        });
         for path in paths {
             let entry = by_path[&path];
             let has_children = children.contains_key(&Some(path.clone()));
@@ -287,7 +317,7 @@ pub fn project_folder_rows(
                     expanded,
                     filter.clone(),
                     query,
-                    descending,
+                    sort.clone(),
                     out,
                 );
             }
@@ -295,9 +325,23 @@ pub fn project_folder_rows(
     }
     let mut rows = Vec::new();
     walk(
-        None, 0, &by_path, &children, expanded, filter, &query, descending, &mut rows,
+        None, 0, &by_path, &children, expanded, filter, &query, sort, &mut rows,
     );
     rows
+}
+
+fn status_rank(status: FolderStatus) -> u8 {
+    match status {
+        FolderStatus::Identical => 0,
+        FolderStatus::Different => 1,
+        FolderStatus::LeftOnly => 2,
+        FolderStatus::RightOnly => 3,
+        FolderStatus::LeftNewer => 4,
+        FolderStatus::RightNewer => 5,
+        FolderStatus::PendingContentComparison => 6,
+        FolderStatus::Unreadable => 7,
+        FolderStatus::Error => 8,
+    }
 }
 
 /// Expands every retained directory entry above `target`.

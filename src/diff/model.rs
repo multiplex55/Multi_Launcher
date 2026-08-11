@@ -1,6 +1,6 @@
 use crate::diff::folder_compare::FolderModel;
 use crate::diff::folder_scan::ScanRules;
-use crate::diff::settings::DiffConfigV1;
+use crate::diff::settings::{DiffConfigV1, FolderColumnWidthsV1, FolderSortColumn};
 use crate::diff::text_compare::{
     self, AlignedDiffRow, CompiledRules, FindMatch, FindScope, NavigationDirection,
     RowProjectionMode, TextComparisonResult, TextComparisonRules,
@@ -79,7 +79,7 @@ impl FolderDisplayFilter {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FolderSortState {
-    pub column: String,
+    pub column: FolderSortColumn,
     pub descending: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -133,6 +133,7 @@ pub struct FolderCompareState {
     pub display_filter: FolderDisplayFilter,
     pub path_filter: String,
     pub sort: FolderSortState,
+    pub column_widths: FolderColumnWidthsV1,
     /// Rules that produced `model`; drafts never mutate these implicitly.
     pub applied_scan_rules: ScanRules,
     pub draft_rules: FolderRulesDraft,
@@ -163,9 +164,10 @@ impl Default for FolderCompareState {
             display_filter: FolderDisplayFilter::All,
             path_filter: String::new(),
             sort: FolderSortState {
-                column: "path".into(),
+                column: FolderSortColumn::Path,
                 descending: false,
             },
+            column_widths: FolderColumnWidthsV1::default(),
             applied_scan_rules: ScanRules::default(),
             draft_rules: FolderRulesDraft::default(),
             text_rules: TextComparisonRules::default(),
@@ -184,6 +186,13 @@ impl Default for FolderCompareState {
 }
 
 impl FolderCompareState {
+    pub fn apply_table_preferences(&mut self, settings: &DiffConfigV1) {
+        self.sort = FolderSortState {
+            column: settings.folder_sort.column,
+            descending: settings.folder_sort.descending,
+        };
+        self.column_widths = settings.folder_column_widths.validated();
+    }
     fn draft_lines(value: &str) -> Vec<String> {
         value
             .lines()
@@ -408,11 +417,13 @@ impl DiffWorkspace {
                 })
             }
         } else if lm.is_dir() && rm.is_dir() {
-            DiffView::FolderCompare(FolderCompareState {
+            let mut folder = FolderCompareState {
                 left_root: lp,
                 right_root: rp,
                 ..FolderCompareState::default()
-            })
+            };
+            folder.apply_table_preferences(&self.settings);
+            DiffView::FolderCompare(folder)
         } else {
             let msg = "Left and right paths must both be files or both be directories".to_string();
             self.error = Some(msg.clone());
@@ -1505,7 +1516,7 @@ mod tests {
             path_filter: "needle".into(),
             display_filter: FolderDisplayFilter::RightOnly,
             sort: FolderSortState {
-                column: "size".into(),
+                column: FolderSortColumn::LeftSize,
                 descending: true,
             },
             ..Default::default()

@@ -1,7 +1,8 @@
 //! Bounded, virtualized viewport for Folder Compare results.
 use super::folder_view::{self, FolderViewAction, SelectionGesture};
 use crate::diff::folder_compare::{FolderEntry, FolderProjectionRow};
-use crate::diff::model::FolderCompareState;
+use crate::diff::model::{FolderCompareState, FolderSortState};
+use crate::diff::settings::{FolderColumnWidthsV1, FolderSortColumn};
 use eframe::egui;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -14,39 +15,18 @@ pub(crate) const FOLDER_ROW_HEIGHT: f32 = 24.0;
 const FOLDER_HEADER_HEIGHT: f32 = 26.0;
 const OVERSCAN_ROWS: usize = 4;
 const GAP: f32 = 8.0;
-const PATH_MIN: f32 = 190.0;
-const METADATA_WIDTH: f32 = 150.0;
-const STATUS_WIDTH: f32 = 130.0;
-const ACTION_WIDTH: f32 = 58.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TableLayout {
-    widths: [f32; 6],
+    widths: [f32; 8],
     total_width: f32,
 }
 
-fn path_extent<'a>(paths: impl Iterator<Item = &'a Path>) -> f32 {
-    // A stable font-independent estimate is sufficient to establish horizontal
-    // canvas extent; text itself is clipped and never participates in layout.
-    paths
-        .map(|path| path.to_string_lossy().chars().count() as f32 * 7.0 + 42.0)
-        .fold(PATH_MIN, f32::max)
-}
-
-fn table_layout(viewport_width: f32, left_extent: f32, right_extent: f32) -> TableLayout {
-    let fixed = METADATA_WIDTH * 2.0 + STATUS_WIDTH + ACTION_WIDTH + GAP * 5.0;
-    let normal_path = ((viewport_width.max(0.0) - fixed) / 2.0).max(PATH_MIN);
-    let widths = [
-        normal_path.max(left_extent),
-        METADATA_WIDTH,
-        STATUS_WIDTH,
-        normal_path.max(right_extent),
-        METADATA_WIDTH,
-        ACTION_WIDTH,
-    ];
+fn table_layout(widths: FolderColumnWidthsV1) -> TableLayout {
+    let widths = widths.validated().as_array();
     TableLayout {
         widths,
-        total_width: widths.iter().sum::<f32>() + GAP * 5.0,
+        total_width: widths.iter().sum::<f32>() + GAP * 7.0,
     }
 }
 
@@ -88,21 +68,8 @@ pub(super) fn show(
     let mut viewport_ui = ui.child_ui(outer, egui::Layout::top_down(egui::Align::Min));
     viewport_ui.set_clip_rect(viewport_ui.clip_rect().intersect(outer));
 
-    let left_extent = path_extent(
-        state
-            .model
-            .entries
-            .values()
-            .filter_map(|entry| entry.left.as_ref().map(|_| entry.relative_path.as_path())),
-    );
-    let right_extent = path_extent(
-        state
-            .model
-            .entries
-            .values()
-            .filter_map(|entry| entry.right.as_ref().map(|_| entry.relative_path.as_path())),
-    );
-    let layout = table_layout(available.x, left_extent, right_extent);
+    state.column_widths = state.column_widths.validated();
+    let layout = table_layout(state.column_widths);
     let entry_keys: HashMap<PathBuf, String> = state
         .model
         .entries
@@ -120,7 +87,7 @@ pub(super) fn show(
         .auto_shrink([false, false])
         .show(&mut viewport_ui, |ui| {
             ui.set_min_width(layout.total_width);
-            render_header(ui, layout);
+            render_header(ui, layout, state, available.x);
             let mut scroll = egui::ScrollArea::vertical()
                 .id_source("folder-results-vertical")
                 .auto_shrink([false, false])
@@ -169,18 +136,25 @@ fn cell_rect(row: egui::Rect, layout: TableLayout, column: usize) -> egui::Rect 
     )
 }
 
-fn render_header(ui: &mut egui::Ui, layout: TableLayout) {
+fn render_header(
+    ui: &mut egui::Ui,
+    layout: TableLayout,
+    state: &mut FolderCompareState,
+    viewport: f32,
+) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(layout.total_width, FOLDER_HEADER_HEIGHT),
         egui::Sense::hover(),
     );
-    for (column, title) in [
-        "Left path",
-        "Left size / modified",
-        "Status",
-        "Right path",
-        "Right size / modified",
-        "",
+    for (column, (title, sort_column)) in [
+        ("Left path", Some(FolderSortColumn::Path)),
+        ("Left size", Some(FolderSortColumn::LeftSize)),
+        ("Left modified", Some(FolderSortColumn::LeftModified)),
+        ("Status", Some(FolderSortColumn::Status)),
+        ("Right path", Some(FolderSortColumn::Path)),
+        ("Right size", Some(FolderSortColumn::RightSize)),
+        ("Right modified", Some(FolderSortColumn::RightModified)),
+        ("", None),
     ]
     .iter()
     .enumerate()
@@ -189,7 +163,57 @@ fn render_header(ui: &mut egui::Ui, layout: TableLayout) {
             cell_rect(rect, layout, column),
             egui::Layout::left_to_right(egui::Align::Center),
         );
-        cell.add(egui::Label::new(egui::RichText::new(*title).strong()).wrap(false));
+        if column == 7 {
+            if cell.small_button("Reset Columns").clicked() {
+                state.column_widths = FolderColumnWidthsV1::for_viewport(viewport).validated();
+            }
+            continue;
+        }
+        let active = sort_column == Some(state.sort.column);
+        let indicator = if active {
+            if state.sort.descending {
+                " ▼"
+            } else {
+                " ▲"
+            }
+        } else {
+            ""
+        };
+        if cell
+            .add(
+                egui::Button::new(egui::RichText::new(format!("{title}{indicator}")).strong())
+                    .frame(false),
+            )
+            .clicked()
+        {
+            if let Some(column) = sort_column {
+                if state.sort.column == column {
+                    state.sort.descending = !state.sort.descending;
+                } else {
+                    state.sort = FolderSortState {
+                        column,
+                        descending: false,
+                    };
+                }
+            }
+        }
+        if column < 7 {
+            let separator = egui::Rect::from_center_size(
+                egui::pos2(cell.max_rect().right() + GAP / 2.0, rect.center().y),
+                egui::vec2(8.0, rect.height()),
+            );
+            let response = ui.interact(
+                separator,
+                ui.id().with(("folder-column-separator", column)),
+                egui::Sense::drag(),
+            );
+            if response.dragged() {
+                state
+                    .column_widths
+                    .set(column, layout.widths[column] + response.drag_delta().x);
+            }
+            response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        }
     }
     ui.painter().hline(
         rect.x_range(),
@@ -235,16 +259,32 @@ fn render_row(
     label_cell(
         ui,
         cell_rect(rect, layout, 1),
-        folder_view::side_details(entry.left.as_ref()),
+        entry
+            .left
+            .as_ref()
+            .and_then(|s| s.metadata.as_ref())
+            .map(|m| folder_view::format_size(m.size))
+            .unwrap_or_else(|| "—".into()),
     );
     label_cell(
         ui,
         cell_rect(rect, layout, 2),
+        entry
+            .left
+            .as_ref()
+            .and_then(|s| s.metadata.as_ref())
+            .and_then(|m| m.modified)
+            .map(folder_view::format_modified)
+            .unwrap_or_else(|| "—".into()),
+    );
+    label_cell(
+        ui,
+        cell_rect(rect, layout, 3),
         folder_view::status_label(entry.effective_status),
     );
     render_path_cell(
         ui,
-        cell_rect(rect, layout, 3),
+        cell_rect(rect, layout, 4),
         state,
         paths,
         row,
@@ -255,11 +295,27 @@ fn render_row(
     );
     label_cell(
         ui,
-        cell_rect(rect, layout, 4),
-        folder_view::side_details(entry.right.as_ref()),
+        cell_rect(rect, layout, 5),
+        entry
+            .right
+            .as_ref()
+            .and_then(|s| s.metadata.as_ref())
+            .map(|m| folder_view::format_size(m.size))
+            .unwrap_or_else(|| "—".into()),
+    );
+    label_cell(
+        ui,
+        cell_rect(rect, layout, 6),
+        entry
+            .right
+            .as_ref()
+            .and_then(|s| s.metadata.as_ref())
+            .and_then(|m| m.modified)
+            .map(folder_view::format_modified)
+            .unwrap_or_else(|| "—".into()),
     );
     let mut cell = ui.child_ui(
-        cell_rect(rect, layout, 5),
+        cell_rect(rect, layout, 7),
         egui::Layout::left_to_right(egui::Align::Center),
     );
     if cell
@@ -383,22 +439,19 @@ mod tests {
                     })
                     .collect();
                 for width in [500.0, 900.0, 1_600.0] {
-                    let extent = path_extent(rows.iter().map(|row| row.path.as_path()));
-                    let layout = table_layout(width, extent, PATH_MIN);
+                    let layout = table_layout(FolderColumnWidthsV1::for_viewport(width));
                     assert!(layout.total_width >= width);
-                    assert!(layout.widths[0] >= layout.widths[3]);
-                    assert!(layout.widths[0] >= PATH_MIN);
+                    assert_eq!(layout.widths[0], layout.widths[4]);
+                    assert!(layout.widths[0] >= 190.0);
                 }
                 let rendered = visible_row_range(1_000.0, 360.0, count, OVERSCAN_ROWS).len();
                 assert!(rendered <= 24);
             }
         }
-        let wide = 260.0 * 7.0 + 42.0;
-        let wide_left = table_layout(900.0, wide, PATH_MIN);
-        assert!(wide_left.widths[0] > wide_left.widths[3]);
-        let both_wide = table_layout(900.0, wide, wide);
-        assert_eq!(both_wide.widths[0], both_wide.widths[3]);
-        assert!(both_wide.total_width > wide_left.total_width);
+        let narrow = table_layout(FolderColumnWidthsV1::for_viewport(100.0));
+        let wide = table_layout(FolderColumnWidthsV1::for_viewport(1600.0));
+        assert!(narrow.total_width > 100.0); // inner overflow, never parent growth
+        assert!(wide.total_width >= 1600.0);
     }
 
     #[test]
