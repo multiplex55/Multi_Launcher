@@ -663,7 +663,7 @@ fn append_ops(
                         DiffRowKind::Modified
                     };
                     push_row(
-                        &mut rows,
+                        rows,
                         Some(&lp[old_index + z]),
                         Some(&rp[new_index + z]),
                         kind,
@@ -679,7 +679,7 @@ fn append_ops(
                 let old_index = old_start + old_index;
                 for z in 0..old_len {
                     push_row(
-                        &mut rows,
+                        rows,
                         Some(&lp[old_index + z]),
                         None,
                         DiffRowKind::Deleted,
@@ -695,7 +695,7 @@ fn append_ops(
                 let new_index = new_start + new_index;
                 for z in 0..new_len {
                     push_row(
-                        &mut rows,
+                        rows,
                         None,
                         Some(&rp[new_index + z]),
                         DiffRowKind::Inserted,
@@ -714,7 +714,7 @@ fn append_ops(
                 let paired = old_len.min(new_len);
                 for z in 0..paired {
                     push_row(
-                        &mut rows,
+                        rows,
                         Some(&lp[old_index + z]),
                         Some(&rp[new_index + z]),
                         DiffRowKind::Modified,
@@ -723,7 +723,7 @@ fn append_ops(
                 }
                 for z in paired..old_len {
                     push_row(
-                        &mut rows,
+                        rows,
                         Some(&lp[old_index + z]),
                         None,
                         DiffRowKind::Deleted,
@@ -732,7 +732,7 @@ fn append_ops(
                 }
                 for z in paired..new_len {
                     push_row(
-                        &mut rows,
+                        rows,
                         None,
                         Some(&rp[new_index + z]),
                         DiffRowKind::Inserted,

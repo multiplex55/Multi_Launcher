@@ -658,7 +658,7 @@ fn render_pane_contents(
                                 ui.label(RichText::new("⚓").color(Color32::LIGHT_BLUE));
                             }
                             response.context_menu(|ui| {
-                                if let Some((origin_side, origin_line)) = model.pending_alignment {
+                                if let Some((origin_side, _origin_line)) = model.pending_alignment {
                                     if origin_side != side
                                         && ui.button("Preview / confirm alignment").clicked()
                                     {
