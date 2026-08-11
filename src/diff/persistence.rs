@@ -5,7 +5,8 @@
 use crate::common::atomic_file::save_atomic;
 use crate::diff::query::normalize_path;
 use crate::diff::settings::{
-    DIFF_CONFIG_VERSION, DiffConfigV1, ReplacementRuleV1, UnimportantSectionRuleV1,
+    DIFF_CONFIG_VERSION, DiffConfigV1, FolderColumnWidthsV1, FolderSortStateV1, ReplacementRuleV1,
+    UnimportantSectionRuleV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -92,6 +93,29 @@ pub struct SavedDiffSessionV1 {
     pub content_comparison: ContentComparisonModeV1,
     #[serde(default)]
     pub folder_alignment_overrides: Vec<FolderAlignmentOverrideV1>,
+    #[serde(default)]
+    pub folder_column_widths: FolderColumnWidthsV1,
+    #[serde(default)]
+    pub folder_sort: FolderSortStateV1,
+    #[serde(default = "default_true")]
+    pub folder_compare_file_size: bool,
+    #[serde(default = "default_true")]
+    pub folder_compare_modified_timestamps: bool,
+    #[serde(default = "default_tolerance")]
+    pub folder_timestamp_tolerance_seconds: f64,
+    #[serde(default = "default_true")]
+    pub folder_use_text_compare_rules: bool,
+    #[serde(default)]
+    pub text_details_visible: bool,
+    #[serde(default)]
+    pub visible_whitespace: bool,
+    #[serde(default = "default_true")]
+    pub sync_vertical: bool,
+    #[serde(default = "default_true")]
+    pub sync_horizontal: bool,
+    /// 0 = all rows, 1 = differences only. Unknown values restore to 0.
+    #[serde(default)]
+    pub projection_mode: u8,
 }
 impl Default for SavedDiffSessionV1 {
     fn default() -> Self {
@@ -114,6 +138,17 @@ impl Default for SavedDiffSessionV1 {
             folder_display_filter: "all".into(),
             content_comparison: Default::default(),
             folder_alignment_overrides: vec![],
+            folder_column_widths: Default::default(),
+            folder_sort: Default::default(),
+            folder_compare_file_size: true,
+            folder_compare_modified_timestamps: true,
+            folder_timestamp_tolerance_seconds: default_tolerance(),
+            folder_use_text_compare_rules: true,
+            text_details_visible: false,
+            visible_whitespace: false,
+            sync_vertical: true,
+            sync_horizontal: true,
+            projection_mode: 0,
         }
     }
 }
@@ -122,6 +157,25 @@ fn default_true() -> bool {
 }
 fn default_folder_display_filter() -> String {
     "all".into()
+}
+fn default_tolerance() -> f64 {
+    2.0
+}
+
+impl SavedDiffSessionV1 {
+    pub fn validate(mut self) -> Self {
+        self.pane_split = crate::diff::model::validated_splitter(self.pane_split);
+        self.folder_column_widths = self.folder_column_widths.validated();
+        if !self.folder_timestamp_tolerance_seconds.is_finite()
+            || !(0.0..=86_400.0).contains(&self.folder_timestamp_tolerance_seconds)
+        {
+            self.folder_timestamp_tolerance_seconds = default_tolerance();
+        }
+        if self.projection_mode > 1 {
+            self.projection_mode = 0;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,8 +233,19 @@ pub fn load(path: &Path) -> Result<Option<DiffPersistenceV1>, LoadError> {
     if version != DIFF_CONFIG_VERSION as u64 {
         return Err(LoadError::UnsupportedVersion(version));
     }
-    serde_json::from_value(value)
-        .map(Some)
+    serde_json::from_value::<DiffPersistenceV1>(value)
+        .map(|mut persistence| {
+            persistence.config.pane_split =
+                crate::diff::model::validated_splitter(persistence.config.pane_split);
+            persistence.config.folder_column_widths =
+                persistence.config.folder_column_widths.validated();
+            persistence.named_sessions = persistence
+                .named_sessions
+                .into_iter()
+                .map(SavedDiffSessionV1::validate)
+                .collect();
+            Some(persistence)
+        })
         .map_err(LoadError::Malformed)
 }
 pub fn save(path: &Path, value: &DiffPersistenceV1) -> anyhow::Result<()> {
@@ -450,5 +515,40 @@ mod tests {
             serde_json::from_str::<SavedDiffSessionV1>(&json).unwrap(),
             session
         );
+    }
+    #[test]
+    fn session_preferences_round_trip_and_corrupt_values_are_sanitized() {
+        let mut session = SavedDiffSessionV1::default();
+        session.visible_whitespace = true;
+        session.sync_horizontal = false;
+        session.projection_mode = 1;
+        let decoded: SavedDiffSessionV1 =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(decoded, session);
+
+        session.pane_split = f32::NAN;
+        session.folder_column_widths.left_path = f32::INFINITY;
+        session.folder_timestamp_tolerance_seconds = -1.0;
+        session.projection_mode = 99;
+        let safe = session.validate();
+        assert_eq!(safe.pane_split, 0.5);
+        assert!(safe.folder_column_widths.left_path.is_finite());
+        assert_eq!(safe.folder_timestamp_tolerance_seconds, 2.0);
+        assert_eq!(safe.projection_mode, 0);
+    }
+
+    #[test]
+    fn named_sessions_do_not_serialize_ephemeral_view_state() {
+        let json = serde_json::to_string(&SavedDiffSessionV1::default()).unwrap();
+        for name in [
+            "scroll_offset",
+            "selected_paths",
+            "current_row",
+            "find_query",
+            "pending_mutation",
+            "worker",
+        ] {
+            assert!(!json.contains(name), "serialized ephemeral field {name}");
+        }
     }
 }

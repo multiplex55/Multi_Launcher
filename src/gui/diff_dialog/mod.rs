@@ -87,11 +87,80 @@ pub struct DiffDialogState {
     operation_preview: Option<operation_preview::OperationPreview>,
     binary_views: HashMap<u64, crate::diff::binary_compare::BinaryViewModel>,
     watch_views: HashMap<u64, crate::diff::watch::ViewWatchRuntime>,
+    restored_text_preferences: HashMap<u64, (bool, bool, bool, bool, u8)>,
     close_prompt: bool,
     pub persistence: crate::diff::persistence::DiffPersistenceV1,
 }
 
 impl DiffDialogState {
+    fn swap_sides(&mut self) {
+        let id = self.workspace.current_view.id;
+        let result = if let Some(model) = self.text_views.get_mut(&id) {
+            model.swap_sides();
+            Ok(())
+        } else if let Some(model) = self.binary_views.get_mut(&id) {
+            model.swap_sides()
+        } else {
+            Ok(())
+        };
+        if let Err(e) = result.and_then(|_| self.workspace.swap_sides()) {
+            self.workspace.error = Some(e);
+            return;
+        }
+        self.watch_views.remove(&id);
+        if matches!(self.workspace.current_view.view, DiffView::FolderCompare(_)) {
+            self.folder_runtimes.remove(&id);
+        }
+    }
+
+    fn reload_files(&mut self) {
+        let id = self.workspace.current_view.id;
+        let result = match &self.workspace.current_view.view {
+            DiffView::TextCompare(_) => self
+                .text_views
+                .get_mut(&id)
+                .ok_or_else(|| "Text view is not loaded".into())
+                .and_then(|m| m.reload_files()),
+            DiffView::BinaryCompare(state) => self
+                .binary_views
+                .get_mut(&id)
+                .ok_or_else(|| "Binary view is not loaded".into())
+                .and_then(|m| m.refresh_external(state)),
+            _ => Err("Reload Files is available for Text and Binary comparisons".into()),
+        };
+        if let Err(e) = result {
+            self.workspace.error = Some(e);
+        }
+    }
+
+    fn recompare(&mut self) {
+        let id = self.workspace.current_view.id;
+        let result = if let Some(m) = self.text_views.get_mut(&id) {
+            m.recompare();
+            Ok(())
+        } else if let Some(m) = self.binary_views.get_mut(&id) {
+            m.recompare()
+        } else {
+            Err("Recompare is available for Text and Binary comparisons".into())
+        };
+        if let Err(e) = result {
+            self.workspace.error = Some(e);
+        }
+    }
+
+    fn refresh_folder(&mut self) {
+        let id = self.workspace.current_view.id;
+        if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view {
+            state.model = Default::default();
+            state.left_scan_complete = false;
+            state.right_scan_complete = false;
+            state.stale_paths.clear();
+            self.folder_runtimes.entry(id).or_default().prepare_rescan();
+        } else {
+            self.workspace.error =
+                Some("Refresh Folder is available for Folder comparisons".into());
+        }
+    }
     pub fn open_payload(&mut self, payload: DiffOpenPayload) -> Result<(), String> {
         self.open = true;
         self.clear_runtime_resources();
@@ -220,6 +289,46 @@ impl DiffDialogState {
                 }
                 _ => vec![],
             },
+            folder_column_widths: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(f) => f.column_widths.validated(),
+                _ => Default::default(),
+            },
+            folder_sort: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(f) => crate::diff::settings::FolderSortStateV1 {
+                    column: f.sort.column,
+                    descending: f.sort.descending,
+                },
+                _ => Default::default(),
+            },
+            folder_compare_file_size: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(f) => f.compare_file_size,
+                _ => true,
+            },
+            folder_compare_modified_timestamps: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(f) => f.compare_modified_timestamps,
+                _ => true,
+            },
+            folder_timestamp_tolerance_seconds: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(f) => f.timestamp_tolerance.as_secs_f64(),
+                _ => 2.0,
+            },
+            folder_use_text_compare_rules: match &self.workspace.current_view.view {
+                DiffView::FolderCompare(f) => f.use_text_compare_rules,
+                _ => true,
+            },
+            text_details_visible: text_model.is_some_and(|m| m.text_details_open),
+            visible_whitespace: text_model.is_some_and(|m| m.visible_whitespace),
+            sync_vertical: text_model.is_none_or(|m| m.scroll.sync_vertical),
+            sync_horizontal: text_model.is_none_or(|m| m.scroll.sync_horizontal),
+            projection_mode: text_model.map_or(0, |m| {
+                if m.projection_mode
+                    == crate::diff::text_compare::RowProjectionMode::DifferencesOnly
+                {
+                    1
+                } else {
+                    0
+                }
+            }),
         })
     }
 
@@ -238,6 +347,17 @@ impl DiffDialogState {
         self.persistence.replacement_rules = session.replacement_rules.clone();
         self.persistence.unimportant_section_rules = session.unimportant_section_rules.clone();
         self.open_and_record(left, right)?;
+        let view_id = self.workspace.current_view.id;
+        self.restored_text_preferences.insert(
+            view_id,
+            (
+                session.text_details_visible,
+                session.visible_whitespace,
+                session.sync_vertical,
+                session.sync_horizontal,
+                session.projection_mode,
+            ),
+        );
         if let DiffView::FolderCompare(folder) = &mut self.workspace.current_view.view {
             folder.alignment_overrides = crate::diff::folder_compare::validate_alignment_overrides(
                 &session
@@ -269,7 +389,20 @@ impl DiffDialogState {
             folder.draft_rules.content_comparison = folder.content_comparison;
             folder.draft_rules.text_rules = folder.text_rules.clone();
             folder.draft_rules.timestamp_tolerance_seconds =
-                folder.timestamp_tolerance.as_secs_f64().to_string();
+                session.folder_timestamp_tolerance_seconds.to_string();
+            folder.timestamp_tolerance =
+                std::time::Duration::from_secs_f64(session.folder_timestamp_tolerance_seconds);
+            folder.compare_file_size = session.folder_compare_file_size;
+            folder.compare_modified_timestamps = session.folder_compare_modified_timestamps;
+            folder.use_text_compare_rules = session.folder_use_text_compare_rules;
+            folder.draft_rules.compare_file_size = folder.compare_file_size;
+            folder.draft_rules.compare_modified_timestamps = folder.compare_modified_timestamps;
+            folder.draft_rules.use_text_compare_rules = folder.use_text_compare_rules;
+            folder.column_widths = session.folder_column_widths.validated();
+            folder.sort = crate::diff::model::FolderSortState {
+                column: session.folder_sort.column,
+                descending: session.folder_sort.descending,
+            };
         }
         Ok(())
     }
@@ -361,6 +494,44 @@ impl DiffDialogState {
                             self.workspace.right_visible.clone(),
                         );
                     }
+                    ui.menu_button("More", |ui| {
+                        let active = !matches!(self.workspace.current_view.view, DiffView::Start);
+                        if ui
+                            .add_enabled(active, egui::Button::new("Swap Sides"))
+                            .clicked()
+                        {
+                            self.swap_sides();
+                            ui.close_menu();
+                        }
+                        let files = matches!(
+                            self.workspace.current_view.view,
+                            DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
+                        );
+                        if ui
+                            .add_enabled(files, egui::Button::new("Reload Files"))
+                            .clicked()
+                        {
+                            self.reload_files();
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(files, egui::Button::new("Recompare"))
+                            .clicked()
+                        {
+                            self.recompare();
+                            ui.close_menu();
+                        }
+                        let folder =
+                            matches!(self.workspace.current_view.view, DiffView::FolderCompare(_));
+                        if ui
+                            .add_enabled(folder, egui::Button::new("Refresh Folder"))
+                            .on_disabled_hover_text("Open a Folder comparison first")
+                            .clicked()
+                        {
+                            self.refresh_folder();
+                            ui.close_menu();
+                        }
+                    });
                 },
             );
             if let Some(error) = &self.workspace.error {
@@ -498,6 +669,18 @@ impl DiffDialogState {
                                 .map(|r| r.pattern.clone())
                                 .collect();
                             m.schedule_compare();
+                            if let Some((details, whitespace, vertical, horizontal, projection)) =
+                                self.restored_text_preferences.remove(&view_id)
+                            {
+                                m.text_details_open = details;
+                                m.visible_whitespace = whitespace;
+                                m.scroll.set_sync(vertical, horizontal);
+                                m.projection_mode = if projection == 1 {
+                                    crate::diff::text_compare::RowProjectionMode::DifferencesOnly
+                                } else {
+                                    crate::diff::text_compare::RowProjectionMode::All
+                                };
+                            }
                             self.text_views.insert(view_id, m);
                         }
                         Err(e) => {

@@ -117,6 +117,22 @@ pub struct BinaryViewModel {
     pub stale: bool,
 }
 impl BinaryViewModel {
+    pub fn swap_sides(&mut self) -> Result<(), String> {
+        std::mem::swap(&mut self.left, &mut self.right);
+        self.differences = BinaryDifferenceIndex::build(&mut self.left, &mut self.right)?;
+        self.current_difference = None;
+        self.pending_scroll_offset = None;
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Recompare the already-open handles; unlike reload this does not reopen paths.
+    pub fn recompare(&mut self) -> Result<(), String> {
+        self.differences = BinaryDifferenceIndex::build(&mut self.left, &mut self.right)?;
+        self.current_difference = None;
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
+    }
     pub fn load(state: &BinaryCompareState, splitter: f32) -> Result<Self, String> {
         let mut left = BinaryDocument::open(state.left.as_deref())?;
         let mut right = BinaryDocument::open(state.right.as_deref())?;
