@@ -1,4 +1,4 @@
-use crate::diff::folder_compare::FolderModel;
+use crate::diff::folder_compare::{FolderAlignmentOverride, FolderModel};
 use crate::diff::folder_scan::ScanRules;
 use crate::diff::settings::{DiffConfigV1, FolderColumnWidthsV1, FolderSortColumn};
 use crate::diff::text_compare::{
@@ -150,6 +150,9 @@ pub struct FolderCompareState {
     pub right_scan_complete: bool,
     /// Children changed by an editor and awaiting a targeted metadata refresh.
     pub stale_paths: BTreeSet<PathBuf>,
+    pub alignment_overrides: Vec<FolderAlignmentOverride>,
+    /// First endpoint selected by the two-step `Align With…` interaction.
+    pub pending_alignment: Option<(bool, PathBuf)>,
 }
 impl Default for FolderCompareState {
     fn default() -> Self {
@@ -181,6 +184,8 @@ impl Default for FolderCompareState {
             left_scan_complete: false,
             right_scan_complete: false,
             stale_paths: BTreeSet::new(),
+            alignment_overrides: vec![],
+            pending_alignment: None,
         }
     }
 }
