@@ -121,7 +121,7 @@ impl Default for FolderRulesDraft {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FolderCompareState {
     pub left_root: PathBuf,
     pub right_root: PathBuf,

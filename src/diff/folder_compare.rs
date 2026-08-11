@@ -260,11 +260,10 @@ pub fn project_folder_rows(
         let mut paths = children.get(&key).cloned().unwrap_or_default();
         // Sort siblings only: a directory remains immediately before its subtree.
         use crate::diff::settings::FolderSortColumn as C;
-        let metadata = |e: &FolderEntry, left: bool| {
-            (if left { &e.left } else { &e.right })
-                .as_ref()
-                .and_then(|s| s.metadata.as_ref())
-        };
+        fn metadata(entry: &FolderEntry, left: bool) -> Option<&EntryMetadata> {
+            let side = if left { &entry.left } else { &entry.right };
+            side.as_ref().and_then(|side| side.metadata.as_ref())
+        }
         let normalized = |p: &PathBuf| p.to_string_lossy().replace('\\', "/").to_lowercase();
         paths.sort_by(|a, b| {
             let (ea, eb) = (by_path[a], by_path[b]);

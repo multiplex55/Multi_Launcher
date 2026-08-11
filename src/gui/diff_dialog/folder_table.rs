@@ -156,7 +156,7 @@ fn render_header(
         ("Right modified", Some(FolderSortColumn::RightModified)),
         ("", None),
     ]
-    .iter()
+    .into_iter()
     .enumerate()
     {
         let mut cell = ui.child_ui(
