@@ -347,6 +347,50 @@ impl Default for DiffWorkspace {
     }
 }
 impl DiffWorkspace {
+    /// Swap the semantic endpoints of the active comparison.  When a folder
+    /// child is open its retained parent is swapped as well, so Back continues
+    /// to describe (and reconcile against) the same pair of roots.
+    pub fn swap_sides(&mut self) -> Result<(), String> {
+        fn swap_view(view: &mut DiffView) {
+            match view {
+                DiffView::TextCompare(s) => std::mem::swap(&mut s.left, &mut s.right),
+                DiffView::BinaryCompare(s) => std::mem::swap(&mut s.left, &mut s.right),
+                DiffView::FolderCompare(s) => {
+                    std::mem::swap(&mut s.left_root, &mut s.right_root);
+                    s.model = Default::default();
+                    s.left_scan_complete = false;
+                    s.right_scan_complete = false;
+                    for a in &mut s.alignment_overrides {
+                        std::mem::swap(&mut a.left_relative, &mut a.right_relative);
+                    }
+                    s.pending_alignment = s.pending_alignment.take().map(|(left, p)| (!left, p));
+                }
+                DiffView::Start => {}
+            }
+        }
+        if matches!(self.current_view.view, DiffView::Start) {
+            return Err("Open a comparison before swapping sides".into());
+        }
+        swap_view(&mut self.current_view.view);
+        if matches!(
+            self.current_view.view,
+            DiffView::TextCompare(TextCompareState {
+                relative_path: Some(_),
+                ..
+            }) | DiffView::BinaryCompare(BinaryCompareState {
+                relative_path: Some(_),
+                ..
+            })
+        ) {
+            if let Some(parent) = self.navigation_stack.last_mut() {
+                swap_view(&mut parent.view);
+            }
+        }
+        std::mem::swap(&mut self.left_visible, &mut self.right_visible);
+        std::mem::swap(&mut self.left_normalized, &mut self.right_normalized);
+        self.current_job_generation = self.current_job_generation.wrapping_add(1);
+        Ok(())
+    }
     pub fn new(settings: DiffConfigV1) -> Self {
         Self {
             left_visible: String::new(),
@@ -1072,6 +1116,66 @@ pub struct TextViewModel {
 }
 
 impl TextViewModel {
+    pub fn swap_sides(&mut self) {
+        std::mem::swap(&mut self.left_path, &mut self.right_path);
+        std::mem::swap(&mut self.left, &mut self.right);
+        std::mem::swap(&mut self.left_error, &mut self.right_error);
+        self.external_conflict.swap(0, 1);
+        std::mem::swap(
+            &mut self.scroll.left_horizontal,
+            &mut self.scroll.right_horizontal,
+        );
+        std::mem::swap(
+            &mut self.scroll.left_vertical,
+            &mut self.scroll.right_vertical,
+        );
+        self.active_side = other(self.active_side);
+        if let Some(cursor) = &mut self.cursor {
+            cursor.side = other(cursor.side);
+        }
+        for anchor in &mut self.manual_alignments {
+            std::mem::swap(&mut anchor.left_line, &mut anchor.right_line);
+        }
+        self.pending_alignment = self
+            .pending_alignment
+            .take()
+            .map(|(s, line)| (other(s), line));
+        self.current_intraline = None;
+        self.comparison = None;
+        self.row_measurements = Default::default();
+        self.schedule_compare();
+    }
+
+    /// Reload is intentionally all-or-nothing with respect to dirty buffers.
+    pub fn reload_files(&mut self) -> Result<(), String> {
+        if self.has_dirty() {
+            return Err(
+                "Reload would discard unsaved edits; save or discard them explicitly first".into(),
+            );
+        }
+        let load = |path: Option<&PathBuf>| -> Result<TextDocument, String> {
+            path.map(|p| {
+                load_text_file(p)
+                    .map_err(|e| format!("{}: {e}", p.display()))
+                    .and_then(|f| {
+                        TextDocument::from_loaded(&f)
+                            .ok_or_else(|| "binary content is not editable".into())
+                    })
+            })
+            .unwrap_or_else(|| Ok(TextDocument::empty()))
+        };
+        let left = load(self.left_path.as_ref())?;
+        let right = load(self.right_path.as_ref())?;
+        self.left = left;
+        self.right = right;
+        self.external_conflict = [false; 2];
+        self.schedule_compare();
+        Ok(())
+    }
+
+    pub fn recompare(&mut self) {
+        self.schedule_compare();
+    }
     /// Installs a clean external reload while monotonically advancing the
     /// document revision used to reject stale comparison results.
     pub fn reload_external(
@@ -1453,6 +1557,36 @@ fn insertion_line(rows: &[AlignedDiffRow], at: usize, side: DiffSide) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn swap_sides_round_trips_text_binary_and_folder() {
+        for view in [
+            DiffView::TextCompare(TextCompareState {
+                left: Some("l".into()),
+                right: Some("r".into()),
+                relative_path: None,
+            }),
+            DiffView::BinaryCompare(BinaryCompareState {
+                left: Some("l".into()),
+                right: Some("r".into()),
+                relative_path: None,
+            }),
+            DiffView::FolderCompare(FolderCompareState {
+                left_root: "l".into(),
+                right_root: "r".into(),
+                ..Default::default()
+            }),
+        ] {
+            let mut w = DiffWorkspace::default();
+            w.left_visible = "left".into();
+            w.right_visible = "right".into();
+            w.current_view.view = view.clone();
+            w.swap_sides().unwrap();
+            w.swap_sides().unwrap();
+            assert_eq!(w.current_view.view, view);
+            assert_eq!(w.left_visible, "left");
+            assert_eq!(w.right_visible, "right");
+        }
+    }
     #[test]
     fn validates_and_retains_inputs() {
         let d = tempfile::tempdir().unwrap();
