@@ -308,7 +308,8 @@ mod tests {
     fn repairs_zero_and_duplicates() {
         let mut d = document();
         d.macros.push(d.macros[0].clone());
-        d.macros[0].steps.push(d.macros[0].steps[0].clone());
+        let duplicate_step = d.macros[0].steps[0].clone();
+        d.macros[0].steps.push(duplicate_step);
         d.macros[0].id = 0;
         d.macros[0].steps[0].id = 0;
         assert!(repair_ids(&mut d));
