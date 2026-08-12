@@ -400,7 +400,7 @@ fn comparison_dimensions(width: f32, height: f32, splitter: f32) -> (f32, f32, f
 
 /// Conservative geometry used to size the unwrapped virtual canvas before a
 /// galley is painted. Tabs use the same four-column stops as the text pane.
-fn unwrapped_content_width(text: &str, glyph_width: f32, gutter_width: f32) -> f32 {
+pub(super) fn unwrapped_content_width(text: &str, glyph_width: f32, gutter_width: f32) -> f32 {
     let mut columns = 0usize;
     for character in text.chars() {
         if character == '\t' {

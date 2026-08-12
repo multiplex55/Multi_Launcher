@@ -271,29 +271,35 @@ pub(super) fn show(
     });
     mutation_buttons(ui, state, runtime, &mut action);
     let scans_done = state.left_scan_complete && state.right_scan_complete;
-    ui.label(format!(
-        "Scanned entries: left {} ({}) / right {} ({})",
-        runtime.left_visited,
-        complete(state.left_scan_complete),
-        runtime.right_visited,
-        complete(state.right_scan_complete)
-    ));
+    bounded_status_row(
+        ui,
+        format!(
+            "Scanned entries: left {} ({}) / right {} ({})",
+            runtime.left_visited,
+            complete(state.left_scan_complete),
+            runtime.right_visited,
+            complete(state.right_scan_complete)
+        ),
+    );
     status_summary(ui, state);
-    ui.label(format!(
-        "Scanning: {}; content checking: {}; compared paths: {}{}",
-        if scans_done { "idle" } else { "active" },
-        if runtime.is_active() && scans_done {
-            "active"
-        } else {
-            "idle"
-        },
-        runtime.completed_comparisons,
-        if scans_done {
-            format!(" / {} total", state.model.entries.len())
-        } else {
-            String::new()
-        }
-    ));
+    bounded_status_row(
+        ui,
+        format!(
+            "Scanning: {}; content checking: {}; compared paths: {}{}",
+            if scans_done { "idle" } else { "active" },
+            if runtime.is_active() && scans_done {
+                "active"
+            } else {
+                "idle"
+            },
+            runtime.completed_comparisons,
+            if scans_done {
+                format!(" / {} total", state.model.entries.len())
+            } else {
+                String::new()
+            }
+        ),
+    );
 
     let mut projected = projected_rows(state);
     let mut paths: Vec<_> = projected.iter().map(|r| r.path.clone()).collect();
@@ -333,7 +339,7 @@ pub(super) fn show(
     projected = projected_rows(state);
     paths = projected.iter().map(|r| r.path.clone()).collect();
     ui.separator();
-    super::folder_table::show(
+    let _ = super::folder_table::show(
         ui,
         state,
         &paths,
@@ -342,6 +348,16 @@ pub(super) fn show(
         &mut action,
     );
     action
+}
+
+fn bounded_status_row(ui: &mut egui::Ui, text: String) {
+    let height = ui.spacing().interact_size.y;
+    egui::ScrollArea::horizontal()
+        .max_height(height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(text);
+        });
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

@@ -1116,6 +1116,33 @@ pub struct TextViewModel {
 }
 
 impl TextViewModel {
+    #[cfg(test)]
+    pub(crate) fn from_test_text(left: String, right: String) -> Self {
+        let mut model = Self::load(
+            &TextCompareState {
+                left: None,
+                right: None,
+                relative_path: None,
+            },
+            &DiffConfigV1::default(),
+        )
+        .unwrap();
+        model.left = TextDocument::from_test_text(left);
+        model.right = TextDocument::from_test_text(right);
+        model.wrap = false;
+        model.scroll.wrapped = false;
+        model.start_compare();
+        for _ in 0..100 {
+            model.poll();
+            if model.comparison.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(model.comparison.is_some(), "in-memory comparison completed");
+        model
+    }
+
     pub fn swap_sides(&mut self) {
         std::mem::swap(&mut self.left_path, &mut self.right_path);
         std::mem::swap(&mut self.left, &mut self.right);

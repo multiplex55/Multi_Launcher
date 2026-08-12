@@ -12,6 +12,7 @@ pub struct BinaryDocument {
     pub path: Option<PathBuf>,
     pub len: u64,
     file: Option<File>,
+    memory: Option<Vec<u8>>,
 }
 impl BinaryDocument {
     pub fn open(path: Option<&Path>) -> Result<Self, String> {
@@ -26,16 +27,23 @@ impl BinaryDocument {
                     path: Some(path.to_owned()),
                     len,
                     file: Some(file),
+                    memory: None,
                 })
             }
             None => Ok(Self {
                 path: None,
                 len: 0,
                 file: None,
+                memory: None,
             }),
         }
     }
     pub fn read_at(&mut self, offset: u64, limit: usize) -> Result<Vec<u8>, String> {
+        if let Some(bytes) = &self.memory {
+            let start = (offset as usize).min(bytes.len());
+            let end = start.saturating_add(limit).min(bytes.len());
+            return Ok(bytes[start..end].to_vec());
+        }
         let Some(file) = &mut self.file else {
             return Ok(vec![]);
         };
@@ -44,6 +52,33 @@ impl BinaryDocument {
         let mut out = vec![0; limit.min(self.len.saturating_sub(offset) as usize)];
         file.read_exact(&mut out).map_err(|e| e.to_string())?;
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl BinaryViewModel {
+    pub(crate) fn from_test_bytes(left_bytes: Vec<u8>, right_bytes: Vec<u8>) -> Self {
+        let document = |bytes: Vec<u8>| BinaryDocument {
+            path: None,
+            len: bytes.len() as u64,
+            file: None,
+            memory: Some(bytes),
+        };
+        let mut left = document(left_bytes);
+        let mut right = document(right_bytes);
+        let differences = BinaryDifferenceIndex::build(&mut left, &mut right).unwrap();
+        Self {
+            left,
+            right,
+            differences,
+            current_difference: None,
+            bytes_per_row: 16,
+            splitter: 0.5,
+            visible_byte_offset: 0,
+            pending_scroll_offset: None,
+            generation: 1,
+            stale: false,
+        }
     }
 }
 

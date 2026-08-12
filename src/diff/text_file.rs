@@ -288,6 +288,12 @@ impl TextDocument {
             redo: vec![],
         }
     }
+    #[cfg(test)]
+    pub(crate) fn from_test_text(source: impl Into<String>) -> Self {
+        let mut document = Self::empty();
+        document.source = source.into();
+        document
+    }
     pub fn from_loaded(file: &LoadedTextFile) -> Option<Self> {
         Some(Self {
             source: file.text()?.into(),

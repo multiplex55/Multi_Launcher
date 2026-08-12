@@ -53,6 +53,13 @@ pub(crate) fn visible_row_range(
     first.saturating_sub(overscan)..visible_end.saturating_add(overscan).min(total_rows)
 }
 
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct FolderTableGeometry {
+    pub viewport: egui::Rect,
+    pub content_width: f32,
+}
+
 pub(super) fn show(
     ui: &mut egui::Ui,
     state: &mut FolderCompareState,
@@ -60,7 +67,7 @@ pub(super) fn show(
     rows: &[FolderProjectionRow],
     operation_active: bool,
     action: &mut FolderViewAction,
-) {
+) -> FolderTableGeometry {
     // Allocate exactly the post-control remainder once. Neither scroll canvas
     // dimension can affect the parent Ui or the Diff window.
     let available = ui.available_size().max(egui::Vec2::ZERO);
@@ -84,7 +91,7 @@ pub(super) fn show(
         .and_then(|anchor| rows.iter().position(|row| &row.path == anchor));
     let data_height = (available.y - FOLDER_HEADER_HEIGHT).max(0.0);
 
-    egui::ScrollArea::horizontal()
+    let output = egui::ScrollArea::horizontal()
         .id_source("folder-results-horizontal")
         .auto_shrink([false, false])
         .show(&mut viewport_ui, |ui| {
@@ -129,6 +136,10 @@ pub(super) fn show(
                 }
             });
         });
+    FolderTableGeometry {
+        viewport: output.inner_rect,
+        content_width: output.content_size.x,
+    }
 }
 
 fn cell_rect(row: egui::Rect, layout: TableLayout, column: usize) -> egui::Rect {
@@ -501,23 +512,14 @@ mod tests {
     #[test]
     fn layout_regressions_are_bounded_and_row_work_is_virtualized() {
         for count in [1, 15, 100, 10_000] {
-            for path in ["short", &"x".repeat(260), "a/b/c/d/e/f/g/h/i/j"] {
-                let rows: Vec<_> = (0..count)
-                    .map(|i| FolderProjectionRow {
-                        path: format!("{path}/{i}").into(),
-                        depth: i % 10,
-                        has_children: false,
-                    })
-                    .collect();
-                for width in [500.0, 900.0, 1_600.0] {
-                    let layout = table_layout(FolderColumnWidthsV1::for_viewport(width));
-                    assert!(layout.total_width >= width);
-                    assert_eq!(layout.widths[0], layout.widths[4]);
-                    assert!(layout.widths[0] >= 190.0);
-                }
-                let rendered = visible_row_range(1_000.0, 360.0, count, OVERSCAN_ROWS).len();
-                assert!(rendered <= 24);
+            for width in [500.0, 900.0, 1_600.0] {
+                let layout = table_layout(FolderColumnWidthsV1::for_viewport(width));
+                assert!(layout.total_width >= width);
+                assert_eq!(layout.widths[0], layout.widths[4]);
+                assert!(layout.widths[0] >= 190.0);
             }
+            let rendered = visible_row_range(1_000.0, 360.0, count, OVERSCAN_ROWS).len();
+            assert!(rendered <= 24);
         }
         let narrow = table_layout(FolderColumnWidthsV1::for_viewport(100.0));
         let wide = table_layout(FolderColumnWidthsV1::for_viewport(1600.0));

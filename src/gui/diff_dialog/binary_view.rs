@@ -2,24 +2,41 @@ use crate::diff::binary_compare::{BinaryCell, BinaryRow, BinaryViewModel};
 use crate::diff::text_compare::NavigationDirection;
 use eframe::egui::{self, Color32, RichText};
 
-pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut BinaryViewModel) {
-    ui.horizontal(|ui| {
-        for (label, direction) in [
-            ("First", NavigationDirection::First),
-            ("Previous", NavigationDirection::Previous),
-            ("Next", NavigationDirection::Next),
-            ("Last", NavigationDirection::Last),
-        ] {
-            if ui.button(label).clicked() {
-                model.navigate(direction);
-            }
-        }
-        ui.label(model.current_difference.map_or_else(
-            || format!("0/{} differences", model.differences.ranges.len()),
-            |i| format!("Difference {}/{}", i + 1, model.differences.ranges.len()),
-        ));
-        ui.label("Read-only · 16 bytes/row");
-    });
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct BinaryViewGeometry {
+    pub viewport: egui::Rect,
+    pub content_size: egui::Vec2,
+}
+
+pub fn show(
+    ui: &mut egui::Ui,
+    workspace: u64,
+    view: u64,
+    model: &mut BinaryViewModel,
+) -> BinaryViewGeometry {
+    let command_height = ui.spacing().interact_size.y;
+    egui::ScrollArea::horizontal()
+        .max_height(command_height)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (label, direction) in [
+                    ("First", NavigationDirection::First),
+                    ("Previous", NavigationDirection::Previous),
+                    ("Next", NavigationDirection::Next),
+                    ("Last", NavigationDirection::Last),
+                ] {
+                    if ui.button(label).clicked() {
+                        model.navigate(direction);
+                    }
+                }
+                ui.label(model.current_difference.map_or_else(
+                    || format!("0/{} differences", model.differences.ranges.len()),
+                    |i| format!("Difference {}/{}", i + 1, model.differences.ranges.len()),
+                ));
+                ui.label("Read-only · 16 bytes/row");
+            })
+        });
     let row_height = 22.0;
     let rows = model
         .left
@@ -38,8 +55,12 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut BinaryView
         );
     }
     let viewport = binary_viewport_size(ui.available_size());
+    let mut geometry = BinaryViewGeometry {
+        viewport: egui::Rect::NOTHING,
+        content_size: egui::Vec2::ZERO,
+    };
     ui.allocate_ui(viewport, |ui| {
-        egui::ScrollArea::horizontal()
+        let output = egui::ScrollArea::horizontal()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 scroll.show_rows(ui, row_height, rows, |ui, range| {
@@ -55,7 +76,10 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut BinaryView
                     }
                 });
             });
+        geometry.viewport = output.inner_rect;
+        geometry.content_size = output.content_size;
     });
+    geometry
 }
 
 fn binary_viewport_size(available: egui::Vec2) -> egui::Vec2 {
