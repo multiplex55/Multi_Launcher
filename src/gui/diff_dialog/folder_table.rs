@@ -53,6 +53,13 @@ pub(crate) fn visible_row_range(
     first.saturating_sub(overscan)..visible_end.saturating_add(overscan).min(total_rows)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct FolderTableGeometry {
+    pub viewport: egui::Rect,
+    pub content_width: f32,
+}
+
 pub(super) fn show(
     ui: &mut egui::Ui,
     state: &mut FolderCompareState,
@@ -60,7 +67,7 @@ pub(super) fn show(
     rows: &[FolderProjectionRow],
     operation_active: bool,
     action: &mut FolderViewAction,
-) {
+) -> FolderTableGeometry {
     // Allocate exactly the post-control remainder once. Neither scroll canvas
     // dimension can affect the parent Ui or the Diff window.
     let available = ui.available_size().max(egui::Vec2::ZERO);
@@ -84,7 +91,7 @@ pub(super) fn show(
         .and_then(|anchor| rows.iter().position(|row| &row.path == anchor));
     let data_height = (available.y - FOLDER_HEADER_HEIGHT).max(0.0);
 
-    egui::ScrollArea::horizontal()
+    let output = egui::ScrollArea::horizontal()
         .id_source("folder-results-horizontal")
         .auto_shrink([false, false])
         .show(&mut viewport_ui, |ui| {
@@ -129,6 +136,10 @@ pub(super) fn show(
                 }
             });
         });
+    FolderTableGeometry {
+        viewport: output.inner_rect,
+        content_width: output.content_size.x,
+    }
 }
 
 fn cell_rect(row: egui::Rect, layout: TableLayout, column: usize) -> egui::Rect {

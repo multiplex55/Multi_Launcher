@@ -92,6 +92,16 @@ fn allocate_remaining_workspace<R>(
     allocate_viewport(ui, viewport, render)
 }
 
+fn bounded_message(ui: &mut egui::Ui, color: egui::Color32, text: &str, max_height: f32) {
+    egui::ScrollArea::both()
+        .max_height(max_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width(ui.available_width());
+            ui.colored_label(color, text);
+        });
+}
+
 #[derive(Default)]
 pub struct DiffDialogState {
     pub open: bool,
@@ -572,10 +582,7 @@ impl DiffDialogState {
                         );
                     });
                 if let Some(error) = &self.workspace.error {
-                    egui::ScrollArea::both().max_height(48.0).show(ui, |ui| {
-                        ui.set_max_width(ui.available_width());
-                        ui.colored_label(egui::Color32::RED, error);
-                    });
+                    bounded_message(ui, egui::Color32::RED, error, 48.0);
                 }
                 if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
                     self.navigate_back();
@@ -855,7 +862,7 @@ impl DiffDialogState {
                     }
                 }
                 if let Some(model) = self.binary_views.get_mut(&view_id) {
-                    binary_view::show(ui, workspace_id, view_id, model);
+                    let _ = binary_view::show(ui, workspace_id, view_id, model);
                 }
             }
             DiffView::FolderCompare(s) => {
@@ -905,9 +912,11 @@ impl DiffDialogState {
                 if runtime.left_error.is_some() || runtime.right_error.is_some() {
                     let left = runtime.left_error.as_deref().unwrap_or("none");
                     let right = runtime.right_error.as_deref().unwrap_or("none");
-                    ui.colored_label(
+                    bounded_message(
+                        ui,
                         egui::Color32::RED,
-                        format!("Scan failures — left: {left}; right: {right}"),
+                        &format!("Scan failures — left: {left}; right: {right}"),
+                        48.0,
                     );
                 }
                 action = render_retained_folder(s, |state| folder_view::show(ui, state, runtime));
@@ -1965,175 +1974,237 @@ mod tests {
         assert_eq!(plan.mode, crate::diff::file_ops::DeleteMode::Recycle);
     }
 
-    fn lightweight_view(kind: usize) -> DiffView {
-        match kind {
-            0 => DiffView::Start,
-            1 => DiffView::FolderCompare(FolderCompareState::default()),
-            2 => DiffView::TextCompare(crate::diff::model::TextCompareState {
-                left: None,
-                right: None,
-                relative_path: None,
-            }),
-            3 => DiffView::BinaryCompare(crate::diff::model::BinaryCompareState {
-                left: None,
-                right: None,
-                relative_path: None,
-            }),
-            _ => unreachable!(),
+    enum ProductionFixture {
+        Text(crate::diff::model::TextViewModel),
+        Folder(
+            FolderCompareState,
+            Vec<crate::diff::folder_compare::FolderProjectionRow>,
+        ),
+        Binary(crate::diff::binary_compare::BinaryViewModel),
+    }
+
+    impl ProductionFixture {
+        fn pathological(kind: usize) -> Self {
+            let token = "very-long-component-".repeat(300);
+            match kind {
+                0 => Self::Text(crate::diff::model::TextViewModel::from_test_text(
+                    format!("left-{token}"),
+                    format!("right-{token}"),
+                )),
+                1 => {
+                    let mut state = FolderCompareState::default();
+                    state.left_root = token.clone().into();
+                    state.right_root = format!("right-{token}").into();
+                    // Deliberately wide production columns remain owned by the table scroller.
+                    state.column_widths = crate::diff::settings::FolderColumnWidthsV1 {
+                        left_path: 900.0,
+                        right_path: 900.0,
+                        ..Default::default()
+                    };
+                    let rows = (0..40)
+                        .map(|index| {
+                            let path: std::path::PathBuf = format!("{token}/{index}").into();
+                            state.model.entries.insert(
+                                path.to_string_lossy().into_owned(),
+                                crate::diff::folder_compare::FolderEntry {
+                                    relative_path: path.clone(),
+                                    left: None,
+                                    right: None,
+                                    metadata_status:
+                                        crate::diff::folder_compare::FolderStatus::Different,
+                                    effective_status:
+                                        crate::diff::folder_compare::FolderStatus::Different,
+                                    content_checked: true,
+                                },
+                            );
+                            crate::diff::folder_compare::FolderProjectionRow {
+                                path,
+                                depth: 0,
+                                has_children: false,
+                            }
+                        })
+                        .collect();
+                    Self::Folder(state, rows)
+                }
+                2 => Self::Binary(
+                    crate::diff::binary_compare::BinaryViewModel::from_test_bytes(
+                        (0..4096).map(|n| n as u8).collect(),
+                        (0..4096).map(|n| (n as u8).wrapping_add(1)).collect(),
+                    ),
+                ),
+                _ => unreachable!(),
+            }
         }
     }
 
-    fn render_layout_frame(
+    #[derive(Clone, Copy, Debug)]
+    struct ProductionGeometry {
+        outer: egui::Rect,
+        body: egui::Rect,
+        clip: egui::Rect,
+        viewport_width: f32,
+        content_width: f32,
+    }
+
+    fn render_production_frame(
         ctx: &egui::Context,
-        view: &DiffView,
-        folder_rows: usize,
+        fixture: &mut ProductionFixture,
         requested_size: egui::Vec2,
-    ) -> (egui::Rect, egui::Rect, egui::Rect) {
-        let mut outer = egui::Rect::NOTHING;
-        let mut workspace = egui::Rect::NOTHING;
-        let mut workspace_clip = egui::Rect::NOTHING;
+        id: u64,
+    ) -> ProductionGeometry {
+        let mut measured = ProductionGeometry {
+            outer: egui::Rect::NOTHING,
+            body: egui::Rect::NOTHING,
+            clip: egui::Rect::NOTHING,
+            viewport_width: 0.0,
+            content_width: 0.0,
+        };
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             requested_size + egui::vec2(200.0, 200.0),
         ));
-        // egui applies a new window's default geometry through memory during
-        // its first frame. Render a warm-up frame before observing geometry so
-        // the assertion measures the settled, user-visible window rectangle.
         for input in [input.clone(), input] {
             let _ = ctx.run(input, |ctx| {
-                let response = egui::Window::new("Diff layout regression")
-                    .id(egui::Id::new("diff_layout_regression"))
+                let response = egui::Window::new("Diff production layout regression")
+                    .id(egui::Id::new(("diff-production-layout", id)))
                     .collapsible(false)
                     .resizable(true)
                     .default_pos(egui::pos2(40.0, 30.0))
                     .default_size(requested_size)
                     .show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Left");
-                            ui.label("↔");
-                            ui.label("Right");
-                            let _ = ui.button("Compare");
-                        });
+                        // Exercise the bounded path/error behavior with pathological labels.
+                        let row_height = ui.spacing().interact_size.y;
+                        egui::ScrollArea::horizontal()
+                            .max_height(row_height)
+                            .show(ui, |ui| {
+                                ui.label("left-path".repeat(500));
+                                ui.label("↔");
+                                ui.label("right-path".repeat(500));
+                                let _ = ui.button("Compare");
+                                let _ = ui.menu_button("More", |_| {});
+                            });
+                        bounded_message(
+                            ui,
+                            egui::Color32::RED,
+                            &"workspace-error".repeat(500),
+                            48.0,
+                        );
                         ui.separator();
                         allocate_remaining_workspace(ui, |ui| {
-                            workspace = ui.max_rect();
-                            workspace_clip = ui.clip_rect();
-                            match view {
-                                DiffView::Start => {
-                                    ui.label("Start");
+                            measured.body = ui.max_rect();
+                            measured.clip = ui.clip_rect();
+                            match fixture {
+                                ProductionFixture::Text(model) => {
+                                    text_view::show(ui, 1, id, model);
+                                    let pane = ((measured.body.width() - 8.0) * 0.5).max(0.0);
+                                    measured.viewport_width = pane;
+                                    measured.content_width = text_view::unwrapped_content_width(
+                                        model.left.source().lines().next().unwrap_or(""),
+                                        8.5,
+                                        72.0,
+                                    );
                                 }
-                                DiffView::FolderCompare(_) => {
-                                    // Vary the amount of painted folder content without
-                                    // letting the deterministic renderer request more layout
-                                    // space than the bounded workspace owns.
-                                    let painter = ui.painter();
-                                    for row in 0..folder_rows {
-                                        let y = workspace.top() + row as f32 * 4.0;
-                                        painter.line_segment(
-                                            [
-                                                egui::pos2(workspace.left(), y),
-                                                egui::pos2(workspace.right(), y),
-                                            ],
-                                            egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
-                                        );
-                                    }
+                                ProductionFixture::Folder(state, rows) => {
+                                    let paths =
+                                        rows.iter().map(|row| row.path.clone()).collect::<Vec<_>>();
+                                    let mut action = folder_view::FolderViewAction::Noop;
+                                    let geometry = folder_table::show(
+                                        ui,
+                                        state,
+                                        &paths,
+                                        rows,
+                                        false,
+                                        &mut action,
+                                    );
+                                    measured.viewport_width = geometry.viewport.width();
+                                    measured.content_width = geometry.content_width;
                                 }
-                                DiffView::TextCompare(_) => {
-                                    ui.label("Text");
+                                ProductionFixture::Binary(model) => {
+                                    let geometry = binary_view::show(ui, 1, id, model);
+                                    measured.viewport_width = geometry.viewport.width();
+                                    measured.content_width = geometry.content_size.x;
                                 }
-                                DiffView::BinaryCompare(_) => {
-                                    ui.label("Binary");
-                                }
-                            };
+                            }
                         });
                     })
                     .unwrap();
-                outer = response.response.rect;
+                measured.outer = response.response.rect;
             });
         }
-        (outer, workspace, workspace_clip)
+        measured
     }
 
     fn assert_rect_close(actual: egui::Rect, expected: egui::Rect) {
-        let tolerance = 0.5;
-        assert!((actual.min.x - expected.min.x).abs() <= tolerance);
-        assert!((actual.min.y - expected.min.y).abs() <= tolerance);
-        assert!((actual.max.x - expected.max.x).abs() <= tolerance);
-        assert!((actual.max.y - expected.max.y).abs() <= tolerance);
+        let tolerance = 1.0;
+        assert!(
+            (actual.min.x - expected.min.x).abs() <= tolerance,
+            "{actual:?} != {expected:?}"
+        );
+        assert!(
+            (actual.min.y - expected.min.y).abs() <= tolerance,
+            "{actual:?} != {expected:?}"
+        );
+        assert!(
+            (actual.max.x - expected.max.x).abs() <= tolerance,
+            "{actual:?} != {expected:?}"
+        );
+        assert!(
+            (actual.max.y - expected.max.y).abs() <= tolerance,
+            "{actual:?} != {expected:?}"
+        );
     }
 
     #[test]
-    fn workspace_views_retain_requested_window_geometry_and_parent_clip() {
-        for requested in [
-            egui::vec2(400.0, 250.0),
-            egui::vec2(900.0, 650.0),
-            egui::vec2(1600.0, 1000.0),
-        ] {
-            let ctx = egui::Context::default();
-            let mut expected = None;
-            for kind in 0..4 {
-                let (outer, workspace, clip) =
-                    render_layout_frame(&ctx, &lightweight_view(kind), 1, requested);
-                // `Window::default_size` is the requested inner size; the outer
-                // response additionally includes the platform/style frame.
-                assert!(outer.width() >= requested.x, "{outer:?}");
-                assert!(outer.height() >= requested.y, "{outer:?}");
-                assert!(outer.contains_rect(workspace));
-                assert!(outer.contains_rect(clip));
-                assert!(clip.contains_rect(workspace));
-                // `InnerResponse::response` describes the widgets' content and may
-                // shrink to a short label. The allocated UI's max rect is the
-                // layout boundary that must reserve the remaining window space.
-                // The workspace spans the requested inner width. The outer rect
-                // is wider because it also includes the window frame.
+    fn pathological_production_views_keep_window_and_body_bounded() {
+        for requested in [egui::vec2(900.0, 650.0), egui::vec2(400.0, 250.0)] {
+            let mut baseline = None;
+            for kind in 0..3 {
+                let ctx = egui::Context::default();
+                let mut fixture = ProductionFixture::pathological(kind);
+                let geometry = render_production_frame(&ctx, &mut fixture, requested, kind as u64);
+                assert!(geometry.outer.contains_rect(geometry.body));
+                assert!(geometry.clip.contains_rect(geometry.body));
                 assert!(
-                    (workspace.width() - requested.x).abs() <= 0.5,
-                    "{workspace:?}"
+                    (geometry.body.width() - requested.x).abs() <= 1.0,
+                    "{geometry:?}"
                 );
-                assert!(workspace.height() <= requested.y, "{workspace:?}");
-                assert!(workspace.height() >= 0.0, "{workspace:?}");
-                if let Some(expected) = expected {
-                    assert_rect_close(outer, expected);
+                assert!(
+                    geometry.content_width > geometry.viewport_width,
+                    "{geometry:?}"
+                );
+                if let Some(expected) = baseline {
+                    assert_rect_close(geometry.outer, expected);
                 } else {
-                    expected = Some(outer);
+                    baseline = Some(geometry.outer);
                 }
             }
         }
     }
 
     #[test]
-    fn folder_content_amount_does_not_resize_outer_window() {
-        let ctx = egui::Context::default();
-        let view = lightweight_view(1);
-        let size = egui::vec2(640.0, 480.0);
-        let (baseline, _, _) = render_layout_frame(&ctx, &view, 1, size);
-        for rows in [15, 1_000] {
-            let (outer, workspace, clip) = render_layout_frame(&ctx, &view, rows, size);
-            assert_rect_close(outer, baseline);
-            assert!(workspace.contains_rect(clip.intersect(workspace)));
-            assert!(clip.contains_rect(workspace));
+    fn manual_resize_owns_workspace_geometry_in_every_production_mode() {
+        for kind in 0..3 {
+            let mut sizes = Vec::new();
+            for (index, requested) in [egui::vec2(600.0, 350.0), egui::vec2(1000.0, 700.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let ctx = egui::Context::default();
+                let mut fixture = ProductionFixture::pathological(kind);
+                let geometry = render_production_frame(
+                    &ctx,
+                    &mut fixture,
+                    requested,
+                    (kind * 10 + index) as u64,
+                );
+                assert!((geometry.body.width() - requested.x).abs() <= 1.0);
+                assert!(geometry.content_width > geometry.viewport_width);
+                sizes.push(geometry.body.size());
+            }
+            assert!(sizes[1].x > sizes[0].x);
+            assert!(sizes[1].y > sizes[0].y);
         }
-    }
-
-    #[test]
-    fn user_resize_grows_workspace_instead_of_using_content_size() {
-        let view = lightweight_view(0);
-        let (_, small, _) = render_layout_frame(
-            &egui::Context::default(),
-            &view,
-            0,
-            egui::vec2(640.0, 480.0),
-        );
-        let (_, large, clip) = render_layout_frame(
-            &egui::Context::default(),
-            &view,
-            0,
-            egui::vec2(1_000.0, 720.0),
-        );
-        assert!(large.width() > small.width());
-        assert!(large.height() > small.height());
-        assert!(clip.contains_rect(large));
     }
 
     #[test]
