@@ -1536,7 +1536,7 @@ mod tests {
             assert!((restored_size[1] - 650.0).abs() <= tolerance);
 
             let mut observation = None;
-            ctx.run(
+            let _ = ctx.run(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_max(
                         egui::pos2(screen[0], screen[1]),
@@ -2091,13 +2091,13 @@ mod tests {
                             48.0,
                         );
                         ui.separator();
-                        allocate_remaining_workspace(ui, |ui| {
-                            measured.body = ui.max_rect();
+                        let workspace = allocate_remaining_workspace(ui, |ui| {
+                            let body_width = ui.max_rect().width();
                             measured.clip = ui.clip_rect();
                             match fixture {
                                 ProductionFixture::Text(model) => {
                                     text_view::show(ui, 1, id, model);
-                                    let pane = ((measured.body.width() - 8.0) * 0.5).max(0.0);
+                                    let pane = ((body_width - 8.0) * 0.5).max(0.0);
                                     measured.viewport_width = pane;
                                     measured.content_width = text_view::unwrapped_content_width(
                                         model.left.source().lines().next().unwrap_or(""),
@@ -2127,6 +2127,9 @@ mod tests {
                                 }
                             }
                         });
+                        // Measure the allocation owned by the bounded workspace, not
+                        // the child Ui's content-dependent `max_rect`.
+                        measured.body = workspace.response.rect;
                     })
                     .unwrap();
                 measured.outer = response.response.rect;
@@ -2164,7 +2167,8 @@ mod tests {
                 let mut fixture = ProductionFixture::pathological(kind);
                 let geometry = render_production_frame(&ctx, &mut fixture, requested, kind as u64);
                 assert!(geometry.outer.contains_rect(geometry.body));
-                assert!(geometry.clip.contains_rect(geometry.body));
+                assert!(geometry.body.contains_rect(geometry.clip));
+                assert!(geometry.clip.is_positive(), "{geometry:?}");
                 assert!(
                     (geometry.body.width() - requested.x).abs() <= 1.0,
                     "{geometry:?}"
