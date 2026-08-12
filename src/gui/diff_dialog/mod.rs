@@ -12,16 +12,25 @@ mod operation_preview;
 mod rules_dialog;
 mod text_view;
 
-/// Captures a complete, persistable runtime rectangle or rejects it atomically.
-fn runtime_window_geometry(rect: egui::Rect, screen: [f32; 4]) -> Option<([f32; 2], [f32; 2])> {
-    let coordinates = [rect.min.x, rect.min.y, rect.max.x, rect.max.y];
-    let size = [rect.width(), rect.height()];
+/// Captures a complete, persistable inner size and outer position, or rejects
+/// the observation atomically.
+fn runtime_window_geometry(
+    inner_size: egui::Vec2,
+    outer_position: egui::Pos2,
+    screen: [f32; 4],
+) -> Option<([f32; 2], [f32; 2])> {
+    let geometry = [
+        inner_size.x,
+        inner_size.y,
+        outer_position.x,
+        outer_position.y,
+    ];
+    let size = [inner_size.x, inner_size.y];
     let minimum = crate::diff::model::diff_window_min_size(screen);
-    (coordinates.iter().all(|value| value.is_finite())
-        && size.iter().all(|value| value.is_finite())
+    (geometry.iter().all(|value| value.is_finite())
         && size[0] >= minimum[0]
         && size[1] >= minimum[1])
-        .then_some((size, [rect.left(), rect.top()]))
+        .then_some((size, [outer_position.x, outer_position.y]))
 }
 
 fn render_retained_folder(
@@ -45,7 +54,7 @@ struct DiffViewport {
 
 impl DiffViewport {
     fn remaining(ui: &egui::Ui) -> Self {
-        let available = ui.available_size();
+        let available = ui.available_rect_before_wrap();
         let bounded = |value: f32| {
             if value.is_finite() {
                 value.max(0.0)
@@ -53,12 +62,26 @@ impl DiffViewport {
                 0.0
             }
         };
-        let size = egui::vec2(bounded(available.x), bounded(available.y));
+        let size = egui::vec2(bounded(available.width()), bounded(available.height()));
         Self {
-            rect: egui::Rect::from_min_size(ui.next_widget_position(), size),
+            rect: egui::Rect::from_min_size(available.min, size),
             size,
         }
     }
+}
+
+fn allocate_viewport<R>(
+    ui: &mut egui::Ui,
+    viewport: DiffViewport,
+    render: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    // The parent owns only this fixed allocation. Descendants can grow their
+    // scroll extents, but cannot feed a larger minimum back into the Window.
+    let response = ui.allocate_rect(viewport.rect, egui::Sense::hover());
+    let mut child = ui.child_ui(viewport.rect, egui::Layout::top_down(egui::Align::Min));
+    child.set_clip_rect(ui.clip_rect().intersect(viewport.rect));
+    let inner = render(&mut child);
+    egui::InnerResponse { inner, response }
 }
 
 fn allocate_remaining_workspace<R>(
@@ -66,16 +89,7 @@ fn allocate_remaining_workspace<R>(
     render: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
     let viewport = DiffViewport::remaining(ui);
-    // Allocate the outer rectangle before rendering. Content may enlarge an
-    // inner scroll extent, but it must never enlarge the workspace or Diff window.
-    let response = ui.allocate_rect(viewport.rect, egui::Sense::hover());
-    let mut child = ui.child_ui(
-        egui::Rect::from_min_size(viewport.rect.min, viewport.size),
-        egui::Layout::top_down(egui::Align::Min),
-    );
-    child.set_clip_rect(ui.clip_rect().intersect(viewport.rect));
-    let inner = render(&mut child);
-    egui::InnerResponse { inner, response }
+    allocate_viewport(ui, viewport, render)
 }
 
 #[derive(Default)]
@@ -454,122 +468,148 @@ impl DiffDialogState {
             window = window.default_pos(position);
         }
         let response = window.show(ctx, |ui| {
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
-                self.navigate_back();
-            }
-            let header_height = ui.spacing().interact_size.y;
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), header_height),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    let path_width =
-                        header_path_width(ui.available_width(), ui.spacing().item_spacing.x);
-                    let left = ui.add_sized(
-                        [path_width, header_height],
-                        egui::TextEdit::singleline(&mut self.workspace.left_visible)
-                            .id(egui::Id::new((self.workspace.workspace_id, "left")))
-                            .hint_text("Left file or folder"),
-                    );
-                    if self.workspace.focus_left_requested {
-                        left.request_focus();
-                        self.workspace.focus_left_requested = false;
-                    }
-                    picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Left);
-                    ui.label("↔");
-                    ui.add_sized(
-                        [path_width, header_height],
-                        egui::TextEdit::singleline(&mut self.workspace.right_visible)
-                            .id(egui::Id::new((self.workspace.workspace_id, "right")))
-                            .hint_text("Right file or folder"),
-                    );
-                    picker_menu(ui, &mut self.workspace, crate::diff::model::DiffSide::Right);
-                    if ui
-                        .button("Compare")
-                        .on_hover_text("Compare/change paths (Ctrl+O)")
-                        .clicked()
-                        || ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O))
-                    {
-                        let _ = self.open_and_record(
-                            self.workspace.left_visible.clone(),
-                            self.workspace.right_visible.clone(),
-                        );
-                    }
-                    ui.menu_button("More", |ui| {
-                        let active = !matches!(self.workspace.current_view.view, DiffView::Start);
-                        if ui
-                            .add_enabled(active, egui::Button::new("Swap Sides"))
-                            .clicked()
-                        {
-                            self.swap_sides();
-                            ui.close_menu();
-                        }
-                        let files = matches!(
-                            self.workspace.current_view.view,
-                            DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
-                        );
-                        if ui
-                            .add_enabled(files, egui::Button::new("Reload Files"))
-                            .clicked()
-                        {
-                            self.reload_files();
-                            ui.close_menu();
-                        }
-                        if ui
-                            .add_enabled(files, egui::Button::new("Recompare"))
-                            .clicked()
-                        {
-                            self.recompare();
-                            ui.close_menu();
-                        }
-                        let folder =
-                            matches!(self.workspace.current_view.view, DiffView::FolderCompare(_));
-                        if ui
-                            .add_enabled(folder, egui::Button::new("Refresh Folder"))
-                            .on_disabled_hover_text("Open a Folder comparison first")
-                            .clicked()
-                        {
-                            self.refresh_folder();
-                            ui.close_menu();
-                        }
-                    });
-                },
-            );
-            if let Some(error) = &self.workspace.error {
-                egui::ScrollArea::vertical()
-                    .max_height(48.0)
+            let body_viewport = DiffViewport::remaining(ui);
+            allocate_viewport(ui, body_viewport, |ui| {
+                if ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
+                    self.navigate_back();
+                }
+                let header_height = ui.spacing().interact_size.y;
+                let header_width = ui.available_width().max(0.0);
+                egui::ScrollArea::horizontal()
+                    .max_height(header_height)
                     .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(header_width, header_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let path_width =
+                                    header_path_width(header_width, ui.spacing().item_spacing.x)
+                                        .min(header_width);
+                                let left = ui.add_sized(
+                                    [path_width, header_height],
+                                    egui::TextEdit::singleline(&mut self.workspace.left_visible)
+                                        .id(egui::Id::new((self.workspace.workspace_id, "left")))
+                                        .hint_text("Left file or folder"),
+                                );
+                                if self.workspace.focus_left_requested {
+                                    left.request_focus();
+                                    self.workspace.focus_left_requested = false;
+                                }
+                                picker_menu(
+                                    ui,
+                                    &mut self.workspace,
+                                    crate::diff::model::DiffSide::Left,
+                                );
+                                ui.label("↔");
+                                ui.add_sized(
+                                    [path_width, header_height],
+                                    egui::TextEdit::singleline(&mut self.workspace.right_visible)
+                                        .id(egui::Id::new((self.workspace.workspace_id, "right")))
+                                        .hint_text("Right file or folder"),
+                                );
+                                picker_menu(
+                                    ui,
+                                    &mut self.workspace,
+                                    crate::diff::model::DiffSide::Right,
+                                );
+                                if ui
+                                    .button("Compare")
+                                    .on_hover_text("Compare/change paths (Ctrl+O)")
+                                    .clicked()
+                                    || ui.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::CTRL, egui::Key::O)
+                                    })
+                                {
+                                    let _ = self.open_and_record(
+                                        self.workspace.left_visible.clone(),
+                                        self.workspace.right_visible.clone(),
+                                    );
+                                }
+                                ui.menu_button("More", |ui| {
+                                    let active = !matches!(
+                                        self.workspace.current_view.view,
+                                        DiffView::Start
+                                    );
+                                    if ui
+                                        .add_enabled(active, egui::Button::new("Swap Sides"))
+                                        .clicked()
+                                    {
+                                        self.swap_sides();
+                                        ui.close_menu();
+                                    }
+                                    let files = matches!(
+                                        self.workspace.current_view.view,
+                                        DiffView::TextCompare(_) | DiffView::BinaryCompare(_)
+                                    );
+                                    if ui
+                                        .add_enabled(files, egui::Button::new("Reload Files"))
+                                        .clicked()
+                                    {
+                                        self.reload_files();
+                                        ui.close_menu();
+                                    }
+                                    if ui
+                                        .add_enabled(files, egui::Button::new("Recompare"))
+                                        .clicked()
+                                    {
+                                        self.recompare();
+                                        ui.close_menu();
+                                    }
+                                    let folder = matches!(
+                                        self.workspace.current_view.view,
+                                        DiffView::FolderCompare(_)
+                                    );
+                                    if ui
+                                        .add_enabled(folder, egui::Button::new("Refresh Folder"))
+                                        .on_disabled_hover_text("Open a Folder comparison first")
+                                        .clicked()
+                                    {
+                                        self.refresh_folder();
+                                        ui.close_menu();
+                                    }
+                                });
+                            },
+                        );
+                    });
+                if let Some(error) = &self.workspace.error {
+                    egui::ScrollArea::both().max_height(48.0).show(ui, |ui| {
                         ui.set_max_width(ui.available_width());
                         ui.colored_label(egui::Color32::RED, error);
                     });
-            }
-            if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
-                self.navigate_back();
-            }
-            ui.separator();
-            let outcome =
-                allocate_remaining_workspace(ui, |ui| self.render_workspace(ctx, ui)).inner;
-            if let Some(error) = outcome.error {
-                self.workspace.error = Some(error);
-            }
-            if let Some(recent) = outcome.recent_to_open {
-                match crate::diff::persistence::reopen_recent(&recent) {
-                    Ok((left, right)) => {
-                        let _ = self.open_and_record(left, right);
-                    }
-                    Err(error) => self.workspace.error = Some(error.to_string()),
                 }
-            }
-            self.apply_folder_action(outcome.folder_action);
+                if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
+                    self.navigate_back();
+                }
+                ui.separator();
+                let outcome =
+                    allocate_remaining_workspace(ui, |ui| self.render_workspace(ctx, ui)).inner;
+                if let Some(error) = outcome.error {
+                    self.workspace.error = Some(error);
+                }
+                if let Some(recent) = outcome.recent_to_open {
+                    match crate::diff::persistence::reopen_recent(&recent) {
+                        Ok((left, right)) => {
+                            let _ = self.open_and_record(left, right);
+                        }
+                        Err(error) => self.workspace.error = Some(error.to_string()),
+                    }
+                }
+                self.apply_folder_action(outcome.folder_action);
+                body_viewport.size
+            })
+            .inner
         });
         self.show_operation_preview(ctx);
         if let Some(response) = response {
-            let rect = response.response.rect;
-            if let Some((size, position)) = runtime_window_geometry(
-                rect,
-                [screen.left(), screen.top(), screen.right(), screen.bottom()],
-            ) {
-                self.persistence.window_size = Some(size);
-                self.persistence.window_position = Some(position);
+            if let Some(inner_size) = response.inner {
+                if let Some((size, position)) = runtime_window_geometry(
+                    inner_size,
+                    response.response.rect.left_top(),
+                    [screen.left(), screen.top(), screen.right(), screen.bottom()],
+                ) {
+                    self.persistence.window_size = Some(size);
+                    self.persistence.window_position = Some(position);
+                }
             }
         }
         if !open && self.text_views.values().any(|m| m.has_dirty()) {
@@ -1430,25 +1470,20 @@ mod tests {
     fn runtime_geometry_accepts_valid_and_effective_minimum_rectangles() {
         let screen = [0.0, 0.0, 1920.0, 1080.0];
         assert_eq!(
-            runtime_window_geometry(
-                egui::Rect::from_min_size(egui::pos2(12.0, 24.0), egui::vec2(1000.0, 700.0)),
-                screen,
-            ),
+            runtime_window_geometry(egui::vec2(1000.0, 700.0), egui::pos2(12.0, 24.0), screen),
             Some(([1000.0, 700.0], [12.0, 24.0]))
         );
         assert_eq!(
-            runtime_window_geometry(
-                egui::Rect::from_min_size(egui::pos2(3.0, 4.0), egui::vec2(400.0, 250.0)),
-                screen,
-            ),
+            runtime_window_geometry(egui::vec2(400.0, 250.0), egui::pos2(3.0, 4.0), screen),
             Some((crate::diff::model::DIFF_MIN_SIZE, [3.0, 4.0]))
         );
-        assert!(
+        assert_eq!(
             runtime_window_geometry(
-                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0)),
-                [0.0, 0.0, 300.0, 200.0],
-            )
-            .is_some()
+                egui::vec2(300.0, 200.0),
+                egui::pos2(7.0, 9.0),
+                [0.0, 0.0, 300.0, 200.0]
+            ),
+            Some(([300.0, 200.0], [7.0, 9.0]))
         );
     }
 
@@ -1456,21 +1491,80 @@ mod tests {
     fn runtime_geometry_rejects_incomplete_rectangles_without_partial_persistence() {
         let screen = [0.0, 0.0, 1920.0, 1080.0];
         let rejected = [
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 61.0)),
-            egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(9.0, 260.0)),
-            egui::Rect::from_min_max(egui::pos2(f32::NAN, 0.0), egui::pos2(900.0, 650.0)),
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(f32::INFINITY, 650.0)),
+            (egui::vec2(f32::NAN, 650.0), egui::pos2(20.0, 30.0)),
+            (egui::vec2(f32::INFINITY, 650.0), egui::pos2(20.0, 30.0)),
+            (egui::vec2(399.0, 650.0), egui::pos2(20.0, 30.0)),
+            (egui::vec2(900.0, 249.0), egui::pos2(20.0, 30.0)),
+            (egui::vec2(900.0, 650.0), egui::pos2(f32::NAN, 30.0)),
+            (egui::vec2(900.0, 650.0), egui::pos2(20.0, f32::INFINITY)),
         ];
         let mut persistence = crate::diff::persistence::DiffPersistenceV1::default();
         persistence.window_size = Some([1000.0, 700.0]);
         persistence.window_position = Some([20.0, 30.0]);
-        for rect in rejected {
-            if let Some((size, position)) = runtime_window_geometry(rect, screen) {
+        for (size, position) in rejected {
+            if let Some((size, position)) = runtime_window_geometry(size, position, screen) {
                 persistence.window_size = Some(size);
                 persistence.window_position = Some(position);
             }
             assert_eq!(persistence.window_size, Some([1000.0, 700.0]));
             assert_eq!(persistence.window_position, Some([20.0, 30.0]));
+        }
+    }
+
+    #[test]
+    fn repeated_open_persists_the_bounded_inner_viewport() {
+        let ctx = egui::Context::default();
+        let screen = [0.0, 0.0, 1600.0, 1200.0];
+        let mut persistence = crate::diff::persistence::DiffPersistenceV1::default();
+        persistence.window_size = Some([900.0, 650.0]);
+        persistence.window_position = Some([40.0, 50.0]);
+        let tolerance = 0.01;
+
+        for workspace_id in 100..103 {
+            let (restored_size, restored_position) =
+                crate::diff::model::validated_window_geometry(&persistence, screen);
+            assert!((restored_size[0] - 900.0).abs() <= tolerance);
+            assert!((restored_size[1] - 650.0).abs() <= tolerance);
+
+            let mut observation = None;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_max(
+                        egui::pos2(screen[0], screen[1]),
+                        egui::pos2(screen[2], screen[3]),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let mut window = egui::Window::new("Diff")
+                        .id(egui::Id::new(("geometry_regression", workspace_id)))
+                        .default_size(restored_size)
+                        .min_size(crate::diff::model::diff_window_min_size(screen));
+                    if let Some(position) = restored_position {
+                        window = window.default_pos(position);
+                    }
+                    let response = window
+                        .show(ctx, |ui| {
+                            let viewport = DiffViewport::remaining(ui);
+                            allocate_viewport(ui, viewport, |_| viewport.size).inner
+                        })
+                        .unwrap();
+                    observation = Some((response.inner, response.response.rect));
+                },
+            );
+
+            let (inner_size, outer_rect) = observation.unwrap();
+            let inner_size = inner_size.expect("window body rendered");
+            let geometry = runtime_window_geometry(inner_size, outer_rect.left_top(), screen)
+                .expect("complete window geometry");
+            assert!((geometry.0[0] - 900.0).abs() <= tolerance);
+            assert!((geometry.0[1] - 650.0).abs() <= tolerance);
+            assert!(
+                outer_rect.width() > inner_size.x || outer_rect.height() > inner_size.y,
+                "the outer response should be allowed to include window chrome"
+            );
+            persistence.window_size = Some(geometry.0);
+            persistence.window_position = Some(geometry.1);
         }
     }
 

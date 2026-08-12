@@ -187,6 +187,7 @@ pub struct DiffPersistenceV1 {
     pub named_sessions: Vec<SavedDiffSessionV1>,
     pub replacement_rules: Vec<ReplacementRuleV1>,
     pub unimportant_section_rules: Vec<UnimportantSectionRuleV1>,
+    /// Size of the bounded Diff body (not the outer frame/title-bar rectangle).
     pub window_size: Option<[f32; 2]>,
     pub window_position: Option<[f32; 2]>,
 }
