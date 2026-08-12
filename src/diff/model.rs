@@ -621,7 +621,7 @@ impl DiffWorkspace {
     }
 }
 
-/// Preferred and minimum Diff window sizes, before adapting them to the work area.
+/// Preferred and minimum Diff inner viewport sizes, before adapting them to the work area.
 pub const DIFF_DEFAULT_SIZE: [f32; 2] = [900.0, 650.0];
 pub const DIFF_MIN_SIZE: [f32; 2] = [400.0, 250.0];
 
@@ -639,7 +639,7 @@ pub fn diff_window_min_size(screen: [f32; 4]) -> [f32; 2] {
 ///
 /// This is deliberately the only policy used when restoring a diff window.
 /// Content and comparison mode are not inputs: they must never influence the
-/// outer window rectangle.
+/// inner viewport size or remembered outer position.
 pub fn validated_window_geometry(
     persistence: &crate::diff::persistence::DiffPersistenceV1,
     screen: [f32; 4],
