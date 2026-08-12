@@ -53,7 +53,7 @@ pub(crate) fn visible_row_range(
     first.saturating_sub(overscan)..visible_end.saturating_add(overscan).min(total_rows)
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct FolderTableGeometry {
     pub viewport: egui::Rect,
@@ -512,23 +512,14 @@ mod tests {
     #[test]
     fn layout_regressions_are_bounded_and_row_work_is_virtualized() {
         for count in [1, 15, 100, 10_000] {
-            for path in ["short", &"x".repeat(260), "a/b/c/d/e/f/g/h/i/j"] {
-                let rows: Vec<_> = (0..count)
-                    .map(|i| FolderProjectionRow {
-                        path: format!("{path}/{i}").into(),
-                        depth: i % 10,
-                        has_children: false,
-                    })
-                    .collect();
-                for width in [500.0, 900.0, 1_600.0] {
-                    let layout = table_layout(FolderColumnWidthsV1::for_viewport(width));
-                    assert!(layout.total_width >= width);
-                    assert_eq!(layout.widths[0], layout.widths[4]);
-                    assert!(layout.widths[0] >= 190.0);
-                }
-                let rendered = visible_row_range(1_000.0, 360.0, count, OVERSCAN_ROWS).len();
-                assert!(rendered <= 24);
+            for width in [500.0, 900.0, 1_600.0] {
+                let layout = table_layout(FolderColumnWidthsV1::for_viewport(width));
+                assert!(layout.total_width >= width);
+                assert_eq!(layout.widths[0], layout.widths[4]);
+                assert!(layout.widths[0] >= 190.0);
             }
+            let rendered = visible_row_range(1_000.0, 360.0, count, OVERSCAN_ROWS).len();
+            assert!(rendered <= 24);
         }
         let narrow = table_layout(FolderColumnWidthsV1::for_viewport(100.0));
         let wide = table_layout(FolderColumnWidthsV1::for_viewport(1600.0));

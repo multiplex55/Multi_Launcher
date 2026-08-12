@@ -2,7 +2,7 @@ use crate::diff::binary_compare::{BinaryCell, BinaryRow, BinaryViewModel};
 use crate::diff::text_compare::NavigationDirection;
 use eframe::egui::{self, Color32, RichText};
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct BinaryViewGeometry {
     pub viewport: egui::Rect,
@@ -55,7 +55,10 @@ pub fn show(
         );
     }
     let viewport = binary_viewport_size(ui.available_size());
-    let mut geometry = BinaryViewGeometry::default();
+    let mut geometry = BinaryViewGeometry {
+        viewport: egui::Rect::NOTHING,
+        content_size: egui::Vec2::ZERO,
+    };
     ui.allocate_ui(viewport, |ui| {
         let output = egui::ScrollArea::horizontal()
             .auto_shrink([false, false])
