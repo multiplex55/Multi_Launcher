@@ -325,3 +325,27 @@ impl Plugin for MacrosPlugin {
         ]
     }
 }
+
+#[cfg(test)]
+mod legacy_contract_tests {
+    use super::*;
+    #[test]
+    fn legacy_macro_contract_remains_unchanged() {
+        assert_eq!(MACROS_FILE, "macros.json");
+        let step = MacroStep {
+            label: "step".into(),
+            command: "macro:child".into(),
+            args: None,
+            delay_ms: 0,
+        };
+        let entry = MacroEntry {
+            label: "legacy".into(),
+            desc: String::new(),
+            auto_delay_ms: None,
+            steps: vec![step],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("macro:child"));
+        assert_eq!(MacrosPlugin::new().name(), "macro");
+    }
+}

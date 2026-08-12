@@ -30,6 +30,7 @@ pub mod indexer;
 pub mod launcher;
 pub mod linking;
 pub mod logging;
+pub mod mkmacro;
 pub mod mouse_gestures;
 pub mod multi_manager;
 pub mod note_todo_sync;
