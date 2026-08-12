@@ -2076,67 +2076,69 @@ mod tests {
                     // hint and then recomputed from the production content.
                     .fixed_size(requested_size)
                     .show(ctx, |ui| {
-                        // Exercise the bounded path/error behavior with pathological labels.
-                        let row_height = ui.spacing().interact_size.y;
-                        egui::ScrollArea::horizontal()
-                            .max_height(row_height)
-                            .show(ui, |ui| {
-                                ui.label("left-path".repeat(500));
-                                ui.label("↔");
-                                ui.label("right-path".repeat(500));
-                                let _ = ui.button("Compare");
-                                let _ = ui.menu_button("More", |_| {});
+                        // Match `DiffDialogState::ui`: reserve the complete body before
+                        // laying out any production child. Otherwise a long child can
+                        // negotiate the Window size before the test observes the body.
+                        let body_viewport = DiffViewport::remaining(ui);
+                        let body = allocate_viewport(ui, body_viewport, |ui| {
+                            measured.clip = ui.clip_rect().intersect(body_viewport.rect);
+                            // Exercise the bounded path/error behavior with pathological labels.
+                            let row_height = ui.spacing().interact_size.y;
+                            egui::ScrollArea::horizontal()
+                                .max_height(row_height)
+                                .show(ui, |ui| {
+                                    ui.label("left-path".repeat(500));
+                                    ui.label("↔");
+                                    ui.label("right-path".repeat(500));
+                                    let _ = ui.button("Compare");
+                                    let _ = ui.menu_button("More", |_| {});
+                                });
+                            bounded_message(
+                                ui,
+                                egui::Color32::RED,
+                                &"workspace-error".repeat(500),
+                                48.0,
+                            );
+                            ui.separator();
+                            allocate_remaining_workspace(ui, |ui| {
+                                let workspace_width = ui.max_rect().width();
+                                match fixture {
+                                    ProductionFixture::Text(model) => {
+                                        text_view::show(ui, 1, id, model);
+                                        let pane = ((workspace_width - 8.0) * 0.5).max(0.0);
+                                        measured.viewport_width = pane;
+                                        measured.content_width = text_view::unwrapped_content_width(
+                                            model.left.source().lines().next().unwrap_or(""),
+                                            8.5,
+                                            72.0,
+                                        );
+                                    }
+                                    ProductionFixture::Folder(state, rows) => {
+                                        let paths = rows
+                                            .iter()
+                                            .map(|row| row.path.clone())
+                                            .collect::<Vec<_>>();
+                                        let mut action = folder_view::FolderViewAction::Noop;
+                                        let geometry = folder_table::show(
+                                            ui,
+                                            state,
+                                            &paths,
+                                            rows,
+                                            false,
+                                            &mut action,
+                                        );
+                                        measured.viewport_width = geometry.viewport.width();
+                                        measured.content_width = geometry.content_width;
+                                    }
+                                    ProductionFixture::Binary(model) => {
+                                        let geometry = binary_view::show(ui, 1, id, model);
+                                        measured.viewport_width = geometry.viewport.width();
+                                        measured.content_width = geometry.content_size.x;
+                                    }
+                                }
                             });
-                        bounded_message(
-                            ui,
-                            egui::Color32::RED,
-                            &"workspace-error".repeat(500),
-                            48.0,
-                        );
-                        ui.separator();
-                        let workspace = allocate_remaining_workspace(ui, |ui| {
-                            let body_rect = ui.max_rect();
-                            let body_width = body_rect.width();
-                            // `Ui::clip_rect` may retain a parent clip that extends
-                            // beyond one axis of this child. The effective workspace
-                            // clip is its intersection with the owned viewport.
-                            measured.clip = ui.clip_rect().intersect(body_rect);
-                            match fixture {
-                                ProductionFixture::Text(model) => {
-                                    text_view::show(ui, 1, id, model);
-                                    let pane = ((body_width - 8.0) * 0.5).max(0.0);
-                                    measured.viewport_width = pane;
-                                    measured.content_width = text_view::unwrapped_content_width(
-                                        model.left.source().lines().next().unwrap_or(""),
-                                        8.5,
-                                        72.0,
-                                    );
-                                }
-                                ProductionFixture::Folder(state, rows) => {
-                                    let paths =
-                                        rows.iter().map(|row| row.path.clone()).collect::<Vec<_>>();
-                                    let mut action = folder_view::FolderViewAction::Noop;
-                                    let geometry = folder_table::show(
-                                        ui,
-                                        state,
-                                        &paths,
-                                        rows,
-                                        false,
-                                        &mut action,
-                                    );
-                                    measured.viewport_width = geometry.viewport.width();
-                                    measured.content_width = geometry.content_width;
-                                }
-                                ProductionFixture::Binary(model) => {
-                                    let geometry = binary_view::show(ui, 1, id, model);
-                                    measured.viewport_width = geometry.viewport.width();
-                                    measured.content_width = geometry.content_size.x;
-                                }
-                            }
                         });
-                        // Measure the allocation owned by the bounded workspace, not
-                        // the child Ui's content-dependent `max_rect`.
-                        measured.body = workspace.response.rect;
+                        measured.body = body.response.rect;
                     })
                     .unwrap();
                 measured.outer = response.response.rect;
