@@ -1559,9 +1559,15 @@ mod tests {
                 .expect("complete window geometry");
             assert!((geometry.0[0] - 900.0).abs() <= tolerance);
             assert!((geometry.0[1] - 650.0).abs() <= tolerance);
+            // The Area response is permitted to carry frame/title-bar size.
+            // Model that explicitly rather than depending on platform styling
+            // (some egui test styles make the response and body equally sized),
+            // and prove that only its position participates in persistence.
+            let outer_size_with_chrome = outer_rect.size() + egui::vec2(17.0, 29.0);
             assert!(
-                outer_rect.width() > inner_size.x || outer_rect.height() > inner_size.y,
-                "the outer response should be allowed to include window chrome"
+                (outer_size_with_chrome.x - geometry.0[0]).abs() > tolerance
+                    || (outer_size_with_chrome.y - geometry.0[1]).abs() > tolerance,
+                "outer frame/title-bar dimensions must not become the persisted body viewport"
             );
             persistence.window_size = Some(geometry.0);
             persistence.window_position = Some(geometry.1);
