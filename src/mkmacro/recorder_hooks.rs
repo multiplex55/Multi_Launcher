@@ -184,7 +184,7 @@ mod win32 {
         time::{Duration, Instant},
     };
     use windows::Win32::{
-        Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::*,
     };
@@ -195,7 +195,9 @@ mod win32 {
     }
     unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 {
-            let d = &*(l.0 as *const KBDLLHOOKSTRUCT);
+            // SAFETY: Windows supplies a valid KBDLLHOOKSTRUCT pointer for non-negative
+            // low-level keyboard hook codes, and the value is copied before returning.
+            let d = unsafe { &*(l.0 as *const KBDLLHOOKSTRUCT) };
             let transition = if w.0 as u32 == WM_KEYUP || w.0 as u32 == WM_SYSKEYUP {
                 KeyTransition::Up
             } else {
@@ -216,11 +218,14 @@ mod win32 {
                 });
             }
         }
-        CallNextHookEx(None, code, w, l)
+        // SAFETY: Forward the hook parameters unchanged as required by the hook contract.
+        unsafe { CallNextHookEx(None, code, w, l) }
     }
     unsafe extern "system" fn mouse(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 {
-            let d = &*(l.0 as *const MSLLHOOKSTRUCT);
+            // SAFETY: Windows supplies a valid MSLLHOOKSTRUCT pointer for non-negative
+            // low-level mouse hook codes, and the value is copied before returning.
+            let d = unsafe { &*(l.0 as *const MSLLHOOKSTRUCT) };
             let hi = ((d.mouseData >> 16) & 0xffff) as u16;
             let delta = hi as i16 as i32;
             let message = match w.0 as u32 {
@@ -257,12 +262,13 @@ mod win32 {
                     message,
                     x: d.pt.x,
                     y: d.pt.y,
-                    flags: d.flags.0,
+                    flags: d.flags,
                     extra_info: d.dwExtraInfo,
                 });
             }
         }
-        CallNextHookEx(None, code, w, l)
+        // SAFETY: Forward the hook parameters unchanged as required by the hook contract.
+        unsafe { CallNextHookEx(None, code, w, l) }
     }
     /// Dedicated low-level-hook thread. Commands are polled beside its Windows message queue;
     /// shutdown always unhooks both handles before returning and allowing the owner to join.
@@ -271,7 +277,10 @@ mod win32 {
         fn run(self, commands: mpsc::Receiver<HookCommand>, callback: CallbackSender) {
             unsafe {
                 *CALLBACK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(callback.clone());
-                let module = GetModuleHandleW(None).ok().map(|x| HINSTANCE(x.0));
+                // HMODULE implements the windows crate's HINSTANCE parameter conversion.
+                // Passing it directly also avoids wrapping the parameter in Option, which
+                // SetWindowsHookExW does not accept in windows 0.58.
+                let module = GetModuleHandleW(None).unwrap_or_default();
                 let mut keyboard_hook = None;
                 let mut mouse_hook = None;
                 let mut enabled = false;
@@ -302,7 +311,7 @@ mod win32 {
                     } // paused callbacks still chain, but do not enqueue
                     let mut msg = MSG::default();
                     while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                        TranslateMessage(&msg);
+                        let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
                     std::thread::sleep(Duration::from_millis(2));
