@@ -325,3 +325,33 @@ impl Plugin for MacrosPlugin {
         ]
     }
 }
+
+#[cfg(test)]
+mod legacy_contract_tests {
+    use super::*;
+    #[test]
+    fn legacy_macro_contract_remains_unchanged() {
+        assert_eq!(MACROS_FILE, "macros.json");
+        let step = MacroStep {
+            label: "step".into(),
+            command: "macro:child".into(),
+            args: None,
+            delay_ms: 0,
+        };
+        let entry = MacroEntry {
+            label: "legacy".into(),
+            desc: String::new(),
+            auto_delay_ms: None,
+            steps: vec![step],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("macro:child"));
+        // The plugin's registration name is plural, while its launcher command
+        // and generated action routing intentionally use the singular prefix.
+        let plugin = MacrosPlugin::new();
+        assert_eq!(plugin.name(), "macros");
+        assert_eq!(plugin.commands()[0].action, "query:macro ");
+        assert_eq!(plugin.commands()[1].action, "query:macro list");
+        assert_eq!(plugin.search("macro")[0].action, "macro:dialog");
+    }
+}
