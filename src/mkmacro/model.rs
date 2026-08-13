@@ -117,9 +117,17 @@ pub enum MkKey {
     PageUp,
     PageDown,
     Control,
+    LeftControl,
+    RightControl,
     Alt,
+    LeftAlt,
+    RightAlt,
     Shift,
+    LeftShift,
+    RightShift,
     Meta,
+    LeftMeta,
+    RightMeta,
     Function(u8),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
