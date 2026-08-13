@@ -5,6 +5,8 @@ pub mod executor;
 pub mod hotkeys;
 pub mod input;
 pub mod model;
+pub mod recorder;
+pub mod recorder_hooks;
 pub mod runtime;
 pub mod store;
 pub mod validation;
@@ -15,6 +17,8 @@ pub use compiler::*;
 pub use coordinates::*;
 pub use executor::*;
 pub use model::*;
+pub use recorder::*;
+pub use recorder_hooks::*;
 pub use runtime::{
     CommandResult, MacroRuntime, RuntimeCommand, RuntimeSnapshot, RuntimeState, StepState,
 };
