@@ -8,7 +8,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             ui.add_enabled(false, eframe::egui::Button::new("Run"))
                 .on_disabled_hover_text(reason);
         } else {
-            ui.button("Run");
+            let _ = ui.button("Run");
         }
         if dialog.dirty {
             ui.label("Unsaved changes");

@@ -395,6 +395,7 @@ pub fn to_macro_steps(items: &[RecordedStep], mut next_id: u64) -> Vec<MkStep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::recorder_hooks::LLKHF_EXTENDED;
     fn mouse(t: u64, m: MouseMessage, x: i32, y: i32) -> RecordingBoundary {
         RecordingBoundary::Event(HookEvent::Mouse {
             timestamp_us: t,
