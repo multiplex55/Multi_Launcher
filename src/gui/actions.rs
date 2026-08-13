@@ -379,6 +379,8 @@ impl LauncherApp {
             self.snippet_dialog.open_edit(alias);
         } else if a.action == "macro:dialog" {
             self.macro_dialog.open();
+        } else if a.action == "mkmacro:dialog" {
+            self.mkmacro_dialog.open();
         } else if a.action == "mg:dialog" {
             self.mouse_gestures_dialog.open();
         } else if a.action == "mg:dialog:add" {

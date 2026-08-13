@@ -212,6 +212,14 @@ pub(crate) fn execute_plan(plan: LaunchPlan<'_>) -> anyhow::Result<()> {
             crate::plugins::macros::run_macro(name)?;
             Ok(())
         }
+        ActionKind::MkMacroDialog => Ok(()),
+        ActionKind::MkMacroRun(id) => crate::mkmacro::runtime::run(id),
+        ActionKind::MkMacroPause => crate::mkmacro::runtime::pause(),
+        ActionKind::MkMacroResume => crate::mkmacro::runtime::resume(),
+        ActionKind::MkMacroStop => crate::mkmacro::runtime::stop(),
+        ActionKind::MkMacroRecord => crate::mkmacro::runtime::record(),
+        ActionKind::MkMacroRecordStop => crate::mkmacro::runtime::record_stop(),
+        ActionKind::MkMacroInvalid(raw) => anyhow::bail!("invalid mkmacro action: {raw}"),
         ActionKind::PowerPlanSet { guid } => system::set_power_plan(guid),
         ActionKind::Keys(spec) => keys::send(spec),
         ActionKind::ExecPath { path, args } => exec::launch(path, args),

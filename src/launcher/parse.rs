@@ -142,6 +142,14 @@ pub(crate) enum ActionKind<'a> {
         args: Option<&'a str>,
     },
     Macro(&'a str),
+    MkMacroDialog,
+    MkMacroRun(u64),
+    MkMacroPause,
+    MkMacroResume,
+    MkMacroStop,
+    MkMacroRecord,
+    MkMacroRecordStop,
+    MkMacroInvalid(&'a str),
 }
 
 pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
@@ -532,6 +540,33 @@ pub(crate) fn parse_action_kind(action: &Action) -> ActionKind<'_> {
     }
     if s == "layout:edit" {
         return ActionKind::LayoutEdit;
+    }
+    if s == "mkmacro:dialog" {
+        return ActionKind::MkMacroDialog;
+    }
+    if s == "mkmacro:pause" {
+        return ActionKind::MkMacroPause;
+    }
+    if s == "mkmacro:resume" {
+        return ActionKind::MkMacroResume;
+    }
+    if s == "mkmacro:stop" {
+        return ActionKind::MkMacroStop;
+    }
+    if s == "mkmacro:record" {
+        return ActionKind::MkMacroRecord;
+    }
+    if s == "mkmacro:record-stop" {
+        return ActionKind::MkMacroRecordStop;
+    }
+    if let Some(id) = s.strip_prefix("mkmacro:run:") {
+        return match id.parse::<u64>() {
+            Ok(id) if id != 0 => ActionKind::MkMacroRun(id),
+            _ => ActionKind::MkMacroInvalid(s),
+        };
+    }
+    if s.starts_with("mkmacro:") {
+        return ActionKind::MkMacroInvalid(s);
     }
     if let Some(name) = s.strip_prefix("macro:") {
         return ActionKind::Macro(name);

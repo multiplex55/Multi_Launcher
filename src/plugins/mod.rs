@@ -26,6 +26,7 @@ pub mod lorem;
 pub mod macros;
 pub mod media;
 pub mod missing;
+pub mod mkmacro;
 pub mod mouse_gestures;
 pub mod multi_manager;
 pub mod network;
