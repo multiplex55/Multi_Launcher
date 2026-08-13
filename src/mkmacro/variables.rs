@@ -27,6 +27,14 @@ pub const BUILT_INS: &[&str] = &[
     "macro.name",
     "step.id",
     "iteration",
+    "last_action_success",
+    "last_window_result",
+    "last_image_result",
+    "last_image.x",
+    "last_image.y",
+    "last_pixel_result",
+    "last_point.x",
+    "last_point.y",
 ];
 pub fn is_builtin(name: &str) -> bool {
     BUILT_INS.contains(&name)

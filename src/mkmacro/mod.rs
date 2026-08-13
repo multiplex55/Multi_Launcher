@@ -20,7 +20,8 @@ pub use model::*;
 pub use recorder::*;
 pub use recorder_hooks::*;
 pub use runtime::{
-    CommandResult, MacroRuntime, RuntimeCommand, RuntimeSnapshot, RuntimeState, StepState,
+    CommandResult, DiagnosticKey, MacroRuntime, RuntimeCommand, RuntimeSnapshot, RuntimeState,
+    StepState,
 };
 pub use store::*;
 pub use validation::*;

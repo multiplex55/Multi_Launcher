@@ -121,18 +121,7 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                         )
                     }
                 }
-                MkAction::RepeatStart { count } => {
-                    if *count == 0 {
-                        push(
-                            &mut out,
-                            m.id,
-                            sid,
-                            "invalid_repeat",
-                            "Repeat count must be positive",
-                        )
-                    };
-                    stack.push(("repeat", false))
-                }
+                MkAction::RepeatStart { count: _ } => stack.push(("repeat", false)),
                 MkAction::RepeatEnd => {
                     if !matches!(stack.pop(), Some(("repeat", _))) {
                         push(
@@ -174,6 +163,13 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                     if let Err(e) = validate_variable_name(name) {
                         push(&mut out, m.id, sid, "invalid_variable", e)
                     }
+                }
+                MkAction::WaitUntil {
+                    condition: c,
+                    wait: w,
+                } => {
+                    condition(c, m.id, sid, asset_root, &mut out);
+                    wait(w, m.id, sid, &mut out)
                 }
                 MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
                     matcher(&p.matcher, m.id, sid, &mut out);

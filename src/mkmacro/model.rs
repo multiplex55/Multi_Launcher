@@ -302,6 +302,12 @@ pub enum MkAction {
     WindowActivate(MkWindowPayload),
     WindowClose(MkWindowMatcher),
     WindowWait(MkWindowPayload),
+    /// The single polling action. Window/image/pixel wait rows are editor conveniences
+    /// and are normalized to this behavior by the executor.
+    WaitUntil {
+        condition: MkCondition,
+        wait: MkWaitOptions,
+    },
     SetVariable {
         name: String,
         value: MkValue,
@@ -347,6 +353,8 @@ impl MkAction {
                 | Self::RepeatEnd
                 | Self::WhileStart { .. }
                 | Self::WhileEnd
+                | Self::Break
+                | Self::Continue
         )
     }
     pub fn can_be_disabled(&self) -> bool {
