@@ -1,5 +1,6 @@
 mod action_editor;
 mod macro_list;
+pub mod recorder_controller;
 mod step_table;
 mod toolbar;
 
