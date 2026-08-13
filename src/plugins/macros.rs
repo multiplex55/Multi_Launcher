@@ -348,7 +348,10 @@ mod legacy_contract_tests {
         assert!(json.contains("macro:child"));
         // The plugin's registration name is plural, while its launcher command
         // and generated action routing intentionally use the singular prefix.
-        assert_eq!(MacrosPlugin::new().name(), "macros");
-        assert_eq!(MacrosPlugin::new().commands()[0].action, "macro:dialog");
+        let plugin = MacrosPlugin::new();
+        assert_eq!(plugin.name(), "macros");
+        assert_eq!(plugin.commands()[0].action, "query:macro ");
+        assert_eq!(plugin.commands()[1].action, "query:macro list");
+        assert_eq!(plugin.search("macro")[0].action, "macro:dialog");
     }
 }
