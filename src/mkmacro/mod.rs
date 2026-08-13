@@ -1,6 +1,7 @@
 //! Versioned model, validation, compilation, and persistence for the new macro system.
 pub mod compiler;
 pub mod model;
+pub mod runtime;
 pub mod store;
 pub mod validation;
 pub mod variables;

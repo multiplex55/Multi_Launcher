@@ -1302,6 +1302,7 @@ impl eframe::App for LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        self.mkmacro_dialog.ui(ctx);
         let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
         mg_dlg.ui(ctx, self);
         self.mouse_gestures_dialog = mg_dlg;

@@ -27,6 +27,7 @@ use crate::plugins::lorem::LoremPlugin;
 use crate::plugins::macros::MacrosPlugin;
 use crate::plugins::media::MediaPlugin;
 use crate::plugins::missing::MissingPlugin;
+use crate::plugins::mkmacro::MkMacroPlugin;
 use crate::plugins::mouse_gestures::MouseGesturesPlugin;
 use crate::plugins::multi_manager::MultiManagerPlugin;
 use crate::plugins::network::NetworkPlugin;
@@ -111,6 +112,7 @@ pub trait Plugin: Send + Sync {
 #[derive(Clone)]
 pub struct PluginInternalServices {
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
+    pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
 }
 
 pub struct PluginManager {
@@ -128,10 +130,17 @@ impl Default for PluginManager {
 
 impl PluginManager {
     pub fn new() -> Self {
+        let store = Arc::new(
+            crate::mkmacro::MkMacroStore::open(".")
+                .expect("open mkmacro store")
+                .0,
+        );
+        crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
         Self {
             plugins: Vec::new(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
+                mkmacro_store: store,
             },
             libs: Vec::new(),
         }
@@ -153,10 +162,17 @@ impl PluginManager {
     }
 
     pub fn with_clipboard_modifier_catalog(catalog: SharedClipboardModifierCatalog) -> Self {
+        let store = Arc::new(
+            crate::mkmacro::MkMacroStore::open(".")
+                .expect("open mkmacro store")
+                .0,
+        );
+        crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
         Self {
             plugins: Vec::new(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
+                mkmacro_store: store,
             },
             libs: Vec::new(),
         }
@@ -218,6 +234,10 @@ impl PluginManager {
         self.register_with_settings(CalendarPlugin, plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
+        self.register_with_settings(
+            MkMacroPlugin::new(Arc::clone(&self.services.mkmacro_store)),
+            plugin_settings,
+        );
         self.register_with_settings(KeysPlugin, plugin_settings);
         self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings);
         self.register_with_settings(MultiManagerPlugin, plugin_settings);

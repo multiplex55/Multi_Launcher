@@ -19,6 +19,7 @@ mod file_search_dialog;
 pub mod file_search_preview_dialog;
 mod image_panel;
 mod macro_dialog;
+pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
 mod multi_manager_actions;
@@ -66,6 +67,7 @@ pub use file_search_dialog::{
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub use image_panel::ImagePanel;
 pub use macro_dialog::MacroDialog;
+pub use mkmacro_dialog::MkMacroDialog;
 pub use mouse_gesture_settings_dialog::MouseGestureSettingsDialog;
 pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
 pub use note_graph_dialog::NoteGraphDialog;
@@ -258,6 +260,7 @@ pub enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     MacroDialog,
+    MkMacroDialog,
     MouseGesturesDialog,
     MouseGestureSettingsDialog,
     ThemeSettingsDialog,
@@ -302,6 +305,7 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     macro_dialog: bool,
+    mkmacro_dialog: bool,
     mouse_gestures_dialog: bool,
     mouse_gesture_settings_dialog: bool,
     theme_settings_dialog: bool,
@@ -429,6 +433,7 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
+    pub mkmacro_dialog: MkMacroDialog,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
     theme_settings_dialog_open: bool,
@@ -1310,6 +1315,8 @@ impl LauncherApp {
             .collect::<HashMap<_, _>>();
         let dashboard_data_cache = DashboardDataCache::new();
         dashboard_data_cache.refresh_all(&plugins);
+        let mkmacro_dialog =
+            MkMacroDialog::new(Arc::clone(&plugins.internal_services().mkmacro_store));
         let mut app = Self {
             actions: Arc::clone(&actions),
             query: String::new(),
@@ -1384,6 +1391,7 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
+            mkmacro_dialog,
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
             theme_settings_dialog_open: false,
@@ -1966,7 +1974,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 40] = [
+    const TRACKED_PANELS: [Panel; 41] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -1979,6 +1987,7 @@ impl LauncherApp {
         Panel::ShellCmdDialog,
         Panel::SnippetDialog,
         Panel::MacroDialog,
+        Panel::MkMacroDialog,
         Panel::MouseGesturesDialog,
         Panel::MouseGestureSettingsDialog,
         Panel::ThemeSettingsDialog,
@@ -2023,6 +2032,7 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open,
             Panel::SnippetDialog => self.snippet_dialog.open,
             Panel::MacroDialog => self.macro_dialog.open,
+            Panel::MkMacroDialog => self.mkmacro_dialog.open,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open,
             Panel::ThemeSettingsDialog => self.theme_settings_dialog_open,
@@ -2167,6 +2177,10 @@ impl LauncherApp {
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
+            }
+            Panel::MkMacroDialog => {
+                self.mkmacro_dialog.open = false;
+                self.panel_states.mkmacro_dialog = false;
             }
             Panel::MouseGesturesDialog => {
                 self.mouse_gestures_dialog.open = false;
@@ -2339,6 +2353,10 @@ impl LauncherApp {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
             }
+            Panel::MkMacroDialog => {
+                self.mkmacro_dialog.open = false;
+                self.panel_states.mkmacro_dialog = false;
+            }
             Panel::MouseGesturesDialog => {
                 self.mouse_gestures_dialog.open = false;
                 self.panel_states.mouse_gestures_dialog = false;
@@ -2474,6 +2492,7 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
             Panel::SnippetDialog => self.snippet_dialog.open = true,
             Panel::MacroDialog => self.macro_dialog.open = true,
+            Panel::MkMacroDialog => self.mkmacro_dialog.open(),
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
@@ -2570,6 +2589,7 @@ impl LauncherApp {
         check!(shell_cmd_dialog, Panel::ShellCmdDialog);
         check!(snippet_dialog, Panel::SnippetDialog);
         check!(macro_dialog, Panel::MacroDialog);
+        check!(mkmacro_dialog, Panel::MkMacroDialog);
         check!(mouse_gestures_dialog, Panel::MouseGesturesDialog);
         check!(
             mouse_gesture_settings_dialog,
