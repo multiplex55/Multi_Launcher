@@ -10,7 +10,7 @@ pub enum MkValue {
     Point(MkPoint),
     Null,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkPoint {
     pub x: i32,
     pub y: i32,

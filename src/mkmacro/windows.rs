@@ -17,8 +17,8 @@ pub enum AmbiguityPolicy {
     First,
 }
 fn same_path(a: &str, b: &str) -> bool {
-    a.replace('/', '\\')
-        .eq_ignore_ascii_case(&b.replace('/', '\\'))
+    a.replace('/', "\\")
+        .eq_ignore_ascii_case(&b.replace('/', "\\"))
 }
 fn basename(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s)

@@ -118,7 +118,7 @@ impl<S: InputSink> Win32InputBackend<S> {
         self.key_event(key, true)
     }
     pub fn chord(&self, keys: &[MkKey]) -> ExecResult {
-        let mut down = Vec::new();
+        let mut down: Vec<&MkKey> = Vec::new();
         for key in keys {
             if let Err(primary) = self.key_event(key, false) {
                 for owned in down.iter().rev() {
