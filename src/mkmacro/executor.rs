@@ -1179,8 +1179,10 @@ mod phase_d_tests {
                             false_c.clone(),
                             MkCondition::Variable {
                                 name: "x".into(),
-                                op: MkCompareOp::Regex,
-                                value: MkValue::String("[".into()),
+                                // Valid at compile time, but would be a runtime type error if
+                                // All failed to short-circuit after the false first condition.
+                                op: MkCompareOp::Less,
+                                value: MkValue::Number(1.0),
                             },
                         ],
                     }),
@@ -1196,8 +1198,9 @@ mod phase_d_tests {
                             },
                             MkCondition::Variable {
                                 name: "x".into(),
-                                op: MkCompareOp::Regex,
-                                value: MkValue::String("[".into()),
+                                // Likewise, Any must not evaluate this after its true branch.
+                                op: MkCompareOp::Less,
+                                value: MkValue::Number(1.0),
                             },
                         ],
                     }),
