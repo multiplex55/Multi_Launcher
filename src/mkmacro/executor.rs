@@ -1015,7 +1015,9 @@ pub mod fake {
 #[cfg(test)]
 mod phase_d_tests {
     use super::{fake::FakeBackend, *};
-    use crate::mkmacro::{MkErrorPolicy, MkMacro, MkPlayback, MkRetry, MkStep, compile};
+    use crate::mkmacro::{
+        MkErrorPolicy, MkMacro, MkPlayback, MkRetry, MkStep, MkTextMode, compile,
+    };
 
     fn s(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -1042,7 +1044,7 @@ mod phase_d_tests {
     fn text(value: &str) -> MkAction {
         MkAction::Text(MkTextPayload {
             text: value.into(),
-            mode: super::MkTextMode::Type,
+            mode: MkTextMode::Type,
         })
     }
     fn run(steps: Vec<MkStep>, fake: Arc<FakeBackend>) -> ExecResult {
