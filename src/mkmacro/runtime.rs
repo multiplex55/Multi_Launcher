@@ -337,18 +337,18 @@ fn run_one(
             publish(shared, |s| match ev {
                 ExecutionEvent::StepStarted(id) => {
                     s.step_id = Some(id);
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Running)
+                    Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
                 }
                 ExecutionEvent::StepFinished(id) => {
                     s.completed_steps += 1;
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Success)
+                    Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
                 }
                 ExecutionEvent::StepSkipped(id) => {
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped)
+                    Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
                 }
                 ExecutionEvent::StepFailed(id, d) => {
                     s.latest_failure = Some(d);
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Failed)
+                    Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
                 }
                 ExecutionEvent::Paused => s.state = RuntimeState::Paused,
                 ExecutionEvent::Resumed => s.state = RuntimeState::Running,
