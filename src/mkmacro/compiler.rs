@@ -6,6 +6,7 @@ pub enum Jump {
     Next,
     To(usize),
     IfFalse(usize),
+    RepeatBegin { exit: usize },
     RepeatEnd { start: usize, exit: usize },
     WhileEnd { condition: usize },
     Break(usize),
@@ -69,6 +70,7 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
             MkAction::RepeatStart { .. } => stack.push((i, "repeat", None)),
             MkAction::RepeatEnd => {
                 let (start, _, _) = stack.pop().unwrap();
+                ins[start].jump = Jump::RepeatBegin { exit: i + 1 };
                 ins[i].jump = Jump::RepeatEnd {
                     start: start + 1,
                     exit: i + 1,

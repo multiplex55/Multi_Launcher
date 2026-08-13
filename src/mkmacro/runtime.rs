@@ -5,7 +5,11 @@ use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::{Arc, Mutex, RwLock, mpsc},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
     time::SystemTime,
 };
@@ -38,9 +42,15 @@ pub enum StepState {
     Skipped,
     Failed,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DiagnosticKey {
+    pub run_id: u64,
+    pub step_id: u64,
+}
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
     pub state: RuntimeState,
+    pub run_id: u64,
     pub macro_id: Option<u64>,
     pub step_id: Option<u64>,
     pub completed_steps: usize,
@@ -48,6 +58,8 @@ pub struct RuntimeSnapshot {
     pub started_at: Option<SystemTime>,
     pub finished_at: Option<SystemTime>,
     pub latest_failure: Option<ExecutionDiagnostic>,
+    /// Transient results, deliberately held outside the persisted macro document.
+    pub failures: Arc<BTreeMap<DiagnosticKey, ExecutionDiagnostic>>,
     pub steps: Arc<BTreeMap<u64, StepState>>,
     pub revision: u64,
 }
@@ -55,6 +67,7 @@ impl Default for RuntimeSnapshot {
     fn default() -> Self {
         Self {
             state: RuntimeState::Idle,
+            run_id: 0,
             macro_id: None,
             step_id: None,
             completed_steps: 0,
@@ -62,6 +75,7 @@ impl Default for RuntimeSnapshot {
             started_at: None,
             finished_at: None,
             latest_failure: None,
+            failures: Arc::new(BTreeMap::new()),
             steps: Arc::new(BTreeMap::new()),
             revision: 0,
         }
@@ -78,6 +92,7 @@ struct Shared {
     snapshot: RwLock<Arc<RuntimeSnapshot>>,
     control: Arc<RunControl>,
     admission: Mutex<Option<u64>>,
+    next_run_id: AtomicU64,
 }
 pub struct MacroRuntime {
     tx: mpsc::Sender<RuntimeCommand>,
@@ -91,6 +106,7 @@ impl MacroRuntime {
             snapshot: RwLock::new(Arc::new(RuntimeSnapshot::default())),
             control: Arc::new(RunControl::default()),
             admission: Mutex::new(None),
+            next_run_id: AtomicU64::new(1),
         });
         let s = shared.clone();
         let worker = thread::Builder::new()
@@ -217,6 +233,7 @@ fn run_one(
     selection: Option<Vec<u64>>,
 ) {
     shared.control.reset();
+    let run_id = shared.next_run_id.fetch_add(1, Ordering::Relaxed);
     let result = (|| {
         let doc = store.snapshot();
         let m = doc.macros.iter().find(|m| m.id == mid).ok_or_else(|| {
@@ -324,6 +341,7 @@ fn run_one(
             .collect();
         publish(shared, |s| {
             s.state = RuntimeState::Running;
+            s.run_id = run_id;
             s.macro_id = Some(mid);
             s.step_id = None;
             s.completed_steps = 0;
@@ -331,6 +349,7 @@ fn run_one(
             s.started_at = Some(SystemTime::now());
             s.finished_at = None;
             s.latest_failure = None;
+            s.failures = Arc::new(BTreeMap::new());
             s.steps = Arc::new(states)
         });
         let observer = |ev: ExecutionEvent| {
@@ -347,7 +366,14 @@ fn run_one(
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
                 }
                 ExecutionEvent::StepFailed(id, d) => {
-                    s.latest_failure = Some(d);
+                    s.latest_failure = Some(d.clone());
+                    Arc::make_mut(&mut s.failures).insert(
+                        DiagnosticKey {
+                            run_id,
+                            step_id: id,
+                        },
+                        d,
+                    );
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
                 }
                 ExecutionEvent::Paused => s.state = RuntimeState::Paused,
@@ -414,6 +440,10 @@ pub fn resume() -> Result<()> {
 }
 pub fn stop() -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Stop))
+}
+/// Returns transient execution state; it is never serialized by `MkMacroStore`.
+pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
+    RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
 }
 pub fn record() -> Result<()> {
     Err(anyhow!("macro recording is not implemented"))

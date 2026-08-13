@@ -25,6 +25,9 @@ pub enum DiagnosticKind {
     Cancelled,
     Panic,
     RuntimeUnavailable,
+    TypeMismatch,
+    InvalidRegex,
+    IterationLimit,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionDiagnostic {
@@ -410,6 +413,7 @@ pub struct Executor {
     control: Arc<RunControl>,
 }
 impl Executor {
+    const MAX_CONTROL_TRANSITIONS: u64 = 100_000;
     pub fn new(backends: Backends, control: Arc<RunControl>) -> Self {
         Self { backends, control }
     }
@@ -418,8 +422,19 @@ impl Executor {
         let mut vars = RuntimeVariables::new();
         let mut pc = 0;
         let mut loops: HashMap<usize, u32> = HashMap::new();
+        let mut transitions = 0u64;
+        vars.insert("macro.id".into(), MkValue::Number(plan.macro_id as f64));
+        vars.insert("last_action_success".into(), MkValue::Boolean(true));
         while pc < plan.instructions.len() {
             self.control.checkpoint()?;
+            transitions += 1;
+            if transitions > Self::MAX_CONTROL_TRANSITIONS {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::IterationLimit,
+                    "control-flow safety limit (100000 transitions) exceeded",
+                )
+                .context("limit", Self::MAX_CONTROL_TRANSITIONS.to_string()));
+            }
             let ins = &plan.instructions[pc];
             let step = &ins.step;
             if !step.enabled {
@@ -428,11 +443,13 @@ impl Executor {
                 continue;
             }
             observe(ExecutionEvent::StepStarted(step.id));
+            vars.insert("step.id".into(), MkValue::Number(step.id as f64));
             let mut final_error = None;
             for repetition in 0..step.repeat {
                 vars.insert("iteration".into(), MkValue::Number(repetition as f64));
-                let attempts = match &step.on_error {
-                    super::MkErrorPolicy::Retry(r) => r.attempts.max(1),
+                let attempts = match (&step.action.is_structural(), &step.on_error) {
+                    (true, _) => 1,
+                    (_, super::MkErrorPolicy::Retry(r)) => r.attempts.max(1),
                     _ => 1,
                 };
                 for attempt in 1..=attempts {
@@ -444,10 +461,16 @@ impl Executor {
                     );
                     match self.action(&step.action, &mut vars, &mut guard) {
                         Ok(()) => {
+                            vars.insert("last_action_success".into(), MkValue::Boolean(true));
                             final_error = None;
                             break;
                         }
                         Err(e) => {
+                            let e = e
+                                .context("backend_operation", action_name(&step.action))
+                                .context("attempt", attempt.to_string())
+                                .context("attempts_exhausted", (attempt == attempts).to_string());
+                            vars.insert("last_action_success".into(), MkValue::Boolean(false));
                             tracing::warn!(macro_id=plan.macro_id,step_id=step.id,attempt,error=%e,"macro step attempt failed");
                             final_error = Some(e);
                             if attempt < attempts {
@@ -476,13 +499,17 @@ impl Executor {
             }
             pc = match (&step.action, &ins.jump) {
                 (MkAction::If(c) | MkAction::WhileStart { condition: c }, Jump::IfFalse(to)) => {
-                    if self.condition(c, &vars)? {
+                    self.control.checkpoint()?;
+                    if self.condition(c, &mut vars)? {
                         pc + 1
                     } else {
                         *to
                     }
                 }
                 (_, Jump::To(to) | Jump::Break(to) | Jump::Continue(to)) => *to,
+                (MkAction::RepeatStart { count }, Jump::RepeatBegin { exit }) if *count == 0 => {
+                    *exit
+                }
                 (MkAction::RepeatStart { count }, _) => {
                     loops.insert(pc, *count);
                     pc + 1
@@ -527,13 +554,12 @@ impl Executor {
                 Ok(())
             }
             MkAction::Text(p) => self.backends.input.text(p),
-            MkAction::MouseMove(t) => self
-                .backends
-                .input
-                .move_mouse(self.backends.screen.resolve(t, v)?),
+            MkAction::MouseMove(t) => self.move_to(t, v),
             MkAction::MouseClick(p) => {
                 let point = self.backends.screen.resolve(&p.target, v)?;
+                set_point(v, "last_point", point);
                 self.backends.input.move_mouse(point)?;
+                set_point(v, "mouse", point);
                 for _ in 0..p.clicks {
                     g.down_button(p.button.clone())?;
                     g.up_button(p.button.clone())?
@@ -552,13 +578,17 @@ impl Executor {
             }
             MkAction::WindowActivate(p) => self.backends.window.activate(p),
             MkAction::WindowClose(m) => self.backends.window.close(m),
-            MkAction::WindowWait(p) => self.wait_until(
+            MkAction::WindowWait(p) => self.wait_condition(
+                &MkCondition::WindowExists {
+                    matcher: p.matcher.clone(),
+                },
                 p.wait.as_ref().unwrap_or(&MkWaitOptions {
                     timeout_ms: 0,
                     poll_interval_ms: 10,
                 }),
-                || self.backends.window.exists(&p.matcher),
+                v,
             ),
+            MkAction::WaitUntil { condition, wait } => self.wait_condition(condition, wait, v),
             MkAction::SetVariable { name, value } => {
                 v.insert(name.clone(), value.clone());
                 Ok(())
@@ -567,10 +597,12 @@ impl Executor {
                 v.remove(name);
                 Ok(())
             }
-            MkAction::ImageFind(p) => self.wait_image(p).map(|_| ()),
+            MkAction::ImageFind(p) => self.wait_image(p, v).map(|_| ()),
             MkAction::ImageClick(p) => {
-                let pt = self.wait_image(p)?;
+                let pt = self.wait_image(p, v)?;
                 self.backends.input.move_mouse(pt)?;
+                set_point(v, "mouse", pt);
+                set_point(v, "last_point", pt);
                 g.down_button(MkMouseButton::Left)?;
                 g.up_button(MkMouseButton::Left)
             }
@@ -579,11 +611,12 @@ impl Executor {
                 color,
                 tolerance,
             } => {
-                if self
+                let matched = self
                     .backends
                     .screen
-                    .pixel_matches(target, color, *tolerance, v)?
-                {
+                    .pixel_matches(target, color, *tolerance, v)?;
+                v.insert("last_pixel_result".into(), MkValue::Boolean(matched));
+                if matched {
                     Ok(())
                 } else {
                     Err(ExecutionDiagnostic::new(
@@ -604,15 +637,63 @@ impl Executor {
             _ => Ok(()),
         }
     }
-    fn wait_image(&self, p: &MkImagePayload) -> ExecResult<MkPoint> {
-        let mut found = None;
-        self.wait_until(&p.wait, || {
-            found = self.backends.screen.image_found(p.asset_id, p.confidence)?;
-            Ok(found.is_some())
-        })?;
+    fn move_to(&self, target: &MkCoordinateTarget, v: &mut RuntimeVariables) -> ExecResult {
+        let point = self.backends.screen.resolve(target, v)?;
+        self.backends.input.move_mouse(point)?;
+        set_point(v, "mouse", point);
+        set_point(v, "last_point", point);
+        Ok(())
+    }
+    fn wait_image(&self, p: &MkImagePayload, v: &mut RuntimeVariables) -> ExecResult<MkPoint> {
+        self.wait_condition(
+            &MkCondition::ImageResult {
+                asset_id: p.asset_id,
+                found: true,
+            },
+            &p.wait,
+            v,
+        )?;
+        let found = self.backends.screen.image_found(p.asset_id, p.confidence)?;
+        v.insert(
+            "last_image_result".into(),
+            MkValue::Boolean(found.is_some()),
+        );
+        if let Some(point) = found {
+            set_point(v, "last_image", point);
+        }
         found.ok_or_else(|| {
             ExecutionDiagnostic::new(DiagnosticKind::TargetNotFound, "image not found")
         })
+    }
+    fn wait_condition(
+        &self,
+        condition: &MkCondition,
+        o: &MkWaitOptions,
+        v: &mut RuntimeVariables,
+    ) -> ExecResult {
+        let started = Instant::now();
+        let mut polls = 0u64;
+        loop {
+            self.control.checkpoint()?;
+            polls += 1;
+            if self.condition(condition, v)? {
+                return Ok(());
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_millis(o.timeout_ms) {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Timeout,
+                    format!("condition timed out after {} ms", o.timeout_ms),
+                )
+                .context("timeout_ms", o.timeout_ms.to_string())
+                .context("poll_interval_ms", o.poll_interval_ms.to_string())
+                .context("polls", polls.to_string()));
+            }
+            self.control.wait(
+                Duration::from_millis(o.poll_interval_ms.max(1))
+                    .min(Duration::from_millis(o.timeout_ms).saturating_sub(elapsed)),
+            )?;
+        }
     }
     fn wait_until(
         &self,
@@ -635,24 +716,52 @@ impl Executor {
                 .wait(Duration::from_millis(o.poll_interval_ms.max(1)))?
         }
     }
-    fn condition(&self, c: &MkCondition, v: &RuntimeVariables) -> ExecResult<bool> {
+    fn condition(&self, c: &MkCondition, v: &mut RuntimeVariables) -> ExecResult<bool> {
         match c {
             MkCondition::Variable { name, op, value } => {
-                Ok(compare(v.get(name).unwrap_or(&MkValue::Null), op, value))
+                compare(v.get(name).unwrap_or(&MkValue::Null), op, value)
             }
-            MkCondition::WindowExists { matcher } => self.backends.window.exists(matcher),
-            MkCondition::WindowActive { matcher } => self.backends.window.is_active(matcher),
+            MkCondition::WindowExists { matcher } => {
+                let x = self
+                    .backends
+                    .window
+                    .exists(matcher)
+                    .map_err(|e| e.context("matcher", format!("{matcher:?}")))?;
+                v.insert("last_window_result".into(), MkValue::Boolean(x));
+                Ok(x)
+            }
+            MkCondition::WindowActive { matcher } => {
+                let x = self
+                    .backends
+                    .window
+                    .is_active(matcher)
+                    .map_err(|e| e.context("matcher", format!("{matcher:?}")))?;
+                v.insert("last_window_result".into(), MkValue::Boolean(x));
+                Ok(x)
+            }
             MkCondition::ImageResult { asset_id, found } => {
-                Ok(self.backends.screen.image_found(*asset_id, 0.0)?.is_some() == *found)
+                let point = self.backends.screen.image_found(*asset_id, 0.0)?;
+                v.insert(
+                    "last_image_result".into(),
+                    MkValue::Boolean(point.is_some()),
+                );
+                if let Some(p) = point {
+                    set_point(v, "last_image", p)
+                };
+                Ok(point.is_some() == *found)
             }
             MkCondition::PixelResult {
                 target,
                 color,
                 tolerance,
-            } => self
-                .backends
-                .screen
-                .pixel_matches(target, color, *tolerance, v),
+            } => {
+                let x = self
+                    .backends
+                    .screen
+                    .pixel_matches(target, color, *tolerance, v)?;
+                v.insert("last_pixel_result".into(), MkValue::Boolean(x));
+                Ok(x)
+            }
             MkCondition::All { conditions } => {
                 for c in conditions {
                     if !self.condition(c, v)? {
@@ -673,37 +782,87 @@ impl Executor {
         }
     }
 }
-fn compare(a: &MkValue, op: &MkCompareOp, b: &MkValue) -> bool {
+fn action_name(a: &MkAction) -> &'static str {
+    match a {
+        MkAction::KeyDown(_)
+        | MkAction::KeyUp(_)
+        | MkAction::KeyPress(_)
+        | MkAction::Hotkey(_)
+        | MkAction::Text(_) => "SendInput",
+        MkAction::MouseMove(_)
+        | MkAction::MouseClick(_)
+        | MkAction::MouseDown(_)
+        | MkAction::MouseUp(_)
+        | MkAction::MouseScroll { .. } => "SendInput",
+        MkAction::WindowActivate(_) | MkAction::WindowClose(_) | MkAction::WindowWait(_) => {
+            "window"
+        }
+        MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::PixelCheck { .. } => "screen",
+        MkAction::UiInvoke(_) | MkAction::UiSetValue { .. } | MkAction::UiWait(_) => "UIAutomation",
+        MkAction::Process(_) | MkAction::LauncherCommand { .. } => "launcher",
+        MkAction::WaitUntil { .. } => "condition_evaluator",
+        _ => "runtime",
+    }
+}
+fn set_point(v: &mut RuntimeVariables, prefix: &str, p: MkPoint) {
+    v.insert(format!("{prefix}.x"), MkValue::Number(p.x as f64));
+    v.insert(format!("{prefix}.y"), MkValue::Number(p.y as f64));
+}
+pub fn compare(a: &MkValue, op: &MkCompareOp, b: &MkValue) -> ExecResult<bool> {
     match op {
-        MkCompareOp::Eq => a == b,
-        MkCompareOp::NotEq => a != b,
+        MkCompareOp::Eq | MkCompareOp::NotEq => {
+            if std::mem::discriminant(a) != std::mem::discriminant(b) {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::TypeMismatch,
+                    "mixed-type comparison is not allowed",
+                ));
+            }
+            Ok(if matches!(op, MkCompareOp::Eq) {
+                a == b
+            } else {
+                a != b
+            })
+        }
         MkCompareOp::Less
         | MkCompareOp::LessOrEq
         | MkCompareOp::Greater
         | MkCompareOp::GreaterOrEq => {
             let (MkValue::Number(a), MkValue::Number(b)) = (a, b) else {
-                return false;
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::TypeMismatch,
+                    "ordering requires two numbers",
+                ));
             };
-            match op {
+            Ok(match op {
                 MkCompareOp::Less => a < b,
                 MkCompareOp::LessOrEq => a <= b,
                 MkCompareOp::Greater => a > b,
                 _ => a >= b,
-            }
+            })
         }
         MkCompareOp::Contains
         | MkCompareOp::StartsWith
         | MkCompareOp::EndsWith
         | MkCompareOp::Regex => {
             let (MkValue::String(a), MkValue::String(b)) = (a, b) else {
-                return false;
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::TypeMismatch,
+                    "string operator requires two strings",
+                ));
             };
-            match op {
+            Ok(match op {
                 MkCompareOp::Contains => a.contains(b),
                 MkCompareOp::StartsWith => a.starts_with(b),
                 MkCompareOp::EndsWith => a.ends_with(b),
-                _ => regex::Regex::new(b).is_ok_and(|r| r.is_match(a)),
-            }
+                _ => regex::Regex::new(b)
+                    .map_err(|e| {
+                        ExecutionDiagnostic::new(
+                            DiagnosticKind::InvalidRegex,
+                            format!("invalid regular expression: {e}"),
+                        )
+                    })?
+                    .is_match(a),
+            })
         }
     }
 }
@@ -850,5 +1009,266 @@ pub mod fake {
         fn command(&self, c: &str, _: Option<&str>) -> ExecResult {
             self.event(format!("command:{c}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_d_tests {
+    use super::{fake::FakeBackend, *};
+    use crate::mkmacro::{MkErrorPolicy, MkMacro, MkPlayback, MkRetry, MkStep, compile};
+
+    fn s(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        }
+    }
+    fn plan(steps: Vec<MkStep>) -> MkExecutionPlan {
+        compile(&MkMacro {
+            id: 9,
+            name: "flow".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            playback: MkPlayback::default(),
+            steps,
+        })
+        .unwrap()
+    }
+    fn text(value: &str) -> MkAction {
+        MkAction::Text(MkTextPayload {
+            text: value.into(),
+            mode: super::MkTextMode::Type,
+        })
+    }
+    fn run(steps: Vec<MkStep>, fake: Arc<FakeBackend>) -> ExecResult {
+        let c = Arc::new(RunControl::default());
+        c.reset();
+        Executor::new(fake.backends(), c).execute(&plan(steps), &|_| {})
+    }
+
+    #[test]
+    fn typed_comparisons_cover_every_operator_and_bad_regex() {
+        use MkCompareOp::*;
+        assert!(compare(&MkValue::Number(1.0), &Less, &MkValue::Number(2.0)).unwrap());
+        assert!(compare(&MkValue::Number(2.0), &LessOrEq, &MkValue::Number(2.0)).unwrap());
+        assert!(compare(&MkValue::Number(3.0), &Greater, &MkValue::Number(2.0)).unwrap());
+        assert!(compare(&MkValue::Number(3.0), &GreaterOrEq, &MkValue::Number(3.0)).unwrap());
+        assert!(
+            compare(
+                &MkValue::String("abcd".into()),
+                &Contains,
+                &MkValue::String("bc".into())
+            )
+            .unwrap()
+        );
+        assert!(
+            compare(
+                &MkValue::String("abcd".into()),
+                &StartsWith,
+                &MkValue::String("ab".into())
+            )
+            .unwrap()
+        );
+        assert!(
+            compare(
+                &MkValue::String("abcd".into()),
+                &EndsWith,
+                &MkValue::String("cd".into())
+            )
+            .unwrap()
+        );
+        assert!(
+            compare(
+                &MkValue::String("abcd".into()),
+                &Regex,
+                &MkValue::String("^a.*d$".into())
+            )
+            .unwrap()
+        );
+        assert!(compare(&MkValue::Boolean(true), &Eq, &MkValue::Boolean(true)).unwrap());
+        assert!(compare(&MkValue::Boolean(true), &NotEq, &MkValue::Boolean(false)).unwrap());
+        assert_eq!(
+            compare(&MkValue::Number(1.0), &Eq, &MkValue::String("1".into()))
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::TypeMismatch
+        );
+        assert_eq!(
+            compare(
+                &MkValue::String("x".into()),
+                &Regex,
+                &MkValue::String("[".into())
+            )
+            .unwrap_err()
+            .kind,
+            DiagnosticKind::InvalidRegex
+        );
+    }
+
+    #[test]
+    fn nested_flow_zero_repeat_break_and_continue_have_correct_destinations() {
+        let f = Arc::new(FakeBackend::default());
+        run(
+            vec![
+                s(1, MkAction::RepeatStart { count: 0 }),
+                s(2, text("never")),
+                s(3, MkAction::RepeatEnd),
+                s(4, MkAction::RepeatStart { count: 3 }),
+                s(5, text("once")),
+                s(6, MkAction::Break),
+                s(7, text("never2")),
+                s(8, MkAction::RepeatEnd),
+                s(9, MkAction::RepeatStart { count: 2 }),
+                s(10, MkAction::Continue),
+                s(11, text("never3")),
+                s(12, MkAction::RepeatEnd),
+                s(
+                    16,
+                    MkAction::SetVariable {
+                        name: "x".into(),
+                        value: MkValue::Boolean(false),
+                    },
+                ),
+                s(
+                    13,
+                    MkAction::If(MkCondition::Not {
+                        condition: Box::new(MkCondition::Variable {
+                            name: "x".into(),
+                            op: MkCompareOp::Eq,
+                            value: MkValue::Boolean(true),
+                        }),
+                    }),
+                ),
+                s(14, text("nested")),
+                s(15, MkAction::EndIf),
+            ],
+            f.clone(),
+        )
+        .unwrap();
+        assert_eq!(f.events(), vec!["text:once", "text:nested"]);
+    }
+
+    #[test]
+    fn all_any_short_circuit_and_while_false_exit() {
+        let f = Arc::new(FakeBackend::default());
+        let false_c = MkCondition::Variable {
+            name: "x".into(),
+            op: MkCompareOp::Eq,
+            value: MkValue::Boolean(true),
+        };
+        run(
+            vec![
+                s(
+                    1,
+                    MkAction::SetVariable {
+                        name: "x".into(),
+                        value: MkValue::Boolean(false),
+                    },
+                ),
+                s(
+                    2,
+                    MkAction::If(MkCondition::All {
+                        conditions: vec![
+                            false_c.clone(),
+                            MkCondition::Variable {
+                                name: "x".into(),
+                                op: MkCompareOp::Regex,
+                                value: MkValue::String("[".into()),
+                            },
+                        ],
+                    }),
+                ),
+                s(3, text("never")),
+                s(4, MkAction::EndIf),
+                s(
+                    5,
+                    MkAction::If(MkCondition::Any {
+                        conditions: vec![
+                            MkCondition::Not {
+                                condition: Box::new(false_c.clone()),
+                            },
+                            MkCondition::Variable {
+                                name: "x".into(),
+                                op: MkCompareOp::Regex,
+                                value: MkValue::String("[".into()),
+                            },
+                        ],
+                    }),
+                ),
+                s(6, text("yes")),
+                s(7, MkAction::EndIf),
+                s(8, MkAction::WhileStart { condition: false_c }),
+                s(9, text("never2")),
+                s(10, MkAction::WhileEnd),
+            ],
+            f.clone(),
+        )
+        .unwrap();
+        assert_eq!(f.events(), vec!["text:yes"]);
+    }
+
+    #[test]
+    fn wait_until_immediate_timeout_and_retry_context() {
+        let f = Arc::new(FakeBackend::default());
+        f.conditions
+            .lock()
+            .unwrap()
+            .insert("window_exists".into(), true);
+        let w = MkWaitOptions {
+            timeout_ms: 5,
+            poll_interval_ms: 1,
+        };
+        run(
+            vec![s(
+                1,
+                MkAction::WaitUntil {
+                    condition: MkCondition::WindowExists {
+                        matcher: MkWindowMatcher {
+                            title: Some("x".into()),
+                            title_regex: None,
+                            process: None,
+                            class: None,
+                        },
+                    },
+                    wait: w.clone(),
+                },
+            )],
+            f.clone(),
+        )
+        .unwrap();
+        f.conditions
+            .lock()
+            .unwrap()
+            .insert("window_exists".into(), false);
+        let mut step = s(
+            2,
+            MkAction::WaitUntil {
+                condition: MkCondition::WindowExists {
+                    matcher: MkWindowMatcher {
+                        title: Some("x".into()),
+                        title_regex: None,
+                        process: None,
+                        class: None,
+                    },
+                },
+                wait: w,
+            },
+        );
+        step.on_error = MkErrorPolicy::Retry(MkRetry {
+            attempts: 2,
+            delay_ms: 0,
+        });
+        let e = run(vec![step], f).unwrap_err();
+        assert_eq!(e.kind, DiagnosticKind::Timeout);
+        assert_eq!(
+            e.context.get("attempts_exhausted").map(String::as_str),
+            Some("true")
+        );
+        assert!(e.context.contains_key("poll_interval_ms"));
     }
 }

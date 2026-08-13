@@ -80,6 +80,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         return;
     };
     let diagnostics = validate_document(&d.draft, None);
+    let runtime = crate::mkmacro::runtime::snapshot();
     let Some(m) = d.draft.macros.iter_mut().find(|m| m.id == mid) else {
         return;
     };
@@ -134,6 +135,29 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         ui.add(eframe::egui::DragValue::new(&mut s.delay_after_ms));
                     });
                     r.col(|ui| {
+                        if let Some(state) = runtime.as_ref().and_then(|run| {
+                            (run.macro_id == Some(mid)).then(|| run.steps.get(&s.id)).flatten()
+                        }) {
+                            let (label, color) = match state {
+                                crate::mkmacro::StepState::Pending => ("pending", eframe::egui::Color32::GRAY),
+                                crate::mkmacro::StepState::Running => ("running", eframe::egui::Color32::YELLOW),
+                                crate::mkmacro::StepState::Success => ("success", eframe::egui::Color32::GREEN),
+                                crate::mkmacro::StepState::Skipped => ("skipped", eframe::egui::Color32::GRAY),
+                                crate::mkmacro::StepState::Failed => ("failed", eframe::egui::Color32::RED),
+                            };
+                            let response = ui.colored_label(color, label);
+                            if let Some(run) = runtime.as_ref() {
+                                if let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id }) {
+                                    response.on_hover_ui(|ui| {
+                                        ui.strong(&failure.message);
+                                        for (key, value) in &failure.context { ui.label(format!("{key}: {value}")); }
+                                        if failure.kind == crate::mkmacro::DiagnosticKind::InputRejected {
+                                            ui.label("Likely integrity/UIPI restriction: SendInput accepted zero events.");
+                                        }
+                                    });
+                                }
+                            }
+                        }
                         for x in diagnostics.iter().filter(|x| x.step_id == Some(s.id)) {
                             ui.colored_label(eframe::egui::Color32::RED, &x.message);
                         }
