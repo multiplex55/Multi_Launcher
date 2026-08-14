@@ -21,6 +21,7 @@ pub enum DestructiveAction {
     ClearBrowserTabCache,
     EmptyRecycleBin,
     ResetWidgetSettings,
+    DeleteMacro,
 }
 
 impl DestructiveAction {
@@ -50,6 +51,7 @@ impl DestructiveAction {
             Self::ClearBrowserTabCache => "Clear browser tab cache",
             Self::EmptyRecycleBin => "Empty recycle bin",
             Self::ResetWidgetSettings => "Reset widget settings",
+            Self::DeleteMacro => "Delete macro",
         }
     }
 

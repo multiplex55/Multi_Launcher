@@ -75,16 +75,20 @@ pub fn move_steps(steps: &mut [MkStep], ids: &BTreeSet<u64>, down: bool) {
     }
 }
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
-    let Some(mid) = d.selected_macro else {
+    let Some(mid) = d.selected_macro_id else {
         ui.label("Select a macro");
         return;
     };
     let diagnostics = validate_document(&d.draft, None);
     let runtime = crate::mkmacro::runtime::snapshot();
-    let Some(m) = d.draft.macros.iter_mut().find(|m| m.id == mid) else {
+    let Some(m) = d.draft.macros.iter().find(|m| m.id == mid) else {
         return;
     };
     let rows: Vec<u64> = m.steps.iter().map(|s| s.id).collect();
+    let depths = super::action_catalog::action_depths(m);
+    let mut clicked = None;
+    let mut changed = false;
+    let mut updates = Vec::new();
     egui_extras::TableBuilder::new(ui)
         .striped(true)
         .column(egui_extras::Column::exact(28.0))
@@ -104,7 +108,8 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             }
         })
         .body(|mut body| {
-            for (i, s) in m.steps.iter_mut().enumerate() {
+            for (i, source) in m.steps.iter().enumerate() {
+                let mut s = source.clone();
                 body.row(22.0, |mut r| {
                     r.col(|ui| {
                         if ui
@@ -112,27 +117,28 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                             .clicked()
                         {
                             let mods = ui.input(|x| x.modifiers);
-                            d.selection.click(&rows, i, mods.ctrl, mods.shift);
+                            clicked = Some((i, mods.ctrl, mods.shift));
                         }
                     });
                     r.col(|ui| {
-                        ui.add_enabled(
+                        changed |= ui.add_enabled(
                             s.action.can_be_disabled(),
                             eframe::egui::Checkbox::without_text(&mut s.enabled),
-                        );
+                        ).changed();
                     });
                     r.col(|ui| {
-                        ui.label(format!("{:?}", s.action));
+                        let structural = matches!(s.action, crate::mkmacro::MkAction::Else|crate::mkmacro::MkAction::EndIf|crate::mkmacro::MkAction::RepeatEnd|crate::mkmacro::MkAction::WhileEnd);
+                        let label = format!("{}{}", "  ".repeat(depths[i]), super::action_catalog::action_name(&s.action));
+                        if structural { ui.strong(label); } else { ui.label(label); }
                     });
                     r.col(|ui| {
-                        ui.label(format!("{:?}", s.action))
-                            .on_hover_text(format!("{:?}", s.action));
+                        let full=super::action_catalog::action_details(&s.action); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; ui.label(short).on_hover_text(full);
                     });
                     r.col(|ui| {
-                        ui.add(eframe::egui::DragValue::new(&mut s.repeat));
+                        changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
                     });
                     r.col(|ui| {
-                        ui.add(eframe::egui::DragValue::new(&mut s.delay_after_ms));
+                        changed |= ui.add(eframe::egui::DragValue::new(&mut s.delay_after_ms).clamp_range(0..=86_400_000)).changed();
                     });
                     r.col(|ui| {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
@@ -163,6 +169,22 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         }
                     });
                 });
+                updates.push((s.id,s.enabled,s.repeat,s.delay_after_ms));
             }
         });
+    if let Some((i, ctrl, shift)) = clicked {
+        d.selection.click(&rows, i, ctrl, shift);
+    }
+    if changed {
+        if let Some(m) = d.selected_macro_mut() {
+            for (id, en, repeat, delay) in updates {
+                if let Some(s) = m.steps.iter_mut().find(|s| s.id == id) {
+                    s.enabled = en;
+                    s.repeat = repeat;
+                    s.delay_after_ms = delay;
+                }
+            }
+        }
+        d.mark_dirty();
+    }
 }
