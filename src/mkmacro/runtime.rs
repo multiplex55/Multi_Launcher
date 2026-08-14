@@ -120,6 +120,26 @@ impl MacroRuntime {
         }
     }
     pub fn command(&self, c: RuntimeCommand) -> CommandResult {
+        if matches!(&c, RuntimeCommand::RunSelection(_, ids) if ids.is_empty()) {
+            return CommandResult::Rejected(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidSelection,
+                "selection is empty",
+            ));
+        }
+        let active = self.shared.admission.lock().unwrap().is_some();
+        let state = self.snapshot().state;
+        let wrong_state = match &c {
+            RuntimeCommand::Pause => !active || state == RuntimeState::Paused,
+            RuntimeCommand::Resume => !active || state != RuntimeState::Paused,
+            RuntimeCommand::Stop => !active,
+            _ => false,
+        };
+        if wrong_state {
+            return CommandResult::Rejected(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                format!("command {c:?} is not valid while runtime is {state:?}"),
+            ));
+        }
         if let RuntimeCommand::Run(id)
         | RuntimeCommand::RunFrom(id, _)
         | RuntimeCommand::RunSelection(id, _) = &c
@@ -210,9 +230,7 @@ fn worker_loop(
                 }
             }
             RuntimeCommand::Stop => {}
-            RuntimeCommand::Run(mid) | RuntimeCommand::RunFrom(mid, 0) => {
-                run_one(&store, &backends, &shared, mid, None, None)
-            }
+            RuntimeCommand::Run(mid) => run_one(&store, &backends, &shared, mid, None, None),
             RuntimeCommand::RunFrom(mid, sid) => {
                 run_one(&store, &backends, &shared, mid, Some(sid), None)
             }
@@ -411,10 +429,14 @@ fn run_one(
 
 static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::new(None));
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
+    set_shared_store_with_backends(store, production_backends())
+}
+/// Installs a shared runtime with injected effects (intended for tests).
+pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {
     if let Some(old) = RUNTIME.write().unwrap().take() {
         old.shutdown()
     }
-    *RUNTIME.write().unwrap() = Some(Arc::new(MacroRuntime::new(store, Backends::unsupported())))
+    *RUNTIME.write().unwrap() = Some(Arc::new(MacroRuntime::new(store, backends)))
 }
 fn global() -> Result<Arc<MacroRuntime>> {
     RUNTIME
@@ -431,6 +453,12 @@ fn accepted(r: CommandResult) -> Result<()> {
 }
 pub fn run(id: u64) -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Run(id)))
+}
+pub fn run_from(macro_id: u64, step_id: u64) -> Result<()> {
+    accepted(global()?.command(RuntimeCommand::RunFrom(macro_id, step_id)))
+}
+pub fn run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
+    accepted(global()?.command(RuntimeCommand::RunSelection(macro_id, ids)))
 }
 pub fn pause() -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Pause))

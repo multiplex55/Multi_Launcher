@@ -33,6 +33,7 @@ pub struct MkMacroDialog {
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
     pub quick_insert: action_editor::QuickInsertState,
+    pub command_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -125,6 +126,7 @@ impl MkMacroDialog {
                 repeat: 1,
                 ..Default::default()
             },
+            command_error: None,
         }
     }
     pub fn open(&mut self) {
@@ -215,10 +217,85 @@ impl MkMacroDialog {
         self.mark_dirty();
     }
     pub fn playback_block_reason(&self) -> Option<String> {
+        let Some(m) = self.selected_macro() else {
+            return Some("Select a macro".into());
+        };
+        if !m.enabled {
+            return Some("The selected macro is disabled".into());
+        }
+        if crate::mkmacro::runtime::snapshot().is_some_and(|s| {
+            matches!(
+                s.state,
+                crate::mkmacro::RuntimeState::Running
+                    | crate::mkmacro::RuntimeState::Paused
+                    | crate::mkmacro::RuntimeState::Stopping
+            )
+        }) {
+            return Some("Another playback operation is active".into());
+        }
         let d = validate_document(&self.draft, None);
         d.iter()
             .find(|x| x.severity == DiagnosticSeverity::Fatal)
             .map(|x| x.message.clone())
+    }
+
+    fn prepare_execution(&mut self) -> anyhow::Result<u64> {
+        if self.dirty {
+            self.save()?;
+        }
+        self.selected_macro_id
+            .ok_or_else(|| anyhow::anyhow!("Select a macro"))
+    }
+    pub fn run_selected_macro(&mut self) -> anyhow::Result<()> {
+        if let Some(reason) = self.playback_block_reason() {
+            anyhow::bail!(reason);
+        }
+        let id = self.prepare_execution()?;
+        crate::mkmacro::runtime::run(id)
+    }
+    pub fn run_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
+        if let Some(reason) = self.playback_block_reason() {
+            anyhow::bail!(reason);
+        }
+        let index = self
+            .selected_macro()
+            .and_then(|m| m.steps.iter().position(|s| s.id == original_step_id))
+            .ok_or_else(|| anyhow::anyhow!("Selected step no longer exists"))?;
+        let id = self.prepare_execution()?;
+        let step = self
+            .selected_macro()
+            .and_then(|m| m.steps.get(index))
+            .ok_or_else(|| anyhow::anyhow!("Selected step no longer exists after save"))?
+            .id;
+        crate::mkmacro::runtime::run_from(id, step)
+    }
+    pub fn run_selected_steps(&mut self) -> anyhow::Result<()> {
+        if let Some(reason) = self.playback_block_reason() {
+            anyhow::bail!(reason);
+        }
+        let positions: Vec<usize> = self
+            .selected_macro()
+            .map(|m| {
+                m.steps
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| self.selection.ids.contains(&s.id).then_some(i))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if positions.is_empty() {
+            anyhow::bail!("Select one or more steps");
+        }
+        let id = self.prepare_execution()?;
+        let ids = positions
+            .into_iter()
+            .filter_map(|i| {
+                self.selected_macro()
+                    .and_then(|m| m.steps.get(i))
+                    .map(|s| s.id)
+            })
+            .collect();
+        crate::mkmacro::runtime::run_selection(id, ids)
     }
     pub fn ui(&mut self, ctx: &eframe::egui::Context) {
         self.sync_external();

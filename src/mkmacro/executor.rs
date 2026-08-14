@@ -124,22 +124,43 @@ pub struct Backends {
 }
 impl Backends {
     pub fn unsupported() -> Self {
-        let u = Arc::new(Unsupported);
+        let input = Arc::new(Unsupported { backend: "input" });
+        let window = Arc::new(Unsupported { backend: "window" });
+        let screen = Arc::new(Unsupported { backend: "screen" });
+        let uia = Arc::new(Unsupported {
+            backend: "UI Automation",
+        });
+        let launcher = Arc::new(Unsupported {
+            backend: "launcher",
+        });
         Self {
-            input: u.clone(),
-            window: u.clone(),
-            screen: u.clone(),
-            uia: u.clone(),
-            launcher: u,
+            input,
+            window,
+            screen,
+            uia,
+            launcher,
         }
     }
+
+    /// Backends used by the installed application. Live input remains an explicit
+    /// production-only capability; tests should use [`MacroRuntime::new`] instead.
+    pub fn production() -> Self {
+        production_backends()
+    }
 }
-struct Unsupported;
-fn unsupported<T>() -> ExecResult<T> {
+struct Unsupported {
+    backend: &'static str,
+}
+fn unsupported_context<T>(backend: &'static str, action: &'static str) -> ExecResult<T> {
     Err(ExecutionDiagnostic::new(
         DiagnosticKind::UnsupportedOperation,
-        "automation backend is unavailable on this platform",
-    ))
+        "This action is not available yet",
+    )
+    .context("backend", backend)
+    .context("action", action))
+}
+fn unsupported<T>() -> ExecResult<T> {
+    unsupported_context("automation", "unknown")
 }
 impl InputBackend for Unsupported {
     fn key_down(&self, _: &MkKey) -> ExecResult {
@@ -180,10 +201,10 @@ impl WindowBackend for Unsupported {
 }
 impl ScreenBackend for Unsupported {
     fn resolve(&self, _: &MkCoordinateTarget, _: &RuntimeVariables) -> ExecResult<MkPoint> {
-        unsupported()
+        unsupported_context(self.backend, "resolve coordinates")
     }
     fn image_found(&self, _: u64, _: f32) -> ExecResult<Option<MkPoint>> {
-        unsupported()
+        unsupported_context(self.backend, "find image")
     }
     fn pixel_matches(
         &self,
@@ -192,30 +213,84 @@ impl ScreenBackend for Unsupported {
         _: u8,
         _: &RuntimeVariables,
     ) -> ExecResult<bool> {
-        unsupported()
+        unsupported_context(self.backend, "match pixel")
     }
 }
 impl UiAutomationBackend for Unsupported {
     fn exists(&self, _: &MkUiPayload) -> ExecResult<bool> {
-        unsupported()
+        unsupported_context(self.backend, "exists")
     }
     fn invoke(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported()
+        unsupported_context(self.backend, "invoke")
     }
     fn set_value(&self, _: &MkUiPayload, _: &str) -> ExecResult {
-        unsupported()
+        unsupported_context(self.backend, "set value")
     }
     fn read_value(&self, _: &MkUiPayload) -> ExecResult<String> {
-        unsupported()
+        unsupported_context(self.backend, "read value")
     }
     fn toggle(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported()
+        unsupported_context(self.backend, "toggle")
     }
     fn select(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported()
+        unsupported_context(self.backend, "select")
     }
     fn focus(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported()
+        unsupported_context(self.backend, "focus")
+    }
+}
+
+#[cfg(windows)]
+struct ProductionLauncher;
+#[cfg(windows)]
+impl LauncherBackend for ProductionLauncher {
+    fn launch_process(&self, p: &MkProcessPayload) -> ExecResult {
+        let action = crate::actions::Action {
+            label: p.program.clone(),
+            desc: "Macro".into(),
+            action: p.program.clone(),
+            args: (!p.arguments.is_empty()).then(|| p.arguments.join(" ")),
+        };
+        crate::gui::execute_action(&action).map_err(|e| {
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, e.to_string())
+                .context("backend", "launcher")
+                .context("action", p.program.clone())
+        })
+    }
+    fn command(&self, command: &str, args: Option<&str>) -> ExecResult {
+        let action = crate::actions::Action {
+            label: command.to_owned(),
+            desc: "Macro".into(),
+            action: command.to_owned(),
+            args: args.map(str::to_owned),
+        };
+        crate::gui::execute_action(&action).map_err(|e| {
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, e.to_string())
+                .context("backend", "launcher")
+                .context("action", command)
+        })
+    }
+}
+
+/// Constructs the application's effect boundaries without exposing an accidental
+/// live-input default.
+pub fn production_backends() -> Backends {
+    let unsupported = Backends::unsupported();
+    #[cfg(windows)]
+    {
+        Backends {
+            input: Arc::new(super::input::Win32InputBackend::system(
+                super::input::LiveInputOptIn::production(),
+            )),
+            window: Arc::new(super::windows::Win32WindowBackend),
+            screen: unsupported.screen,
+            uia: unsupported.uia,
+            launcher: Arc::new(ProductionLauncher),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        unsupported
     }
 }
 impl LauncherBackend for Unsupported {

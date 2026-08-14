@@ -185,14 +185,14 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
                             (run.macro_id == Some(mid)).then(|| run.steps.get(&s.id)).flatten()
                         }) {
-                            let (label, color) = match state {
-                                crate::mkmacro::StepState::Pending => ("pending", eframe::egui::Color32::GRAY),
-                                crate::mkmacro::StepState::Running => ("running", eframe::egui::Color32::YELLOW),
-                                crate::mkmacro::StepState::Success => ("success", eframe::egui::Color32::GREEN),
-                                crate::mkmacro::StepState::Skipped => ("skipped", eframe::egui::Color32::GRAY),
-                                crate::mkmacro::StepState::Failed => ("failed", eframe::egui::Color32::RED),
+                            let (label, full, color) = match state {
+                                crate::mkmacro::StepState::Pending => ("○", "Pending", eframe::egui::Color32::GRAY),
+                                crate::mkmacro::StepState::Running => ("▶", "Running", eframe::egui::Color32::YELLOW),
+                                crate::mkmacro::StepState::Success => ("✓", "Success", eframe::egui::Color32::GREEN),
+                                crate::mkmacro::StepState::Skipped => ("–", "Skipped", eframe::egui::Color32::GRAY),
+                                crate::mkmacro::StepState::Failed => ("✕", "Failed", eframe::egui::Color32::RED),
                             };
-                            let response = ui.colored_label(color, label);
+                            let response = ui.colored_label(color, label).on_hover_text(full);
                             if let Some(run) = runtime.as_ref()
                                 && let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id })
                             {
@@ -283,8 +283,16 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
         return;
     }
     if matches!(c, Command::RunOne | Command::RunFrom) {
+        let result = match (c, d.selection.ids.iter().next().copied()) {
+            (Command::RunOne, _) => d.run_selected_steps(),
+            (Command::RunFrom, Some(id)) => d.run_from_step(id),
+            _ => Err(anyhow::anyhow!("Select a step")),
+        };
+        if let Err(e) = result {
+            d.command_error = Some(e.to_string());
+        }
         return;
-    } // runtime commands are intentionally draft-only unsupported until a compiled slice API exists.
+    }
     let ids = d.selection.ids.clone();
     let unsafe_structure = d.selected_macro().is_some_and(|m| {
         m.steps
