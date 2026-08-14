@@ -611,7 +611,26 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             last = Some(x.category)
                         }
                         if ui.button(x.name).on_hover_text(x.description).clicked() {
-                            insert_action(d, (x.make_default)());
+                            let action = (x.make_default)();
+                            if matches!(
+                                action,
+                                MkAction::MouseClick(_)
+                                    | MkAction::MouseMove(_)
+                                    | MkAction::KeyPress(_)
+                                    | MkAction::KeyDown(_)
+                                    | MkAction::KeyUp(_)
+                                    | MkAction::Hotkey(_)
+                                    | MkAction::Text(_)
+                                    | MkAction::Delay { .. }
+                                    | MkAction::Process(_)
+                                    | MkAction::WindowActivate(_)
+                                    | MkAction::WindowWait(_)
+                                    | MkAction::LauncherCommand { .. }
+                            ) {
+                                d.action_editor.begin_new(action);
+                            } else {
+                                insert_action(d, action);
+                            }
                             d.action_catalog_visible = false;
                         }
                     }

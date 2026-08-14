@@ -13,7 +13,7 @@ use crate::mkmacro::{
     DiagnosticSeverity, MkMacro, MkMacroDocument, MkMacroStore, repair_ids, validate_document,
 };
 use std::sync::Arc;
-pub use step_table::{Selection, duplicate_steps, move_steps};
+pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
 
 pub struct MkMacroDialog {
     pub open: bool,
@@ -31,6 +31,8 @@ pub struct MkMacroDialog {
     pub action_search: String,
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
+    pub action_editor: action_editor::ActionEditorState,
+    pub quick_insert: action_editor::QuickInsertState,
 }
 
 #[cfg(test)]
@@ -118,6 +120,11 @@ impl MkMacroDialog {
             action_search: String::new(),
             structural_insertion: None,
             uia_editor: Default::default(),
+            action_editor: Default::default(),
+            quick_insert: action_editor::QuickInsertState {
+                repeat: 1,
+                ..Default::default()
+            },
         }
     }
     pub fn open(&mut self) {
@@ -247,9 +254,7 @@ impl MkMacroDialog {
                 });
         }
         action_catalog::show_modal(ui.ctx(), self);
-        if !self.uia_editor.editor_hidden() {
-            action_editor::show(ui, self);
-        }
+        action_editor::show(ui.ctx(), self);
         uia_editor::show(ui, &mut self.uia_editor);
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();
