@@ -1,4 +1,5 @@
 mod action_editor;
+pub mod image_search_editor;
 mod macro_list;
 pub mod recorder_controller;
 mod step_table;

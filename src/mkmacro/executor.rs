@@ -646,6 +646,7 @@ impl Executor {
                     .screen
                     .pixel_matches(target, color, *tolerance, v)?;
                 v.insert("last_pixel_result".into(), MkValue::Boolean(matched));
+                v.insert("last_pixel_found".into(), MkValue::Boolean(matched));
                 if matched {
                     Ok(())
                 } else {
@@ -696,8 +697,11 @@ impl Executor {
             "last_image_result".into(),
             MkValue::Boolean(found.is_some()),
         );
+        v.insert("last_image_found".into(), MkValue::Boolean(found.is_some()));
         if let Some(point) = found {
             set_point(v, "last_image", point);
+            v.insert("last_image_x".into(), MkValue::Number(point.x.into()));
+            v.insert("last_image_y".into(), MkValue::Number(point.y.into()));
         }
         found.ok_or_else(|| {
             ExecutionDiagnostic::new(DiagnosticKind::TargetNotFound, "image not found")
@@ -783,8 +787,11 @@ impl Executor {
                     "last_image_result".into(),
                     MkValue::Boolean(point.is_some()),
                 );
+                v.insert("last_image_found".into(), MkValue::Boolean(point.is_some()));
                 if let Some(p) = point {
-                    set_point(v, "last_image", p)
+                    set_point(v, "last_image", p);
+                    v.insert("last_image_x".into(), MkValue::Number(p.x.into()));
+                    v.insert("last_image_y".into(), MkValue::Number(p.y.into()));
                 };
                 Ok(point.is_some() == *found)
             }
@@ -798,6 +805,7 @@ impl Executor {
                     .screen
                     .pixel_matches(target, color, *tolerance, v)?;
                 v.insert("last_pixel_result".into(), MkValue::Boolean(x));
+                v.insert("last_pixel_found".into(), MkValue::Boolean(x));
                 Ok(x)
             }
             MkCondition::All { conditions } => {
