@@ -37,30 +37,36 @@ fn legacy_and_mkmacro_routes_coexist_and_disable_independently() {
 
 #[test]
 fn rename_keeps_id_based_launcher_action() {
-    let dir = tempdir().unwrap();
-    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-    let store = std::sync::Arc::new(store);
-    let mut doc = MkMacroDocument {
-        schema_version: SCHEMA_VERSION,
-        macros: vec![MkMacro {
-            id: 99,
-            name: "before".into(),
-            description: String::new(),
-            enabled: true,
-            hotkey: None,
-            playback: Default::default(),
-            steps: vec![],
-        }],
-    };
-    store.save(doc.clone()).unwrap();
-    let before = MkMacroPlugin::new(store.clone()).search("mkmacro before")[0]
-        .action
-        .clone();
-    doc.macros[0].name = "after".into();
-    store.save(doc).unwrap();
+    fn action_for(name: &str) -> String {
+        let dir = tempdir().unwrap();
+        let doc = MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            macros: vec![MkMacro {
+                id: 99,
+                name: name.into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps: vec![],
+            }],
+        };
+        // Seed the persisted state before opening the watched store. Replacing a
+        // watched file in rapid succession is unrelated to the ID-routing contract
+        // and can race with Windows file-sharing semantics.
+        std::fs::write(
+            dir.path().join(MKMACROS_FILE),
+            serde_json::to_vec_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        MkMacroPlugin::new(std::sync::Arc::new(store)).search(&format!("mkmacro {name}"))[0]
+            .action
+            .clone()
+    }
+
+    let before = action_for("before");
+    let after = action_for("after");
     assert_eq!(before, "mkmacro:run:99");
-    assert_eq!(
-        MkMacroPlugin::new(store).search("mkmacro after")[0].action,
-        before
-    );
+    assert_eq!(after, before);
 }
