@@ -58,10 +58,22 @@ fn rejected(wanted: usize, sent: usize, detail: impl Into<String>) -> ExecutionD
 pub struct Win32InputBackend<S = SystemInputSink> {
     sink: S,
 }
-impl Default for Win32InputBackend<SystemInputSink> {
-    fn default() -> Self {
+/// Deliberate capability required to construct the backend that can affect the
+/// user's real desktop. Tests should instead use `FakeBackend` or `with_sink`.
+/// Keeping this token out of `Default` prevents an acceptance harness from
+/// accidentally turning a harmless fixture into live `SendInput` calls.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveInputOptIn(());
+impl LiveInputOptIn {
+    /// Explicitly opts into destructive, production input synthesis.
+    pub fn production() -> Self {
+        Self(())
+    }
+}
+impl Win32InputBackend<SystemInputSink> {
+    pub fn system(_: LiveInputOptIn) -> Self {
         Self {
-            sink: SystemInputSink,
+            sink: SystemInputSink(()),
         }
     }
 }
@@ -331,7 +343,7 @@ pub fn drag(
     }
 }
 #[derive(Clone, Copy)]
-pub struct SystemInputSink;
+pub struct SystemInputSink(());
 #[cfg(not(windows))]
 impl InputSink for SystemInputSink {
     fn send(&self, _: &[RawInputEvent]) -> Result<usize, String> {
