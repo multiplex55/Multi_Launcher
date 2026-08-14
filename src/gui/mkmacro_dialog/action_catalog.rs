@@ -515,7 +515,7 @@ pub fn action_depths(m: &MkMacro) -> Vec<usize> {
     if let Ok(p) = crate::mkmacro::compile(m) {
         return p.instructions.iter().map(|i| i.depth).collect();
     }
-    let mut n = 0;
+    let mut n: usize = 0;
     let mut out = vec![];
     for s in &m.steps {
         if matches!(
@@ -559,32 +559,33 @@ pub fn insert_action(d: &mut MkMacroDialog, action: MkAction) {
         .filter_map(|(i, s)| ids.contains(&s.id).then_some(i))
         .collect();
     let pos = selected.last().map_or(m.steps.len(), |i| i + 1);
-    let structural = match action {
-        MkAction::If(_) => Some((action, MkAction::EndIf)),
-        MkAction::RepeatStart { .. } => Some((action, MkAction::RepeatEnd)),
-        MkAction::WhileStart { .. } => Some((action, MkAction::WhileEnd)),
+    let terminator = match &action {
+        MkAction::If(_) => Some(MkAction::EndIf),
+        MkAction::RepeatStart { .. } => Some(MkAction::RepeatEnd),
+        MkAction::WhileStart { .. } => Some(MkAction::WhileEnd),
         _ => None,
     };
-    let (start, count) = if let Some((a, z)) = structural {
+    let inserted_indices = if let Some(terminator) = terminator {
         if let (Some(first), Some(last)) = (selected.first(), selected.last()) {
             let first = *first;
             let last = *last;
-            m.steps.insert(first, step(a));
-            m.steps.insert(last + 2, step(z));
-            (first, 2)
+            let terminator_index = last + 2;
+            m.steps.insert(first, step(action));
+            m.steps.insert(terminator_index, step(terminator));
+            vec![first, terminator_index]
         } else {
-            m.steps.insert(pos, step(a));
-            m.steps.insert(pos + 1, step(z));
-            (pos, 2)
+            m.steps.insert(pos, step(action));
+            m.steps.insert(pos + 1, step(terminator));
+            vec![pos, pos + 1]
         }
     } else {
         m.steps.insert(pos, step(action));
-        (pos, 1)
+        vec![pos]
     };
     repair_ids(&mut d.draft);
-    let chosen = d.selected_macro().unwrap().steps[start..start + count]
+    let chosen = inserted_indices
         .iter()
-        .map(|s| s.id)
+        .map(|&index| d.selected_macro().unwrap().steps[index].id)
         .collect();
     d.selection.ids = chosen;
     d.mark_dirty()
@@ -603,10 +604,8 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .max_height(430.0)
                 .show(ui, |ui| {
                     let mut last = None;
-                    for x in descriptors()
-                        .into_iter()
-                        .filter(|x| matches(x, &d.action_search))
-                    {
+                    let query = d.action_search.clone();
+                    for x in descriptors().into_iter().filter(|x| matches(x, &query)) {
                         if last != Some(x.category) {
                             ui.heading(x.category.label());
                             last = Some(x.category)
