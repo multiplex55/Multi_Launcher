@@ -584,7 +584,7 @@ impl DiffDialogState {
                 if let Some(error) = &self.workspace.error {
                     bounded_message(ui, egui::Color32::RED, error, 48.0);
                 }
-                if self.workspace.navigation_stack.len() > 0 && ui.button("← Back").clicked() {
+                if !self.workspace.navigation_stack.is_empty() && ui.button("← Back").clicked() {
                     self.navigate_back();
                 }
                 ui.separator();
@@ -607,17 +607,16 @@ impl DiffDialogState {
             .inner
         });
         self.show_operation_preview(ctx);
-        if let Some(response) = response {
-            if let Some(inner_size) = response.inner {
-                if let Some((size, position)) = runtime_window_geometry(
-                    inner_size,
-                    response.response.rect.left_top(),
-                    [screen.left(), screen.top(), screen.right(), screen.bottom()],
-                ) {
-                    self.persistence.window_size = Some(size);
-                    self.persistence.window_position = Some(position);
-                }
-            }
+        if let Some(response) = response
+            && let Some(inner_size) = response.inner
+            && let Some((size, position)) = runtime_window_geometry(
+                inner_size,
+                response.response.rect.left_top(),
+                [screen.left(), screen.top(), screen.right(), screen.bottom()],
+            )
+        {
+            self.persistence.window_size = Some(size);
+            self.persistence.window_position = Some(position);
         }
         if !open && self.text_views.values().any(|m| m.has_dirty()) {
             self.close_prompt = true;
@@ -790,14 +789,13 @@ impl DiffDialogState {
                                         "{label} changed on disk; in-memory edits were preserved."
                                     ),
                                 );
-                                if ui.button("Reload / discard edits").clicked() {
-                                    if let Some(loaded) = self
+                                if ui.button("Reload / discard edits").clicked()
+                                    && let Some(loaded) = self
                                         .watch_views
                                         .get_mut(&view_id)
                                         .and_then(|w| w.resolve_text_conflict(side, true))
-                                    {
-                                        let _ = m.reload_external(side, &loaded);
-                                    }
+                                {
+                                    let _ = m.reload_external(side, &loaded);
                                 }
                                 if ui.button("Keep current").clicked() {
                                     if let Some(w) = self.watch_views.get_mut(&view_id) {
@@ -818,11 +816,13 @@ impl DiffDialogState {
                 ));
             }
             DiffView::BinaryCompare(s) => {
-                if !self.binary_views.contains_key(&view_id) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.binary_views.entry(view_id)
+                {
                     match crate::diff::binary_compare::BinaryViewModel::load(s, settings.pane_split)
                     {
                         Ok(model) => {
-                            self.binary_views.insert(view_id, model);
+                            entry.insert(model);
                         }
                         Err(error) => {
                             render_error = Some(error);
@@ -854,12 +854,11 @@ impl DiffDialogState {
                         .into_iter()
                         .any(|a| matches!(a, crate::diff::watch::ViewWatchAction::BinaryRefresh))
                 });
-                if refresh {
-                    if let Some(model) = self.binary_views.get_mut(&view_id) {
-                        if let Err(error) = model.refresh_external(s) {
-                            render_error = Some(format!("Binary view is stale: {error}"));
-                        }
-                    }
+                if refresh
+                    && let Some(model) = self.binary_views.get_mut(&view_id)
+                    && let Err(error) = model.refresh_external(s)
+                {
+                    render_error = Some(format!("Binary view is stale: {error}"));
                 }
                 if let Some(model) = self.binary_views.get_mut(&view_id) {
                     let _ = binary_view::show(ui, workspace_id, view_id, model);
@@ -953,19 +952,19 @@ impl DiffDialogState {
                 self.navigate_back();
             }
             folder_view::FolderViewAction::RequestRescan => {
-                if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view {
-                    if state.apply_draft().is_ok() {
-                        state.model = Default::default();
-                        state.left_scan_complete = false;
-                        state.right_scan_complete = false;
-                        state.stale_paths.clear();
-                        // Keep view controls and selection. Non-surviving paths are
-                        // naturally harmless until the replacement model arrives.
-                        self.folder_runtimes
-                            .entry(self.workspace.current_view.id)
-                            .or_default()
-                            .prepare_rescan();
-                    }
+                if let DiffView::FolderCompare(state) = &mut self.workspace.current_view.view
+                    && state.apply_draft().is_ok()
+                {
+                    state.model = Default::default();
+                    state.left_scan_complete = false;
+                    state.right_scan_complete = false;
+                    state.stale_paths.clear();
+                    // Keep view controls and selection. Non-surviving paths are
+                    // naturally harmless until the replacement model arrives.
+                    self.folder_runtimes
+                        .entry(self.workspace.current_view.id)
+                        .or_default()
+                        .prepare_rescan();
                 }
             }
             folder_view::FolderViewAction::RequestMutation(kind) => self.plan_mutation(kind),
@@ -1087,15 +1086,15 @@ impl DiffDialogState {
     fn dirty_paths(&self) -> HashSet<std::path::PathBuf> {
         let mut paths = HashSet::new();
         for model in self.text_views.values() {
-            if model.left.is_dirty() {
-                if let Some(path) = &model.left_path {
-                    paths.insert(path.clone());
-                }
+            if model.left.is_dirty()
+                && let Some(path) = &model.left_path
+            {
+                paths.insert(path.clone());
             }
-            if model.right.is_dirty() {
-                if let Some(path) = &model.right_path {
-                    paths.insert(path.clone());
-                }
+            if model.right.is_dirty()
+                && let Some(path) = &model.right_path
+            {
+                paths.insert(path.clone());
             }
         }
         paths

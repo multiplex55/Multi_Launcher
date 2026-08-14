@@ -902,15 +902,15 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
             ctrl: true,
             ..Default::default()
         };
-        if i.consume_key(copy_modifiers, egui::Key::ArrowRight) {
-            if let Err(error) = m.copy_hunk(DiffSide::Left) {
-                m.right_error = Some(error);
-            }
+        if i.consume_key(copy_modifiers, egui::Key::ArrowRight)
+            && let Err(error) = m.copy_hunk(DiffSide::Left)
+        {
+            m.right_error = Some(error);
         }
-        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft) {
-            if let Err(error) = m.copy_hunk(DiffSide::Right) {
-                m.left_error = Some(error);
-            }
+        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft)
+            && let Err(error) = m.copy_hunk(DiffSide::Right)
+        {
+            m.left_error = Some(error);
         }
         if i.consume_key(egui::Modifiers::CTRL, egui::Key::Num1) {
             m.active_side = DiffSide::Left;

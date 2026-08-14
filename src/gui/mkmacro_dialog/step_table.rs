@@ -146,16 +146,16 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 crate::mkmacro::StepState::Failed => ("failed", eframe::egui::Color32::RED),
                             };
                             let response = ui.colored_label(color, label);
-                            if let Some(run) = runtime.as_ref() {
-                                if let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id }) {
-                                    response.on_hover_ui(|ui| {
-                                        ui.strong(&failure.message);
-                                        for (key, value) in &failure.context { ui.label(format!("{key}: {value}")); }
-                                        if failure.kind == crate::mkmacro::DiagnosticKind::InputRejected {
-                                            ui.label("Likely integrity/UIPI restriction: SendInput accepted zero events.");
-                                        }
-                                    });
-                                }
+                            if let Some(run) = runtime.as_ref()
+                                && let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id })
+                            {
+                                response.on_hover_ui(|ui| {
+                                    ui.strong(&failure.message);
+                                    for (key, value) in &failure.context { ui.label(format!("{key}: {value}")); }
+                                    if failure.kind == crate::mkmacro::DiagnosticKind::InputRejected {
+                                        ui.label("Likely integrity/UIPI restriction: SendInput accepted zero events.");
+                                    }
+                                });
                             }
                         }
                         for x in diagnostics.iter().filter(|x| x.step_id == Some(s.id)) {

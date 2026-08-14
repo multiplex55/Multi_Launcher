@@ -8,7 +8,7 @@ use crate::mkmacro::{
 pub enum CaptureState {
     Idle,
     Capturing { cursor: MkPoint },
-    Preview(UiElementInfo),
+    Preview(Box<UiElementInfo>),
 }
 #[derive(Debug, Clone)]
 pub struct UiaEditorState {
@@ -35,7 +35,7 @@ impl UiaEditorState {
     }
     pub fn preview(&mut self, info: UiElementInfo) {
         self.candidate = Some(info.clone());
-        self.capture = CaptureState::Preview(info);
+        self.capture = CaptureState::Preview(Box::new(info));
     }
     pub fn cancel(&mut self) {
         self.capture = CaptureState::Idle;
