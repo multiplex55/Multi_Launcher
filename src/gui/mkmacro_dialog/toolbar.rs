@@ -4,6 +4,15 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         if ui.button("Save").clicked() {
             let _ = dialog.save();
         }
+        if ui
+            .add_enabled(
+                dialog.selected_macro().is_some(),
+                eframe::egui::Button::new("+ Action"),
+            )
+            .clicked()
+        {
+            dialog.action_catalog_visible = true;
+        }
         if let Some(reason) = dialog.playback_block_reason() {
             ui.add_enabled(false, eframe::egui::Button::new("Run"))
                 .on_disabled_hover_text(reason);

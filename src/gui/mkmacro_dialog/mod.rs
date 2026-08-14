@@ -1,13 +1,16 @@
+pub mod action_catalog;
 mod action_editor;
 pub mod image_search_editor;
 mod macro_list;
+mod macro_properties;
 pub mod recorder_controller;
 mod step_table;
 mod toolbar;
 pub mod uia_editor;
 
+use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
-    DiagnosticSeverity, MkMacroDocument, MkMacroStore, repair_ids, validate_document,
+    DiagnosticSeverity, MkMacro, MkMacroDocument, MkMacroStore, repair_ids, validate_document,
 };
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, move_steps};
@@ -19,10 +22,82 @@ pub struct MkMacroDialog {
     baseline: Arc<MkMacroDocument>,
     pub dirty: bool,
     pub conflict: bool,
-    pub selected_macro: Option<u64>,
+    pub selected_macro_id: Option<u64>,
     pub selection: Selection,
     pub search: String,
+    pub delete_confirmation: ConfirmationModal,
+    pub hotkey_capture: bool,
+    pub action_catalog_visible: bool,
+    pub action_search: String,
+    pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mkmacro::{MkAction, MkHotkey, MkKey, MkStep};
+    fn dialog() -> (tempfile::TempDir, MkMacroDialog) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        (dir, MkMacroDialog::new(Arc::new(store)))
+    }
+    #[test]
+    fn create_duplicate_and_delete_are_draft_only() {
+        let (_dir, mut d) = dialog();
+        let baseline = d.store.snapshot();
+        d.create_macro();
+        let first = d.selected_macro_id.unwrap();
+        assert_ne!(first, 0);
+        d.selected_macro_mut().unwrap().hotkey = Some(MkHotkey {
+            key: MkKey::Function(8),
+            modifiers: vec![MkKey::Control],
+        });
+        d.selected_macro_mut().unwrap().steps.push(MkStep {
+            id: 0,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::Delay { milliseconds: 1 },
+        });
+        repair_ids(&mut d.draft);
+        d.duplicate_selected_macro();
+        let copy = d.selected_macro().unwrap();
+        assert_ne!(copy.id, first);
+        assert!(copy.hotkey.is_none());
+        assert_eq!(copy.name, "New Macro Copy");
+        assert!(copy.steps.iter().all(|s| s.id != 0));
+        d.delete_selected_macro();
+        assert_eq!(d.selected_macro_id, Some(first));
+        assert!(d.dirty);
+        assert!(Arc::ptr_eq(&baseline, &d.store.snapshot()));
+    }
+    #[test]
+    fn catalog_search_and_structures() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        assert!(
+            action_catalog::descriptors()
+                .iter()
+                .any(|x| action_catalog::matches(x, "launch"))
+        );
+        action_catalog::insert_action(
+            &mut d,
+            MkAction::If(crate::mkmacro::MkCondition::All { conditions: vec![] }),
+        );
+        assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
+        action_catalog::insert_action(&mut d, MkAction::RepeatStart { count: 2 });
+        assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
+    }
+    #[test]
+    fn names_and_details_cover_catalog() {
+        for x in action_catalog::descriptors() {
+            let a = (x.make_default)();
+            assert!(!action_catalog::action_name(&a).is_empty());
+            let _ = action_catalog::action_details(&a);
+        }
+    }
 }
 impl MkMacroDialog {
     pub fn new(store: Arc<MkMacroStore>) -> Self {
@@ -34,9 +109,14 @@ impl MkMacroDialog {
             store,
             dirty: false,
             conflict: false,
-            selected_macro: None,
+            selected_macro_id: None,
             selection: Default::default(),
             search: String::new(),
+            delete_confirmation: Default::default(),
+            hotkey_capture: false,
+            action_catalog_visible: false,
+            action_search: String::new(),
+            structural_insertion: None,
             uia_editor: Default::default(),
         }
     }
@@ -62,6 +142,71 @@ impl MkMacroDialog {
         self.conflict = false;
         Ok(())
     }
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+    pub fn selected_macro(&self) -> Option<&MkMacro> {
+        let id = self.selected_macro_id?;
+        self.draft.macros.iter().find(|m| m.id == id)
+    }
+    pub fn selected_macro_mut(&mut self) -> Option<&mut MkMacro> {
+        let id = self.selected_macro_id?;
+        self.draft.macros.iter_mut().find(|m| m.id == id)
+    }
+    pub fn create_macro(&mut self) {
+        self.draft.macros.push(MkMacro {
+            id: 0,
+            name: "New Macro".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            playback: Default::default(),
+            steps: vec![],
+        });
+        repair_ids(&mut self.draft);
+        self.selected_macro_id = self.draft.macros.last().map(|m| m.id);
+        self.selection.clear();
+        self.mark_dirty();
+    }
+    pub fn duplicate_selected_macro(&mut self) {
+        let Some(mut copy) = self.selected_macro().cloned() else {
+            return;
+        };
+        copy.id = 0;
+        copy.name.push_str(" Copy");
+        copy.hotkey = None;
+        for step in &mut copy.steps {
+            step.id = 0;
+        }
+        self.draft.macros.push(copy);
+        repair_ids(&mut self.draft);
+        self.selected_macro_id = self.draft.macros.last().map(|m| m.id);
+        self.selection.clear();
+        self.mark_dirty();
+    }
+    pub fn request_delete_selected_macro(&mut self) {
+        if self.selected_macro().is_some() {
+            self.delete_confirmation
+                .open_for(DestructiveAction::DeleteMacro);
+        }
+    }
+    pub fn delete_selected_macro(&mut self) {
+        let Some(id) = self.selected_macro_id else {
+            return;
+        };
+        let Some(index) = self.draft.macros.iter().position(|m| m.id == id) else {
+            return;
+        };
+        self.draft.macros.remove(index);
+        self.selected_macro_id = self
+            .draft
+            .macros
+            .get(index)
+            .or_else(|| index.checked_sub(1).and_then(|i| self.draft.macros.get(i)))
+            .map(|m| m.id);
+        self.selection.clear();
+        self.mark_dirty();
+    }
     pub fn playback_block_reason(&self) -> Option<String> {
         let d = validate_document(&self.draft, None);
         d.iter()
@@ -80,16 +225,34 @@ impl MkMacroDialog {
             .min_size([680.0, 420.0])
             .resizable(true)
             .show(ctx, |ui| {
-                toolbar::show(ui, self);
-                ui.columns(2, |cols| {
-                    macro_list::show(&mut cols[0], self);
-                    step_table::show(&mut cols[1], self);
-                });
-                if !self.uia_editor.editor_hidden() {
-                    action_editor::show(ui, self);
-                }
-                uia_editor::show(ui, &mut self.uia_editor);
+                self.show_contents(ui);
             });
         self.open = open;
+    }
+    pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
+        toolbar::show(ui, self);
+        if self.draft.macros.is_empty() {
+            macro_list::show_empty(ui, self);
+        } else {
+            egui_extras::StripBuilder::new(ui)
+                .size(egui_extras::Size::exact(macro_list::SIDEBAR_WIDTH))
+                .size(egui_extras::Size::remainder())
+                .horizontal(|mut strip| {
+                    strip.cell(|ui| macro_list::show(ui, self));
+                    strip.cell(|ui| {
+                        macro_properties::show(ui, self);
+                        ui.separator();
+                        step_table::show(ui, self);
+                    });
+                });
+        }
+        action_catalog::show_modal(ui.ctx(), self);
+        if !self.uia_editor.editor_hidden() {
+            action_editor::show(ui, self);
+        }
+        uia_editor::show(ui, &mut self.uia_editor);
+        if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
+            self.delete_selected_macro();
+        }
     }
 }
