@@ -9,6 +9,7 @@ pub mod recorder;
 pub mod recorder_hooks;
 pub mod runtime;
 pub mod store;
+pub mod uia;
 pub mod validation;
 pub mod variables;
 pub mod windows;
@@ -24,6 +25,7 @@ pub use runtime::{
     StepState,
 };
 pub use store::*;
+pub use uia::*;
 pub use validation::*;
 pub use variables::*;
 pub use windows::*;

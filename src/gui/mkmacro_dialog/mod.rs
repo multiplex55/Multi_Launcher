@@ -3,6 +3,7 @@ mod macro_list;
 pub mod recorder_controller;
 mod step_table;
 mod toolbar;
+pub mod uia_editor;
 
 use crate::mkmacro::{
     DiagnosticSeverity, MkMacroDocument, MkMacroStore, repair_ids, validate_document,
@@ -20,6 +21,7 @@ pub struct MkMacroDialog {
     pub selected_macro: Option<u64>,
     pub selection: Selection,
     pub search: String,
+    pub uia_editor: uia_editor::UiaEditorState,
 }
 impl MkMacroDialog {
     pub fn new(store: Arc<MkMacroStore>) -> Self {
@@ -34,6 +36,7 @@ impl MkMacroDialog {
             selected_macro: None,
             selection: Default::default(),
             search: String::new(),
+            uia_editor: Default::default(),
         }
     }
     pub fn open(&mut self) {
@@ -81,7 +84,10 @@ impl MkMacroDialog {
                     macro_list::show(&mut cols[0], self);
                     step_table::show(&mut cols[1], self);
                 });
-                action_editor::show(ui, self);
+                if !self.uia_editor.editor_hidden() {
+                    action_editor::show(ui, self);
+                }
+                uia_editor::show(ui, &mut self.uia_editor);
             });
         self.open = open;
     }
