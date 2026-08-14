@@ -171,16 +171,59 @@ pub struct MkImageAsset {
     pub name: String,
     pub relative_path: String,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkUiSelector {
     #[serde(default)]
     pub automation_id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
-    pub control_type: Option<String>,
+    pub control_type: Option<MkUiControlType>,
     #[serde(default)]
-    pub ancestor: Option<Box<MkUiSelector>>,
+    pub class_name: Option<String>,
+    #[serde(default)]
+    pub framework_id: Option<String>,
+    /// Nearest ancestor first. Each entry must contain at least one identity field.
+    #[serde(default)]
+    pub ancestor_path: Vec<MkUiSelectorPart>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkUiControlType {
+    Button,
+    Edit,
+    CheckBox,
+    RadioButton,
+    ComboBox,
+    ListItem,
+    TabItem,
+    MenuItem,
+    TreeItem,
+    Text,
+    Custom,
+    Other(String),
+}
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MkUiSelectorPart {
+    #[serde(default)]
+    pub automation_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub class_name: Option<String>,
+    #[serde(default)]
+    pub control_type: Option<MkUiControlType>,
+    #[serde(default)]
+    pub framework_id: Option<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkUiPattern {
+    Invoke,
+    Value,
+    Toggle,
+    SelectionItem,
+    Focus,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkWaitOptions {
@@ -340,6 +383,13 @@ pub enum MkAction {
         target: MkUiPayload,
         value: String,
     },
+    UiReadValue {
+        target: MkUiPayload,
+        variable: String,
+    },
+    UiToggle(MkUiPayload),
+    UiSelect(MkUiPayload),
+    UiFocus(MkUiPayload),
     UiWait(MkUiPayload),
 }
 impl MkAction {

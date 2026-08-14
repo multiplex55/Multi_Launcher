@@ -28,6 +28,9 @@ pub enum DiagnosticKind {
     TypeMismatch,
     InvalidRegex,
     IterationLimit,
+    UnsupportedPattern,
+    StaleElement,
+    ComFailure,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionDiagnostic {
@@ -90,6 +93,21 @@ pub trait UiAutomationBackend: Send + Sync {
     fn exists(&self, p: &MkUiPayload) -> ExecResult<bool>;
     fn invoke(&self, p: &MkUiPayload) -> ExecResult;
     fn set_value(&self, p: &MkUiPayload, value: &str) -> ExecResult;
+    fn read_value(&self, _: &MkUiPayload) -> ExecResult<String> {
+        unsupported()
+    }
+    fn toggle(&self, _: &MkUiPayload) -> ExecResult {
+        unsupported()
+    }
+    fn select(&self, _: &MkUiPayload) -> ExecResult {
+        unsupported()
+    }
+    fn focus(&self, _: &MkUiPayload) -> ExecResult {
+        unsupported()
+    }
+}
+pub trait UiAutomationInspector: Send + Sync {
+    fn inspect_at(&self, point: MkPoint) -> ExecResult<super::UiElementInfo>;
 }
 pub trait LauncherBackend: Send + Sync {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult;
@@ -185,6 +203,18 @@ impl UiAutomationBackend for Unsupported {
         unsupported()
     }
     fn set_value(&self, _: &MkUiPayload, _: &str) -> ExecResult {
+        unsupported()
+    }
+    fn read_value(&self, _: &MkUiPayload) -> ExecResult<String> {
+        unsupported()
+    }
+    fn toggle(&self, _: &MkUiPayload) -> ExecResult {
+        unsupported()
+    }
+    fn select(&self, _: &MkUiPayload) -> ExecResult {
+        unsupported()
+    }
+    fn focus(&self, _: &MkUiPayload) -> ExecResult {
         unsupported()
     }
 }
@@ -627,6 +657,14 @@ impl Executor {
             }
             MkAction::UiInvoke(p) => self.backends.uia.invoke(p),
             MkAction::UiSetValue { target, value } => self.backends.uia.set_value(target, value),
+            MkAction::UiReadValue { target, variable } => {
+                let value = self.backends.uia.read_value(target)?;
+                v.insert(variable.clone(), MkValue::String(value));
+                Ok(())
+            }
+            MkAction::UiToggle(p) => self.backends.uia.toggle(p),
+            MkAction::UiSelect(p) => self.backends.uia.select(p),
+            MkAction::UiFocus(p) => self.backends.uia.focus(p),
             MkAction::UiWait(p) => self.wait_until(
                 p.wait.as_ref().unwrap_or(&MkWaitOptions {
                     timeout_ms: 0,
@@ -798,7 +836,13 @@ fn action_name(a: &MkAction) -> &'static str {
             "window"
         }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::PixelCheck { .. } => "screen",
-        MkAction::UiInvoke(_) | MkAction::UiSetValue { .. } | MkAction::UiWait(_) => "UIAutomation",
+        MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => "UIAutomation",
         MkAction::Process(_) | MkAction::LauncherCommand { .. } => "launcher",
         MkAction::WaitUntil { .. } => "condition_evaluator",
         _ => "runtime",
