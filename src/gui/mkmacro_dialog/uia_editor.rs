@@ -103,7 +103,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, state: &mut UiaEditorState) {
                         eframe::egui::vec2(width as f32, height as f32),
                     ),
                     2.0,
-                    eframe::egui::Stroke::new(3.0, eframe::egui::Color32::YELLOW),
+                    eframe::egui::Stroke::new(3.0_f32, eframe::egui::Color32::YELLOW),
                 );
             }
             ui.group(|ui| {

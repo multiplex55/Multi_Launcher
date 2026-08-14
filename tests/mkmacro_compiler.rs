@@ -33,7 +33,7 @@ fn malformed_control_flow_cannot_compile() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Error)
+            .any(|d| d.severity == DiagnosticSeverity::Fatal)
     );
 }
 
