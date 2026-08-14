@@ -147,7 +147,7 @@ fn decode(bytes: &[u8]) -> (LoadedContent, Option<TextEncoding>, bool) {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         let le = bytes.starts_with(&[0xff, 0xfe]);
         let rest = &bytes[2..];
-        if rest.len() % 2 != 0 {
+        if !rest.len().is_multiple_of(2) {
             return (
                 LoadedContent::Binary {
                     digest: digest(bytes),

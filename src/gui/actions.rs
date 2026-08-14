@@ -1840,7 +1840,7 @@ mod clipboard_modify_gui_action_tests {
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.move_cursor_end);
         assert!(app.error.as_deref().unwrap_or_default().contains("boom"));
-        assert!(app.usage.get(&meta.action.action).is_none());
+        assert!(!app.usage.contains_key(&meta.action.action));
     }
 
     #[test]

@@ -835,12 +835,12 @@ fn push_row(
         _ => ChangeImportance::Important,
     };
     let (mut lr, mut rr) = (vec![], vec![]);
-    if kind == DiffRowKind::Modified {
-        if let (Some(a), Some(b)) = (l, r) {
-            if a.raw.len() <= limit && b.raw.len() <= limit {
-                (lr, rr) = intraline(&a.raw, &b.raw)
-            }
-        }
+    if kind == DiffRowKind::Modified
+        && let (Some(a), Some(b)) = (l, r)
+        && a.raw.len() <= limit
+        && b.raw.len() <= limit
+    {
+        (lr, rr) = intraline(&a.raw, &b.raw)
     }
     rows.push(AlignedDiffRow {
         id: 0,

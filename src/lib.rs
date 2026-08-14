@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(clippy::module_inception)]
+#![cfg_attr(test, allow(clippy::items_after_test_module))]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::field_reassign_with_default)]

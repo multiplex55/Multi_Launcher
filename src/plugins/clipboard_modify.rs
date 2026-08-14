@@ -433,6 +433,18 @@ fn section_slug(section: ModifySection) -> &'static str {
     }
 }
 
+fn launcher_desc(query: &str, desc: &str) -> String {
+    match query {
+        "cm" => "Complete query to open Clipboard Modify".into(),
+        "cm help" => "Complete query to report syntax help".into(),
+        "cm undo" => "Complete query to execute undo".into(),
+        _ if query.starts_with("cm ") && desc.starts_with("Open ") => {
+            format!("Complete query to {desc}")
+        }
+        _ => desc.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,17 +825,5 @@ mod tests {
     #[test]
     fn search_does_not_touch_clipboard_services() {
         let _ = plugin().search("cm upper");
-    }
-}
-
-fn launcher_desc(query: &str, desc: &str) -> String {
-    match query {
-        "cm" => "Complete query to open Clipboard Modify".into(),
-        "cm help" => "Complete query to report syntax help".into(),
-        "cm undo" => "Complete query to execute undo".into(),
-        _ if query.starts_with("cm ") && desc.starts_with("Open ") => {
-            format!("Complete query to {desc}")
-        }
-        _ => desc.into(),
     }
 }

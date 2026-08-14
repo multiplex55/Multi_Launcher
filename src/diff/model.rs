@@ -316,7 +316,7 @@ pub enum DiffView {
     Start,
     TextCompare(TextCompareState),
     BinaryCompare(BinaryCompareState),
-    FolderCompare(FolderCompareState),
+    FolderCompare(Box<FolderCompareState>),
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetainedView {
@@ -381,10 +381,9 @@ impl DiffWorkspace {
                 relative_path: Some(_),
                 ..
             })
-        ) {
-            if let Some(parent) = self.navigation_stack.last_mut() {
-                swap_view(&mut parent.view);
-            }
+        ) && let Some(parent) = self.navigation_stack.last_mut()
+        {
+            swap_view(&mut parent.view);
         }
         std::mem::swap(&mut self.left_visible, &mut self.right_visible);
         std::mem::swap(&mut self.left_normalized, &mut self.right_normalized);
@@ -473,7 +472,7 @@ impl DiffWorkspace {
                 ..FolderCompareState::default()
             };
             folder.apply_table_preferences(&self.settings);
-            DiffView::FolderCompare(folder)
+            DiffView::FolderCompare(Box::new(folder))
         } else {
             let msg = "Left and right paths must both be files or both be directories".to_string();
             self.error = Some(msg.clone());
@@ -1308,27 +1307,23 @@ impl TextViewModel {
         if self.recalculate_at.is_some_and(|t| Instant::now() >= t) {
             self.start_compare();
         }
-        if let Some(rx) = &self.receiver {
-            if let Ok(m) = rx.try_recv() {
-                if m.generation == self.generation
-                    && !m.result.is_stale(
-                        self.left.revision,
-                        self.right.revision,
-                        self.rules.revision,
-                    )
-                {
-                    let anchor = self.cursor.map(|p| ScrollAnchor {
-                        side: p.side,
-                        source_line: p.line,
-                        offset: 0.0,
-                    });
-                    self.current_row = anchor
-                        .map(|a| restore_anchor(&m.result.rows, a))
-                        .or(self.current_row);
-                    self.comparison = Some(m.result);
-                    self.recalculating = false;
-                }
-            }
+        if let Some(rx) = &self.receiver
+            && let Ok(m) = rx.try_recv()
+            && m.generation == self.generation
+            && !m
+                .result
+                .is_stale(self.left.revision, self.right.revision, self.rules.revision)
+        {
+            let anchor = self.cursor.map(|p| ScrollAnchor {
+                side: p.side,
+                source_line: p.line,
+                offset: 0.0,
+            });
+            self.current_row = anchor
+                .map(|a| restore_anchor(&m.result.rows, a))
+                .or(self.current_row);
+            self.comparison = Some(m.result);
+            self.recalculating = false;
         }
     }
     fn start_compare(&mut self) {
@@ -1347,12 +1342,11 @@ impl TextViewModel {
         self.receiver = Some(rx);
         self.recalculating = true;
         std::thread::spawn(move || {
-            if let Ok(c) = CompiledRules::compile(&rules) {
-                if let Ok(result) =
+            if let Ok(c) = CompiledRules::compile(&rules)
+                && let Ok(result) =
                     text_compare::compare_with_alignments(&l, &r, lr, rr, &c, 4096, &anchors)
-                {
-                    let _ = tx.send(CompareMessage { generation, result });
-                }
+            {
+                let _ = tx.send(CompareMessage { generation, result });
             }
         });
     }
@@ -1597,11 +1591,11 @@ mod tests {
                 right: Some("r".into()),
                 relative_path: None,
             }),
-            DiffView::FolderCompare(FolderCompareState {
+            DiffView::FolderCompare(Box::new(FolderCompareState {
                 left_root: "l".into(),
                 right_root: "r".into(),
                 ..Default::default()
-            }),
+            })),
         ] {
             let mut w = DiffWorkspace::default();
             w.left_visible = "left".into();
@@ -1762,12 +1756,12 @@ mod tests {
         let mut w = DiffWorkspace::default();
         w.current_view = RetainedView {
             id: 99,
-            view: DiffView::FolderCompare(FolderCompareState {
+            view: DiffView::FolderCompare(Box::new(FolderCompareState {
                 left_root: "/left".into(),
                 right_root: "/right".into(),
                 path_filter: "rs".into(),
                 ..Default::default()
-            }),
+            })),
         };
         w.push_file_compare("a".into(), Some("a".into()), None)
             .unwrap();
@@ -1786,7 +1780,7 @@ mod tests {
         let mut workspace = DiffWorkspace::default();
         workspace.current_view = RetainedView {
             id: 100,
-            view: DiffView::FolderCompare(FolderCompareState::default()),
+            view: DiffView::FolderCompare(Box::default()),
         };
         workspace
             .push_file_compare("pair.bin".into(), Some(left.clone()), Some(right.clone()))
@@ -1855,19 +1849,19 @@ mod tests {
         let mut workspace = DiffWorkspace::default();
         workspace.current_view = RetainedView {
             id: 101,
-            view: DiffView::FolderCompare(folder),
+            view: DiffView::FolderCompare(Box::new(folder)),
         };
         workspace
             .push_file_compare("child.txt".into(), Some("/left/child.txt".into()), None)
             .unwrap();
         assert_eq!(
             workspace.navigation_stack[0].view,
-            DiffView::FolderCompare(expected.clone())
+            DiffView::FolderCompare(Box::new(expected.clone()))
         );
         assert!(workspace.back());
         assert_eq!(
             workspace.current_view.view,
-            DiffView::FolderCompare(expected)
+            DiffView::FolderCompare(Box::new(expected))
         );
     }
 

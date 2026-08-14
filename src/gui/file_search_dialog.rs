@@ -4117,7 +4117,7 @@ mod tests {
             .result_rows
             .iter()
             .find(|row| {
-                row.id.path == PathBuf::from("b.rs")
+                row.id.path.as_path() == std::path::Path::new("b.rs")
                     && matches!(row.payload, FileSearchRowPayload::Content { .. })
             })
             .unwrap()

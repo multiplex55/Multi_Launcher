@@ -724,7 +724,10 @@ mod tests {
         );
 
         assert_eq!(call_count.get(), 1);
-        assert_eq!(probed_paths.borrow().as_slice(), &[configured_path.clone()]);
+        assert_eq!(
+            probed_paths.borrow().as_slice(),
+            std::slice::from_ref(&configured_path)
+        );
         assert_eq!(state.last_tested_path.as_ref(), Some(&configured_path));
         assert!(cached_configured_result_for_path(&state, &configured_path).is_some());
     }

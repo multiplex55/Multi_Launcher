@@ -433,27 +433,28 @@ fn add_bracket_construct_ranges(content: &str, ranges: &mut Vec<ProtectedRange>)
             i += 1;
             continue;
         }
-        if bytes[i] == b'!' && content[i..].starts_with("![[") {
-            if let Some(end) = content[i + 3..].find("]]").map(|off| i + 3 + off + 2) {
-                ranges.push(ProtectedRange {
-                    start: i,
-                    end,
-                    count_existing: false,
-                });
-                i = end;
-                continue;
-            }
+        if bytes[i] == b'!'
+            && content[i..].starts_with("![[")
+            && let Some(end) = content[i + 3..].find("]]").map(|off| i + 3 + off + 2)
+        {
+            ranges.push(ProtectedRange {
+                start: i,
+                end,
+                count_existing: false,
+            });
+            i = end;
+            continue;
         }
-        if content[i..].starts_with("[[") {
-            if let Some(end) = content[i + 2..].find("]]").map(|off| i + 2 + off + 2) {
-                ranges.push(ProtectedRange {
-                    start: i,
-                    end,
-                    count_existing: false,
-                });
-                i = end;
-                continue;
-            }
+        if content[i..].starts_with("[[")
+            && let Some(end) = content[i + 2..].find("]]").map(|off| i + 2 + off + 2)
+        {
+            ranges.push(ProtectedRange {
+                start: i,
+                end,
+                count_existing: false,
+            });
+            i = end;
+            continue;
         }
         if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
             if let Some(end) = markdown_link_end(content, i + 1) {
@@ -465,16 +466,16 @@ fn add_bracket_construct_ranges(content: &str, ranges: &mut Vec<ProtectedRange>)
                 i = end;
                 continue;
             }
-        } else if bytes[i] == b'[' {
-            if let Some(end) = markdown_link_end(content, i) {
-                ranges.push(ProtectedRange {
-                    start: i,
-                    end,
-                    count_existing: true,
-                });
-                i = end;
-                continue;
-            }
+        } else if bytes[i] == b'['
+            && let Some(end) = markdown_link_end(content, i)
+        {
+            ranges.push(ProtectedRange {
+                start: i,
+                end,
+                count_existing: true,
+            });
+            i = end;
+            continue;
         }
         i += 1;
     }
@@ -516,19 +517,19 @@ fn add_angle_ranges(content: &str, ranges: &mut Vec<ProtectedRange>) {
             i += 1;
             continue;
         }
-        if bytes[i] == b'<' {
-            if let Some(off) = content[i + 1..].find('>') {
-                let end = i + 1 + off + 1;
-                let inner = &content[i + 1..end - 1];
-                let count_existing = is_valid_url_candidate(inner).is_some();
-                ranges.push(ProtectedRange {
-                    start: i,
-                    end,
-                    count_existing,
-                });
-                i = end;
-                continue;
-            }
+        if bytes[i] == b'<'
+            && let Some(off) = content[i + 1..].find('>')
+        {
+            let end = i + 1 + off + 1;
+            let inner = &content[i + 1..end - 1];
+            let count_existing = is_valid_url_candidate(inner).is_some();
+            ranges.push(ProtectedRange {
+                start: i,
+                end,
+                count_existing,
+            });
+            i = end;
+            continue;
         }
         i += 1;
     }
@@ -604,11 +605,11 @@ fn scan_raw_candidate(content: &str, i: usize, end: usize) -> Option<(usize, &st
     let mut candidate_end = raw_end;
     loop {
         let s = &content[i..candidate_end];
-        if let Some(ch) = s.chars().next_back() {
-            if matches!(ch, '.' | ',' | ';' | ':' | '!' | '?') || is_unmatched_closer(s, ch) {
-                candidate_end -= ch.len_utf8();
-                continue;
-            }
+        if let Some(ch) = s.chars().next_back()
+            && (matches!(ch, '.' | ',' | ';' | ':' | '!' | '?') || is_unmatched_closer(s, ch))
+        {
+            candidate_end -= ch.len_utf8();
+            continue;
         }
         break;
     }

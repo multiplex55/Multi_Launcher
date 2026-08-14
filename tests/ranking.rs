@@ -71,9 +71,11 @@ fn fuzzy_vs_usage_weight() {
             args: None,
         },
     ];
-    let mut settings = Settings::default();
-    settings.fuzzy_weight = 5.0;
-    settings.usage_weight = 1.0;
+    let settings = Settings {
+        fuzzy_weight: 5.0,
+        usage_weight: 1.0,
+        ..Default::default()
+    };
     let mut app = new_app_with_settings(&ctx, actions, settings);
     app.usage.insert("b".into(), 20);
     app.query = format!("{} abc", APP_PREFIX);

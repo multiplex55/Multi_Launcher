@@ -458,13 +458,13 @@ fn add_file(
             overwrite: true,
         }),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            if let Some(parent) = rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-                if !dr.canonical.join(parent).exists() {
-                    dirs.push(PlannedDirectory {
-                        relative: parent.into(),
-                        target: dr.canonical.join(parent),
-                    });
-                }
+            if let Some(parent) = rel.parent().filter(|p| !p.as_os_str().is_empty())
+                && !dr.canonical.join(parent).exists()
+            {
+                dirs.push(PlannedDirectory {
+                    relative: parent.into(),
+                    target: dr.canonical.join(parent),
+                });
             }
             copies.push(PlannedCopy {
                 relative: rel,

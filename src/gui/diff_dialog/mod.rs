@@ -1440,7 +1440,7 @@ mod tests {
         let mut dialog = DiffDialogState::default();
         dialog.workspace.current_view = RetainedView {
             id,
-            view: DiffView::FolderCompare(FolderCompareState::default()),
+            view: DiffView::FolderCompare(Box::default()),
         };
         dialog
     }
@@ -1974,22 +1974,22 @@ mod tests {
     }
 
     enum ProductionFixture {
-        Text(crate::diff::model::TextViewModel),
+        Text(Box<crate::diff::model::TextViewModel>),
         Folder(
-            FolderCompareState,
+            Box<FolderCompareState>,
             Vec<crate::diff::folder_compare::FolderProjectionRow>,
         ),
-        Binary(crate::diff::binary_compare::BinaryViewModel),
+        Binary(Box<crate::diff::binary_compare::BinaryViewModel>),
     }
 
     impl ProductionFixture {
         fn pathological(kind: usize) -> Self {
             let token = "very-long-component-".repeat(300);
             match kind {
-                0 => Self::Text(crate::diff::model::TextViewModel::from_test_text(
+                0 => Self::Text(Box::new(crate::diff::model::TextViewModel::from_test_text(
                     format!("left-{token}"),
                     format!("right-{token}"),
-                )),
+                ))),
                 1 => {
                     let mut state = FolderCompareState::default();
                     state.left_root = token.clone().into();
@@ -2023,14 +2023,14 @@ mod tests {
                             }
                         })
                         .collect();
-                    Self::Folder(state, rows)
+                    Self::Folder(Box::new(state), rows)
                 }
-                2 => Self::Binary(
+                2 => Self::Binary(Box::new(
                     crate::diff::binary_compare::BinaryViewModel::from_test_bytes(
                         (0..4096).map(|n| n as u8).collect(),
                         (0..4096).map(|n| (n as u8).wrapping_add(1)).collect(),
                     ),
-                ),
+                )),
                 _ => unreachable!(),
             }
         }

@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use multi_launcher::diff::text_compare::*;
 use multi_launcher::diff::text_file::*;
 

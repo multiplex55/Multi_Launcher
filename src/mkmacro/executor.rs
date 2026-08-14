@@ -503,10 +503,10 @@ impl Executor {
                             vars.insert("last_action_success".into(), MkValue::Boolean(false));
                             tracing::warn!(macro_id=plan.macro_id,step_id=step.id,attempt,error=%e,"macro step attempt failed");
                             final_error = Some(e);
-                            if attempt < attempts {
-                                if let super::MkErrorPolicy::Retry(r) = &step.on_error {
-                                    self.control.wait(Duration::from_millis(r.delay_ms))?
-                                }
+                            if attempt < attempts
+                                && let super::MkErrorPolicy::Retry(r) = &step.on_error
+                            {
+                                self.control.wait(Duration::from_millis(r.delay_ms))?
                             }
                         }
                     }

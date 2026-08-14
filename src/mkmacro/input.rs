@@ -142,10 +142,10 @@ impl<S: InputSink> Win32InputBackend<S> {
         }
         let mut primary = None;
         for key in down.into_iter().rev() {
-            if let Err(e) = self.key_event(key, true) {
-                if primary.is_none() {
-                    primary = Some(e);
-                }
+            if let Err(e) = self.key_event(key, true)
+                && primary.is_none()
+            {
+                primary = Some(e);
             }
         }
         primary.map_or(Ok(()), Err)

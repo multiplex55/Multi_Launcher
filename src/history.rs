@@ -269,7 +269,7 @@ mod tests {
             timestamp: 123,
         };
 
-        save_pins(path.to_str().unwrap(), &[pin.clone()]).expect("save pins");
+        save_pins(path.to_str().unwrap(), std::slice::from_ref(&pin)).expect("save pins");
         let loaded = load_pins(path.to_str().unwrap()).expect("load pins");
         assert_eq!(loaded, vec![pin.clone()]);
 

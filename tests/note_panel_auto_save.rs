@@ -21,8 +21,10 @@ fn setup() -> tempfile::TempDir {
 }
 
 fn new_app(ctx: &egui::Context) -> LauncherApp {
-    let mut settings = Settings::default();
-    settings.note_save_on_close = true;
+    let settings = Settings {
+        note_save_on_close: true,
+        ..Default::default()
+    };
     LauncherApp::new(
         ctx,
         Arc::new(Vec::new()),

@@ -553,7 +553,7 @@ mod tests {
             ],
             truncated: false,
         };
-        let results = vec![SearchResult::ContentFile(file.clone())];
+        let results = [SearchResult::ContentFile(file.clone())];
         let header_count = results
             .iter()
             .filter_map(|r| match r {

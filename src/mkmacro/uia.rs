@@ -35,7 +35,7 @@ pub trait UiaDriver: 'static {
 
 enum Request {
     Execute(
-        MkUiPayload,
+        Box<MkUiPayload>,
         UiCommand,
         mpsc::Sender<ExecResult<Option<String>>>,
     ),
@@ -100,7 +100,7 @@ impl UiaWorker {
     pub fn execute(&self, p: &MkUiPayload, c: UiCommand) -> ExecResult<Option<String>> {
         let (tx, rx) = mpsc::channel();
         self.tx
-            .send(Request::Execute(p.clone(), c, tx))
+            .send(Request::Execute(Box::new(p.clone()), c, tx))
             .map_err(disconnected)?;
         rx.recv_timeout(self.timeout)
             .map_err(|_| diag(DiagnosticKind::Timeout, "UI Automation action timed out"))?
@@ -183,7 +183,7 @@ pub fn validate_selector(s: &MkUiSelector) -> ExecResult<()> {
             "UIA selector requires AutomationId, Name, ClassName, or ControlType",
         ));
     }
-    if s.ancestor_path.iter().any(|p| part_empty(p)) {
+    if s.ancestor_path.iter().any(part_empty) {
         return Err(diag(
             DiagnosticKind::InvalidTarget,
             "UIA ancestor path contains an empty selector",

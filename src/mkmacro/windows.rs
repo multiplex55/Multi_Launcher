@@ -35,10 +35,10 @@ pub fn candidate_matches(m: &MkWindowMatcher, c: &WindowCandidate) -> ExecResult
             return Ok(false);
         }
     }
-    if let Some(class) = m.class.as_deref() {
-        if !class.eq_ignore_ascii_case(&c.class_name) {
-            return Ok(false);
-        }
+    if let Some(class) = m.class.as_deref()
+        && !class.eq_ignore_ascii_case(&c.class_name)
+    {
+        return Ok(false);
     }
     if let Some(pattern) = m.title_regex.as_deref() {
         let r = regex::Regex::new(pattern).map_err(|e| {
@@ -50,10 +50,10 @@ pub fn candidate_matches(m: &MkWindowMatcher, c: &WindowCandidate) -> ExecResult
         if !r.is_match(&c.title) {
             return Ok(false);
         }
-    } else if let Some(title) = m.title.as_deref() {
-        if !c.title.contains(title) {
-            return Ok(false);
-        }
+    } else if let Some(title) = m.title.as_deref()
+        && !c.title.contains(title)
+    {
+        return Ok(false);
     }
     Ok(true)
 }

@@ -270,28 +270,6 @@ fn parse_powercfg_list(output: &str) -> Vec<PowerPlan> {
     plans
 }
 
-#[cfg(test)]
-mod tests {
-    #[cfg(target_os = "windows")]
-    use super::*;
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn parse_powercfg_output() {
-        let sample = r#"
-Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced) *
-Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)
-Power Scheme GUID: a1841308-3541-4fab-bc81-f71556f20b4a  (Power saver)
-"#;
-        let plans = parse_powercfg_list(sample);
-        assert_eq!(plans.len(), 3);
-        assert_eq!(plans[0].name, "Balanced");
-        assert!(plans[0].active);
-        assert_eq!(plans[1].guid, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
-        assert!(!plans[1].active);
-    }
-}
-
 pub fn recycle_clean() {
     // Emptying the recycle bin can take a noticeable amount of time on
     // Windows. Running it on the current thread would block the UI and
@@ -478,5 +456,27 @@ pub fn browser_tab_switch(runtime_id: &[i32]) {
             }
         }
         CoUninitialize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "windows")]
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parse_powercfg_output() {
+        let sample = r#"
+Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced) *
+Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)
+Power Scheme GUID: a1841308-3541-4fab-bc81-f71556f20b4a  (Power saver)
+"#;
+        let plans = parse_powercfg_list(sample);
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].name, "Balanced");
+        assert!(plans[0].active);
+        assert_eq!(plans[1].guid, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+        assert!(!plans[1].active);
     }
 }

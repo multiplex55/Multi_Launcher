@@ -254,6 +254,22 @@ fn normalize_all(t: &mut [ClipboardTemplate], p: &mut [SavedPipeline]) -> Result
     Ok(())
 }
 
+pub fn reset_to_defaults_with_backup(path: &Path) -> Result<VersionedClipboardModifiersFile> {
+    let _ = crate::common::atomic_file::backup_file(path, "factory-reset")?;
+    let model = default_model();
+    save_model_atomic(path, &model)?;
+    Ok(model)
+}
+
+pub fn recovery_replace_with_backup(
+    path: &Path,
+    model: &VersionedClipboardModifiersFile,
+) -> Result<()> {
+    validate_model(model).context("recovery replacement model is invalid")?;
+    let _ = crate::common::atomic_file::backup_file(path, "automatic-recovery")?;
+    save_model_atomic(path, model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,20 +451,4 @@ mod tests {
         assert!(load_current_or_migrate(&p).is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), invalid);
     }
-}
-
-pub fn reset_to_defaults_with_backup(path: &Path) -> Result<VersionedClipboardModifiersFile> {
-    let _ = crate::common::atomic_file::backup_file(path, "factory-reset")?;
-    let model = default_model();
-    save_model_atomic(path, &model)?;
-    Ok(model)
-}
-
-pub fn recovery_replace_with_backup(
-    path: &Path,
-    model: &VersionedClipboardModifiersFile,
-) -> Result<()> {
-    validate_model(model).context("recovery replacement model is invalid")?;
-    let _ = crate::common::atomic_file::backup_file(path, "automatic-recovery")?;
-    save_model_atomic(path, model)
 }

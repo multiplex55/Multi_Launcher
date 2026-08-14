@@ -85,9 +85,11 @@ mod scope_tests {
     fn product_boundary_has_no_implicit_or_unsupported_capabilities() {
         assert!(!CURRENT.iter().any(|item| item.contains("synchron")));
         assert!(EXCLUDED.contains(&"automatic synchronization or mirroring"));
-        assert!(HEX_IS_READ_ONLY);
-        assert!(ARCHIVES_ARE_ORDINARY_BINARY_FILES);
-        assert!(GUI_DELETE_USES_RECYCLE_BIN);
+        const {
+            assert!(HEX_IS_READ_ONLY);
+            assert!(ARCHIVES_ARE_ORDINARY_BINARY_FILES);
+            assert!(GUI_DELETE_USES_RECYCLE_BIN);
+        }
     }
 
     #[test]

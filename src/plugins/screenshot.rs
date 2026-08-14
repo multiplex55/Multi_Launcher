@@ -64,26 +64,15 @@ pub fn launch_editor(
     };
     if app.get_screenshot_use_editor() {
         app.open_screenshot_editor(img, clip, tool);
-    } else {
-        if clip {
-            let (w, h) = img.dimensions();
-            let mut cb = arboard::Clipboard::new()?;
-            cb.set_image(arboard::ImageData {
-                width: w as usize,
-                height: h as usize,
-                bytes: Cow::Owned(img.clone().into_raw()),
-            })?;
-            if app.get_screenshot_save_file() {
-                let dir = screenshot_dir();
-                std::fs::create_dir_all(&dir)?;
-                let filename = format!(
-                    "multi_launcher_{}.png",
-                    Local::now().format("%Y%m%d_%H%M%S")
-                );
-                let path = dir.join(filename);
-                img.save(&path)?;
-            }
-        } else {
+    } else if clip {
+        let (w, h) = img.dimensions();
+        let mut cb = arboard::Clipboard::new()?;
+        cb.set_image(arboard::ImageData {
+            width: w as usize,
+            height: h as usize,
+            bytes: Cow::Owned(img.clone().into_raw()),
+        })?;
+        if app.get_screenshot_save_file() {
             let dir = screenshot_dir();
             std::fs::create_dir_all(&dir)?;
             let filename = format!(
@@ -92,8 +81,17 @@ pub fn launch_editor(
             );
             let path = dir.join(filename);
             img.save(&path)?;
-            open::that(&path)?;
         }
+    } else {
+        let dir = screenshot_dir();
+        std::fs::create_dir_all(&dir)?;
+        let filename = format!(
+            "multi_launcher_{}.png",
+            Local::now().format("%Y%m%d_%H%M%S")
+        );
+        let path = dir.join(filename);
+        img.save(&path)?;
+        open::that(&path)?;
     }
     Ok(ScreenshotLaunchOutcome::Completed)
 }

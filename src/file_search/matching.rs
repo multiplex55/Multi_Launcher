@@ -376,16 +376,14 @@ mod tests {
                 byte_end: 1
             })
         );
-        assert!(ranges.iter().any(|range| *range
-            == TextMatchRange {
-                byte_start: 4,
-                byte_end: 5
-            }));
-        assert!(ranges.iter().any(|range| *range
-            == TextMatchRange {
-                byte_start: 10,
-                byte_end: 11
-            }));
+        assert!(ranges.contains(&TextMatchRange {
+            byte_start: 4,
+            byte_end: 5
+        }));
+        assert!(ranges.contains(&TextMatchRange {
+            byte_start: 10,
+            byte_end: 11
+        }));
         assert!(ranges.iter().all(
             |range| "FileSearchDialog".is_char_boundary(range.byte_start)
                 && "FileSearchDialog".is_char_boundary(range.byte_end)

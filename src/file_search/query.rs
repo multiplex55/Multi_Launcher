@@ -267,7 +267,7 @@ mod tests {
         assert!(matches!(
             parse(r#"fs content "launch_action" "D:\Projects\multi launcher""#),
             FileSearchCommand::Error(FileSearchError::InvalidDirectory { path, .. })
-                if path == PathBuf::from(r"D:\Projects\multi launcher")
+                if path.as_path() == std::path::Path::new(r"D:\Projects\multi launcher")
         ));
     }
 
@@ -276,7 +276,7 @@ mod tests {
         assert!(matches!(
             parse(r#"fs file README "\\server\share""#),
             FileSearchCommand::Error(FileSearchError::InvalidDirectory { path, .. })
-                if path == PathBuf::from(r"\\server\share")
+                if path.as_path() == std::path::Path::new(r"\\server\share")
         ));
     }
 
@@ -337,7 +337,7 @@ mod tests {
         assert!(matches!(
             parse("fs file README ./definitely-not-a-directory"),
             FileSearchCommand::Error(FileSearchError::InvalidDirectory { path, message })
-                if path == PathBuf::from("./definitely-not-a-directory")
+                if path.as_path() == std::path::Path::new("./definitely-not-a-directory")
                     && message.contains("does not exist")
         ));
     }

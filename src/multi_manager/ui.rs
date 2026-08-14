@@ -911,6 +911,37 @@ fn hotkey_editor_is_empty(editor: &HotkeyEditorState) -> bool {
     editor.key.trim().is_empty() && !editor.ctrl && !editor.shift && !editor.alt && !editor.win
 }
 
+fn is_duplicate_hwnd(
+    app: &LauncherApp,
+    hwnd: usize,
+    workspace_id: &str,
+    window_index: usize,
+) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    app.multi_manager
+        .workspaces
+        .lock()
+        .map(|workspaces| {
+            bindings::duplicate_hwnds(&workspaces)
+                .into_iter()
+                .any(|duplicate| {
+                    duplicate.hwnd == hwnd
+                        && duplicate
+                            .locations
+                            .into_iter()
+                            .any(|(ws_index, win_index)| {
+                                workspaces
+                                    .get(ws_index)
+                                    .is_some_and(|workspace| workspace.id == workspace_id)
+                                    && win_index == window_index
+                            })
+                })
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,35 +1492,4 @@ mod tests {
             ..Default::default()
         }
     }
-}
-
-fn is_duplicate_hwnd(
-    app: &LauncherApp,
-    hwnd: usize,
-    workspace_id: &str,
-    window_index: usize,
-) -> bool {
-    if hwnd == 0 {
-        return false;
-    }
-    app.multi_manager
-        .workspaces
-        .lock()
-        .map(|workspaces| {
-            bindings::duplicate_hwnds(&workspaces)
-                .into_iter()
-                .any(|duplicate| {
-                    duplicate.hwnd == hwnd
-                        && duplicate
-                            .locations
-                            .into_iter()
-                            .any(|(ws_index, win_index)| {
-                                workspaces
-                                    .get(ws_index)
-                                    .is_some_and(|workspace| workspace.id == workspace_id)
-                                    && win_index == window_index
-                            })
-                })
-        })
-        .unwrap_or(false)
 }

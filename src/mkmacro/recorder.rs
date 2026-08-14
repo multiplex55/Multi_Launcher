@@ -171,8 +171,8 @@ pub fn normalize(
                 }
                 let keep = match cfg.movement_mode {
                     MovementMode::Off | MovementMode::ClicksOnly => false,
-                    MovementMode::DetailedMovement => last_move.map_or(true, |(p, _)| p != (x, y)),
-                    MovementMode::SampledMovement => last_move.map_or(true, |(p, lt)| {
+                    MovementMode::DetailedMovement => last_move.is_none_or(|(p, _)| p != (x, y)),
+                    MovementMode::SampledMovement => last_move.is_none_or(|(p, lt)| {
                         distance(p, (x, y)) >= cfg.movement_distance_px
                             || t.saturating_sub(lt) >= cfg.movement_interval_ms * 1000
                     }),
@@ -266,24 +266,20 @@ pub fn normalize(
                     count,
                 },
             ) = (out.last_mut(), &action)
-            {
-                if let RecordedAction::Click {
+                && let RecordedAction::Click {
                     button: pb,
                     x: px,
                     y: py,
                     count: pc,
                 } = &mut prev.action
-                {
-                    if pb == button
-                        && distance((*px, *py), (*x, *y)) <= cfg.click_distance_px
-                        && t.saturating_sub(prev.timestamp_us) <= cfg.multi_click_ms * 1000
-                    {
-                        *pc += *count;
-                        prev.timestamp_us = t;
-                        prev.context = context;
-                        continue;
-                    }
-                }
+                && pb == button
+                && distance((*px, *py), (*x, *y)) <= cfg.click_distance_px
+                && t.saturating_sub(prev.timestamp_us) <= cfg.multi_click_ms * 1000
+            {
+                *pc += *count;
+                prev.timestamp_us = t;
+                prev.context = context;
+                continue;
             }
             out.push(RecordedStep {
                 timestamp_us: t,
