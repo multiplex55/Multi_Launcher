@@ -47,7 +47,12 @@ fn rejected(wanted: usize, sent: usize, detail: impl Into<String>) -> ExecutionD
     ExecutionDiagnostic::new(
         DiagnosticKind::InputRejected,
         format!(
-            "SendInput accepted {sent} of {wanted} event(s): {}",
+            "SendInput accepted {sent} of {wanted} event(s): {}{}",
+            if sent == 0 {
+                " likely integrity/UIPI restrictions; "
+            } else {
+                ""
+            },
             detail.into()
         ),
     )

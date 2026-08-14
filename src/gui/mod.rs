@@ -237,7 +237,9 @@ pub fn set_execute_action_hook(
     }
 }
 
-fn execute_action(action: &Action) -> anyhow::Result<()> {
+/// Dispatch an already-resolved launcher action without performing another plugin search.
+/// This is also the canonical boundary used by macro playback.
+pub(crate) fn execute_action(action: &Action) -> anyhow::Result<()> {
     if let Ok(guard) = EXECUTE_ACTION_HOOK.lock()
         && let Some(ref hook) = *guard
     {

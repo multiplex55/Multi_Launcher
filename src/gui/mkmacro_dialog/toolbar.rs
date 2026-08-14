@@ -1,8 +1,57 @@
 use super::MkMacroDialog;
+use crate::mkmacro::RuntimeState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolbarState {
+    pub run: bool,
+    pub pause: bool,
+    pub resume: bool,
+    pub stop: bool,
+    pub run_from: bool,
+    pub run_selected: bool,
+    pub disabled_reason: Option<String>,
+}
+pub fn decide(
+    runtime: RuntimeState,
+    disabled_reason: Option<String>,
+    selected_rows: usize,
+) -> ToolbarState {
+    let idle = !matches!(
+        runtime,
+        RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping
+    );
+    let run = idle && disabled_reason.is_none();
+    ToolbarState {
+        run,
+        pause: runtime == RuntimeState::Running,
+        resume: runtime == RuntimeState::Paused,
+        stop: matches!(runtime, RuntimeState::Running | RuntimeState::Paused),
+        run_from: run && selected_rows == 1,
+        run_selected: run && selected_rows != 0,
+        disabled_reason,
+    }
+}
+pub fn state(dialog: &MkMacroDialog) -> ToolbarState {
+    let runtime = crate::mkmacro::runtime::snapshot()
+        .map(|s| s.state)
+        .unwrap_or(RuntimeState::Idle);
+    decide(
+        runtime,
+        dialog.playback_block_reason(),
+        dialog.selection.ids.len(),
+    )
+}
+fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>) {
+    if let Err(e) = result {
+        dialog.command_error = Some(e.to_string());
+    }
+}
 pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
+    let state = state(dialog);
     ui.horizontal(|ui| {
         if ui.button("Save").clicked() {
-            let _ = dialog.save();
+            let result = dialog.save();
+            report(dialog, result);
         }
         if ui
             .add_enabled(
@@ -13,11 +62,54 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         {
             dialog.action_catalog_visible = true;
         }
-        if let Some(reason) = dialog.playback_block_reason() {
+        if !state.run {
             ui.add_enabled(false, eframe::egui::Button::new("Run"))
-                .on_disabled_hover_text(reason);
-        } else {
-            let _ = ui.button("Run");
+                .on_disabled_hover_text(
+                    state
+                        .disabled_reason
+                        .clone()
+                        .unwrap_or_else(|| "Playback is active".into()),
+                );
+        } else if ui.button("Run").clicked() {
+            let result = dialog.run_selected_macro();
+            report(dialog, result);
+        }
+        if ui
+            .add_enabled(state.pause, eframe::egui::Button::new("Pause"))
+            .clicked()
+        {
+            report(dialog, crate::mkmacro::runtime::pause());
+        }
+        if ui
+            .add_enabled(state.resume, eframe::egui::Button::new("Resume"))
+            .clicked()
+        {
+            report(dialog, crate::mkmacro::runtime::resume());
+        }
+        if ui
+            .add_enabled(state.stop, eframe::egui::Button::new("Stop"))
+            .clicked()
+        {
+            report(dialog, crate::mkmacro::runtime::stop());
+        }
+        if ui
+            .add_enabled(state.run_from, eframe::egui::Button::new("Run From Here"))
+            .clicked()
+        {
+            if let Some(id) = dialog.selection.ids.iter().next().copied() {
+                let result = dialog.run_from_step(id);
+                report(dialog, result)
+            }
+        }
+        if ui
+            .add_enabled(
+                state.run_selected,
+                eframe::egui::Button::new("Run Selected"),
+            )
+            .clicked()
+        {
+            let result = dialog.run_selected_steps();
+            report(dialog, result);
         }
         if dialog.dirty {
             ui.label("Unsaved changes");
@@ -29,4 +121,52 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             );
         }
     });
+    if let Some(error) = &dialog.command_error {
+        ui.colored_label(eframe::egui::Color32::RED, error);
+    }
+    if let Some(run) = crate::mkmacro::runtime::snapshot().filter(|s| {
+        matches!(
+            s.state,
+            RuntimeState::Running | RuntimeState::Paused | RuntimeState::Failed
+        )
+    }) {
+        let name = run
+            .macro_id
+            .and_then(|id| dialog.draft.macros.iter().find(|m| m.id == id))
+            .map(|m| m.name.as_str())
+            .unwrap_or("Unknown macro");
+        ui.label(format!(
+            "{:?}: {} — step {}/{}",
+            run.state,
+            name,
+            run.completed_steps.saturating_add(1).min(run.total_steps),
+            run.total_steps
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn idle_controls_follow_eligibility_and_selection() {
+        let s = decide(RuntimeState::Idle, None, 1);
+        assert!(s.run && s.run_from && s.run_selected);
+        assert!(!s.pause && !s.resume && !s.stop);
+        let blocked = decide(RuntimeState::Idle, Some("macro is disabled".into()), 1);
+        assert!(!blocked.run);
+        assert_eq!(
+            blocked.disabled_reason.as_deref(),
+            Some("macro is disabled")
+        );
+    }
+    #[test]
+    fn running_and_paused_controls_are_deterministic() {
+        let running = decide(RuntimeState::Running, None, 1);
+        assert!(running.pause && running.stop);
+        assert!(!running.run && !running.resume);
+        let paused = decide(RuntimeState::Paused, None, 1);
+        assert!(paused.resume && paused.stop);
+        assert!(!paused.run && !paused.pause);
+    }
 }
