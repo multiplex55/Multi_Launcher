@@ -569,12 +569,11 @@ mod comprehensive_transform_regressions {
 
     #[test]
     fn json_url_base64_errors_and_escapes() {
-        assert_eq!(
+        assert!(
             run("a\n\"b", st(OperationId::JsonMinify))
                 .unwrap_err()
                 .to_string()
-                .contains("Stage 1"),
-            true
+                .contains("Stage 1")
         );
         assert_eq!(
             run("{\"s\":\"a\\nb\"}", st(OperationId::JsonPretty)).unwrap(),

@@ -102,12 +102,11 @@ pub(super) fn show(ctx: &egui::Context, state: &mut FolderCompareState) -> bool 
                 if ui
                     .add_enabled(validation.is_ok(), egui::Button::new("Apply + Rescan"))
                     .clicked()
+                    && state.apply_draft().is_ok()
                 {
-                    if state.apply_draft().is_ok() {
-                        state.folder_rules_cancel_snapshot = None;
-                        state.folder_rules_open = false;
-                        applied = true;
-                    }
+                    state.folder_rules_cancel_snapshot = None;
+                    state.folder_rules_open = false;
+                    applied = true;
                 }
                 if ui.button("Cancel").clicked() {
                     cancel(state);

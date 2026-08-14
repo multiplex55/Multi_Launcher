@@ -6168,7 +6168,7 @@ More text.
 
         assert_eq!(linked.len(), 1);
         assert_eq!(related.len(), 1);
-        assert!(mentions.len() >= 1);
+        assert!(!mentions.is_empty());
     }
 
     #[test]

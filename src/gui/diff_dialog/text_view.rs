@@ -24,10 +24,9 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 .add_enabled(merge, egui::Button::new("Copy →"))
                 .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
                 .clicked()
+                && let Err(e) = model.copy_hunk(DiffSide::Left)
             {
-                if let Err(e) = model.copy_hunk(DiffSide::Left) {
-                    model.right_error = Some(e)
-                }
+                model.right_error = Some(e)
             }
             if ui
                 .add_enabled(merge, egui::Button::new("← Copy"))
@@ -35,10 +34,9 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                     "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
                 )
                 .clicked()
+                && let Err(e) = model.copy_hunk(DiffSide::Right)
             {
-                if let Err(e) = model.copy_hunk(DiffSide::Right) {
-                    model.left_error = Some(e)
-                }
+                model.left_error = Some(e)
             }
             if ui.button("Find").clicked() {
                 model.find_open = true;
@@ -273,10 +271,10 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                 );
             }
         }
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                model.request_overview_scroll(pos.y - rect.top(), rect.height());
-            }
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            model.request_overview_scroll(pos.y - rect.top(), rect.height());
         }
         if response.dragged() {
             model.splitter = crate::diff::model::validated_splitter(
@@ -681,11 +679,10 @@ fn render_pane_contents(
                                             DiffSide::Left => a.left_line == n,
                                             DiffSide::Right => a.right_line == n,
                                         })
+                                    && ui.button("Remove alignment").clicked()
                                 {
-                                    if ui.button("Remove alignment").clicked() {
-                                        remove_anchor = Some(anchor);
-                                        ui.close_menu();
-                                    }
+                                    remove_anchor = Some(anchor);
+                                    ui.close_menu();
                                 }
                             });
                         });
@@ -902,15 +899,15 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
             ctrl: true,
             ..Default::default()
         };
-        if i.consume_key(copy_modifiers, egui::Key::ArrowRight) {
-            if let Err(error) = m.copy_hunk(DiffSide::Left) {
-                m.right_error = Some(error);
-            }
+        if i.consume_key(copy_modifiers, egui::Key::ArrowRight)
+            && let Err(error) = m.copy_hunk(DiffSide::Left)
+        {
+            m.right_error = Some(error);
         }
-        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft) {
-            if let Err(error) = m.copy_hunk(DiffSide::Right) {
-                m.left_error = Some(error);
-            }
+        if i.consume_key(copy_modifiers, egui::Key::ArrowLeft)
+            && let Err(error) = m.copy_hunk(DiffSide::Right)
+        {
+            m.left_error = Some(error);
         }
         if i.consume_key(egui::Modifiers::CTRL, egui::Key::Num1) {
             m.active_side = DiffSide::Left;

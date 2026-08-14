@@ -476,7 +476,12 @@ mod tests {
             Err(MutationError::InvalidRange)
         );
         assert_eq!(
-            wrap_char_selection_in_callout(content, 3..2, "note", ""),
+            wrap_char_selection_in_callout(
+                content,
+                std::ops::Range { start: 3, end: 2 },
+                "note",
+                ""
+            ),
             Err(MutationError::InvalidRange)
         );
     }

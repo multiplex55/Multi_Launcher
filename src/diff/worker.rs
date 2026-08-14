@@ -504,16 +504,22 @@ impl Clone for ResultSender {
     }
 }
 impl ResultSender {
-    pub fn send(&self, result: DiffResult, cancel: &CancellationToken) -> Result<(), DiffResult> {
+    pub fn send(
+        &self,
+        result: DiffResult,
+        cancel: &CancellationToken,
+    ) -> Result<(), Box<DiffResult>> {
         if cancel.is_cancelled() {
-            return Err(result);
+            return Err(Box::new(result));
         }
         match self.sender.try_send(result) {
             Ok(()) => {
                 (self.repaint)();
                 Ok(())
             }
-            Err(mpsc::TrySendError::Full(v)) | Err(mpsc::TrySendError::Disconnected(v)) => Err(v),
+            Err(mpsc::TrySendError::Full(v)) | Err(mpsc::TrySendError::Disconnected(v)) => {
+                Err(Box::new(v))
+            }
         }
     }
 }

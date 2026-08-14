@@ -86,6 +86,34 @@ fn timestamp() -> String {
     format!("{}{:09}", d.as_secs(), d.subsec_nanos())
 }
 
+#[cfg(windows)]
+fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+    let s = wide(src);
+    let d = wide(dst);
+    unsafe {
+        MoveFileExW(
+            PCWSTR(s.as_ptr()),
+            PCWSTR(d.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .with_context(|| {
+        format!(
+            "replace {} with {} using MoveFileExW",
+            dst.display(),
+            src.display()
+        )
+    })
+}
+
 #[cfg(not(windows))]
 fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
     fs::rename(src, dst).map_err(Into::into)
@@ -125,32 +153,4 @@ mod tests {
             "temporary files should be removed after a failed replace: {temp_entries:?}"
         );
     }
-}
-
-#[cfg(windows)]
-fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-    fn wide(p: &Path) -> Vec<u16> {
-        p.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
-    let s = wide(src);
-    let d = wide(dst);
-    unsafe {
-        MoveFileExW(
-            PCWSTR(s.as_ptr()),
-            PCWSTR(d.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .with_context(|| {
-        format!(
-            "replace {} with {} using MoveFileExW",
-            dst.display(),
-            src.display()
-        )
-    })
 }

@@ -68,7 +68,7 @@ impl ClipboardModifyWatcher {
                 }
             }
         }
-        if !self.reload_deadline.is_some_and(|deadline| now >= deadline) {
+        if self.reload_deadline.is_none_or(|deadline| now < deadline) {
             return Vec::new();
         }
         self.reload_deadline = None;

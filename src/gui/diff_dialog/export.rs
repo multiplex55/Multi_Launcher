@@ -45,10 +45,9 @@ fn save_folder(
         .add_filter(extension, &[extension])
         .set_file_name(format!("folder-comparison.{extension}"))
         .save_file()
+        && let Err(e) = std::fs::write(&path, snapshot.render(format))
     {
-        if let Err(e) = std::fs::write(&path, snapshot.render(format)) {
-            tracing::error!("could not export {}: {e}", path.display());
-        }
+        tracing::error!("could not export {}: {e}", path.display());
     }
 }
 pub(super) fn text_menu(ui: &mut egui::Ui, model: &TextViewModel) {
@@ -81,10 +80,9 @@ pub(super) fn text_menu(ui: &mut egui::Ui, model: &TextViewModel) {
                     .add_filter(ext, &[ext])
                     .set_file_name(format!("comparison.{ext}"))
                     .save_file()
+                    && let Err(e) = std::fs::write(&path, snapshot.render(format))
                 {
-                    if let Err(e) = std::fs::write(&path, snapshot.render(format)) {
-                        tracing::error!("could not export {}: {e}", path.display());
-                    }
+                    tracing::error!("could not export {}: {e}", path.display());
                 }
                 ui.close_menu();
             }

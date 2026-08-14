@@ -1106,23 +1106,17 @@ impl NotePlugin {
             Config::default(),
         )
         .ok();
-        let watcher = match watcher {
-            Some(mut w) => {
-                if w.watch(&dir, RecursiveMode::NonRecursive)
-                    .or_else(|_| {
-                        dir.parent()
-                            .map(|p| w.watch(p, RecursiveMode::NonRecursive))
-                            .unwrap_or(Ok(()))
-                    })
-                    .is_ok()
-                {
-                    Some(w)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
+        let watcher = watcher.and_then(|mut watcher| {
+            watcher
+                .watch(&dir, RecursiveMode::NonRecursive)
+                .or_else(|_| {
+                    dir.parent()
+                        .map(|p| watcher.watch(p, RecursiveMode::NonRecursive))
+                        .unwrap_or(Ok(()))
+                })
+                .is_ok()
+                .then_some(watcher)
+        });
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -2108,11 +2102,11 @@ mod tests {
 
     fn assert_no_bak_files(dir: &std::path::Path) {
         assert!(std::fs::read_dir(dir).unwrap().all(|entry| {
-            !entry
+            entry
                 .unwrap()
                 .path()
                 .extension()
-                .is_some_and(|ext| ext == "bak")
+                .is_none_or(|ext| ext != "bak")
         }));
     }
 

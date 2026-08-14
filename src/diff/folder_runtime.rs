@@ -154,13 +154,13 @@ impl FolderRuntime {
     pub fn pump(&mut self, model: &mut FolderModel, rules: &TextComparisonRules) {
         while let Ok(result) = self.result_rx.try_recv() {
             self.in_flight.remove(&result.job.relative_path);
-            if self.result_is_current(&result.job, model, rules) {
-                if let Some(entry) = find_entry_mut(model, &result.job.relative_path) {
-                    entry.content_checked = true;
-                    entry.effective_status = result.status;
-                    self.completed_comparisons += 1;
-                    model.revision = model.revision.wrapping_add(1);
-                }
+            if self.result_is_current(&result.job, model, rules)
+                && let Some(entry) = find_entry_mut(model, &result.job.relative_path)
+            {
+                entry.content_checked = true;
+                entry.effective_status = result.status;
+                self.completed_comparisons += 1;
+                model.revision = model.revision.wrapping_add(1);
             }
         }
         while self.in_flight.len() < MAX_IN_FLIGHT {

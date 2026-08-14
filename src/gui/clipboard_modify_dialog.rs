@@ -842,10 +842,10 @@ impl ClipboardModifyDialogState {
                     });
             });
         }
-        if let Some(id) = remove {
-            if let Err(e) = self.delete_template_from_draft(catalog.as_ref(), &id) {
-                self.template_editor_error = Some(e);
-            }
+        if let Some(id) = remove
+            && let Err(e) = self.delete_template_from_draft(catalog.as_ref(), &id)
+        {
+            self.template_editor_error = Some(e);
         }
         if let Some(id) = &self.template_delete_confirmation
             && let Some(message) = Self::template_delete_confirmation_text(catalog.as_ref(), id)
@@ -1101,11 +1101,9 @@ impl ClipboardModifyDialogState {
             match a.as_str() {
                 "apply" => self.commit(service, false, false),
                 "apply_close" => self.commit(service, true, false),
-                "reload" => {
-                    if self.source == self.reset_source {
-                        self.load_clipboard(service);
-                        self.mark_dirty(catalog);
-                    }
+                "reload" if self.source == self.reset_source => {
+                    self.load_clipboard(service);
+                    self.mark_dirty(catalog);
                 }
                 _ => {}
             }

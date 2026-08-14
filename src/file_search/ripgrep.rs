@@ -1216,13 +1216,13 @@ mod tests {
             summary
                 .results
                 .iter()
-                .any(|r| r.path == PathBuf::from("one/a.txt"))
+                .any(|r| r.path.as_path() == std::path::Path::new("one/a.txt"))
         );
         assert!(
             summary
                 .results
                 .iter()
-                .any(|r| r.path == PathBuf::from("two/a.txt"))
+                .any(|r| r.path.as_path() == std::path::Path::new("two/a.txt"))
         );
     }
 

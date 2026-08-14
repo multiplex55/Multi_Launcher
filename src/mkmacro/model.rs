@@ -83,15 +83,12 @@ impl Default for MkPlayback {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MkErrorPolicy {
+    #[default]
     Stop,
     Continue,
     Retry(MkRetry),
-}
-impl Default for MkErrorPolicy {
-    fn default() -> Self {
-        Self::Stop
-    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkRetry {

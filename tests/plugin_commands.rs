@@ -104,8 +104,10 @@ fn query_matches_commands_when_plugins_empty() {
 fn disabled_plugin_commands_hidden() {
     let ctx = egui::Context::default();
     let actions: Vec<Action> = Vec::new();
-    let mut settings = Settings::default();
-    settings.enabled_plugins = Some(std::collections::HashSet::from(["web_search".to_string()]));
+    let settings = Settings {
+        enabled_plugins: Some(std::collections::HashSet::from(["web_search".to_string()])),
+        ..Default::default()
+    };
     let mut app = new_app_with_settings(&ctx, actions, settings);
     app.query.clear();
     app.search();

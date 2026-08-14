@@ -37,31 +37,28 @@ impl AddBookmarkDialog {
                     if ui.button("Save").clicked() {
                         if self.url.trim().is_empty() {
                             app.report_error_message("ui operation", "URL required");
+                        } else if let Err(e) = append_bookmark(BOOKMARKS_FILE, &self.url) {
+                            app.report_error_message(
+                                "ui operation",
+                                format!("Failed to save: {e}"),
+                            );
+                        } else if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
+                            app.report_error_message(
+                                "ui operation",
+                                format!("Failed to save alias: {e}"),
+                            );
                         } else {
-                            if let Err(e) = append_bookmark(BOOKMARKS_FILE, &self.url) {
-                                app.report_error_message(
-                                    "ui operation",
-                                    format!("Failed to save: {e}"),
-                                );
-                            } else if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias)
-                            {
-                                app.report_error_message(
-                                    "ui operation",
-                                    format!("Failed to save alias: {e}"),
-                                );
-                            } else {
-                                close = true;
-                                if app.enable_toasts {
-                                    app.add_toast(Toast {
-                                        text: format!("Saved bookmark {}", self.url).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(app.toast_duration as f64),
-                                    });
-                                }
-                                app.search();
-                                app.focus_input();
+                            close = true;
+                            if app.enable_toasts {
+                                app.add_toast(Toast {
+                                    text: format!("Saved bookmark {}", self.url).into(),
+                                    kind: ToastKind::Success,
+                                    options: ToastOptions::default()
+                                        .duration_in_seconds(app.toast_duration as f64),
+                                });
                             }
+                            app.search();
+                            app.focus_input();
                         }
                     }
                     if ui.button("Cancel").clicked() {

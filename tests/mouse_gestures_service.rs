@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use multi_launcher::gui::register_event_sender;
 use multi_launcher::mouse_gestures::db::{
     BindingEntry, BindingKind, GestureDb, GestureEntry, SCHEMA_VERSION,

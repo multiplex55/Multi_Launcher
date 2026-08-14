@@ -25,8 +25,7 @@ pub fn storage_dir() -> PathBuf {
     #[cfg(test)]
     {
         use std::thread;
-        return std::env::temp_dir()
-            .join(format!("multi_launcher_tmp_{:?}", thread::current().id()));
+        std::env::temp_dir().join(format!("multi_launcher_tmp_{:?}", thread::current().id()))
     }
     #[cfg(not(test))]
     {

@@ -38,8 +38,10 @@ impl Drop for CurrentDirGuard {
 
 fn new_app(ctx: &egui::Context, actions: Vec<Action>, preserve: bool) -> LauncherApp {
     let custom_len = actions.len();
-    let mut settings = Settings::default();
-    settings.preserve_command = preserve;
+    let settings = Settings {
+        preserve_command: preserve,
+        ..Default::default()
+    };
     LauncherApp::new(
         ctx,
         Arc::new(actions),

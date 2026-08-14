@@ -67,11 +67,7 @@ impl SearchState {
         self.selected = Some(id);
     }
     fn missing_rg_prompt(&mut self) -> bool {
-        if self.ripgrep_prompt_dismissed {
-            false
-        } else {
-            true
-        }
+        !self.ripgrep_prompt_dismissed
     }
     fn dismiss_rg_prompt(&mut self) {
         self.ripgrep_prompt_dismissed = true;

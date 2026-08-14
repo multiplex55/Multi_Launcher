@@ -77,16 +77,16 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                     "Step repeat must be positive",
                 )
             };
-            if let MkErrorPolicy::Retry(r) = &s.on_error {
-                if r.attempts == 0 {
-                    push(
-                        &mut out,
-                        m.id,
-                        sid,
-                        "invalid_retry",
-                        "Retry attempts must be positive",
-                    )
-                }
+            if let MkErrorPolicy::Retry(r) = &s.on_error
+                && r.attempts == 0
+            {
+                push(
+                    &mut out,
+                    m.id,
+                    sid,
+                    "invalid_retry",
+                    "Retry attempts must be positive",
+                )
             }
             match &s.action {
                 MkAction::If(c) => {
@@ -218,10 +218,10 @@ fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic
             "Window matcher needs at least one criterion",
         )
     };
-    if let Some(r) = &x.title_regex {
-        if Regex::new(r).is_err() {
-            push(o, m, s, "invalid_regex", "Window title regex is invalid")
-        }
+    if let Some(r) = &x.title_regex
+        && Regex::new(r).is_err()
+    {
+        push(o, m, s, "invalid_regex", "Window title regex is invalid")
     }
 }
 fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDiagnostic>) {

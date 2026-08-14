@@ -1061,6 +1061,29 @@ pub(crate) fn build_recapture_queue(
         .collect()
 }
 
+fn binding_fingerprint(
+    workspaces: &[crate::multi_manager::model::MmWorkspace],
+) -> Vec<(usize, usize, usize, bool)> {
+    workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(workspace_index, workspace)| {
+            workspace
+                .windows
+                .iter()
+                .enumerate()
+                .map(move |(window_index, window)| {
+                    (
+                        workspace_index,
+                        window_index,
+                        window.hwnd,
+                        window.binding_verified,
+                    )
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_recapture_queue, format_reconnect_summary};
@@ -2235,27 +2258,4 @@ mod tests {
 
         assert!(!app.is_launcher_capture(&captured(100, "Notepad")));
     }
-}
-
-fn binding_fingerprint(
-    workspaces: &[crate::multi_manager::model::MmWorkspace],
-) -> Vec<(usize, usize, usize, bool)> {
-    workspaces
-        .iter()
-        .enumerate()
-        .flat_map(|(workspace_index, workspace)| {
-            workspace
-                .windows
-                .iter()
-                .enumerate()
-                .map(move |(window_index, window)| {
-                    (
-                        workspace_index,
-                        window_index,
-                        window.hwnd,
-                        window.binding_verified,
-                    )
-                })
-        })
-        .collect()
 }

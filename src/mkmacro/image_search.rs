@@ -47,26 +47,20 @@ impl ImageDecodeCache {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ReturnPoint {
     TopLeft,
+    #[default]
     Center,
-}
-impl Default for ReturnPoint {
-    fn default() -> Self {
-        Self::Center
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AlphaPolicy {
+    #[default]
     Compare,
     Ignore,
-}
-impl Default for AlphaPolicy {
-    fn default() -> Self {
-        Self::Compare
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,18 +163,15 @@ fn invalid(s: impl Into<String>) -> ExecutionDiagnostic {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PixelScanOrder {
+    #[default]
     TopLeftRows,
     TopRightRows,
     BottomLeftRows,
     BottomRightRows,
     LeftTopColumns,
     RightTopColumns,
-}
-impl Default for PixelScanOrder {
-    fn default() -> Self {
-        Self::TopLeftRows
-    }
 }
 pub fn find_pixel(
     frame: &CapturedRegion,

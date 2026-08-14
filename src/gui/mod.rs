@@ -1085,18 +1085,15 @@ impl LauncherApp {
                 {
                     watchers.push(w);
                 }
-            } else {
-                if enable_toasts && show_error_toasts {
-                    push_toast(
-                        &mut toasts,
-                        Toast {
-                            text: format!("Failed to watch {}", actions_path).into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(toast_duration as f64),
-                        },
-                    );
-                }
+            } else if enable_toasts && show_error_toasts {
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: format!("Failed to watch {}", actions_path).into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+                    },
+                );
             }
         }
 
@@ -1130,18 +1127,15 @@ impl LauncherApp {
                 if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders) {
                     watchers.push(w);
                 }
-            } else {
-                if enable_toasts && show_error_toasts {
-                    push_toast(
-                        &mut toasts,
-                        Toast {
-                            text: "Failed to watch folders.json".into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(toast_duration as f64),
-                        },
-                    );
-                }
+            } else if enable_toasts && show_error_toasts {
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: "Failed to watch folders.json".into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+                    },
+                );
             }
         }
 
@@ -1175,18 +1169,15 @@ impl LauncherApp {
                 if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks) {
                     watchers.push(w);
                 }
-            } else {
-                if enable_toasts && show_error_toasts {
-                    push_toast(
-                        &mut toasts,
-                        Toast {
-                            text: "Failed to watch bookmarks.json".into(),
-                            kind: ToastKind::Error,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(toast_duration as f64),
-                        },
-                    );
-                }
+            } else if enable_toasts && show_error_toasts {
+                push_toast(
+                    &mut toasts,
+                    Toast {
+                        text: "Failed to watch bookmarks.json".into(),
+                        kind: ToastKind::Error,
+                        options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+                    },
+                );
             }
         }
 
@@ -1255,10 +1246,10 @@ impl LauncherApp {
                 WatchEvent::Gestures,
             ),
         ] {
-            if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), event) {
-                    watchers.push(w);
-                }
+            if path.exists()
+                && let Ok(w) = watch_file(path, tx.clone(), event)
+            {
+                watchers.push(w);
             }
         }
 

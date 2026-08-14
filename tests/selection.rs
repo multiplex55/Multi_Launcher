@@ -119,8 +119,10 @@ fn page_keys_respect_setting() {
             args: None,
         })
         .collect();
-    let mut settings = Settings::default();
-    settings.page_jump = 3;
+    let settings = Settings {
+        page_jump: 3,
+        ..Default::default()
+    };
     let custom_len = acts.len();
     let mut app = LauncherApp::new(
         &ctx,

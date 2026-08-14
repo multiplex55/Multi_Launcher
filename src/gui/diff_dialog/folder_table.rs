@@ -199,16 +199,15 @@ fn render_header(
                     .frame(false),
             )
             .clicked()
+            && let Some(column) = sort_column
         {
-            if let Some(column) = sort_column {
-                if state.sort.column == column {
-                    state.sort.descending = !state.sort.descending;
-                } else {
-                    state.sort = FolderSortState {
-                        column,
-                        descending: false,
-                    };
-                }
+            if state.sort.column == column {
+                state.sort.descending = !state.sort.descending;
+            } else {
+                state.sort = FolderSortState {
+                    column,
+                    descending: false,
+                };
             }
         }
         if column < 7 {
@@ -422,39 +421,37 @@ fn render_path_cell(
             .alignment_overrides
             .iter()
             .position(|m| m.left_relative == row.path)
+            && ui.button("Remove alignment override").clicked()
         {
-            if ui.button("Remove alignment override").clicked() {
-                state.alignment_overrides.remove(index);
-                state.pending_alignment = None;
-                ui.close_menu();
-            }
+            state.alignment_overrides.remove(index);
+            state.pending_alignment = None;
+            ui.close_menu();
         }
-        if let Some((source_left, source)) = state.pending_alignment.clone() {
-            if source_left != left
-                && present
-                && ui
-                    .button(format!("Confirm alignment with {}", source.display()))
-                    .clicked()
-            {
-                let value = if source_left {
-                    crate::diff::folder_compare::FolderAlignmentOverride {
-                        left_relative: source,
-                        right_relative: side_relative.clone(),
-                    }
-                } else {
-                    crate::diff::folder_compare::FolderAlignmentOverride {
-                        left_relative: side_relative.clone(),
-                        right_relative: source,
-                    }
-                };
-                let mut candidate = state.alignment_overrides.clone();
-                candidate.push(value);
-                if crate::diff::folder_compare::validate_alignment_overrides(&candidate).is_ok() {
-                    state.alignment_overrides = candidate;
+        if let Some((source_left, source)) = state.pending_alignment.clone()
+            && source_left != left
+            && present
+            && ui
+                .button(format!("Confirm alignment with {}", source.display()))
+                .clicked()
+        {
+            let value = if source_left {
+                crate::diff::folder_compare::FolderAlignmentOverride {
+                    left_relative: source,
+                    right_relative: side_relative.clone(),
                 }
-                state.pending_alignment = None;
-                ui.close_menu();
+            } else {
+                crate::diff::folder_compare::FolderAlignmentOverride {
+                    left_relative: side_relative.clone(),
+                    right_relative: source,
+                }
+            };
+            let mut candidate = state.alignment_overrides.clone();
+            candidate.push(value);
+            if crate::diff::folder_compare::validate_alignment_overrides(&candidate).is_ok() {
+                state.alignment_overrides = candidate;
             }
+            state.pending_alignment = None;
+            ui.close_menu();
         }
         ui.separator();
         folder_view::mutation_menu(ui, state, operation_active, action);

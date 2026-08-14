@@ -465,13 +465,13 @@ fn find_conflicts_groups_duplicates_and_prefixes() {
     let prefix = prefix.expect("prefix conflict");
     assert_eq!(prefix.gestures.len(), 3);
 
-    assert!(conflicts.iter().all(|conflict| match conflict {
+    assert!(conflicts.iter().all(|conflict| !matches!(
+        conflict,
         GestureConflict {
             dir_mode: DirMode::Eight,
             ..
-        } => false,
-        _ => true,
-    }));
+        }
+    )));
 }
 
 fn assert_match_type(

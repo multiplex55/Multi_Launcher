@@ -143,3 +143,51 @@ Run these checks in a real desktop session because they depend on launcher focus
 2. Bind a simple gesture to a harmless command such as opening help.
 3. Hold the right mouse button, draw the gesture, and release.
 4. Confirm the expected command runs and no unexpected elevated-permission prompt appears.
+
+## `mkmacro` Windows acceptance checklist
+
+These checks are intentionally manual and destructive. They require a real interactive Windows desktop; ordinary automated tests **must use fake input, window, screen, UIA, and launcher backends** and must never opt into `LiveInputOptIn`. Record the Windows version, Multi Launcher commit, monitor layout/DPI, integrity level, and tester/date beside every applicable result.
+
+### Prerequisites and recovery
+
+- [ ] Save work, close sensitive applications, disconnect remote-control software, and use a disposable standard-user Windows account or VM with a restore snapshot.
+- [ ] Keep Task Manager available and know how to terminate Multi Launcher without using its hotkeys. Ensure a physical keyboard and mouse remain available.
+- [ ] Create a disposable Notepad document, a harmless test window, known exact/tolerant reference images, and pixels of known colors. Use a second monitor with its left/top edge at a negative virtual-desktop coordinate when available.
+- [ ] Back up `mkmacros.json` and `mkmacro_assets`; verify the legacy `macros.json` backup separately.
+- [ ] After each failure, stop playback/recording, release any apparently held keys/buttons physically, close test applications, restore the files/snapshot, and restart Multi Launcher. Never continue if normal keyboard or mouse input is impaired.
+
+### Keyboard, mouse, and destructive emergency-stop checks
+
+- [ ] **Notepad text/keys:** type Unicode containing an accented character and a non-BMP emoji; run Ctrl+A and Ctrl+C; run individual key-down/key-up rows. **Expected:** exact text and selection/clipboard results, no replacement characters, balanced down/up events, and `Completed` rows.
+- [ ] **Stop with modifier held:** hold Ctrl in a macro, stop during a delay, then type normally. **Expected:** Ctrl releases immediately, status is `Stopped`, no later row runs, and subsequent input works normally.
+- [ ] **Pointer coverage:** verify move, single/double/right click, X1/X2 buttons where hardware supports them, vertical/horizontal wheel, drag, active-window/variable/image-relative targets, and multi-monitor negative coordinates. **Expected:** the intended target receives each exact operation and every button is released.
+- [ ] **DESTRUCTIVE—key Emergency Stop:** run **key down → 10-second delay → Emergency Stop**. **Expected (all required):** immediate key release, `Stopped` status, no following action, and successful subsequent normal keyboard input.
+- [ ] **DESTRUCTIVE—mouse Emergency Stop:** run **mouse button down → 10-second delay → Emergency Stop**. **Expected (all required):** immediate button release, `Stopped` status, no following action, and successful subsequent normal mouse input.
+
+### Windows and recording
+
+- [ ] **Window operations:** activate, wait, move, resize, minimize, maximize, restore, and close a disposable target. Also try a missing target and two ambiguous matches. **Expected:** each valid operation changes only the selected window; missing/ambiguous cases fail visibly and do not guess.
+- [ ] **Recorder:** record typing, clicks, wheel, and drag; use the recorder controls; play the result while recording is armed. **Expected:** physical actions become sensible steps, while injected playback, Emergency Stop, and record/controller interactions are excluded and playback is not re-recorded.
+- [ ] **Injected exclusion:** generate tagged playback and unrelated injected input with exclusion enabled. **Expected:** neither becomes a recorded step; physical input still does.
+
+### Control flow, launcher, and hotkeys
+
+- [ ] **Structured plan:** exercise nested If/Else, repeat, while, break, continue, timeout, retry, and continue-on-error. **Expected:** row order and per-row Success/Skipped/Failed states match the branches; bounded loops/timeouts terminate; retry delay remains stoppable.
+- [ ] **Launcher coexistence:** run an `mkmacro` launcher command and an existing legacy `macro` invocation. Disable each plugin in turn. **Expected:** prefixes route independently and disabling one never disables or rewrites the other.
+- [ ] **Hotkeys:** invoke a per-macro hotkey and configure a collision with Emergency Stop, launcher, or another macro. **Expected:** the unique hotkey runs once; every conflict is presented clearly and is not silently registered.
+
+### UI Automation, vision, and cancellation
+
+- [ ] **UIA patterns:** against disposable controls, test invoke, set/read value, toggle, select, and focus. Request an unsupported pattern with fallback explicitly disabled. **Expected:** supported operations affect the selected element; unsupported/no-fallback fails explicitly without mouse/keyboard synthesis.
+- [ ] **Visual operations:** test exact and tolerant image search, pixel search, found-image click, and cancellation during a long visual wait. **Expected:** confidence/tolerance distinguish fixtures, click uses the returned point, cancellation wakes promptly, status becomes `Stopped`, and no later action runs.
+- [ ] **Wait safety:** repeat Stop/Emergency Stop during a long delay, paused delay, held key, held mouse button, smooth move/drag, window wait, image/pixel wait, and retry delay. **Expected:** prompt wakeup, final `Stopped` status, no following row, and cleanup releases every input owned by playback.
+
+### Higher-integrity/UIPI behavior
+
+- [ ] From a normal, non-elevated Multi Launcher, target an elevated disposable application (for example, an administrator-launched Notepad) where policy permits. **Expected:** UIPI-blocked activation/input/UIA fails visibly as a rejected operation; it never reports success, every owned key/button is released, later rows do not run under Stop policy, and normal input still works. Do not weaken UAC/UIPI policy merely to make this pass.
+
+### Completion and release gate
+
+- [ ] Restore/compare `macros.json`, remove disposable `mkmacros.json` entries/assets, close targets, verify no hooks/hotkeys remain registered, restart, and confirm ordinary keyboard/mouse and the legacy macro plugin still work.
+- [ ] Attach the completed checklist (including explicit Not Applicable reasons), environment metadata, failures, and recovery performed to the release record.
+- [ ] **Release acceptance:** the complete fake-backed `mkmacro` suite must pass, and every applicable Windows smoke-test entry above must have a recorded result, **before enabling `mkmacro` by default**. Any safety, cleanup, false-success, or UIPI result blocks default enablement.

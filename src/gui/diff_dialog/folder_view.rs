@@ -326,12 +326,11 @@ pub(super) fn show(
             ("Next", DifferenceNavigation::Next),
             ("Last", DifferenceNavigation::Last),
         ] {
-            if ui.button(label).clicked() {
-                if let Some(target) =
+            if ui.button(label).clicked()
+                && let Some(target) =
                     navigate_difference(&paths, state, state.primary_selection.as_deref(), nav)
-                {
-                    select_navigation_target(state, target);
-                }
+            {
+                select_navigation_target(state, target);
             }
         }
     });

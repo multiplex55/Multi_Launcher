@@ -15,6 +15,7 @@ fn open_action_missing_file_does_not_panic() {
         std::panic::catch_unwind(|| {
             if std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .open(TOAST_LOG_FILE)
                 .is_ok()

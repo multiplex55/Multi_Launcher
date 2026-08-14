@@ -28,14 +28,17 @@ enum ViewWatchKind {
         left: PathBuf,
         right: PathBuf,
     },
-    Text {
-        left: Option<ExternalDocument>,
-        right: Option<ExternalDocument>,
-    },
+    Text(Box<TextWatch>),
     Binary {
         left: Option<PathBuf>,
         right: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct TextWatch {
+    left: Option<ExternalDocument>,
+    right: Option<ExternalDocument>,
 }
 
 #[derive(Debug)]
@@ -82,10 +85,10 @@ impl ViewWatchRuntime {
             tag,
             watcher,
             coalescer: EventCoalescer::new(Self::DEBOUNCE),
-            kind: ViewWatchKind::Text {
+            kind: ViewWatchKind::Text(Box::new(TextWatch {
                 left: document(left),
                 right: document(right),
-            },
+            })),
         }
     }
     pub fn binary(tag: WatchTag, left: Option<PathBuf>, right: Option<PathBuf>) -> Self {
@@ -134,7 +137,8 @@ impl ViewWatchRuntime {
                         });
                     }
                 }
-                ViewWatchKind::Text { left, right } => {
+                ViewWatchKind::Text(text) => {
+                    let TextWatch { left, right } = text.as_mut();
                     for (index, document) in [left, right].into_iter().enumerate() {
                         let Some(document) = document else { continue };
                         if event.identity_path != document.path {
@@ -180,9 +184,10 @@ impl ViewWatchRuntime {
         side: crate::diff::model::DiffSide,
         reload: bool,
     ) -> Option<LoadedTextFile> {
-        let ViewWatchKind::Text { left, right } = &mut self.kind else {
+        let ViewWatchKind::Text(text) = &mut self.kind else {
             return None;
         };
+        let TextWatch { left, right } = text.as_mut();
         let document = match side {
             crate::diff::model::DiffSide::Left => left,
             crate::diff::model::DiffSide::Right => right,

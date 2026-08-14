@@ -123,9 +123,11 @@ fn every_recent_mode_is_recorded_separately() {
 fn all_session_durable_fields_roundtrip_without_runtime_state() {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("diff.json");
-    let mut p = DiffPersistenceV1::default();
-    p.window_size = Some([812.0, 612.0]);
-    p.window_position = Some([21.0, 34.0]);
+    let mut p = DiffPersistenceV1 {
+        window_size: Some([812.0, 612.0]),
+        window_position: Some([21.0, 34.0]),
+        ..Default::default()
+    };
     let mut s = session("complete");
     s.comparison_mode = ComparisonModeV1::Binary;
     s.pane_split = 0.37;
