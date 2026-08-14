@@ -4,6 +4,8 @@ use crate::common::{
     json_watch::{JsonWatcher, watch_json},
 };
 use anyhow::{Context, Result};
+use image::{DynamicImage, ImageFormat, RgbaImage};
+use std::io::Cursor;
 use std::{
     collections::HashSet,
     fs,
@@ -112,6 +114,59 @@ impl MkMacroStore {
             .join(ASSET_DIRECTORY)
             .join(macro_id.to_string())
             .join(format!("{asset_id}.png")))
+    }
+    /// Writes a validated PNG before the caller changes the document.  The returned
+    /// value is the stable, portable reference that should be persisted in JSON.
+    pub fn import_png_asset(&self, macro_id: u64, asset_id: u64, source: &Path) -> Result<PathBuf> {
+        let bytes = fs::read(source).with_context(|| format!("read image {}", source.display()))?;
+        let image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+            .with_context(|| format!("{} is not a valid PNG image", source.display()))?
+            .to_rgba8();
+        self.write_png_asset(macro_id, asset_id, &image)
+    }
+    /// Capture flow counterpart to [`Self::import_png_asset`].
+    pub fn write_png_asset(
+        &self,
+        macro_id: u64,
+        asset_id: u64,
+        image: &RgbaImage,
+    ) -> Result<PathBuf> {
+        if image.width() == 0 || image.height() == 0 {
+            anyhow::bail!("reference image is empty")
+        }
+        let destination = self.asset_path(macro_id, asset_id)?;
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image.clone()).write_to(&mut encoded, ImageFormat::Png)?;
+        save_atomic(&destination, encoded.get_ref())
+            .with_context(|| format!("write asset {}", destination.display()))?;
+        Ok(PathBuf::from(ASSET_DIRECTORY)
+            .join(macro_id.to_string())
+            .join(format!("{asset_id}.png")))
+    }
+    /// JSON is committed only after an asset was staged. The old path is merely
+    /// returned: deletion still requires a separate, explicit `cleanup_assets` call.
+    pub fn commit_asset_update(
+        &self,
+        doc: MkMacroDocument,
+        staged_reference: &Path,
+        previous_reference: Option<&Path>,
+    ) -> Result<(Arc<MkMacroDocument>, Option<PathBuf>)> {
+        let macro_id = staged_reference
+            .components()
+            .nth(1)
+            .and_then(|x| x.as_os_str().to_str())
+            .and_then(|x| x.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("invalid staged asset reference"))?;
+        let staged = self.resolve_asset_reference(macro_id, staged_reference)?;
+        if !staged.is_file() {
+            anyhow::bail!("staged asset does not exist: {}", staged.display())
+        }
+        let saved = self.save(doc)?;
+        let cleanup = previous_reference
+            .filter(|old| *old != staged_reference)
+            .map(|old| self.resolve_asset_reference(macro_id, old))
+            .transpose()?;
+        Ok((saved, cleanup))
     }
     pub fn resolve_asset_reference(&self, macro_id: u64, reference: &Path) -> Result<PathBuf> {
         if reference.is_absolute()
