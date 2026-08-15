@@ -578,38 +578,69 @@ mod tests {
             "specialized editor",
         ];
         for descriptor in action_catalog::visible_descriptors() {
+            let context = |capability: &str, action: &MkAction| {
+                format!(
+                    "descriptor={:?}, variant={}, editor={:?}, capability={capability}",
+                    descriptor.name,
+                    action_catalog::action_name(action),
+                    descriptor.editor
+                )
+            };
+            let action = (descriptor.make_default)();
             assert_eq!(
                 descriptor.availability,
-                action_catalog::ActionAvailability::Ready
+                action_catalog::ActionAvailability::Ready,
+                "{}",
+                context("visible availability", &action)
             );
             assert_eq!(
                 descriptor.runtime,
-                action_catalog::RuntimeAvailability::Supported
+                action_catalog::RuntimeAvailability::Supported,
+                "{}",
+                context("ready runtime", &action)
             );
             assert!(
                 names.insert(descriptor.name),
                 "duplicate name {}",
                 descriptor.name
             );
-            assert!(!descriptor.name.trim().is_empty());
-            assert!(!descriptor.description.trim().is_empty());
-            let action = (descriptor.make_default)();
+            assert!(
+                !descriptor.name.trim().is_empty(),
+                "{}",
+                context("name", &action)
+            );
+            assert!(
+                !descriptor.description.trim().is_empty()
+                    && descriptor.description.trim() != descriptor.name.trim(),
+                "{}",
+                context("meaningful description", &action)
+            );
+            assert!(
+                serde_json::to_string(&action).is_ok(),
+                "{}",
+                context("serialization", &action)
+            );
             let variant = std::mem::discriminant(&action);
             assert!(
                 variants.insert(variant),
                 "duplicate action variant for {}",
                 descriptor.name
             );
-            assert_eq!(
-                descriptor.editor,
-                action_catalog::editor_for_action(&action)
+            assert!(
+                action_catalog::editor_route_recognizes(&action, descriptor.editor),
+                "{}",
+                context("implemented editor route", &action)
             );
-            assert!(action_catalog::editor_route_recognizes(
-                &action,
-                descriptor.editor
-            ));
-            assert!(crate::mkmacro::executor::has_runtime_support(&action));
-            let configurable = action_catalog::editable_field_count(descriptor.editor) > 0;
+            assert_eq!(
+                descriptor.runtime == action_catalog::RuntimeAvailability::Supported,
+                crate::mkmacro::executor::has_runtime_support(&action),
+                "{}",
+                context("runtime metadata agreement", &action)
+            );
+            let configurable = matches!(
+                action_catalog::editor_contract(descriptor.editor),
+                Some(action_catalog::EditorContract::Configurable { field_count: 1.. })
+            );
             assert!(!configurable || descriptor.editor != action_catalog::EditorKind::DirectInsert);
             let text = format!(
                 "{} {} {} {}",
@@ -645,10 +676,97 @@ mod tests {
     }
 
     #[test]
+    fn complete_catalog_metadata_and_hidden_policy() {
+        use std::collections::HashSet;
+        let descriptors = action_catalog::descriptors();
+        let visible: HashSet<_> = action_catalog::visible_descriptors()
+            .map(|d| d.name)
+            .collect();
+        let mut names = HashSet::new();
+        for descriptor in descriptors {
+            let action = (descriptor.make_default)();
+            let context = format!(
+                "descriptor={:?}, variant={}, editor={:?}",
+                descriptor.name,
+                action_catalog::action_name(&action),
+                descriptor.editor
+            );
+            assert!(
+                names.insert(descriptor.name),
+                "{context}: duplicate descriptor name"
+            );
+            if descriptor.category != action_catalog::ActionCategory::UiAutomation {
+                assert_eq!(
+                    descriptor.name,
+                    action_catalog::action_name(&action),
+                    "{context}: action-name mapping"
+                );
+            } else {
+                assert!(
+                    !action_catalog::action_name(&action).trim().is_empty(),
+                    "{context}: hidden legacy action-name mapping"
+                );
+            }
+            assert_eq!(
+                descriptor.runtime == action_catalog::RuntimeAvailability::Supported,
+                crate::mkmacro::executor::has_runtime_support(&action),
+                "{context}: runtime contract"
+            );
+            if descriptor.availability == action_catalog::ActionAvailability::Hidden {
+                assert!(
+                    descriptor
+                        .hidden_reason
+                        .is_some_and(|r| !r.trim().is_empty()),
+                    "{context}: hidden reason"
+                );
+                assert!(
+                    !visible.contains(descriptor.name),
+                    "{context}: hidden search leak"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completed_actions_keep_real_editor_routes() {
+        for (name, expected) in [
+            ("Close Window", action_catalog::EditorKind::Window),
+            ("Set Variable", action_catalog::EditorKind::Variable),
+            ("Unset Variable", action_catalog::EditorKind::Variable),
+            ("Wait Until", action_catalog::EditorKind::Condition),
+            ("If", action_catalog::EditorKind::Condition),
+            ("While", action_catalog::EditorKind::Condition),
+            ("Repeat", action_catalog::EditorKind::Repeat),
+        ] {
+            let descriptor = catalog_descriptor(name);
+            let action = (descriptor.make_default)();
+            assert_eq!(
+                descriptor.editor,
+                expected,
+                "descriptor={name:?}, variant={}, editor={:?}: expected specialized configurable editor",
+                action_catalog::action_name(&action),
+                descriptor.editor
+            );
+            assert!(
+                matches!(
+                    action_catalog::editor_contract(descriptor.editor),
+                    Some(action_catalog::EditorContract::Configurable { field_count: 1.. })
+                ),
+                "descriptor={name:?}, variant={}, editor={:?}: configurable editor contract",
+                action_catalog::action_name(&action),
+                descriptor.editor
+            );
+        }
+    }
+
+    #[test]
     fn configurable_editor_routes_build_meaningful_fields() {
-        for descriptor in action_catalog::visible_descriptors()
-            .filter(|d| action_catalog::editable_field_count(d.editor) > 0)
-        {
+        for descriptor in action_catalog::visible_descriptors().filter(|d| {
+            matches!(
+                action_catalog::editor_contract(d.editor),
+                Some(action_catalog::EditorContract::Configurable { field_count: 1.. })
+            )
+        }) {
             let (_dir, mut dialog) = dialog();
             dialog.create_macro();
             assert!(action_catalog::select_descriptor(&mut dialog, &descriptor));
@@ -662,7 +780,10 @@ mod tests {
                 descriptor.editor
             ));
             assert!(
-                action_catalog::editable_field_count(descriptor.editor) > 0,
+                matches!(
+                    action_catalog::editor_contract(descriptor.editor),
+                    Some(action_catalog::EditorContract::Configurable { field_count: 1.. })
+                ),
                 "{} produced an inert editor",
                 descriptor.name
             );
