@@ -2,7 +2,10 @@
 //!
 //! The editor owns a complete `MkStep` clone.  No document field is borrowed by
 //! the modal, which makes closing/cancelling it a genuinely lossless operation.
-use super::MkMacroDialog;
+use super::{
+    MkMacroDialog,
+    key_capture::{CapturedChord, captured_chord, key_name},
+};
 use crate::mkmacro::variables::MkPoint;
 use crate::mkmacro::*;
 use eframe::egui;
@@ -190,62 +193,6 @@ pub fn apply_picked_window(payload: &mut MkWindowPayload, picked: &PickedWindow)
     payload.matcher = picked.matcher.clone();
 }
 
-fn key_name(k: &MkKey) -> String {
-    super::macro_properties::key_name(k)
-}
-fn egui_key(k: egui::Key) -> Option<MkKey> {
-    Some(match k {
-        egui::Key::Enter => MkKey::Enter,
-        egui::Key::Tab => MkKey::Tab,
-        egui::Key::Escape => MkKey::Escape,
-        egui::Key::Space => MkKey::Space,
-        egui::Key::Backspace => MkKey::Backspace,
-        egui::Key::Delete => MkKey::Delete,
-        egui::Key::ArrowUp => MkKey::Up,
-        egui::Key::ArrowDown => MkKey::Down,
-        egui::Key::ArrowLeft => MkKey::Left,
-        egui::Key::ArrowRight => MkKey::Right,
-        egui::Key::Home => MkKey::Home,
-        egui::Key::End => MkKey::End,
-        egui::Key::PageUp => MkKey::PageUp,
-        egui::Key::PageDown => MkKey::PageDown,
-        k if format!("{k:?}").len() == 1 => MkKey::Character(format!("{k:?}")),
-        _ => return None,
-    })
-}
-pub(super) fn captured_from_input(i: &egui::InputState) -> Option<Vec<MkKey>> {
-    for e in &i.events {
-        if let egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } = e
-        {
-            if *key == egui::Key::Escape {
-                return Some(vec![]);
-            }
-            let mut v = vec![];
-            if modifiers.ctrl {
-                v.push(MkKey::Control)
-            }
-            if modifiers.alt {
-                v.push(MkKey::Alt)
-            }
-            if modifiers.shift {
-                v.push(MkKey::Shift)
-            }
-            if modifiers.mac_cmd {
-                v.push(MkKey::Meta)
-            }
-            if let Some(k) = egui_key(*key) {
-                v.push(k);
-                return Some(v);
-            }
-        }
-    }
-    None
-}
 fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     let v = value.get_or_insert_with(String::new);
     ui.horizontal(|ui| {
@@ -467,11 +414,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     egui::Color32::YELLOW,
                     "Press the next real key or chord. Escape cancels capture.",
                 );
-                if let Some(keys) = ui.input(captured_from_input) {
-                    if keys.is_empty() {
-                        state.capture_keys = false
-                    } else {
-                        captured = Some(keys);
+                if let Some(result) = ui.input(captured_chord) {
+                    match result {
+                        CapturedChord::Cancelled => state.capture_keys = false,
+                        CapturedChord::Keys(keys) => captured = Some(keys),
                     }
                 }
             }

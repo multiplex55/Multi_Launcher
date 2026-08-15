@@ -1,68 +1,11 @@
 use super::MkMacroDialog;
-use crate::mkmacro::{MkHotkey, MkKey};
+use super::key_capture::{CapturedChord, captured_chord, hotkey_name};
 use eframe::egui;
 
-pub fn key_name(key: &MkKey) -> String {
-    match key {
-        MkKey::Character(v) => v.to_uppercase(),
-        MkKey::Function(n) => format!("F{n}"),
-        MkKey::PageUp => "Page Up".into(),
-        MkKey::PageDown => "Page Down".into(),
-        MkKey::LeftControl | MkKey::RightControl | MkKey::Control => "Ctrl".into(),
-        MkKey::LeftAlt | MkKey::RightAlt | MkKey::Alt => "Alt".into(),
-        MkKey::LeftShift | MkKey::RightShift | MkKey::Shift => "Shift".into(),
-        MkKey::LeftMeta | MkKey::RightMeta | MkKey::Meta => "Meta".into(),
-        MkKey::Enter => "Enter".into(),
-        MkKey::Tab => "Tab".into(),
-        MkKey::Escape => "Escape".into(),
-        MkKey::Space => "Space".into(),
-        MkKey::Backspace => "Backspace".into(),
-        MkKey::Delete => "Delete".into(),
-        MkKey::Up => "Up".into(),
-        MkKey::Down => "Down".into(),
-        MkKey::Left => "Left".into(),
-        MkKey::Right => "Right".into(),
-        MkKey::Home => "Home".into(),
-        MkKey::End => "End".into(),
-    }
+fn clear_hotkey(hotkey: &mut Option<crate::mkmacro::MkHotkey>) -> bool {
+    hotkey.take().is_some()
 }
-pub fn hotkey_name(h: &MkHotkey) -> String {
-    h.modifiers
-        .iter()
-        .chain(std::iter::once(&h.key))
-        .map(key_name)
-        .collect::<Vec<_>>()
-        .join(" + ")
-}
-fn egui_key(k: egui::Key) -> Option<MkKey> {
-    use egui::Key::*;
-    Some(match k {
-        Enter => MkKey::Enter,
-        Tab => MkKey::Tab,
-        Space => MkKey::Space,
-        ArrowUp => MkKey::Up,
-        ArrowDown => MkKey::Down,
-        ArrowLeft => MkKey::Left,
-        ArrowRight => MkKey::Right,
-        Home => MkKey::Home,
-        End => MkKey::End,
-        PageUp => MkKey::PageUp,
-        PageDown => MkKey::PageDown,
-        F1 => MkKey::Function(1),
-        F2 => MkKey::Function(2),
-        F3 => MkKey::Function(3),
-        F4 => MkKey::Function(4),
-        F5 => MkKey::Function(5),
-        F6 => MkKey::Function(6),
-        F7 => MkKey::Function(7),
-        F8 => MkKey::Function(8),
-        F9 => MkKey::Function(9),
-        F10 => MkKey::Function(10),
-        F11 => MkKey::Function(11),
-        F12 => MkKey::Function(12),
-        _ => return None,
-    })
-}
+
 pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     let capturing = d.hotkey_capture;
     let mut changed = false;
@@ -119,58 +62,27 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             .changed();
     });
     if clear {
-        m.hotkey = None;
-        changed = true;
+        changed |= clear_hotkey(&mut m.hotkey);
     }
     let _ = m;
     if capture == Some(true) {
         d.hotkey_capture = true;
     }
     if capturing {
-        let events = ui.input(|i| i.events.clone());
-        for event in events {
-            if let egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } = event
-            {
-                if key == egui::Key::Escape {
-                    d.hotkey_capture = false;
-                    break;
-                }
-                if matches!(key, egui::Key::Backspace | egui::Key::Delete) {
+        if let Some(result) = ui.input(captured_chord) {
+            d.hotkey_capture = false;
+            if let CapturedChord::Keys(mut keys) = result {
+                if let Some(key) = keys.pop() {
+                    let hotkey = crate::mkmacro::MkHotkey {
+                        key,
+                        modifiers: keys,
+                    };
                     if let Some(m) = d.selected_macro_mut() {
-                        m.hotkey = None;
+                        if m.hotkey.as_ref() != Some(&hotkey) {
+                            m.hotkey = Some(hotkey);
+                            changed = true;
+                        }
                     }
-                    changed = true;
-                    d.hotkey_capture = false;
-                    break;
-                }
-                if let Some(key) = egui_key(key) {
-                    let mut mods = vec![];
-                    if modifiers.ctrl {
-                        mods.push(MkKey::Control)
-                    }
-                    if modifiers.shift {
-                        mods.push(MkKey::Shift)
-                    }
-                    if modifiers.alt {
-                        mods.push(MkKey::Alt)
-                    }
-                    if modifiers.mac_cmd {
-                        mods.push(MkKey::Meta)
-                    }
-                    if let Some(m) = d.selected_macro_mut() {
-                        m.hotkey = Some(MkHotkey {
-                            key,
-                            modifiers: mods,
-                        });
-                    }
-                    changed = true;
-                    d.hotkey_capture = false;
-                    break;
                 }
             }
         }
@@ -183,5 +95,22 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     }
     if changed {
         d.mark_dirty();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mkmacro::{MkHotkey, MkKey};
+
+    #[test]
+    fn clear_removes_an_assigned_hotkey_and_reports_a_change() {
+        let mut hotkey = Some(MkHotkey {
+            key: MkKey::Delete,
+            modifiers: vec![],
+        });
+        assert!(clear_hotkey(&mut hotkey));
+        assert!(hotkey.is_none());
+        assert!(!clear_hotkey(&mut hotkey));
     }
 }
