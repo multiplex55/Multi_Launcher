@@ -196,7 +196,22 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Move",
             "Move the pointer",
             &["mouse"],
-            MkAction::MouseMove(point())
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: point(),
+                duration_ms: 0
+            })
+        ),
+        d!(
+            Mouse,
+            "Mouse Drag",
+            "Drag while holding a mouse button",
+            &["mouse", "drag"],
+            MkAction::MouseDrag(MkMouseDragPayload {
+                from: point(),
+                to: point(),
+                button: MkMouseButton::Left,
+                duration_ms: 400
+            })
         ),
         d!(
             Mouse,
@@ -518,6 +533,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::Hotkey(_) => "Hotkey",
         MkAction::Text(_) => "Text",
         MkAction::MouseMove(_) => "Mouse Move",
+        MkAction::MouseDrag(_) => "Mouse Drag",
         MkAction::MouseClick(_) => "Mouse Click",
         MkAction::MouseDown(_) => "Mouse Down",
         MkAction::MouseUp(_) => "Mouse Up",
@@ -608,7 +624,22 @@ pub fn action_details(a: &MkAction) -> String {
         MkAction::UiReadValue { variable, .. } => {
             format!("Unavailable UI Automation action (read into {variable})")
         }
-        MkAction::MouseMove(target) => format_coordinate_target(target),
+        MkAction::MouseMove(p) => format!(
+            "{} · {}",
+            format_coordinate_target(&p.target),
+            if p.duration_ms == 0 {
+                "Instant".into()
+            } else {
+                format!("{} ms", p.duration_ms)
+            }
+        ),
+        MkAction::MouseDrag(p) => format!(
+            "{} → {} · {} · {} ms",
+            format_coordinate_target(&p.from),
+            format_coordinate_target(&p.to),
+            mouse(&p.button),
+            p.duration_ms
+        ),
         MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
             format!("Window {}", p.matcher.title.as_deref().unwrap_or("match"))
         }

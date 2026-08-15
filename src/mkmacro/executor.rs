@@ -65,6 +65,7 @@ pub trait InputBackend: Send + Sync {
     fn button_down(&self, button: MkMouseButton) -> ExecResult;
     fn button_up(&self, button: MkMouseButton) -> ExecResult;
     fn move_mouse(&self, point: MkPoint) -> ExecResult;
+    fn cursor_position(&self) -> ExecResult<MkPoint>;
     fn scroll(&self, delta: i32) -> ExecResult;
     fn text(&self, payload: &MkTextPayload) -> ExecResult;
 }
@@ -176,6 +177,9 @@ impl InputBackend for Unsupported {
         unsupported()
     }
     fn move_mouse(&self, _: MkPoint) -> ExecResult {
+        unsupported()
+    }
+    fn cursor_position(&self) -> ExecResult<MkPoint> {
         unsupported()
     }
     fn scroll(&self, _: i32) -> ExecResult {
@@ -759,7 +763,22 @@ impl Executor {
                 Ok(())
             }
             MkAction::Text(p) => self.backends.input.text(p),
-            MkAction::MouseMove(t) => self.move_to(t, v),
+            MkAction::MouseMove(p) => self.move_to(p, v),
+            MkAction::MouseDrag(p) => {
+                let from = self.backends.screen.resolve(&p.from, v)?;
+                let to = self.backends.screen.resolve(&p.to, v)?;
+                super::input::drag(
+                    &*self.backends.input,
+                    &self.control,
+                    p.button.clone(),
+                    from,
+                    to,
+                    Duration::from_millis(p.duration_ms),
+                )?;
+                set_point(v, "mouse", to);
+                set_point(v, "last_point", to);
+                Ok(())
+            }
             MkAction::MouseClick(p) => {
                 let point = self.backends.screen.resolve(&p.target, v)?;
                 set_point(v, "last_point", point);
@@ -861,9 +880,20 @@ impl Executor {
             | MkAction::Continue => Ok(()),
         }
     }
-    fn move_to(&self, target: &MkCoordinateTarget, v: &mut RuntimeVariables) -> ExecResult {
-        let point = self.backends.screen.resolve(target, v)?;
-        self.backends.input.move_mouse(point)?;
+    fn move_to(&self, payload: &super::MkMouseMovePayload, v: &mut RuntimeVariables) -> ExecResult {
+        let point = self.backends.screen.resolve(&payload.target, v)?;
+        if payload.duration_ms == 0 {
+            self.backends.input.move_mouse(point)?;
+        } else {
+            let from = self.backends.input.cursor_position()?;
+            super::input::smooth_move(
+                &*self.backends.input,
+                &self.control,
+                from,
+                point,
+                Duration::from_millis(payload.duration_ms),
+            )?;
+        }
         set_point(v, "mouse", point);
         set_point(v, "last_point", point);
         Ok(())
@@ -1027,6 +1057,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::Hotkey(_)
         | MkAction::Text(_)
         | MkAction::MouseMove(_)
+        | MkAction::MouseDrag(_)
         | MkAction::MouseClick(_)
         | MkAction::MouseDown(_)
         | MkAction::MouseUp(_)
@@ -1069,6 +1100,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::Hotkey(_)
         | MkAction::Text(_) => "SendInput",
         MkAction::MouseMove(_)
+        | MkAction::MouseDrag(_)
         | MkAction::MouseClick(_)
         | MkAction::MouseDown(_)
         | MkAction::MouseUp(_)
@@ -1155,11 +1187,21 @@ pub fn compare(a: &MkValue, op: &MkCompareOp, b: &MkValue) -> ExecResult<bool> {
 /// Configurable synchronized fake implementing every effect boundary.
 pub mod fake {
     use super::*;
-    #[derive(Default)]
     pub struct FakeBackend {
         pub events: Mutex<Vec<String>>,
         pub failures: Mutex<HashMap<String, ExecutionDiagnostic>>,
         pub conditions: Mutex<HashMap<String, bool>>,
+        pub cursor: Mutex<MkPoint>,
+    }
+    impl Default for FakeBackend {
+        fn default() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+                failures: Mutex::new(HashMap::new()),
+                conditions: Mutex::new(HashMap::new()),
+                cursor: Mutex::new(MkPoint { x: 0, y: 0 }),
+            }
+        }
     }
     impl FakeBackend {
         pub fn events(&self) -> Vec<String> {
@@ -1201,6 +1243,10 @@ pub mod fake {
         }
         fn move_mouse(&self, p: MkPoint) -> ExecResult {
             self.event(format!("move:{},{}", p.x, p.y))
+        }
+        fn cursor_position(&self) -> ExecResult<MkPoint> {
+            self.event("cursor_position".into())?;
+            Ok(*self.cursor.lock().unwrap())
         }
         fn scroll(&self, d: i32) -> ExecResult {
             self.event(format!("scroll:{d}"))

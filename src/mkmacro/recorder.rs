@@ -1,7 +1,8 @@
 //! Worker-side, pure recording normalization. No OS, UI automation, or persistence is used here.
 use super::{
     HookEvent, KeyTransition, MkAction, MkCoordinateTarget, MkErrorPolicy, MkKey, MkMouseButton,
-    MkMousePayload, MkPoint, MkStep, MouseButton, MouseMessage, should_record,
+    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkPoint, MkStep, MouseButton,
+    MouseMessage, should_record,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,7 +372,10 @@ pub fn to_macro_steps(items: &[RecordedStep], mut next_id: u64) -> Vec<MkStep> {
             RecordedAction::Key {
                 down: false, vk, ..
             } => vec![MkAction::KeyUp(key(vk))],
-            RecordedAction::Move { x, y } => vec![MkAction::MouseMove(point(x, y))],
+            RecordedAction::Move { x, y } => vec![MkAction::MouseMove(MkMouseMovePayload {
+                target: point(x, y),
+                duration_ms: 0,
+            })],
             RecordedAction::Click {
                 button: b,
                 x,
@@ -388,12 +392,12 @@ pub fn to_macro_steps(items: &[RecordedStep], mut next_id: u64) -> Vec<MkStep> {
                 button: b,
                 from,
                 to,
-            } => vec![
-                MkAction::MouseMove(point(from.0, from.1)),
-                MkAction::MouseDown(button(b)),
-                MkAction::MouseMove(point(to.0, to.1)),
-                MkAction::MouseUp(button(b)),
-            ],
+            } => vec![MkAction::MouseDrag(MkMouseDragPayload {
+                from: point(from.0, from.1),
+                to: point(to.0, to.1),
+                button: button(b),
+                duration_ms: 0,
+            })],
             RecordedAction::Wheel { delta, .. } => vec![MkAction::MouseScroll { i32_delta: delta }],
         };
         let action_count = actions.len();
@@ -504,5 +508,37 @@ mod tests {
             }
         ));
         assert_eq!(v[0].delay_after_ms, 100);
+    }
+
+    #[test]
+    fn normalized_drag_becomes_one_drag_step() {
+        let recorded = RecordedStep {
+            action: RecordedAction::Drag {
+                button: MouseButton::Right,
+                from: (3, 4),
+                to: (30, 40),
+            },
+            delay_after_ms: 77,
+        };
+        let steps = to_macro_steps(&[recorded], 10);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].delay_after_ms, 77);
+        let MkAction::MouseDrag(payload) = &steps[0].action else {
+            panic!()
+        };
+        assert_eq!(payload.button, MkMouseButton::Right);
+        assert_eq!(payload.duration_ms, 0);
+        assert_eq!(
+            payload.from,
+            MkCoordinateTarget::Screen {
+                point: MkPoint { x: 3, y: 4 }
+            }
+        );
+        assert_eq!(
+            payload.to,
+            MkCoordinateTarget::Screen {
+                point: MkPoint { x: 30, y: 40 }
+            }
+        );
     }
 }

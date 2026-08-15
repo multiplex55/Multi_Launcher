@@ -186,8 +186,11 @@ mod tests {
             "Image asset 9 offset (-3, 5)"
         );
         assert_eq!(
-            action_catalog::action_details(&MkAction::MouseMove(screen.clone())),
-            "Screen (824, 446)"
+            action_catalog::action_details(&MkAction::MouseMove(MkMouseMovePayload {
+                target: screen.clone(),
+                duration_ms: 0
+            })),
+            "Screen (824, 446) · Instant"
         );
         for (clicks, expected) in [
             (1, "Left ×1 @ Screen (824, 446)"),
@@ -237,22 +240,29 @@ mod tests {
         for i in 0..500 {
             action_catalog::insert_action(
                 &mut dialog,
-                MkAction::MouseMove(MkCoordinateTarget::Screen {
-                    point: crate::mkmacro::variables::MkPoint {
-                        x: i - 250,
-                        y: 250 - i,
+                MkAction::MouseMove(MkMouseMovePayload {
+                    target: MkCoordinateTarget::Screen {
+                        point: crate::mkmacro::variables::MkPoint {
+                            x: i - 250,
+                            y: 250 - i,
+                        },
                     },
+                    duration_ms: 0,
                 }),
             );
         }
         let before = serde_json::to_vec(&dialog.draft).unwrap();
         for step in &dialog.selected_macro().unwrap().steps {
-            let MkAction::MouseMove(MkCoordinateTarget::Screen { point }) = &step.action else {
+            let MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Screen { point },
+                ..
+            }) = &step.action
+            else {
                 panic!("unexpected action")
             };
             assert_eq!(
                 action_catalog::action_details(&step.action),
-                format!("Screen ({}, {})", point.x, point.y)
+                format!("Screen ({}, {}) · Instant", point.x, point.y)
             );
         }
         assert_eq!(serde_json::to_vec(&dialog.draft).unwrap(), before);

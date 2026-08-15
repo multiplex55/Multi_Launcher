@@ -232,7 +232,7 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if text.trim().is_empty() {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_str(&text)
+    let mut value: serde_json::Value = serde_json::from_str(&text)
         .context("mkmacros.json is malformed; keep it for recovery or correct the JSON")?;
     let version = value
         .get("schema_version")
@@ -243,8 +243,11 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
             "mkmacros.json schema version {version} is newer than supported version {SCHEMA_VERSION}; update Multi Launcher before opening it"
         )
     };
+    if version == 1 {
+        migrate_v1_to_v2(&mut value)?;
+    }
     let mut doc: MkMacroDocument = match version {
-        0 | 1 => serde_json::from_value(value)
+        0 | 1 | 2 => serde_json::from_value(value)
             .context("mkmacros.json does not match the macro schema")?,
         _ => unreachable!(),
     };
@@ -252,6 +255,46 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<()> {
+    let macros = value
+        .get_mut("macros")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("version 1 macro document has no macros array"))?;
+    for mac in macros {
+        let Some(steps) = mac
+            .get_mut("steps")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for step in steps {
+            let Some(action) = step
+                .get_mut("action")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            if action.get("type").and_then(serde_json::Value::as_str) != Some("mouse_move") {
+                continue;
+            }
+            let already = action
+                .get("data")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|data| data.contains_key("target"));
+            if !already {
+                let old = action
+                    .remove("data")
+                    .ok_or_else(|| anyhow::anyhow!("version 1 mouse_move has no data"))?;
+                action.insert(
+                    "data".into(),
+                    serde_json::json!({"target": old, "duration_ms": 0}),
+                );
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+    Ok(())
 }
 pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
     let mut used = HashSet::new();
@@ -358,6 +401,42 @@ mod tests {
         .unwrap();
         let (_, x) = MkMacroStore::open(d.path()).unwrap();
         assert!(matches!(x, LoadDisposition::NeedsUserRecovery { .. }))
+    }
+    #[test]
+    fn version_one_mouse_move_migrates_once_to_payload() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(MKMACROS_FILE);
+        fs::write(
+            &p,
+            r#"{
+          "schema_version": 1,
+          "macros": [{"id": 1, "name": "legacy", "steps": [{
+            "id": 2, "action": {"type": "mouse_move", "data": {
+              "kind": "screen", "point": {"x": 12, "y": -4}
+            }}
+          }]}]
+        }"#,
+        )
+        .unwrap();
+        let (doc, changed) = read_document(&p).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(doc.schema_version, 2);
+        let MkAction::MouseMove(payload) = &doc.macros[0].steps[0].action else {
+            panic!()
+        };
+        assert_eq!(payload.duration_ms, 0);
+        assert_eq!(
+            payload.target,
+            MkCoordinateTarget::Screen {
+                point: MkPoint { x: 12, y: -4 }
+            }
+        );
+        persist(&p, &doc).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.contains("\"target\""));
+        let (again, changed_again) = read_document(&p).unwrap().unwrap();
+        assert!(!changed_again);
+        assert_eq!(again, doc);
     }
     #[test]
     fn repairs_zero_and_duplicates() {
