@@ -1,7 +1,5 @@
 use super::MkMacroDialog;
-use crate::mkmacro::{
-    MovementMode, RecorderRuntimeState, RuntimeState, repair_ids, to_macro_steps,
-};
+use crate::mkmacro::{MovementMode, RecorderRuntimeState, RuntimeState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolbarState {
@@ -195,11 +193,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 match crate::mkmacro::runtime::record_stop() {
                     Err(e)=>dialog.command_error=Some(e.to_string()),
                     Ok(result)=> {
-                        let next=dialog.draft.macros.iter().flat_map(|m|m.steps.iter()).map(|s|s.id).max().unwrap_or(0);
-                        let inserted=to_macro_steps(&result.generated_steps,next);
-                        let ids:Vec<u64>=inserted.iter().map(|s|s.id).collect();
-                        if let Some(m)=dialog.draft.macros.iter_mut().find(|m|m.id==result.macro_id) {
-                            m.steps.extend(inserted); repair_ids(&mut dialog.draft); dialog.selection.ids=ids.into_iter().collect(); dialog.mark_dirty();
+                        if dialog.apply_recording(result.macro_id, &result.generated_steps).is_ok() {
                             if result.dropped_event_count>0 { dialog.command_error=Some(format!("Recording completed with {} dropped events",result.dropped_event_count)); }
                         } else {
                             dialog.pending_recording=Some((result.macro_id,result.generated_steps));

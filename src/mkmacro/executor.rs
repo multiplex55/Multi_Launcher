@@ -218,26 +218,34 @@ impl ScreenBackend for Unsupported {
 }
 impl UiAutomationBackend for Unsupported {
     fn exists(&self, _: &MkUiPayload) -> ExecResult<bool> {
-        unsupported_context(self.backend, "exists")
+        uia_unavailable("exists")
     }
     fn invoke(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "invoke")
+        uia_unavailable("invoke")
     }
     fn set_value(&self, _: &MkUiPayload, _: &str) -> ExecResult {
-        unsupported_context(self.backend, "set value")
+        uia_unavailable("set value")
     }
     fn read_value(&self, _: &MkUiPayload) -> ExecResult<String> {
-        unsupported_context(self.backend, "read value")
+        uia_unavailable("read value")
     }
     fn toggle(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "toggle")
+        uia_unavailable("toggle")
     }
     fn select(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "select")
+        uia_unavailable("select")
     }
     fn focus(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "focus")
+        uia_unavailable("focus")
     }
+}
+fn uia_unavailable<T>(action: &'static str) -> ExecResult<T> {
+    Err(ExecutionDiagnostic::new(
+        DiagnosticKind::UnsupportedOperation,
+        "UI Automation backend is not available yet",
+    )
+    .context("backend", "UI Automation")
+    .context("action", action))
 }
 
 #[cfg(windows)]
