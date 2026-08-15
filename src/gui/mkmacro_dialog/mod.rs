@@ -300,19 +300,22 @@ mod tests {
         );
         let image = MkImagePayload {
             asset_id: 42,
-            confidence: 0.85,
             wait: MkWaitOptions {
                 timeout_ms: 2500,
                 poll_interval_ms: 100,
             },
+            region: SearchRegion::Desktop,
+            tolerance: 0,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
         };
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageFind(image.clone())),
-            "Asset 42 · 85% confidence · screen · 2500 ms timeout"
+            "Reference image · Desktop · tolerance 0 · 2500 ms timeout"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageClick(image)),
-            "Asset 42 · 85% confidence · screen · 2500 ms timeout"
+            "Reference image · Desktop · tolerance 0 · 2500 ms timeout"
         );
     }
 

@@ -1,8 +1,12 @@
+use super::{
+    image_search::{AlphaPolicy, ReturnPoint},
+    screen::SearchRegion,
+};
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -321,7 +325,13 @@ pub struct MkImagePayload {
     pub asset_id: u64,
     pub wait: MkWaitOptions,
     #[serde(default)]
-    pub confidence: f32,
+    pub region: SearchRegion,
+    #[serde(default)]
+    pub tolerance: u8,
+    #[serde(default)]
+    pub alpha: AlphaPolicy,
+    #[serde(default)]
+    pub return_point: ReturnPoint,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkUiPayload {
@@ -424,5 +434,20 @@ impl MkAction {
             self,
             Self::Else | Self::EndIf | Self::RepeatEnd | Self::WhileEnd
         )
+    }
+}
+#[cfg(test)]
+mod image_payload_tests {
+    use super::*;
+    #[test]
+    fn missing_image_search_fields_default_and_current_round_trips() {
+        let legacy = r#"{"asset_id":4,"wait":{"timeout_ms":10,"poll_interval_ms":2}}"#;
+        let p: MkImagePayload = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.region, SearchRegion::Desktop);
+        assert_eq!(p.tolerance, 0);
+        assert_eq!(p.alpha, AlphaPolicy::Compare);
+        assert_eq!(p.return_point, ReturnPoint::Center);
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<MkImagePayload>(&json).unwrap(), p);
     }
 }

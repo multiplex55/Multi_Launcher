@@ -868,21 +868,61 @@ fn action_ui(
             );
         }
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
+            ui.heading("Reference Image");
             ui.horizontal(|ui| {
-                ui.label("Image asset ID");
-                ui.add(egui::DragValue::new(&mut p.asset_id));
+                ui.add_enabled(false, egui::Button::new("Select PNG..."));
+                ui.add_enabled(false, egui::Button::new("Capture..."));
+            });
+            ui.label(format!("mkmacro_assets/<macro>/{}.png", p.asset_id));
+            ui.horizontal(|ui| {
+                ui.label("Tolerance");
+                ui.add(egui::Slider::new(&mut p.tolerance, 0..=255));
             });
             ui.horizontal(|ui| {
-                ui.label("Confidence");
-                ui.add(egui::Slider::new(&mut p.confidence, 0.0..=1.0));
+                ui.label("Return point");
+                ui.selectable_value(&mut p.return_point, ReturnPoint::Center, "Center");
+                ui.selectable_value(&mut p.return_point, ReturnPoint::TopLeft, "Top-left");
             });
+            ui.horizontal(|ui| {
+                ui.label("Search region");
+                if ui
+                    .selectable_label(matches!(p.region, SearchRegion::Desktop), "Desktop")
+                    .clicked()
+                {
+                    p.region = SearchRegion::Desktop;
+                }
+                if ui
+                    .selectable_label(
+                        matches!(p.region, SearchRegion::Rectangle { .. }),
+                        "Rectangle",
+                    )
+                    .clicked()
+                {
+                    p.region = SearchRegion::Rectangle {
+                        rect: ScreenRect::new(0, 0, 1, 1),
+                    };
+                }
+            });
+            if let SearchRegion::Rectangle { rect } = &mut p.region {
+                ui.horizontal(|ui| {
+                    ui.label("X");
+                    ui.add(egui::DragValue::new(&mut rect.x));
+                    ui.label("Y");
+                    ui.add(egui::DragValue::new(&mut rect.y));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Width");
+                    ui.add(egui::DragValue::new(&mut rect.width).clamp_range(1..=u32::MAX));
+                    ui.label("Height");
+                    ui.add(egui::DragValue::new(&mut rect.height).clamp_range(1..=u32::MAX));
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("Timeout (ms)");
                 ui.add(egui::DragValue::new(&mut p.wait.timeout_ms));
                 ui.label("Poll (ms)");
                 ui.add(egui::DragValue::new(&mut p.wait.poll_interval_ms));
             });
-            ui.small("Search scope: screen");
         }
         MkAction::PixelCheck {
             target,

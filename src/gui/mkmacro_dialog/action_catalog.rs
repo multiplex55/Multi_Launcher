@@ -111,7 +111,10 @@ fn ip() -> MkImagePayload {
     MkImagePayload {
         asset_id: 1,
         wait: wait(),
-        confidence: 0.8,
+        region: SearchRegion::Desktop,
+        tolerance: 0,
+        alpha: AlphaPolicy::Compare,
+        return_point: ReturnPoint::Center,
     }
 }
 fn up() -> MkUiPayload {
@@ -458,23 +461,19 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::Continue
         ),
         d!(
-            hidden_ready,
             Visual,
             "Find Image",
             "Find an image",
             &["image"],
             Image,
-            "Image insertion requires an asset creation transaction before Apply",
             MkAction::ImageFind(ip())
         ),
         d!(
-            hidden_ready,
             Visual,
             "Click Image",
             "Find and click an image",
             &["image", "click"],
             Image,
-            "Image insertion requires an asset creation transaction before Apply",
             MkAction::ImageClick(ip())
         ),
         d!(
@@ -739,10 +738,8 @@ pub fn action_details(a: &MkAction) -> String {
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
         MkAction::RepeatStart { count } => format!("{count} times"),
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => format!(
-            "Asset {} · {:.0}% confidence · screen · {} ms timeout",
-            p.asset_id,
-            p.confidence * 100.0,
-            p.wait.timeout_ms
+            "Reference image · {:?} · tolerance {} · {} ms timeout",
+            p.region, p.tolerance, p.wait.timeout_ms
         ),
         MkAction::PixelCheck {
             target,
