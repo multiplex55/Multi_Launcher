@@ -37,6 +37,12 @@ pub struct ActionDescriptor {
     pub description: &'static str,
     pub keywords: &'static [&'static str],
     pub make_default: fn() -> MkAction,
+    pub insertion: ActionInsertion,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionInsertion {
+    Editor,
+    Direct,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionAvailability {
@@ -107,6 +113,7 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
+            insertion: ActionInsertion::Editor,
         }
     };
     (hidden,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
@@ -117,6 +124,18 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
+            insertion: ActionInsertion::Editor,
+        }
+    };
+    (direct,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
+        ActionDescriptor {
+            category: ActionCategory::$c,
+            availability: ActionAvailability::Ready,
+            name: $n,
+            description: $desc,
+            keywords: $keys,
+            make_default: || $a,
+            insertion: ActionInsertion::Direct,
         }
     };
 }
@@ -286,6 +305,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::If(cond())
         ),
         d!(
+            direct,
             Logic,
             "Else",
             "Alternate condition branch",
@@ -293,6 +313,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::Else
         ),
         d!(
+            direct,
             Logic,
             "End If",
             "End condition block",
@@ -307,6 +328,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::RepeatStart { count: 2 }
         ),
         d!(
+            direct,
             Logic,
             "End Repeat",
             "End repeat block",
@@ -321,14 +343,23 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::WhileStart { condition: cond() }
         ),
         d!(
+            direct,
             Logic,
             "End While",
             "End while loop",
             &["loop"],
             MkAction::WhileEnd
         ),
-        d!(Logic, "Break", "Exit a loop", &["loop"], MkAction::Break),
         d!(
+            direct,
+            Logic,
+            "Break",
+            "Exit a loop",
+            &["loop"],
+            MkAction::Break
+        ),
+        d!(
+            direct,
             Logic,
             "Continue",
             "Continue a loop",
@@ -624,11 +655,29 @@ pub fn insert_action(d: &mut MkMacroDialog, action: MkAction) {
     d.selection.ids = chosen;
     d.mark_dirty()
 }
+/// Select a catalog entry without ever replacing an in-progress transaction.
+pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -> bool {
+    if d.action_editor.draft.is_some() {
+        return false;
+    }
+    let action = (descriptor.make_default)();
+    match descriptor.insertion {
+        ActionInsertion::Editor => d.action_editor.begin_new(action),
+        ActionInsertion::Direct => insert_action(d, action),
+    }
+    true
+}
+
+pub fn close(d: &mut MkMacroDialog) {
+    d.action_catalog_visible = false;
+}
+
 pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if !d.action_catalog_visible {
         return;
     }
-    let mut open = true;
+    let mut open = d.action_catalog_visible;
+    let mut close_clicked = false;
     egui::Window::new("Add Action")
         .open(&mut open)
         .default_width(520.0)
@@ -644,31 +693,25 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             ui.heading(x.category.label());
                             last = Some(x.category)
                         }
-                        if ui.button(x.name).on_hover_text(x.description).clicked() {
-                            let action = (x.make_default)();
-                            if matches!(
-                                action,
-                                MkAction::MouseClick(_)
-                                    | MkAction::MouseMove(_)
-                                    | MkAction::KeyPress(_)
-                                    | MkAction::KeyDown(_)
-                                    | MkAction::KeyUp(_)
-                                    | MkAction::Hotkey(_)
-                                    | MkAction::Text(_)
-                                    | MkAction::Delay { .. }
-                                    | MkAction::Process(_)
-                                    | MkAction::WindowActivate(_)
-                                    | MkAction::WindowWait(_)
-                                    | MkAction::LauncherCommand { .. }
-                            ) {
-                                d.action_editor.begin_new(action);
-                            } else {
-                                insert_action(d, action);
-                            }
-                            d.action_catalog_visible = false;
+                        let blocked = d.action_editor.draft.is_some();
+                        let response = ui
+                            .add_enabled(!blocked, egui::Button::new(x.name))
+                            .on_hover_text(x.description);
+                        let response = if blocked {
+                            response
+                                .on_disabled_hover_text("Apply or cancel the current action first.")
+                        } else {
+                            response
+                        };
+                        if response.clicked() {
+                            select_descriptor(d, &x);
                         }
                     }
                 });
+            ui.separator();
+            close_clicked = ui.button("Close").clicked();
         });
-    d.action_catalog_visible &= open
+    if !open || close_clicked {
+        close(d);
+    }
 }

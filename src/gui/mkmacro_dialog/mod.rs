@@ -114,6 +114,98 @@ mod tests {
         }
     }
 
+    fn catalog_descriptor(name: &str) -> action_catalog::ActionDescriptor {
+        action_catalog::visible_descriptors()
+            .find(|descriptor| descriptor.name == name)
+            .unwrap_or_else(|| panic!("missing catalog descriptor {name}"))
+    }
+
+    #[test]
+    fn configurable_catalog_selection_is_transactional_and_keeps_catalog_state() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.action_catalog_visible = true;
+        d.action_search = "key".into();
+
+        assert!(action_catalog::select_descriptor(
+            &mut d,
+            &catalog_descriptor("Key Press")
+        ));
+        let original = d.action_editor.draft.as_ref().unwrap().action.clone();
+        assert!(d.action_catalog_visible);
+        assert!(!action_catalog::select_descriptor(
+            &mut d,
+            &catalog_descriptor("Text")
+        ));
+        assert_eq!(d.action_editor.draft.as_ref().unwrap().action, original);
+
+        let mut editor = std::mem::take(&mut d.action_editor);
+        assert!(editor.apply(&mut d).is_some());
+        d.action_editor = editor;
+        assert_eq!(d.selected_macro().unwrap().steps.len(), 1);
+        assert!(d.action_catalog_visible);
+        assert_eq!(d.action_search, "key");
+    }
+
+    #[test]
+    fn cancelling_catalog_editor_preserves_macro_and_catalog() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.action_catalog_visible = true;
+        d.action_search = "mouse".into();
+        action_catalog::select_descriptor(&mut d, &catalog_descriptor("Mouse Click"));
+        d.action_editor.cancel();
+        assert!(d.selected_macro().unwrap().steps.is_empty());
+        assert!(d.action_catalog_visible);
+        assert_eq!(d.action_search, "mouse");
+    }
+
+    #[test]
+    fn direct_catalog_actions_insert_and_keep_catalog_open() {
+        for name in [
+            "Else",
+            "End If",
+            "End Repeat",
+            "End While",
+            "Break",
+            "Continue",
+        ] {
+            let (_dir, mut d) = dialog();
+            d.create_macro();
+            d.action_catalog_visible = true;
+            d.action_search = "structure".into();
+            assert!(action_catalog::select_descriptor(
+                &mut d,
+                &catalog_descriptor(name)
+            ));
+            assert_eq!(d.selected_macro().unwrap().steps.len(), 1, "{name}");
+            assert_eq!(d.selection.ids.len(), 1, "{name}");
+            assert!(d.dirty, "{name}");
+            assert!(d.action_catalog_visible, "{name}");
+            assert_eq!(d.action_search, "structure", "{name}");
+        }
+    }
+
+    #[test]
+    fn catalog_close_paths_and_parent_close_reset_children() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.action_catalog_visible = true;
+        action_catalog::close(&mut d); // Explicit Close button transition.
+        assert!(!d.action_catalog_visible);
+        d.action_catalog_visible = true;
+        action_catalog::close(&mut d); // Simulated window-X transition.
+        assert!(!d.action_catalog_visible);
+
+        d.action_catalog_visible = true;
+        d.action_editor
+            .begin_new(MkAction::Delay { milliseconds: 1 });
+        d.open = false;
+        d.close_children();
+        assert!(!d.action_catalog_visible);
+        assert!(d.action_editor.draft.is_none());
+    }
+
     fn uia_actions() -> Vec<MkAction> {
         action_catalog::descriptors()
             .into_iter()
@@ -509,6 +601,7 @@ impl MkMacroDialog {
     pub fn ui(&mut self, ctx: &eframe::egui::Context) {
         self.sync_external();
         if !self.open {
+            self.close_children();
             return;
         }
         let mut open = self.open;
@@ -522,6 +615,14 @@ impl MkMacroDialog {
                 self.show_contents(ui);
             });
         self.open = open;
+        if !self.open {
+            self.close_children();
+        }
+    }
+    fn close_children(&mut self) {
+        self.action_catalog_visible = false;
+        self.action_editor.cancel();
+        self.structural_insertion = None;
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         toolbar::show(ui, self);
