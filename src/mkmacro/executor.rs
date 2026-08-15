@@ -1186,9 +1186,11 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WhileEnd
         | MkAction::Break
         | MkAction::Continue
-        | MkAction::ImageFind(_)
-        | MkAction::ImageClick(_)
         | MkAction::PixelCheck { .. } => true,
+        // `SystemVisualSearch::find_image` currently returns
+        // UnsupportedOperation unconditionally.  A dispatch arm alone is not
+        // production support.
+        MkAction::ImageFind(_) | MkAction::ImageClick(_) => false,
     }
 }
 fn action_name(a: &MkAction) -> &'static str {
