@@ -156,7 +156,7 @@ macro_rules! d {
             category: ActionCategory::$c,
             // Terminators and context-sensitive control markers are generated
             // by structural insertion, never offered as unsafe standalone rows.
-            availability: ActionAvailability::Hidden,
+            availability: ActionAvailability::Ready,
             name: $n,
             description: $desc,
             keywords: $keys,
@@ -167,7 +167,7 @@ macro_rules! d {
     };
 }
 pub fn descriptors() -> Vec<ActionDescriptor> {
-    let mut entries = vec![
+    let entries = vec![
         d!(
             KeyboardText,
             "Key Press",
@@ -761,48 +761,191 @@ fn step(action: MkAction) -> MkStep {
     }
 }
 pub fn insert_action(d: &mut MkMacroDialog, action: MkAction) {
-    let ids = d.selection.ids.clone();
-    let Some(m) = d.selected_macro_mut() else {
-        return;
-    };
-    let selected: Vec<usize> = m
-        .steps
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| ids.contains(&s.id).then_some(i))
-        .collect();
-    let pos = selected.last().map_or(m.steps.len(), |i| i + 1);
-    let terminator = match &action {
-        MkAction::If(_) => Some(MkAction::EndIf),
-        MkAction::RepeatStart { .. } => Some(MkAction::RepeatEnd),
-        MkAction::WhileStart { .. } => Some(MkAction::WhileEnd),
-        _ => None,
-    };
-    let inserted_indices = if let Some(terminator) = terminator {
-        if let (Some(first), Some(last)) = (selected.first(), selected.last()) {
-            let first = *first;
-            let last = *last;
-            let terminator_index = last + 2;
-            m.steps.insert(first, step(action));
-            m.steps.insert(terminator_index, step(terminator));
-            vec![first, terminator_index]
+    if matches!(
+        action,
+        MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. }
+    ) {
+        let ids: Vec<_> = d
+            .selected_macro()
+            .into_iter()
+            .flat_map(|m| m.steps.iter())
+            .filter(|s| d.selection.ids.contains(&s.id))
+            .map(|s| s.id)
+            .collect();
+        let intent = if ids.is_empty() {
+            super::action_editor::InsertionIntent::Plain {
+                after_step_id: None,
+            }
         } else {
-            m.steps.insert(pos, step(action));
-            m.steps.insert(pos + 1, step(terminator));
-            vec![pos, pos + 1]
+            super::action_editor::InsertionIntent::Wrap { step_ids: ids }
+        };
+        if let Err(error) = apply_structural(d, step(action), intent) {
+            d.command_error = Some(error);
         }
-    } else {
-        m.steps.insert(pos, step(action));
-        vec![pos]
-    };
-    repair_ids(&mut d.draft);
-    let chosen = inserted_indices
-        .iter()
-        .map(|&index| d.selected_macro().unwrap().steps[index].id)
-        .collect();
-    d.selection.ids = chosen;
-    d.mark_dirty()
+        return;
+    }
+    if let Err(error) = insert_direct(d, action) {
+        d.command_error = Some(error);
+    }
 }
+
+fn insertion_position(d: &MkMacroDialog) -> usize {
+    let ids = &d.selection.ids;
+    d.selected_macro().map_or(0, |m| {
+        m.steps
+            .iter()
+            .rposition(|s| ids.contains(&s.id))
+            .map_or(m.steps.len(), |i| i + 1)
+    })
+}
+
+fn insert_direct(d: &mut MkMacroDialog, action: MkAction) -> Result<u64, String> {
+    if matches!(
+        action,
+        MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. }
+    ) {
+        return Err("Block openers must be configured before insertion".into());
+    }
+    let pos = insertion_position(d);
+    if matches!(
+        action,
+        MkAction::Else
+            | MkAction::EndIf
+            | MkAction::RepeatEnd
+            | MkAction::WhileEnd
+            | MkAction::Break
+            | MkAction::Continue
+    ) {
+        validate_direct_context(
+            d.selected_macro().ok_or("No macro is selected")?,
+            pos,
+            &action,
+        )?;
+    }
+    let m = d.selected_macro_mut().ok_or("No macro is selected")?;
+    m.steps.insert(pos, step(action));
+    repair_ids(&mut d.draft);
+    let id = d.selected_macro().unwrap().steps[pos].id;
+    d.selection.ids.clear();
+    d.selection.ids.insert(id);
+    d.command_error = None;
+    d.mark_dirty();
+    Ok(id)
+}
+
+fn validate_direct_context(m: &MkMacro, pos: usize, action: &MkAction) -> Result<(), String> {
+    #[derive(Clone, Copy)]
+    enum Open {
+        If(bool),
+        Repeat,
+        While,
+    }
+    let mut stack = Vec::new();
+    for s in &m.steps[..pos] {
+        match s.action {
+            MkAction::If(_) => stack.push(Open::If(false)),
+            MkAction::RepeatStart { .. } => stack.push(Open::Repeat),
+            MkAction::WhileStart { .. } => stack.push(Open::While),
+            MkAction::Else => {
+                if let Some(Open::If(seen)) = stack.last_mut() {
+                    *seen = true
+                }
+            }
+            MkAction::EndIf | MkAction::RepeatEnd | MkAction::WhileEnd => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let bad = match action {
+        MkAction::Else => !matches!(stack.last(), Some(Open::If(false))),
+        MkAction::EndIf => !matches!(stack.last(), Some(Open::If(_))),
+        MkAction::RepeatEnd => !matches!(stack.last(), Some(Open::Repeat)),
+        MkAction::WhileEnd => !matches!(stack.last(), Some(Open::While)),
+        MkAction::Break | MkAction::Continue => !stack
+            .iter()
+            .any(|x| matches!(x, Open::Repeat | Open::While)),
+        _ => false,
+    };
+    if bad {
+        Err(format!(
+            "{} is not valid at the current insertion position",
+            action_name(action)
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn apply_structural(
+    d: &mut MkMacroDialog,
+    mut opener: MkStep,
+    intent: super::action_editor::InsertionIntent,
+) -> Result<u64, String> {
+    use super::action_editor::InsertionIntent;
+    let terminator = match opener.action {
+        MkAction::If(_) => MkAction::EndIf,
+        MkAction::RepeatStart { .. } => MkAction::RepeatEnd,
+        MkAction::WhileStart { .. } => MkAction::WhileEnd,
+        _ => return Err("Action is not a block opener".into()),
+    };
+    let original = d.selected_macro().ok_or("No macro is selected")?;
+    let (first, last) = match intent {
+        InsertionIntent::Plain { after_step_id } => {
+            let p = after_step_id
+                .and_then(|id| original.steps.iter().position(|s| s.id == id))
+                .map_or(original.steps.len(), |i| i + 1);
+            (p, p)
+        }
+        InsertionIntent::Wrap { step_ids } => {
+            let indices: Vec<_> = original
+                .steps
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| step_ids.contains(&s.id).then_some(i))
+                .collect();
+            if indices.len() != step_ids.len()
+                || indices.is_empty()
+                || indices.windows(2).any(|w| w[1] != w[0] + 1)
+            {
+                return Err("Block wrapping requires one contiguous selection".into());
+            }
+            (*indices.first().unwrap(), indices.last().unwrap() + 1)
+        }
+        InsertionIntent::EditExisting { .. } => {
+            return Err("Existing rows cannot be inserted as new blocks".into());
+        }
+    };
+    let next_id = d
+        .draft
+        .macros
+        .iter()
+        .flat_map(|m| m.steps.iter())
+        .map(|s| s.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    opener.id = next_id;
+    let mut candidate = original.clone();
+    candidate.steps.insert(first, opener);
+    let mut ending = step(terminator);
+    ending.id = next_id.saturating_add(1);
+    candidate.steps.insert(last + 1, ending);
+    if crate::mkmacro::compile(&candidate).is_err() {
+        return Err("The selection cuts through an existing block boundary".into());
+    }
+    let open_id = candidate.steps[first].id;
+    let end_id = candidate.steps[last + 1].id;
+    *d.selected_macro_mut().unwrap() = candidate;
+    // Deterministically select both newly-created boundary rows.
+    d.selection.ids.clear();
+    d.selection.ids.insert(open_id);
+    d.selection.ids.insert(end_id);
+    d.command_error = None;
+    d.mark_dirty();
+    Ok(open_id)
+}
+
 /// Select a catalog entry without ever replacing an in-progress transaction.
 pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -> bool {
     if d.action_editor.draft.is_some() {
@@ -816,7 +959,28 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
     );
     match descriptor.editor {
         EditorKind::DirectInsert => insert_action(d, action),
-        kind => d.action_editor.begin_new_with_editor(action, kind),
+        kind => {
+            let ids: Vec<_> = d
+                .selected_macro()
+                .into_iter()
+                .flat_map(|m| m.steps.iter())
+                .filter(|s| d.selection.ids.contains(&s.id))
+                .map(|s| s.id)
+                .collect();
+            let after = ids.last().copied();
+            let structural = matches!(
+                action,
+                MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. }
+            );
+            d.action_editor.begin_new_with_editor(action, kind);
+            d.action_editor.insertion = Some(if structural && !ids.is_empty() {
+                super::action_editor::InsertionIntent::Wrap { step_ids: ids }
+            } else {
+                super::action_editor::InsertionIntent::Plain {
+                    after_step_id: after,
+                }
+            });
+        }
     }
     true
 }
@@ -847,12 +1011,25 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             last = Some(x.category)
                         }
                         let blocked = d.action_editor.draft.is_some();
+                        let action = (x.make_default)();
+                        let context_error = if matches!(x.editor, EditorKind::DirectInsert) {
+                            d.selected_macro().and_then(|m| {
+                                validate_direct_context(m, insertion_position(d), &action).err()
+                            })
+                        } else {
+                            None
+                        };
                         let response = ui
-                            .add_enabled(!blocked, egui::Button::new(x.name))
+                            .add_enabled(
+                                !blocked && context_error.is_none(),
+                                egui::Button::new(x.name),
+                            )
                             .on_hover_text(x.description);
                         let response = if blocked {
                             response
                                 .on_disabled_hover_text("Apply or cancel the current action first.")
+                        } else if let Some(reason) = context_error {
+                            response.on_disabled_hover_text(reason)
                         } else {
                             response
                         };

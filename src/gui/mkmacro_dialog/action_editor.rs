@@ -15,12 +15,22 @@ pub struct ActionEditorState {
     pub draft: Option<MkStep>,
     /// `None` means insert a new row; otherwise replace this stable step id.
     pub editing_id: Option<u64>,
+    /// Captured when the editor opens, so applying cannot accidentally use a
+    /// selection which changed underneath the modal.
+    pub insertion: Option<InsertionIntent>,
     pub capture_keys: bool,
     pub capture_message: Option<String>,
     pub editor: Option<super::action_catalog::EditorKind>,
     position_capture: Option<PositionCaptureState>,
     draft_generation: u64,
     picker: NativePositionPicker,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InsertionIntent {
+    Plain { after_step_id: Option<u64> },
+    Wrap { step_ids: Vec<u64> },
+    EditExisting { step_id: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +142,11 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
+        // The dialog supplies the precise insertion intent immediately after
+        // this call. This fallback keeps programmatic callers insertion-safe.
+        self.insertion = Some(InsertionIntent::Plain {
+            after_step_id: None,
+        });
         self.editor = Some(editor);
         self.draft = Some(MkStep {
             id: 0,
@@ -146,6 +161,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
+        self.insertion = Some(InsertionIntent::EditExisting { step_id: step.id });
         self.draft = Some(step.clone());
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
@@ -153,6 +169,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft = None;
         self.editing_id = None;
+        self.insertion = None;
         self.capture_keys = false;
         self.editor = None;
     }
@@ -160,56 +177,43 @@ impl ActionEditorState {
         self.stop_position_capture();
         let mut step = self.draft.take()?;
         let edit = self.editing_id.take();
+        let intent = self.insertion.take().unwrap_or_else(|| match edit {
+            Some(step_id) => InsertionIntent::EditExisting { step_id },
+            None => InsertionIntent::Plain {
+                after_step_id: None,
+            },
+        });
         self.editor = None;
         // New block openers are inserted together with their mandatory closing
         // marker, while the configured step settings remain on the opener.
-        if edit.is_none()
+        if !matches!(intent, InsertionIntent::EditExisting { .. })
             && matches!(
                 &step.action,
                 MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. }
             )
         {
-            let action = step.action.clone();
-            super::action_catalog::insert_action(dialog, action);
-            let selected = dialog.selection.ids.clone();
-            let opening_id = dialog
-                .selected_macro()?
-                .steps
-                .iter()
-                .find(|candidate| {
-                    selected.contains(&candidate.id)
-                        && matches!(
-                            (&candidate.action, &step.action),
-                            (MkAction::If(_), MkAction::If(_))
-                                | (MkAction::RepeatStart { .. }, MkAction::RepeatStart { .. })
-                                | (MkAction::WhileStart { .. }, MkAction::WhileStart { .. })
-                        )
-                })?
-                .id;
-            step.id = opening_id;
-            let opening = dialog
-                .selected_macro_mut()?
-                .steps
-                .iter_mut()
-                .find(|candidate| candidate.id == opening_id)?;
-            *opening = step;
-            dialog.selection.ids.clear();
-            dialog.selection.ids.insert(opening_id);
-            return Some(opening_id);
+            return match super::action_catalog::apply_structural(dialog, step, intent) {
+                Ok(id) => Some(id),
+                Err(error) => {
+                    dialog.command_error = Some(error);
+                    None
+                }
+            };
         }
-        let selected = dialog.selection.ids.clone();
         let m = dialog.selected_macro_mut()?;
-        let index = if let Some(id) = edit {
+        let index = if let InsertionIntent::EditExisting { step_id: id } = intent {
             let i = m.steps.iter().position(|s| s.id == id)?;
             step.id = id;
             m.steps[i] = step;
             i
         } else {
             step.id = 0;
-            let i = m
-                .steps
-                .iter()
-                .rposition(|s| selected.contains(&s.id))
+            let after_step_id = match intent {
+                InsertionIntent::Plain { after_step_id } => after_step_id,
+                InsertionIntent::Wrap { .. } | InsertionIntent::EditExisting { .. } => None,
+            };
+            let i = after_step_id
+                .and_then(|id| m.steps.iter().position(|s| s.id == id))
                 .map_or(m.steps.len(), |i| i + 1);
             m.steps.insert(i, step);
             i
