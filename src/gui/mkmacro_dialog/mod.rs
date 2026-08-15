@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_catalog_actions_insert_and_keep_catalog_open() {
+    fn internal_control_markers_are_deliberately_hidden() {
         for name in [
             "Else",
             "End If",
@@ -324,19 +324,15 @@ mod tests {
             "Break",
             "Continue",
         ] {
-            let (_dir, mut d) = dialog();
-            d.create_macro();
-            d.action_catalog_visible = true;
-            d.action_search = "structure".into();
-            assert!(action_catalog::select_descriptor(
-                &mut d,
-                &catalog_descriptor(name)
-            ));
-            assert_eq!(d.selected_macro().unwrap().steps.len(), 1, "{name}");
-            assert_eq!(d.selection.ids.len(), 1, "{name}");
-            assert!(d.dirty, "{name}");
-            assert!(d.action_catalog_visible, "{name}");
-            assert_eq!(d.action_search, "structure", "{name}");
+            let descriptor = action_catalog::descriptors()
+                .into_iter()
+                .find(|d| d.name == name)
+                .unwrap();
+            assert_eq!(
+                descriptor.availability,
+                action_catalog::ActionAvailability::Hidden
+            );
+            assert_eq!(descriptor.editor, action_catalog::EditorKind::DirectInsert);
         }
     }
 
@@ -486,6 +482,166 @@ mod tests {
         let _show: fn(&mut eframe::egui::Ui, &mut uia_editor::UiaEditorState) = uia_editor::show;
         assert!(std::mem::size_of::<crate::mkmacro::MkUiPayload>() > 0);
         assert!(std::mem::size_of::<crate::mkmacro::uia::UiCommand>() > 0);
+    }
+    #[test]
+    fn canonical_visible_catalog_contract() {
+        use std::collections::HashSet;
+        let mut names = HashSet::new();
+        let mut variants = HashSet::new();
+        const FORBIDDEN: [&str; 4] = [
+            "unavailable",
+            "coming later",
+            "placeholder",
+            "specialized editor",
+        ];
+        for descriptor in action_catalog::visible_descriptors() {
+            assert_eq!(
+                descriptor.availability,
+                action_catalog::ActionAvailability::Ready
+            );
+            assert_eq!(
+                descriptor.runtime,
+                action_catalog::RuntimeAvailability::Supported
+            );
+            assert!(
+                names.insert(descriptor.name),
+                "duplicate name {}",
+                descriptor.name
+            );
+            assert!(!descriptor.name.trim().is_empty());
+            assert!(!descriptor.description.trim().is_empty());
+            let action = (descriptor.make_default)();
+            let variant = std::mem::discriminant(&action);
+            assert!(
+                variants.insert(variant),
+                "duplicate action variant for {}",
+                descriptor.name
+            );
+            assert_eq!(
+                descriptor.editor,
+                action_catalog::editor_for_action(&action)
+            );
+            assert!(action_catalog::editor_route_recognizes(
+                &action,
+                descriptor.editor
+            ));
+            assert!(crate::mkmacro::executor::has_runtime_support(&action));
+            let configurable = action_catalog::editable_field_count(descriptor.editor) > 0;
+            assert!(!configurable || descriptor.editor != action_catalog::EditorKind::DirectInsert);
+            let text = format!(
+                "{} {} {} {}",
+                descriptor.name,
+                descriptor.description,
+                action_catalog::action_name(&action),
+                action_catalog::action_details(&action)
+            );
+            assert!(
+                FORBIDDEN.iter().all(|p| !text.to_lowercase().contains(p)),
+                "placeholder text for {}: {text}",
+                descriptor.name
+            );
+
+            // Exercise the real insertion/editor transaction, then the same
+            // document validator used by save and run.
+            let (_dir, mut dialog) = dialog();
+            dialog.create_macro();
+            assert!(action_catalog::select_descriptor(&mut dialog, &descriptor));
+            if configurable {
+                assert!(dialog.action_editor.draft.is_some());
+                let mut editor = std::mem::take(&mut dialog.action_editor);
+                assert!(editor.apply(&mut dialog).is_some());
+                dialog.action_editor = editor;
+            }
+            let diagnostics = validate_document(&dialog.draft, None);
+            assert!(
+                crate::mkmacro::can_run(&diagnostics),
+                "invalid default {}: {diagnostics:?}",
+                descriptor.name
+            );
+        }
+    }
+
+    #[test]
+    fn configurable_editor_routes_build_meaningful_fields() {
+        for descriptor in action_catalog::visible_descriptors()
+            .filter(|d| action_catalog::editable_field_count(d.editor) > 0)
+        {
+            let (_dir, mut dialog) = dialog();
+            dialog.create_macro();
+            assert!(action_catalog::select_descriptor(&mut dialog, &descriptor));
+            let draft = dialog
+                .action_editor
+                .draft
+                .as_ref()
+                .expect("configurable action must open editor");
+            assert!(action_catalog::editor_route_recognizes(
+                &draft.action,
+                descriptor.editor
+            ));
+            assert!(
+                action_catalog::editable_field_count(descriptor.editor) > 0,
+                "{} produced an inert editor",
+                descriptor.name
+            );
+        }
+    }
+
+    #[test]
+    fn mouse_catalog_contracts() {
+        let action = |name| (catalog_descriptor(name).make_default)();
+        assert!(matches!(
+            action("Mouse Move"),
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Screen { .. },
+                duration_ms: 0
+            })
+        ));
+        assert!(matches!(
+            action("Mouse Click"),
+            MkAction::MouseClick(MkMousePayload {
+                button: MkMouseButton::Left,
+                clicks: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            action("Mouse Drag"),
+            MkAction::MouseDrag(crate::mkmacro::MkMouseDragPayload {
+                from: MkCoordinateTarget::Screen { .. },
+                to: MkCoordinateTarget::Screen { .. },
+                button: MkMouseButton::Left,
+                duration_ms: 400
+            })
+        ));
+        assert_eq!(
+            catalog_descriptor("Mouse Down").editor,
+            action_catalog::EditorKind::MouseButton
+        );
+        assert_eq!(
+            catalog_descriptor("Mouse Up").editor,
+            action_catalog::EditorKind::MouseButton
+        );
+        assert_eq!(
+            catalog_descriptor("Mouse Scroll").editor,
+            action_catalog::EditorKind::MouseScroll
+        );
+        assert!(matches!(
+            action("Mouse Scroll"),
+            MkAction::MouseScroll { i32_delta: -120 }
+        ));
+        for name in [
+            "Mouse Move",
+            "Mouse Click",
+            "Mouse Drag",
+            "Mouse Down",
+            "Mouse Up",
+            "Mouse Scroll",
+        ] {
+            assert!(
+                crate::mkmacro::executor::has_runtime_support(&action(name)),
+                "{name}"
+            );
+        }
     }
 }
 impl MkMacroDialog {

@@ -42,11 +42,21 @@ pub struct ActionDescriptor {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorKind {
-    Generic,
-    DirectInsert,
-    Structural,
+    Keyboard,
+    Text,
+    MouseMove,
+    MouseClick,
+    MouseDrag,
+    MouseButton,
+    MouseScroll,
+    Timing,
+    Window,
+    Process,
+    Launcher,
     Image,
     Pixel,
+    Structural,
+    DirectInsert,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionAvailability {
@@ -94,7 +104,7 @@ fn wp() -> MkWindowPayload {
 }
 fn ip() -> MkImagePayload {
     MkImagePayload {
-        asset_id: 0,
+        asset_id: 1,
         wait: wait(),
         confidence: 0.8,
     }
@@ -122,7 +132,7 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            editor: EditorKind::Generic,
+            editor: editor_for_action(&$a),
             runtime: RuntimeAvailability::Supported,
         }
     };
@@ -134,14 +144,16 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            editor: EditorKind::Generic,
+            editor: editor_for_action(&$a),
             runtime: RuntimeAvailability::Unavailable,
         }
     };
     (direct,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
         ActionDescriptor {
             category: ActionCategory::$c,
-            availability: ActionAvailability::Ready,
+            // Terminators and context-sensitive control markers are generated
+            // by structural insertion, never offered as unsafe standalone rows.
+            availability: ActionAvailability::Hidden,
             name: $n,
             description: $desc,
             keywords: $keys,
@@ -483,7 +495,6 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
     ];
     for descriptor in &mut entries {
         let action = (descriptor.make_default)();
-        descriptor.editor = editor_for_action(&action);
         if matches!(
             action,
             MkAction::WaitUntil { .. }
@@ -495,8 +506,25 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
     }
     entries
 }
+/// The editor capability for every model variant. This exhaustive match is the
+/// compile-time maintenance point for action/editor coverage.
 pub fn editor_for_action(action: &MkAction) -> EditorKind {
     match action {
+        MkAction::KeyDown(_) | MkAction::KeyUp(_) | MkAction::KeyPress(_) | MkAction::Hotkey(_) => {
+            EditorKind::Keyboard
+        }
+        MkAction::Text(_) => EditorKind::Text,
+        MkAction::MouseMove(_) => EditorKind::MouseMove,
+        MkAction::MouseDrag(_) => EditorKind::MouseDrag,
+        MkAction::MouseClick(_) => EditorKind::MouseClick,
+        MkAction::MouseDown(_) | MkAction::MouseUp(_) => EditorKind::MouseButton,
+        MkAction::MouseScroll { .. } => EditorKind::MouseScroll,
+        MkAction::Delay { .. } => EditorKind::Timing,
+        MkAction::Process(_) => EditorKind::Process,
+        MkAction::LauncherCommand { .. } => EditorKind::Launcher,
+        MkAction::WindowActivate(_) | MkAction::WindowClose(_) | MkAction::WindowWait(_) => {
+            EditorKind::Window
+        }
         MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. } => {
             EditorKind::Structural
         }
@@ -508,7 +536,38 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::Continue => EditorKind::DirectInsert,
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
         MkAction::PixelCheck { .. } => EditorKind::Pixel,
-        _ => EditorKind::Generic,
+        MkAction::WaitUntil { .. }
+        | MkAction::SetVariable { .. }
+        | MkAction::UnsetVariable { .. }
+        | MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => EditorKind::Structural,
+    }
+}
+
+/// True only when this exact action/editor pairing has an implemented route.
+pub fn editor_route_recognizes(action: &MkAction, editor: EditorKind) -> bool {
+    editor_for_action(action) == editor
+}
+
+/// A pure description used by rendering-contract tests (and useful to
+/// accessibility tooling). Zero means the strategy is deliberately insertion-only.
+pub fn editable_field_count(editor: EditorKind) -> usize {
+    match editor {
+        EditorKind::DirectInsert | EditorKind::Structural => 0,
+        EditorKind::Keyboard
+        | EditorKind::Text
+        | EditorKind::Timing
+        | EditorKind::MouseButton
+        | EditorKind::MouseScroll
+        | EditorKind::Process
+        | EditorKind::Launcher => 1,
+        EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => 2,
+        EditorKind::MouseDrag | EditorKind::Window => 3,
     }
 }
 /// Descriptors currently offered by the macro-authoring UI.
@@ -756,6 +815,11 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
         return false;
     }
     let action = (descriptor.make_default)();
+    assert!(
+        editor_route_recognizes(&action, descriptor.editor),
+        "catalog editor/action mismatch for {}",
+        descriptor.name
+    );
     match descriptor.editor {
         EditorKind::DirectInsert | EditorKind::Structural => insert_action(d, action),
         kind => d.action_editor.begin_new_with_editor(action, kind),

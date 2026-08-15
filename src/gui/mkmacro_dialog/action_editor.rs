@@ -118,7 +118,8 @@ impl QuickInsertState {
 
 impl ActionEditorState {
     pub fn begin_new(&mut self, action: MkAction) {
-        self.begin_new_with_editor(action, super::action_catalog::EditorKind::Generic);
+        let editor = super::action_catalog::editor_for_action(&action);
+        self.begin_new_with_editor(action, editor);
     }
     pub fn begin_new_with_editor(
         &mut self,
@@ -799,6 +800,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .show(ctx, |ui| {
             let state = &mut d.action_editor;
             let step = state.draft.as_mut().unwrap();
+            let editor = state.editor.expect("action editor draft has no editor strategy");
+            assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
             pick_request = action_ui(ui, step, &mut state.capture_keys);
             if state.position_capture.is_some() {
                 ui.colored_label(egui::Color32::YELLOW, "Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels.");

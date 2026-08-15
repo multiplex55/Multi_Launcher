@@ -1050,7 +1050,17 @@ impl Executor {
 }
 /// Testable declaration that every action has deliberate executor handling.
 pub fn has_runtime_support(action: &MkAction) -> bool {
+    // This is production capability metadata, not merely a mirror of the
+    // executor match. Mouse support includes the wired WindowsScreenBackend
+    // coordinate resolver and SendInput paths (including drag).
     match action {
+        MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => false,
         MkAction::KeyDown(_)
         | MkAction::KeyUp(_)
         | MkAction::KeyPress(_)
@@ -1082,14 +1092,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::Continue
         | MkAction::ImageFind(_)
         | MkAction::ImageClick(_)
-        | MkAction::PixelCheck { .. }
-        | MkAction::UiInvoke(_)
-        | MkAction::UiSetValue { .. }
-        | MkAction::UiReadValue { .. }
-        | MkAction::UiToggle(_)
-        | MkAction::UiSelect(_)
-        | MkAction::UiFocus(_)
-        | MkAction::UiWait(_) => true,
+        | MkAction::PixelCheck { .. } => true,
     }
 }
 fn action_name(a: &MkAction) -> &'static str {
