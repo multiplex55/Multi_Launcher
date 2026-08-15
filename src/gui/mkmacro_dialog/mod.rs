@@ -574,12 +574,6 @@ mod tests {
         use std::collections::HashSet;
         let mut names = HashSet::new();
         let mut variants = HashSet::new();
-        const FORBIDDEN: [&str; 4] = [
-            "unavailable",
-            "coming later",
-            "placeholder",
-            "specialized editor",
-        ];
         for descriptor in action_catalog::visible_descriptors() {
             let context = |capability: &str, action: &MkAction| {
                 format!(
@@ -653,10 +647,16 @@ mod tests {
                 action_catalog::action_details(&action)
             );
             assert!(
-                FORBIDDEN.iter().all(|p| !text.to_lowercase().contains(p)),
+                !action_catalog::contains_placeholder_wording(&text),
                 "placeholder text for {}: {text}",
                 descriptor.name
             );
+            assert!(
+                !text.contains("This action uses its existing specialized editor"),
+                "historical fallback copy returned for {}",
+                descriptor.name
+            );
+            assert!(descriptor.hidden_reason.is_none());
 
             // Exercise the real insertion/editor transaction, then the same
             // document validator used by save and run.
@@ -726,6 +726,29 @@ mod tests {
                     !visible.contains(descriptor.name),
                     "{context}: hidden search leak"
                 );
+                // Filtering raw registry rows is intentionally insufficient:
+                // the render input must originate from visible_descriptors().
+                assert!(
+                    !action_catalog::visible_descriptors()
+                        .filter(|row| action_catalog::matches(row, descriptor.name))
+                        .any(|row| row.name == descriptor.name),
+                    "{context}: hidden descriptor rendered for an exact-name search"
+                );
+
+                let (_dir, mut dialog) = dialog();
+                dialog.create_macro();
+                assert!(
+                    !action_catalog::select_descriptor(&mut dialog, &descriptor),
+                    "{context}: hidden descriptor was selectable"
+                );
+                assert!(dialog.selected_macro().unwrap().steps.is_empty());
+                assert!(dialog.action_editor.draft.is_none());
+
+                // Hidden is an authoring policy only: existing documents must
+                // retain the complete payload during load/save round trips.
+                let encoded = serde_json::to_vec(&action).unwrap();
+                let decoded: MkAction = serde_json::from_slice(&encoded).unwrap();
+                assert_eq!(decoded, action, "{context}: saved payload changed");
             }
         }
     }

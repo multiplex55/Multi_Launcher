@@ -63,6 +63,14 @@ pub enum EditorKind {
     General,
     DirectInsert,
 }
+
+impl EditorKind {
+    /// Whether this strategy has a complete authoring transaction.  Keeping
+    /// this beside the enum prevents callers from inventing editor exceptions.
+    pub fn contract(self) -> Option<EditorContract> {
+        editor_contract(self)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionAvailability {
     Ready,
@@ -461,19 +469,23 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::Continue
         ),
         d!(
+            hidden,
             Visual,
             "Find Image",
             "Find an image",
             &["image"],
             Image,
+            "Image search requires a production visual-search backend before it can be inserted",
             MkAction::ImageFind(ip())
         ),
         d!(
+            hidden,
             Visual,
             "Click Image",
             "Find and click an image",
             &["image", "click"],
             Image,
+            "Image search requires a production visual-search backend before it can be inserted",
             MkAction::ImageClick(ip())
         ),
         d!(
@@ -617,14 +629,36 @@ pub fn editor_route_recognizes(action: &MkAction, editor: EditorKind) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorContract {
     Configurable { field_count: usize },
-    DirectInsert,
+    DirectInsert { context: InsertionContextRoute },
+}
+
+/// The concrete validation path used before a structural marker is inserted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertionContextRoute {
+    CompileCheckedStructuralPosition,
+}
+
+/// Shared product-copy guard used by catalog invariants.  This deliberately
+/// complements (rather than replaces) the exact historical-string regression.
+pub fn contains_placeholder_wording(value: &str) -> bool {
+    const PLACEHOLDERS: [&str; 5] = [
+        "existing specialized editor",
+        "legacy action",
+        "not implemented",
+        "unavailable",
+        "placeholder",
+    ];
+    let value = value.to_ascii_lowercase();
+    PLACEHOLDERS.iter().any(|wording| value.contains(wording))
 }
 
 /// Authoritative routing contract. Every configurable value listed here has a
 /// concrete `action_ui` branch; `None` means that no editor route is implemented.
 pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
     match editor {
-        EditorKind::DirectInsert => Some(EditorContract::DirectInsert),
+        EditorKind::DirectInsert => Some(EditorContract::DirectInsert {
+            context: InsertionContextRoute::CompileCheckedStructuralPosition,
+        }),
         EditorKind::General => None,
         EditorKind::Keyboard
         | EditorKind::Text
@@ -1026,7 +1060,14 @@ pub fn apply_structural(
 
 /// Select a catalog entry without ever replacing an in-progress transaction.
 pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -> bool {
-    if d.action_editor.draft.is_some() {
+    // Selection is an authoring capability, not a generic model-loading route.
+    // Hidden actions remain deserializable but cannot bypass the catalog filter
+    // through a direct call to this function.
+    if descriptor.availability != ActionAvailability::Ready
+        || descriptor.hidden_reason.is_some()
+        || descriptor.runtime != RuntimeAvailability::Supported
+        || d.action_editor.draft.is_some()
+    {
         return false;
     }
     let action = (descriptor.make_default)();
