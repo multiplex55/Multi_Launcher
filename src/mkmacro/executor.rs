@@ -453,7 +453,9 @@ impl InputCleanupGuard {
 #[cfg(test)]
 mod tests {
     use super::{fake::FakeBackend, *};
-    use crate::mkmacro::{MkErrorPolicy, MkMacro, MkPlayback, MkStep, compile};
+    use crate::mkmacro::{
+        AlphaPolicy, MkErrorPolicy, MkMacro, MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
+    };
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -521,10 +523,10 @@ mod tests {
                 timeout_ms: 0,
                 poll_interval_ms: 1,
             },
-            region: super::SearchRegion::Desktop,
+            region: SearchRegion::Desktop,
             tolerance: 0,
-            alpha: super::AlphaPolicy::Compare,
-            return_point: super::ReturnPoint::Center,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
         };
         let mut vars = RuntimeVariables::new();
         assert_eq!(
