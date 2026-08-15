@@ -15,9 +15,7 @@ use std::{
 };
 
 fn wait_for(runtime: &MacroRuntime, wanted: RuntimeState) -> RuntimeSnapshot {
-    // The runtime worker is deliberately asynchronous. Windows CI can be heavily
-    // oversubscribed, so this is a deadline rather than an assertion about speed.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let snapshot = runtime.snapshot();
         if snapshot.state == wanted {
@@ -177,13 +175,21 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
                 extra_info: 0,
                 timestamp_us: 1,
             }),
+            RecordingBoundary::Event(HookEvent::Key {
+                transition: KeyTransition::Up,
+                vk: 65,
+                scan_code: 30,
+                flags: 0,
+                extra_info: 0,
+                timestamp_us: 2,
+            }),
             RecordingBoundary::Event(HookEvent::Mouse {
                 message: MouseMessage::Down(MouseButton::Left),
                 x: 10,
                 y: 20,
                 flags: 0,
                 extra_info: 0,
-                timestamp_us: 2,
+                timestamp_us: 3,
             }),
             RecordingBoundary::Event(HookEvent::Mouse {
                 message: MouseMessage::Up(MouseButton::Left),
@@ -191,7 +197,7 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
                 y: 20,
                 flags: 0,
                 extra_info: 0,
-                timestamp_us: 3,
+                timestamp_us: 4,
             }),
         ],
         &NormalizationConfig {
@@ -227,13 +233,23 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     assert_eq!(editor.apply(&mut dialog), Some(click));
     dialog.save().unwrap();
     assert_eq!(&*store.snapshot(), &dialog.draft);
+    // Rerun the transaction we just edited. The initial run above already covers
+    // the complete authored macro; selecting the recorded click here isolates the
+    // recorder -> edit -> save -> playback contract and cannot leave a recorded
+    // key-down affecting later tests if normalization regresses.
     assert_eq!(
-        runtime.command(RuntimeCommand::Run(id)),
+        runtime.command(RuntimeCommand::RunSelection(id, vec![click])),
         CommandResult::Accepted
     );
+    let rerun = wait_for(&runtime, RuntimeState::Completed);
+    assert_eq!(rerun.steps.get(&click), Some(&StepState::Success));
     assert_eq!(
-        wait_for(&runtime, RuntimeState::Completed).state,
-        RuntimeState::Completed
+        fake.events()
+            .iter()
+            .filter(|event| event.as_str() == "button_down:Left")
+            .count(),
+        2,
+        "the transactionally edited double-click must be executed"
     );
 }
 
