@@ -39,6 +39,8 @@ pub struct ActionDescriptor {
     pub make_default: fn() -> MkAction,
     pub editor: EditorKind,
     pub runtime: RuntimeAvailability,
+    /// A deliberate product/capability reason is mandatory for hidden rows.
+    pub hidden_reason: Option<&'static str>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorKind {
@@ -127,7 +129,7 @@ fn up() -> MkUiPayload {
     }
 }
 macro_rules! d {
-    ($c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
+    ($c:ident,$n:literal,$desc:literal,$keys:expr,$editor:ident,$a:expr) => {
         ActionDescriptor {
             category: ActionCategory::$c,
             availability: ActionAvailability::Ready,
@@ -135,11 +137,12 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            editor: editor_for_action(&$a),
-            runtime: RuntimeAvailability::Supported,
+            editor: EditorKind::$editor,
+            runtime: runtime_availability(&$a),
+            hidden_reason: None,
         }
     };
-    (hidden,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
+    (hidden_ready,$c:ident,$n:literal,$desc:literal,$keys:expr,$editor:ident,$reason:literal,$a:expr) => {
         ActionDescriptor {
             category: ActionCategory::$c,
             availability: ActionAvailability::Hidden,
@@ -147,8 +150,22 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            editor: editor_for_action(&$a),
-            runtime: RuntimeAvailability::Unavailable,
+            editor: EditorKind::$editor,
+            runtime: runtime_availability(&$a),
+            hidden_reason: Some($reason),
+        }
+    };
+    (hidden,$c:ident,$n:literal,$desc:literal,$keys:expr,$editor:ident,$reason:literal,$a:expr) => {
+        ActionDescriptor {
+            category: ActionCategory::$c,
+            availability: ActionAvailability::Hidden,
+            name: $n,
+            description: $desc,
+            keywords: $keys,
+            make_default: || $a,
+            editor: EditorKind::$editor,
+            runtime: runtime_availability(&$a),
+            hidden_reason: Some($reason),
         }
     };
     (direct,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
@@ -156,15 +173,24 @@ macro_rules! d {
             category: ActionCategory::$c,
             // Terminators and context-sensitive control markers are generated
             // by structural insertion, never offered as unsafe standalone rows.
-            availability: ActionAvailability::Ready,
+            availability: ActionAvailability::Hidden,
             name: $n,
             description: $desc,
             keywords: $keys,
             make_default: || $a,
             editor: EditorKind::DirectInsert,
-            runtime: RuntimeAvailability::Supported,
+            runtime: runtime_availability(&$a),
+            hidden_reason: Some("Context-sensitive structural markers are inserted by block transactions or contextual controls"),
         }
     };
+}
+
+fn runtime_availability(action: &MkAction) -> RuntimeAvailability {
+    if crate::mkmacro::executor::has_runtime_support(action) {
+        RuntimeAvailability::Supported
+    } else {
+        RuntimeAvailability::Unavailable
+    }
 }
 pub fn descriptors() -> Vec<ActionDescriptor> {
     let entries = vec![
@@ -173,6 +199,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Key Press",
             "Press and release a keyboard key",
             &["keyboard", "send"],
+            Keyboard,
             MkAction::KeyPress(MkKey::Enter)
         ),
         d!(
@@ -180,6 +207,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Key Down",
             "Hold a keyboard key",
             &["keyboard"],
+            Keyboard,
             MkAction::KeyDown(MkKey::Enter)
         ),
         d!(
@@ -187,6 +215,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Key Up",
             "Release a keyboard key",
             &["keyboard"],
+            Keyboard,
             MkAction::KeyUp(MkKey::Enter)
         ),
         d!(
@@ -194,6 +223,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Hotkey",
             "Send a key combination",
             &["keyboard", "send"],
+            Keyboard,
             MkAction::Hotkey(vec![MkKey::Control, MkKey::Character("C".into())])
         ),
         d!(
@@ -201,6 +231,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Text",
             "Type or paste text",
             &["type", "send", "keyboard"],
+            Text,
             MkAction::Text(MkTextPayload {
                 text: String::new(),
                 mode: MkTextMode::Type
@@ -211,6 +242,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Move",
             "Move the pointer",
             &["mouse"],
+            MouseMove,
             MkAction::MouseMove(MkMouseMovePayload {
                 target: point(),
                 duration_ms: 0
@@ -221,6 +253,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Drag",
             "Drag while holding a mouse button",
             &["mouse", "drag"],
+            MouseDrag,
             MkAction::MouseDrag(MkMouseDragPayload {
                 from: point(),
                 to: point(),
@@ -233,6 +266,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Click",
             "Click a mouse button",
             &["click", "mouse"],
+            MouseClick,
             MkAction::MouseClick(MkMousePayload {
                 target: point(),
                 button: MkMouseButton::Left,
@@ -244,6 +278,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Down",
             "Hold a mouse button",
             &["mouse"],
+            MouseButton,
             MkAction::MouseDown(MkMouseButton::Left)
         ),
         d!(
@@ -251,6 +286,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Up",
             "Release a mouse button",
             &["mouse"],
+            MouseButton,
             MkAction::MouseUp(MkMouseButton::Left)
         ),
         d!(
@@ -258,6 +294,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Mouse Scroll",
             "Scroll the mouse wheel",
             &["mouse"],
+            MouseScroll,
             MkAction::MouseScroll { i32_delta: -120 }
         ),
         d!(
@@ -265,6 +302,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Delay",
             "Wait for a duration",
             &["wait"],
+            Timing,
             MkAction::Delay { milliseconds: 1000 }
         ),
         d!(
@@ -272,6 +310,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Wait Until",
             "Wait for a condition",
             &["wait", "condition"],
+            Condition,
             MkAction::WaitUntil {
                 condition: cond(),
                 wait: wait()
@@ -282,6 +321,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Activate Window",
             "Activate a matching window",
             &["window"],
+            Window,
             MkAction::WindowActivate(wp())
         ),
         d!(
@@ -289,6 +329,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Close Window",
             "Close a matching window",
             &["window"],
+            Window,
             MkAction::WindowClose(matcher())
         ),
         d!(
@@ -296,6 +337,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Wait for Window",
             "Wait for a matching window",
             &["window", "wait"],
+            Window,
             MkAction::WindowWait(wp())
         ),
         d!(
@@ -303,6 +345,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Run Program",
             "Start a program",
             &["run", "launch"],
+            Process,
             MkAction::Process(MkProcessPayload {
                 program: "program".into(),
                 arguments: vec![],
@@ -315,6 +358,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Launcher Command",
             "Run a launcher command",
             &["run", "launch"],
+            Launcher,
             MkAction::LauncherCommand {
                 command: "command".into(),
                 args: None
@@ -325,6 +369,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Set Variable",
             "Store a value",
             &["variable"],
+            Variable,
             MkAction::SetVariable {
                 name: "value".into(),
                 value: MkValue::Null
@@ -335,6 +380,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Unset Variable",
             "Remove a value",
             &["variable"],
+            Variable,
             MkAction::UnsetVariable {
                 name: "value".into()
             }
@@ -344,6 +390,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "If",
             "Condition block",
             &["condition"],
+            Condition,
             MkAction::If(cond())
         ),
         d!(
@@ -367,6 +414,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Repeat",
             "Repeat block",
             &["loop"],
+            Repeat,
             MkAction::RepeatStart { count: 5 }
         ),
         d!(
@@ -382,6 +430,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "While",
             "Conditional loop",
             &["loop", "condition"],
+            Condition,
             MkAction::WhileStart { condition: cond() }
         ),
         d!(
@@ -409,17 +458,23 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::Continue
         ),
         d!(
+            hidden_ready,
             Visual,
             "Find Image",
             "Find an image",
             &["image"],
+            Image,
+            "Image insertion requires an asset creation transaction before Apply",
             MkAction::ImageFind(ip())
         ),
         d!(
+            hidden_ready,
             Visual,
             "Click Image",
             "Find and click an image",
             &["image", "click"],
+            Image,
+            "Image insertion requires an asset creation transaction before Apply",
             MkAction::ImageClick(ip())
         ),
         d!(
@@ -427,6 +482,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Check Pixel",
             "Check a pixel color",
             &["pixel"],
+            Pixel,
             MkAction::PixelCheck {
                 target: point(),
                 color: "#000000".into(),
@@ -439,6 +495,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Invoke UI Element",
             "Invoke a UI element",
             &["uia"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiInvoke(up())
         ),
         d!(
@@ -447,6 +505,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Set UI Value",
             "Set an element value",
             &["uia"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiSetValue {
                 target: up(),
                 value: String::new()
@@ -458,6 +518,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Read UI Value",
             "Read an element value",
             &["uia"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiReadValue {
                 target: up(),
                 variable: "value".into()
@@ -469,6 +531,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Toggle UI Element",
             "Toggle an element",
             &["uia"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiToggle(up())
         ),
         d!(
@@ -477,6 +541,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Select UI Element",
             "Select an element",
             &["uia"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiSelect(up())
         ),
         d!(
@@ -485,6 +551,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Focus UI Element",
             "Focus an element",
             &["uia"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiFocus(up())
         ),
         d!(
@@ -493,6 +561,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Wait for UI Element",
             "Wait for an element",
             &["uia", "wait"],
+            General,
+            "UI Automation execution and editing are not yet available",
             MkAction::UiWait(up())
         ),
     ];
@@ -542,14 +612,21 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
 
 /// True only when this exact action/editor pairing has an implemented route.
 pub fn editor_route_recognizes(action: &MkAction, editor: EditorKind) -> bool {
-    editor_for_action(action) == editor
+    editor_for_action(action) == editor && editor_contract(editor).is_some()
 }
 
-/// A pure description used by rendering-contract tests (and useful to
-/// accessibility tooling). Zero means the strategy is deliberately insertion-only.
-pub fn editable_field_count(editor: EditorKind) -> usize {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorContract {
+    Configurable { field_count: usize },
+    DirectInsert,
+}
+
+/// Authoritative routing contract. Every configurable value listed here has a
+/// concrete `action_ui` branch; `None` means that no editor route is implemented.
+pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
     match editor {
-        EditorKind::DirectInsert | EditorKind::General => 0,
+        EditorKind::DirectInsert => Some(EditorContract::DirectInsert),
+        EditorKind::General => None,
         EditorKind::Keyboard
         | EditorKind::Text
         | EditorKind::Timing
@@ -559,9 +636,13 @@ pub fn editable_field_count(editor: EditorKind) -> usize {
         | EditorKind::Launcher
         | EditorKind::Condition
         | EditorKind::Repeat
-        | EditorKind::Variable => 1,
-        EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => 2,
-        EditorKind::MouseDrag | EditorKind::Window => 3,
+        | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
+        EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => {
+            Some(EditorContract::Configurable { field_count: 2 })
+        }
+        EditorKind::MouseDrag | EditorKind::Window => {
+            Some(EditorContract::Configurable { field_count: 3 })
+        }
     }
 }
 /// Descriptors currently offered by the macro-authoring UI.
@@ -612,13 +693,13 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel",
-        MkAction::UiInvoke(_)
-        | MkAction::UiSetValue { .. }
-        | MkAction::UiReadValue { .. }
-        | MkAction::UiToggle(_)
-        | MkAction::UiSelect(_)
-        | MkAction::UiFocus(_)
-        | MkAction::UiWait(_) => "UI Automation — currently unavailable",
+        MkAction::UiInvoke(_) => "Invoke UI Element",
+        MkAction::UiSetValue { .. } => "Set UI Value",
+        MkAction::UiReadValue { .. } => "Read UI Value",
+        MkAction::UiToggle(_) => "Toggle UI Element",
+        MkAction::UiSelect(_) => "Select UI Element",
+        MkAction::UiFocus(_) => "Focus UI Element",
+        MkAction::UiWait(_) => "Wait for UI Element",
     }
 }
 fn mouse(b: &MkMouseButton) -> &'static str {
