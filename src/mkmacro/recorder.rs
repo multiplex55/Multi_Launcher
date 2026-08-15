@@ -513,12 +513,14 @@ mod tests {
     #[test]
     fn normalized_drag_becomes_one_drag_step() {
         let recorded = RecordedStep {
+            timestamp_us: 0,
             action: RecordedAction::Drag {
                 button: MouseButton::Right,
                 from: (3, 4),
                 to: (30, 40),
             },
             delay_after_ms: 77,
+            context: None,
         };
         let steps = to_macro_steps(&[recorded], 10);
         assert_eq!(steps.len(), 1);

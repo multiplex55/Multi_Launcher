@@ -340,6 +340,7 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::MkPoint;
     fn document() -> MkMacroDocument {
         MkMacroDocument {
             schema_version: SCHEMA_VERSION,

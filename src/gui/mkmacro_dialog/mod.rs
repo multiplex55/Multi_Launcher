@@ -53,7 +53,7 @@ mod tests {
     use super::*;
     use crate::mkmacro::{
         MkAction, MkCoordinateTarget, MkHotkey, MkImagePayload, MkKey, MkMouseButton,
-        MkMousePayload, MkStep, MkWaitOptions,
+        MkMouseMovePayload, MkMousePayload, MkStep, MkWaitOptions,
     };
     fn dialog() -> (tempfile::TempDir, MkMacroDialog) {
         let dir = tempfile::tempdir().unwrap();
