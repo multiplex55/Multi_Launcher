@@ -507,7 +507,7 @@ mod tests {
         .unwrap();
         let (doc, changed) = read_document(&p).unwrap().unwrap();
         assert!(changed);
-        assert_eq!(doc.schema_version, 2);
+        assert_eq!(doc.schema_version, SCHEMA_VERSION);
         let MkAction::MouseMove(payload) = &doc.macros[0].steps[0].action else {
             panic!()
         };
