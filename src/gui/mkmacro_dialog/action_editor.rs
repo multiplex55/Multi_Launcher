@@ -197,7 +197,7 @@ impl ActionEditorState {
         }
         #[cfg(windows)]
         {
-            use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            use ::windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
             self.position_capture = Some(PositionCaptureState {
                 target_step_id: self.editing_id,
                 draft_generation: self.draft_generation,
@@ -313,7 +313,7 @@ fn is_modifier(k: &MkKey) -> bool {
 #[cfg(windows)]
 impl PositionPicker for NativePositionPicker {
     fn poll_event(&mut self) -> Result<Option<PositionCaptureEvent>, String> {
-        use windows::Win32::{
+        use ::windows::Win32::{
             Foundation::POINT,
             UI::{
                 Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RETURN},
@@ -364,7 +364,7 @@ pub struct PickedWindow {
 
 #[cfg(windows)]
 fn picked_foreground_window(c: &PositionCaptureState) -> Result<PickedWindow, String> {
-    use windows::Win32::{
+    use ::windows::Win32::{
         Foundation::{HWND, POINT},
         UI::WindowsAndMessaging::{ClientToScreen, GetForegroundWindow},
     };
@@ -376,7 +376,12 @@ fn picked_foreground_window(c: &PositionCaptureState) -> Result<PickedWindow, St
     unsafe { ClientToScreen(hwnd, &mut origin) }
         .map_err(|e| format!("Could not determine the active window client origin: {e}"))?;
     Ok(PickedWindow {
-        matcher: MkWindowMatcher::default(),
+        matcher: MkWindowMatcher {
+            title: None,
+            title_regex: None,
+            process: None,
+            class: None,
+        },
         client_origin: MkPoint {
             x: origin.x,
             y: origin.y,
