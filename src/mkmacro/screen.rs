@@ -373,6 +373,377 @@ pub fn cancelled_error() -> ExecutionDiagnostic {
     ExecutionDiagnostic::new(DiagnosticKind::Cancelled, "visual search cancelled")
 }
 
+/// A monitor capture together with its position in the signed virtual-desktop
+/// coordinate space. The capture itself always starts at monitor-local `(0, 0)`.
+#[derive(Clone)]
+struct CaptureMonitor {
+    bounds: ScreenRect,
+    source: Arc<dyn MonitorCapture>,
+    stable_id: u64,
+}
+
+trait MonitorCapture: Send + Sync {
+    fn capture(&self) -> ExecResult<RgbaImage>;
+}
+
+trait CapturePlatform: Send + Sync {
+    fn virtual_desktop_metrics(&self) -> ExecResult<(i32, i32, i32, i32)>;
+    fn monitors(&self) -> ExecResult<Vec<CaptureMonitor>>;
+    fn window_rect(&self, matcher: &MkWindowMatcher, client: bool) -> ExecResult<ScreenRect>;
+}
+
+/// Production Windows screen capture. Coordinate resolution remains in
+/// [`WindowsScreenBackend`]; this type owns only capture geometry and pixels.
+pub struct WindowsScreenCaptureBackend {
+    platform: Arc<dyn CapturePlatform>,
+}
+
+impl WindowsScreenCaptureBackend {
+    #[cfg(windows)]
+    pub fn system() -> Self {
+        Self {
+            platform: Arc::new(SystemCapturePlatform),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(platform: Arc<dyn CapturePlatform>) -> Self {
+        Self { platform }
+    }
+
+    fn monitors(&self) -> ExecResult<Vec<CaptureMonitor>> {
+        let mut monitors = self.platform.monitors().map_err(|e| {
+            e.context("backend", "WindowsScreenCaptureBackend")
+                .context("operation", "enumerate monitors")
+        })?;
+        // Geometry first makes indices stable even if the OS enumeration order changes.
+        monitors.sort_by_key(|m| {
+            (
+                m.bounds.x,
+                m.bounds.y,
+                m.bounds.width,
+                m.bounds.height,
+                m.stable_id,
+            )
+        });
+        Ok(monitors)
+    }
+}
+
+fn rect_from_signed_metrics(x: i32, y: i32, width: i32, height: i32) -> ExecResult<ScreenRect> {
+    if width <= 0 || height <= 0 {
+        return Err(invalid(format!(
+            "invalid screen dimensions {width}x{height}"
+        )));
+    }
+    let width = u32::try_from(width).map_err(|_| invalid("screen width conversion overflow"))?;
+    let height = u32::try_from(height).map_err(|_| invalid("screen height conversion overflow"))?;
+    let rect = ScreenRect::new(x, y, width, height);
+    if rect.right() > i64::from(i32::MAX) + 1 || rect.bottom() > i64::from(i32::MAX) + 1 {
+        return Err(invalid("screen rectangle endpoint overflow"));
+    }
+    Ok(rect)
+}
+
+fn intersection(a: ScreenRect, b: ScreenRect) -> Option<ScreenRect> {
+    let left = i64::from(a.x).max(i64::from(b.x));
+    let top = i64::from(a.y).max(i64::from(b.y));
+    let right = a.right().min(b.right());
+    let bottom = a.bottom().min(b.bottom());
+    (left < right && top < bottom).then(|| {
+        ScreenRect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
+    })
+}
+
+fn compose_monitors(
+    target: ScreenRect,
+    monitors: &[CaptureMonitor],
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<RgbaImage> {
+    if target.is_empty() {
+        return Err(invalid("capture region is empty"));
+    }
+    let pixels = usize::try_from(u64::from(target.width) * u64::from(target.height))
+        .map_err(|_| invalid("capture allocation size overflow"))?;
+    let _rgba_bytes = pixels
+        .checked_mul(4)
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or_else(|| invalid("RGBA capture allocation size overflow"))?;
+    let mut covered = vec![false; pixels];
+    let mut destination = RgbaImage::new(target.width, target.height);
+    for monitor in monitors {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
+        let Some(overlap) = intersection(target, monitor.bounds) else {
+            continue;
+        };
+        let source = monitor.source.capture().map_err(|e| {
+            e.context("operation", "capture monitor").context(
+                "monitor",
+                format!(
+                    "{},{},{}x{}",
+                    monitor.bounds.x, monitor.bounds.y, monitor.bounds.width, monitor.bounds.height
+                ),
+            )
+        })?;
+        if source.dimensions() != (monitor.bounds.width, monitor.bounds.height) {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!(
+                    "monitor capture returned {}x{} for {}x{} monitor",
+                    source.width(),
+                    source.height(),
+                    monitor.bounds.width,
+                    monitor.bounds.height
+                ),
+            )
+            .context("operation", "validate monitor capture"));
+        }
+        let sx = u32::try_from(i64::from(overlap.x) - i64::from(monitor.bounds.x))
+            .map_err(|_| invalid("monitor-local X offset overflow"))?;
+        let sy = u32::try_from(i64::from(overlap.y) - i64::from(monitor.bounds.y))
+            .map_err(|_| invalid("monitor-local Y offset overflow"))?;
+        let dx = u32::try_from(i64::from(overlap.x) - i64::from(target.x))
+            .map_err(|_| invalid("destination X offset overflow"))?;
+        let dy = u32::try_from(i64::from(overlap.y) - i64::from(target.y))
+            .map_err(|_| invalid("destination Y offset overflow"))?;
+        if sx
+            .checked_add(overlap.width)
+            .is_none_or(|v| v > source.width())
+            || sy
+                .checked_add(overlap.height)
+                .is_none_or(|v| v > source.height())
+            || dx
+                .checked_add(overlap.width)
+                .is_none_or(|v| v > destination.width())
+            || dy
+                .checked_add(overlap.height)
+                .is_none_or(|v| v > destination.height())
+        {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "compositor offsets exceed image bounds",
+            )
+            .context("operation", "copy monitor intersection"));
+        }
+        for y in 0..overlap.height {
+            for x in 0..overlap.width {
+                destination.put_pixel(dx + x, dy + y, *source.get_pixel(sx + x, sy + y));
+                covered
+                    [(u64::from(dy + y) * u64::from(target.width) + u64::from(dx + x)) as usize] =
+                    true;
+            }
+        }
+    }
+    if cancelled() {
+        return Err(cancelled_error());
+    }
+    if covered.iter().any(|covered| !covered) {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::Backend,
+            "monitors do not cover every requested pixel",
+        )
+        .context("operation", "compose monitor captures"));
+    }
+    Ok(destination)
+}
+
+impl ScreenCaptureBackend for WindowsScreenCaptureBackend {
+    fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+        let (x, y, width, height) = self.platform.virtual_desktop_metrics().map_err(|e| {
+            e.context("backend", "WindowsScreenCaptureBackend")
+                .context("operation", "read virtual-screen metrics")
+        })?;
+        rect_from_signed_metrics(x, y, width, height)
+            .map_err(|e| e.context("backend", "WindowsScreenCaptureBackend"))
+    }
+
+    fn region_bounds(&self, region: &SearchRegion) -> ExecResult<ScreenRect> {
+        let result = match region {
+            SearchRegion::Desktop => self.virtual_desktop(),
+            SearchRegion::Monitor { index } => self
+                .monitors()?
+                .get(*index)
+                .map(|m| m.bounds)
+                .ok_or_else(|| {
+                    ExecutionDiagnostic::new(
+                        DiagnosticKind::TargetNotFound,
+                        format!("monitor index {index} does not exist"),
+                    )
+                    .context("monitor_index", index.to_string())
+                }),
+            SearchRegion::Rectangle { rect } => Ok(*rect),
+            SearchRegion::Window { matcher } => self.platform.window_rect(matcher, false),
+            SearchRegion::ClientArea { matcher } => self.platform.window_rect(matcher, true),
+        };
+        result.map_err(|e| {
+            e.context("backend", "WindowsScreenCaptureBackend")
+                .context("requested_region", format!("{region:?}"))
+        })
+    }
+
+    fn capture_rect(
+        &self,
+        rect: ScreenRect,
+        cancelled: &dyn Fn() -> bool,
+    ) -> ExecResult<RgbaImage> {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
+        compose_monitors(rect, &self.monitors()?, cancelled)
+    }
+}
+
+#[cfg(windows)]
+struct ScreenshotMonitor(screenshots::Screen);
+#[cfg(windows)]
+impl MonitorCapture for ScreenshotMonitor {
+    fn capture(&self) -> ExecResult<RgbaImage> {
+        // screenshots performs the native Windows BGRA -> RGBA conversion; its
+        // public image is therefore safe to copy without another channel swap.
+        self.0
+            .capture_area_ignore_area_check(
+                0,
+                0,
+                self.0.display_info.width,
+                self.0.display_info.height,
+            )
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("screenshots monitor capture failed: {e}"),
+                )
+            })
+    }
+}
+
+#[cfg(windows)]
+struct SystemCapturePlatform;
+#[cfg(windows)]
+impl CapturePlatform for SystemCapturePlatform {
+    fn virtual_desktop_metrics(&self) -> ExecResult<(i32, i32, i32, i32)> {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        Ok(unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        })
+    }
+
+    fn monitors(&self) -> ExecResult<Vec<CaptureMonitor>> {
+        screenshots::Screen::all()
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("screenshots monitor enumeration failed: {e}"),
+                )
+            })?
+            .into_iter()
+            .map(|screen| {
+                let d = screen.display_info;
+                if d.width == 0
+                    || d.height == 0
+                    || i64::from(d.x) + i64::from(d.width) > i64::from(i32::MAX) + 1
+                    || i64::from(d.y) + i64::from(d.height) > i64::from(i32::MAX) + 1
+                {
+                    return Err(invalid(format!("monitor {} has invalid bounds", d.id)));
+                }
+                Ok(CaptureMonitor {
+                    bounds: ScreenRect::new(d.x, d.y, d.width, d.height),
+                    stable_id: u64::from(d.id),
+                    source: Arc::new(ScreenshotMonitor(screen)),
+                })
+            })
+            .collect()
+    }
+
+    fn window_rect(&self, matcher: &MkWindowMatcher, client: bool) -> ExecResult<ScreenRect> {
+        use windows::Win32::{
+            Foundation::{HWND, POINT, RECT},
+            Graphics::Gdi::ClientToScreen,
+            UI::WindowsAndMessaging::{GetClientRect, GetWindowRect},
+        };
+        let candidates = crate::multi_manager::win::enumerate_top_level_windows()
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("window enumeration failed: {e}"),
+                )
+            })?
+            .into_iter()
+            .map(|w| crate::mkmacro::windows::WindowCandidate {
+                handle: w.hwnd,
+                title: w.title,
+                executable: w.executable,
+                process_path: w.process_path,
+                class_name: w.class_name,
+            })
+            .collect::<Vec<_>>();
+        let candidate = crate::mkmacro::windows::resolve_window(
+            matcher,
+            &candidates,
+            crate::mkmacro::windows::AmbiguityPolicy::Error,
+        )
+        .map_err(|e| e.context("window_matcher", format!("{matcher:?}")))?;
+        let hwnd = HWND(candidate.handle as *mut _);
+        let mut rect = RECT::default();
+        if client {
+            unsafe { GetClientRect(hwnd, &mut rect) }.map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("GetClientRect failed: {e}"),
+                )
+            })?;
+            let mut origin = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
+            if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "ClientToScreen failed",
+                ));
+            }
+            rect.right = origin
+                .x
+                .checked_add(rect.right - rect.left)
+                .ok_or_else(|| invalid("client rectangle X overflow"))?;
+            rect.bottom = origin
+                .y
+                .checked_add(rect.bottom - rect.top)
+                .ok_or_else(|| invalid("client rectangle Y overflow"))?;
+            rect.left = origin.x;
+            rect.top = origin.y;
+        } else {
+            unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("GetWindowRect failed: {e}"),
+                )
+            })?;
+        }
+        rect_from_signed_metrics(
+            rect.left,
+            rect.top,
+            rect.right
+                .checked_sub(rect.left)
+                .ok_or_else(|| invalid("window width overflow"))?,
+            rect.bottom
+                .checked_sub(rect.top)
+                .ok_or_else(|| invalid("window height overflow"))?,
+        )
+    }
+}
+
 #[cfg(test)]
 mod windows_backend_tests {
     use super::*;
@@ -382,6 +753,7 @@ mod windows_backend_tests {
     #[test]
     fn system_constructor_has_the_production_screen_backend_type() {
         let _: WindowsScreenBackend = WindowsScreenBackend::system();
+        let _: WindowsScreenCaptureBackend = WindowsScreenCaptureBackend::system();
     }
 
     struct Geometry {
@@ -589,6 +961,180 @@ mod windows_backend_tests {
                 .unwrap_err()
                 .message
                 .contains("overflow")
+        );
+    }
+
+    struct ImageSource(RgbaImage);
+    impl MonitorCapture for ImageSource {
+        fn capture(&self) -> ExecResult<RgbaImage> {
+            Ok(self.0.clone())
+        }
+    }
+    struct CaptureFixture {
+        desktop: (i32, i32, i32, i32),
+        monitors: Vec<CaptureMonitor>,
+    }
+    impl CapturePlatform for CaptureFixture {
+        fn virtual_desktop_metrics(&self) -> ExecResult<(i32, i32, i32, i32)> {
+            Ok(self.desktop)
+        }
+        fn monitors(&self) -> ExecResult<Vec<CaptureMonitor>> {
+            Ok(self.monitors.clone())
+        }
+        fn window_rect(&self, _: &MkWindowMatcher, _: bool) -> ExecResult<ScreenRect> {
+            Err(ExecutionDiagnostic::new(
+                DiagnosticKind::TargetNotFound,
+                "fixture window missing",
+            ))
+        }
+    }
+    fn monitor(id: u64, rect: ScreenRect, color: [u8; 4]) -> CaptureMonitor {
+        CaptureMonitor {
+            bounds: rect,
+            stable_id: id,
+            source: Arc::new(ImageSource(RgbaImage::from_pixel(
+                rect.width,
+                rect.height,
+                image::Rgba(color),
+            ))),
+        }
+    }
+
+    #[test]
+    fn half_open_intersections_handle_primary_left_above_and_touching_edges() {
+        let primary = ScreenRect::new(0, 0, 4, 3);
+        assert_eq!(intersection(primary, ScreenRect::new(-3, 0, 3, 3)), None);
+        assert_eq!(intersection(primary, ScreenRect::new(0, -2, 4, 2)), None);
+        assert_eq!(
+            intersection(primary, ScreenRect::new(-2, 1, 4, 1)),
+            Some(ScreenRect::new(0, 1, 2, 1))
+        );
+    }
+
+    #[test]
+    fn compositor_translates_negative_origins_and_exact_rgba_offsets() {
+        let monitors = vec![
+            monitor(1, ScreenRect::new(-2, 0, 2, 2), [1, 2, 3, 4]),
+            monitor(2, ScreenRect::new(0, 0, 3, 2), [10, 20, 30, 40]),
+        ];
+        let image = compose_monitors(ScreenRect::new(-1, 0, 3, 2), &monitors, &|| false).unwrap();
+        assert_eq!(image.dimensions(), (3, 2));
+        assert_eq!(image.get_pixel(0, 1).0, [1, 2, 3, 4]);
+        assert_eq!(image.get_pixel(1, 1).0, [10, 20, 30, 40]);
+        assert_eq!(image.get_pixel(2, 0).0, [10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn compositor_supports_above_ultrawide_and_single_monitor_targets() {
+        let monitors = vec![
+            monitor(1, ScreenRect::new(0, -2, 2, 2), [1, 0, 0, 255]),
+            monitor(2, ScreenRect::new(0, 0, 2, 2), [2, 0, 0, 255]),
+            monitor(3, ScreenRect::new(2, 0, 5, 2), [3, 0, 0, 255]),
+        ];
+        assert_eq!(
+            compose_monitors(ScreenRect::new(3, 0, 3, 2), &monitors, &|| false)
+                .unwrap()
+                .get_pixel(2, 1)
+                .0,
+            [3, 0, 0, 255]
+        );
+        let span = compose_monitors(ScreenRect::new(0, -1, 2, 3), &monitors, &|| false).unwrap();
+        assert_eq!(span.get_pixel(0, 0).0[0], 1);
+        assert_eq!(span.get_pixel(0, 1).0[0], 2);
+    }
+
+    #[test]
+    fn validation_rejects_empty_overflow_outside_and_uncovered_rectangles() {
+        for metrics in [(0, 0, 0, 1), (0, 0, -1, 1), (i32::MAX, 0, 2, 1)] {
+            assert_eq!(
+                rect_from_signed_metrics(metrics.0, metrics.1, metrics.2, metrics.3)
+                    .unwrap_err()
+                    .kind,
+                DiagnosticKind::InvalidTarget
+            );
+        }
+        let backend = WindowsScreenCaptureBackend::new(Arc::new(CaptureFixture {
+            desktop: (0, 0, 2, 2),
+            monitors: vec![monitor(1, ScreenRect::new(0, 0, 1, 2), [0; 4])],
+        }));
+        assert_eq!(
+            backend
+                .capture(
+                    &SearchRegion::Rectangle {
+                        rect: ScreenRect::new(0, 0, 0, 1)
+                    },
+                    &|| false
+                )
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::InvalidTarget
+        );
+        assert_eq!(
+            backend
+                .capture(
+                    &SearchRegion::Rectangle {
+                        rect: ScreenRect::new(-1, 0, 1, 1)
+                    },
+                    &|| false
+                )
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::InvalidTarget
+        );
+        assert_eq!(
+            backend
+                .capture_rect(ScreenRect::new(0, 0, 2, 2), &|| false)
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Backend
+        );
+    }
+
+    #[test]
+    fn monitor_indices_are_deterministic_and_invalid_indices_are_typed() {
+        let backend = WindowsScreenCaptureBackend::new(Arc::new(CaptureFixture {
+            desktop: (-2, 0, 4, 1),
+            monitors: vec![
+                monitor(8, ScreenRect::new(0, 0, 2, 1), [0; 4]),
+                monitor(9, ScreenRect::new(-2, 0, 2, 1), [0; 4]),
+            ],
+        }));
+        assert_eq!(
+            backend
+                .region_bounds(&SearchRegion::Monitor { index: 0 })
+                .unwrap()
+                .x,
+            -2
+        );
+        assert_eq!(
+            backend
+                .region_bounds(&SearchRegion::Monitor { index: 2 })
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::TargetNotFound
+        );
+    }
+
+    #[test]
+    fn cancellation_is_observed_before_and_between_monitor_captures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let monitors = vec![
+            monitor(1, ScreenRect::new(0, 0, 1, 1), [0; 4]),
+            monitor(2, ScreenRect::new(1, 0, 1, 1), [0; 4]),
+        ];
+        assert_eq!(
+            compose_monitors(ScreenRect::new(0, 0, 2, 1), &monitors, &|| true)
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Cancelled
+        );
+        let checks = AtomicUsize::new(0);
+        let cancelled = || checks.fetch_add(1, Ordering::SeqCst) >= 1;
+        assert_eq!(
+            compose_monitors(ScreenRect::new(0, 0, 2, 1), &monitors, &cancelled)
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Cancelled
         );
     }
 }
