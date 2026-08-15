@@ -316,7 +316,9 @@ impl PositionPicker for NativePositionPicker {
         use ::windows::Win32::{
             Foundation::POINT,
             UI::{
-                Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RETURN},
+                Input::KeyboardAndMouse::{
+                    GetAsyncKeyState, VIRTUAL_KEY, VK_ESCAPE, VK_LBUTTON, VK_RETURN,
+                },
                 WindowsAndMessaging::GetCursorPos,
             },
         };
@@ -327,7 +329,7 @@ impl PositionPicker for NativePositionPicker {
             self.last_position = Some(point);
             return Ok(Some(PositionCaptureEvent::PointerMoved(point)));
         }
-        let down = |key| unsafe { GetAsyncKeyState(key.0 as i32) } < 0;
+        let down = |key: VIRTUAL_KEY| unsafe { GetAsyncKeyState(key.0 as i32) } < 0;
         let left = down(VK_LBUTTON);
         let enter = down(VK_RETURN);
         let escape = down(VK_ESCAPE);
@@ -366,15 +368,20 @@ pub struct PickedWindow {
 fn picked_foreground_window(c: &PositionCaptureState) -> Result<PickedWindow, String> {
     use ::windows::Win32::{
         Foundation::{HWND, POINT},
-        UI::WindowsAndMessaging::{ClientToScreen, GetForegroundWindow},
+        Graphics::Gdi::ClientToScreen,
+        UI::WindowsAndMessaging::GetForegroundWindow,
     };
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() || hwnd != HWND(c.foreground_window as *mut core::ffi::c_void) {
         return Err("The active window changed or disappeared during capture".into());
     }
     let mut origin = POINT::default();
-    unsafe { ClientToScreen(hwnd, &mut origin) }
-        .map_err(|e| format!("Could not determine the active window client origin: {e}"))?;
+    if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+        return Err(format!(
+            "Could not determine the active window client origin: {}",
+            ::windows::core::Error::from_win32()
+        ));
+    }
     Ok(PickedWindow {
         matcher: MkWindowMatcher {
             title: None,
