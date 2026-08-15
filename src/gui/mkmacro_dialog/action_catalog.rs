@@ -55,7 +55,10 @@ pub enum EditorKind {
     Launcher,
     Image,
     Pixel,
-    Structural,
+    Condition,
+    Repeat,
+    Variable,
+    General,
     DirectInsert,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,7 +367,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Repeat",
             "Repeat block",
             &["loop"],
-            MkAction::RepeatStart { count: 2 }
+            MkAction::RepeatStart { count: 5 }
         ),
         d!(
             direct,
@@ -493,17 +496,6 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::UiWait(up())
         ),
     ];
-    for descriptor in &mut entries {
-        let action = (descriptor.make_default)();
-        if matches!(
-            action,
-            MkAction::WaitUntil { .. }
-                | MkAction::SetVariable { .. }
-                | MkAction::UnsetVariable { .. }
-        ) {
-            descriptor.availability = ActionAvailability::Hidden;
-        }
-    }
     entries
 }
 /// The editor capability for every model variant. This exhaustive match is the
@@ -525,9 +517,11 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         MkAction::WindowActivate(_) | MkAction::WindowClose(_) | MkAction::WindowWait(_) => {
             EditorKind::Window
         }
-        MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. } => {
-            EditorKind::Structural
+        MkAction::If(_) | MkAction::WhileStart { .. } | MkAction::WaitUntil { .. } => {
+            EditorKind::Condition
         }
+        MkAction::RepeatStart { .. } => EditorKind::Repeat,
+        MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => EditorKind::Variable,
         MkAction::Else
         | MkAction::EndIf
         | MkAction::RepeatEnd
@@ -536,16 +530,13 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::Continue => EditorKind::DirectInsert,
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
         MkAction::PixelCheck { .. } => EditorKind::Pixel,
-        MkAction::WaitUntil { .. }
-        | MkAction::SetVariable { .. }
-        | MkAction::UnsetVariable { .. }
-        | MkAction::UiInvoke(_)
+        MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
         | MkAction::UiToggle(_)
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
-        | MkAction::UiWait(_) => EditorKind::Structural,
+        | MkAction::UiWait(_) => EditorKind::General,
     }
 }
 
@@ -558,14 +549,17 @@ pub fn editor_route_recognizes(action: &MkAction, editor: EditorKind) -> bool {
 /// accessibility tooling). Zero means the strategy is deliberately insertion-only.
 pub fn editable_field_count(editor: EditorKind) -> usize {
     match editor {
-        EditorKind::DirectInsert | EditorKind::Structural => 0,
+        EditorKind::DirectInsert | EditorKind::General => 0,
         EditorKind::Keyboard
         | EditorKind::Text
         | EditorKind::Timing
         | EditorKind::MouseButton
         | EditorKind::MouseScroll
         | EditorKind::Process
-        | EditorKind::Launcher => 1,
+        | EditorKind::Launcher
+        | EditorKind::Condition
+        | EditorKind::Repeat
+        | EditorKind::Variable => 1,
         EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => 2,
         EditorKind::MouseDrag | EditorKind::Window => 3,
     }
@@ -821,7 +815,7 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
         descriptor.name
     );
     match descriptor.editor {
-        EditorKind::DirectInsert | EditorKind::Structural => insert_action(d, action),
+        EditorKind::DirectInsert => insert_action(d, action),
         kind => d.action_editor.begin_new_with_editor(action, kind),
     }
     true
