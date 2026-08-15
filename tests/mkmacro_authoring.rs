@@ -1,5 +1,11 @@
 use multi_launcher::{
-    gui::mkmacro_dialog::{MkMacroDialog, action_catalog, action_editor::ActionEditorState},
+    gui::mkmacro_dialog::{
+        MkMacroDialog, action_catalog,
+        action_editor::ActionEditorState,
+        recorder_controller::{
+            RecorderController, RecorderControllerView, RecorderState, RecorderStatusSnapshot,
+        },
+    },
     mkmacro::{executor::fake::FakeBackend, *},
 };
 use std::{
@@ -9,7 +15,9 @@ use std::{
 };
 
 fn wait_for(runtime: &MacroRuntime, wanted: RuntimeState) -> RuntimeSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // The runtime worker is deliberately asynchronous. Windows CI can be heavily
+    // oversubscribed, so this is a deadline rather than an assertion about speed.
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let snapshot = runtime.snapshot();
         if snapshot.state == wanted {
@@ -21,6 +29,19 @@ fn wait_for(runtime: &MacroRuntime, wanted: RuntimeState) -> RuntimeSnapshot {
             snapshot.state
         );
         thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[derive(Default)]
+struct FakeRecorderView;
+impl RecorderControllerView for FakeRecorderView {
+    fn set_visible(&mut self, _: bool) {}
+    fn show(
+        &mut self,
+        _: &RecorderStatusSnapshot,
+        _: Option<&RuntimeSnapshot>,
+    ) -> Option<multi_launcher::gui::mkmacro_dialog::recorder_controller::ControllerAction> {
+        None
     }
 }
 
@@ -143,6 +164,9 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     let stopped = wait_for(&runtime, RuntimeState::Stopped);
     assert!(stopped.steps.values().any(|s| *s == StepState::Success));
 
+    let mut recorder = RecorderController::new(FakeRecorderView);
+    recorder.hook_command(HookCommand::Start);
+    assert_eq!(recorder.status.state, RecorderState::Recording);
     let recorded = normalize(
         &[
             RecordingBoundary::Event(HookEvent::Key {
@@ -176,6 +200,8 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
         },
         None,
     );
+    recorder.hook_command(HookCommand::Stop);
+    assert_eq!(recorder.status.state, RecorderState::Stopped);
     let before = dialog.draft.clone();
     assert!(dialog.apply_recording(u64::MAX, &recorded).is_err());
     assert_eq!(dialog.draft, before, "recorder failure is atomic");
