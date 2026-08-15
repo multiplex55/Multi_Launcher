@@ -37,11 +37,14 @@ fn image_wait_cancels_promptly_without_real_screen_access() {
             Executor::new(f.backends(), c).execute(
                 &plan(MkAction::ImageFind(MkImagePayload {
                     asset_id: 2,
-                    confidence: 0.9,
                     wait: MkWaitOptions {
                         timeout_ms: 60_000,
                         poll_interval_ms: 10_000,
                     },
+                    region: SearchRegion::Desktop,
+                    tolerance: 0,
+                    alpha: AlphaPolicy::Compare,
+                    return_point: ReturnPoint::Center,
                 })),
                 &|_| {},
             )

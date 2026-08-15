@@ -2,8 +2,8 @@
 //! Coordinates in a [`CapturedRegion`] are local; `origin` converts them back to
 //! virtual-desktop coordinates (and may therefore be negative).
 use crate::mkmacro::{
-    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkCoordinateTarget, MkPoint, MkValue,
-    MkWindowMatcher, RuntimeVariables, ScreenBackend,
+    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkCoordinateTarget, MkImagePayload, MkPoint,
+    MkValue, MkWindowMatcher, RuntimeVariables, ScreenBackend,
 };
 use image::RgbaImage;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ trait WindowsGeometry: Send + Sync {
 }
 
 trait VisualSearch: Send + Sync {
-    fn image_found(&self, asset_id: u64, confidence: f32) -> ExecResult<Option<MkPoint>>;
+    fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
     fn pixel_matches(&self, point: MkPoint, color: &str, tolerance: u8) -> ExecResult<bool>;
 }
 
@@ -139,8 +139,8 @@ impl ScreenBackend for WindowsScreenBackend {
         }
     }
 
-    fn image_found(&self, asset_id: u64, confidence: f32) -> ExecResult<Option<MkPoint>> {
-        self.visual.image_found(asset_id, confidence)
+    fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+        self.visual.find_image(macro_id, payload)
     }
 
     fn pixel_matches(
@@ -219,7 +219,7 @@ impl WindowsGeometry for SystemWindowsGeometry {
 struct SystemVisualSearch;
 #[cfg(windows)]
 impl VisualSearch for SystemVisualSearch {
-    fn image_found(&self, _: u64, _: f32) -> ExecResult<Option<MkPoint>> {
+    fn find_image(&self, _: u64, _: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
         Err(ExecutionDiagnostic::new(
             DiagnosticKind::UnsupportedOperation,
             "production image lookup is not configured",
@@ -278,6 +278,11 @@ pub enum SearchRegion {
     Window { matcher: MkWindowMatcher },
     ClientArea { matcher: MkWindowMatcher },
     Rectangle { rect: ScreenRect },
+}
+impl Default for SearchRegion {
+    fn default() -> Self {
+        Self::Desktop
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -777,7 +782,8 @@ mod windows_backend_tests {
         requested: Mutex<Vec<u64>>,
     }
     impl VisualSearch for Visual {
-        fn image_found(&self, id: u64, _: f32) -> ExecResult<Option<MkPoint>> {
+        fn find_image(&self, _: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+            let id = payload.asset_id;
             self.requested.lock().unwrap().push(id);
             Ok(None)
         }

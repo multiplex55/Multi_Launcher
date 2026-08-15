@@ -1,3 +1,4 @@
+use super::SearchRegion;
 use super::model::*;
 use super::variables::*;
 use regex::Regex;
@@ -180,7 +181,18 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                 MkAction::WindowClose(x) => matcher(x, m.id, sid, &mut out),
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                     wait(&p.wait, m.id, sid, &mut out);
-                    asset(p.asset_id, m.id, sid, asset_root, &mut out)
+                    asset(p.asset_id, m.id, sid, asset_root, &mut out);
+                    if let SearchRegion::Rectangle { rect } = &p.region
+                        && (rect.width == 0 || rect.height == 0)
+                    {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_image_region",
+                            "Image search rectangle must have positive width and height",
+                        )
+                    }
                 }
                 _ => {}
             }

@@ -32,6 +32,54 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
+    /// Returns the lowest unused canonical positive numeric PNG stem.
+    pub fn next_asset_id(&self, macro_id: u64) -> Result<u64> {
+        if macro_id == 0 {
+            anyhow::bail!("macro ID must be non-zero")
+        }
+        let directory = self
+            .inner
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(ASSET_DIRECTORY)
+            .join(macro_id.to_string());
+        let mut occupied = HashSet::new();
+        match fs::read_dir(&directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let path = entry.path();
+                    if path.extension().and_then(|x| x.to_str()) != Some("png") {
+                        continue;
+                    }
+                    let Some(stem) = path.file_stem().and_then(|x| x.to_str()) else {
+                        continue;
+                    };
+                    let Ok(id) = stem.parse::<u64>() else {
+                        continue;
+                    };
+                    if id > 0 && stem == id.to_string() {
+                        occupied.insert(id);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("inspect assets for macro {macro_id}"));
+            }
+        }
+        let mut id = 1u64;
+        while occupied.contains(&id) {
+            id = id
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("asset ID space exhausted"))?;
+        }
+        Ok(id)
+    }
     pub fn open(directory: impl AsRef<Path>) -> Result<(Self, LoadDisposition)> {
         let path = directory.as_ref().join(MKMACROS_FILE);
         let inner = Arc::new(Inner {
@@ -246,8 +294,11 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if version == 1 {
         migrate_v1_to_v2(&mut value)?;
     }
+    if version <= 2 {
+        migrate_v2_to_v3(&mut value)?;
+    }
     let mut doc: MkMacroDocument = match version {
-        0 | 1 | 2 => serde_json::from_value(value)
+        0 | 1 | 2 | 3 => serde_json::from_value(value)
             .context("mkmacros.json does not match the macro schema")?,
         _ => unreachable!(),
     };
@@ -255,6 +306,41 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+/// Adds schema-3 image matching defaults. Legacy `confidence` is removed rather
+/// than translated because its floating-point semantics never matched byte
+/// tolerance; this makes migration deterministic.
+fn migrate_v2_to_v3(value: &mut serde_json::Value) -> Result<()> {
+    let Some(macros) = value.get_mut("macros").and_then(|v| v.as_array_mut()) else {
+        value["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+        return Ok(());
+    };
+    for mac in macros {
+        if let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) {
+            for step in steps {
+                if let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) {
+                    if matches!(
+                        action.get("type").and_then(|v| v.as_str()),
+                        Some("image_find" | "image_click")
+                    ) {
+                        if let Some(data) = action.get_mut("data").and_then(|v| v.as_object_mut()) {
+                            data.entry("region")
+                                .or_insert_with(|| serde_json::json!({"type":"desktop"}));
+                            data.entry("tolerance")
+                                .or_insert_with(|| serde_json::json!(0));
+                            data.entry("alpha")
+                                .or_insert_with(|| serde_json::json!("compare"));
+                            data.entry("return_point")
+                                .or_insert_with(|| serde_json::json!("center"));
+                            data.remove("confidence");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+    Ok(())
 }
 fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<()> {
     let macros = value
@@ -340,7 +426,7 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::MkPoint;
+    use crate::mkmacro::{MkPoint, SearchRegion};
     fn document() -> MkMacroDocument {
         MkMacroDocument {
             schema_version: SCHEMA_VERSION,
@@ -421,7 +507,7 @@ mod tests {
         .unwrap();
         let (doc, changed) = read_document(&p).unwrap().unwrap();
         assert!(changed);
-        assert_eq!(doc.schema_version, 2);
+        assert_eq!(doc.schema_version, SCHEMA_VERSION);
         let MkAction::MouseMove(payload) = &doc.macros[0].steps[0].action else {
             panic!()
         };
@@ -465,5 +551,45 @@ mod tests {
             s.resolve_asset_reference(4, Path::new("mkmacro_assets/4/1.png"))
                 .is_ok()
         )
+    }
+    #[test]
+    fn next_asset_id_uses_only_canonical_positive_png_files() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = MkMacroStore::open(d.path()).unwrap();
+        assert_eq!(s.next_asset_id(7).unwrap(), 1);
+        let dir = d.path().join(ASSET_DIRECTORY).join("7");
+        fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "1.png",
+            "3.png",
+            "0.png",
+            "01.png",
+            "2.jpg",
+            "notes.txt",
+            "18446744073709551615.png",
+        ] {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(s.next_asset_id(7).unwrap(), 2);
+        assert_eq!(s.next_asset_id(8).unwrap(), 1);
+        assert!(s.next_asset_id(0).is_err());
+    }
+    #[test]
+    fn version_two_images_migrate_once_and_drop_confidence() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(MKMACROS_FILE);
+        fs::write(&p, r#"{"schema_version":2,"macros":[{"id":1,"name":"m","steps":[{"id":2,"action":{"type":"image_find","data":{"asset_id":9,"wait":{"timeout_ms":20,"poll_interval_ms":5},"confidence":0.8}}}]}]}"#).unwrap();
+        let (doc, changed) = read_document(&p).unwrap().unwrap();
+        assert!(changed);
+        let MkAction::ImageFind(image) = &doc.macros[0].steps[0].action else {
+            panic!()
+        };
+        assert_eq!(image.asset_id, 9);
+        assert_eq!(image.wait.timeout_ms, 20);
+        assert_eq!(image.region, SearchRegion::Desktop);
+        assert_eq!(image.tolerance, 0);
+        persist(&p, &doc).unwrap();
+        assert!(!fs::read_to_string(&p).unwrap().contains("confidence"));
+        assert!(!read_document(&p).unwrap().unwrap().1);
     }
 }
