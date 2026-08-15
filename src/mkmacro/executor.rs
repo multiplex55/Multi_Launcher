@@ -291,7 +291,7 @@ pub fn production_backends() -> Backends {
                 super::input::LiveInputOptIn::production(),
             )),
             window: Arc::new(super::windows::Win32WindowBackend),
-            screen: unsupported.screen,
+            screen: Arc::new(super::screen::WindowsScreenBackend::system()),
             uia: unsupported.uia,
             launcher: Arc::new(ProductionLauncher),
         }
@@ -503,6 +503,58 @@ mod tests {
             let _guard = InputCleanupGuard::new(fake.clone());
         }
         assert!(fake.events().is_empty());
+    }
+    #[test]
+    fn wait_image_records_legacy_and_asset_scoped_results_and_clears_stale_data() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.conditions.lock().unwrap().insert("image".into(), true);
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let payload = |asset_id| MkImagePayload {
+            asset_id,
+            wait: MkWaitOptions {
+                timeout_ms: 0,
+                poll_interval_ms: 1,
+            },
+            confidence: 0.9,
+        };
+        let mut vars = RuntimeVariables::new();
+        assert_eq!(
+            executor.wait_image(&payload(7), &mut vars).unwrap(),
+            MkPoint { x: 1, y: 1 }
+        );
+        assert_eq!(
+            executor.wait_image(&payload(8), &mut vars).unwrap(),
+            MkPoint { x: 1, y: 1 }
+        );
+        for key in [
+            "last_image",
+            "last_image_x",
+            "last_image_y",
+            "last_image_result",
+            "last_image_found",
+            "__image.7",
+            "__image.8",
+        ] {
+            assert!(
+                vars.contains_key(key),
+                "missing compatibility/runtime key {key}"
+            );
+        }
+        assert_eq!(
+            vars.get("last_image"),
+            Some(&MkValue::Point(MkPoint { x: 1, y: 1 }))
+        );
+
+        fake.conditions
+            .lock()
+            .unwrap()
+            .insert("image".into(), false);
+        let error = executor.wait_image(&payload(7), &mut vars).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Timeout);
+        assert!(!vars.contains_key("__image.7"));
+        assert!(vars.contains_key("__image.8"));
     }
     #[test]
     fn stop_wakes_a_long_wait() {
@@ -817,6 +869,8 @@ impl Executor {
         Ok(())
     }
     fn wait_image(&self, p: &MkImagePayload, v: &mut RuntimeVariables) -> ExecResult<MkPoint> {
+        let image_variable = super::screen::image_result_variable(p.asset_id);
+        v.remove(&image_variable);
         self.wait_condition(
             &MkCondition::ImageResult {
                 asset_id: p.asset_id,
@@ -832,6 +886,8 @@ impl Executor {
         );
         v.insert("last_image_found".into(), MkValue::Boolean(found.is_some()));
         if let Some(point) = found {
+            v.insert(image_variable, MkValue::Point(point));
+            v.insert("last_image".into(), MkValue::Point(point));
             set_point(v, "last_image", point);
             v.insert("last_image_x".into(), MkValue::Number(point.x.into()));
             v.insert("last_image_y".into(), MkValue::Number(point.y.into()));
@@ -922,6 +978,7 @@ impl Executor {
                 );
                 v.insert("last_image_found".into(), MkValue::Boolean(point.is_some()));
                 if let Some(p) = point {
+                    v.insert("last_image".into(), MkValue::Point(p));
                     set_point(v, "last_image", p);
                     v.insert("last_image_x".into(), MkValue::Number(p.x.into()));
                     v.insert("last_image_y".into(), MkValue::Number(p.y.into()));
