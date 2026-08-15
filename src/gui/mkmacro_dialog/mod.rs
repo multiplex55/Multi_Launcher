@@ -1,6 +1,7 @@
 pub mod action_catalog;
 pub mod action_editor;
 pub mod image_search_editor;
+mod key_capture;
 mod macro_list;
 mod macro_properties;
 pub mod recorder_controller;

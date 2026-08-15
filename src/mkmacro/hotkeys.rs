@@ -9,6 +9,10 @@ pub struct HotkeyDiagnostic {
 fn key_name(k: &MkKey) -> String {
     match k {
         MkKey::Character(s) => s.to_ascii_uppercase(),
+        MkKey::Control | MkKey::LeftControl | MkKey::RightControl => "CONTROL".into(),
+        MkKey::Alt | MkKey::LeftAlt | MkKey::RightAlt => "ALT".into(),
+        MkKey::Shift | MkKey::LeftShift | MkKey::RightShift => "SHIFT".into(),
+        MkKey::Meta | MkKey::LeftMeta | MkKey::RightMeta => "META".into(),
         x => format!("{x:?}").to_ascii_uppercase(),
     }
 }
@@ -100,5 +104,18 @@ mod tests {
             validate_hotkeys(&d, &[("emergency stop", "CONTROL+K")]).len(),
             1
         )
+    }
+    #[test]
+    fn canonical_modifier_order_sides_and_duplicates_are_equivalent() {
+        let key = MkKey::Character("m".into());
+        let a = MkHotkey {
+            key: key.clone(),
+            modifiers: vec![MkKey::Alt, MkKey::Control],
+        };
+        let b = MkHotkey {
+            key,
+            modifiers: vec![MkKey::RightControl, MkKey::LeftAlt, MkKey::Control],
+        };
+        assert_eq!(canonical_hotkey(&a), canonical_hotkey(&b));
     }
 }
