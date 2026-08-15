@@ -1,5 +1,6 @@
 pub mod action_catalog;
 pub mod action_editor;
+pub mod condition_editor;
 pub mod image_search_editor;
 mod key_capture;
 mod macro_list;

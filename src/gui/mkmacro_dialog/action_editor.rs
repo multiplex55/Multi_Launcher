@@ -6,7 +6,7 @@ use super::{
     MkMacroDialog,
     key_capture::{CapturedChord, captured_chord, key_name},
 };
-use crate::mkmacro::variables::MkPoint;
+use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
 
@@ -161,6 +161,42 @@ impl ActionEditorState {
         let mut step = self.draft.take()?;
         let edit = self.editing_id.take();
         self.editor = None;
+        // New block openers are inserted together with their mandatory closing
+        // marker, while the configured step settings remain on the opener.
+        if edit.is_none()
+            && matches!(
+                &step.action,
+                MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. }
+            )
+        {
+            let action = step.action.clone();
+            super::action_catalog::insert_action(dialog, action);
+            let selected = dialog.selection.ids.clone();
+            let opening_id = dialog
+                .selected_macro()?
+                .steps
+                .iter()
+                .find(|candidate| {
+                    selected.contains(&candidate.id)
+                        && matches!(
+                            (&candidate.action, &step.action),
+                            (MkAction::If(_), MkAction::If(_))
+                                | (MkAction::RepeatStart { .. }, MkAction::RepeatStart { .. })
+                                | (MkAction::WhileStart { .. }, MkAction::WhileStart { .. })
+                        )
+                })?
+                .id;
+            step.id = opening_id;
+            let opening = dialog
+                .selected_macro_mut()?
+                .steps
+                .iter_mut()
+                .find(|candidate| candidate.id == opening_id)?;
+            *opening = step;
+            dialog.selection.ids.clear();
+            dialog.selection.ids.insert(opening_id);
+            return Some(opening_id);
+        }
         let selected = dialog.selection.ids.clone();
         let m = dialog.selected_macro_mut()?;
         let index = if let Some(id) = edit {
@@ -436,17 +472,17 @@ fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
         *value = None;
     }
 }
-fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) {
-    optional_field(ui, "Executable/process", &mut m.process);
+pub(super) fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) {
+    optional_field(ui, "Executable", &mut m.process);
     optional_field(ui, "Title contains", &mut m.title);
     optional_field(ui, "Title regex", &mut m.title_regex);
-    optional_field(ui, "Window class", &mut m.class);
+    optional_field(ui, "Class", &mut m.class);
     ui.add_enabled(
         false,
         egui::Button::new("Pick window (unavailable on this platform/session)"),
     );
 }
-fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> bool {
+pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> bool {
     let kind = match target {
         MkCoordinateTarget::Screen { .. } => 0,
         MkCoordinateTarget::ActiveWindow { .. } => 1,
@@ -513,6 +549,66 @@ fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> bool {
         }
     }
     false
+}
+
+/// A shared typed editor. Switching type constructs a fresh value rather than
+/// interpreting text belonging to the previous type.
+pub(super) fn value_ui(ui: &mut egui::Ui, value: &mut MkValue) {
+    let kind = match value {
+        MkValue::String(_) => 0,
+        MkValue::Number(_) => 1,
+        MkValue::Boolean(_) => 2,
+        MkValue::Point(_) => 3,
+        MkValue::Null => 4,
+    };
+    let mut next = kind;
+    egui::ComboBox::from_label("Type")
+        .selected_text(["String", "Number", "Boolean", "Point", "Null"][kind])
+        .show_ui(ui, |ui| {
+            for (index, label) in ["String", "Number", "Boolean", "Point", "Null"]
+                .iter()
+                .enumerate()
+            {
+                ui.selectable_value(&mut next, index, *label);
+            }
+        });
+    if next != kind {
+        *value = match next {
+            0 => MkValue::String(String::new()),
+            1 => MkValue::Number(0.0),
+            2 => MkValue::Boolean(false),
+            3 => MkValue::Point(MkPoint { x: 0, y: 0 }),
+            _ => MkValue::Null,
+        };
+    }
+    match value {
+        MkValue::String(text) => {
+            ui.horizontal(|ui| {
+                ui.label("Value");
+                ui.text_edit_singleline(text);
+            });
+        }
+        MkValue::Number(number) => {
+            ui.horizontal(|ui| {
+                ui.label("Value");
+                ui.add(egui::DragValue::new(number));
+            });
+        }
+        MkValue::Boolean(boolean) => {
+            ui.checkbox(boolean, "Value");
+        }
+        MkValue::Point(point) => {
+            ui.horizontal(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut point.x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut point.y));
+            });
+        }
+        MkValue::Null => {
+            ui.small("Null has no value.");
+        }
+    }
 }
 
 fn action_ui(
@@ -717,6 +813,39 @@ fn action_ui(
             }
         }
         MkAction::WindowClose(m) => matcher_ui(ui, m),
+        MkAction::SetVariable { name, value } => {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(name);
+            });
+            value_ui(ui, value);
+        }
+        MkAction::UnsetVariable { name } => {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(name);
+            });
+        }
+        MkAction::RepeatStart { count } => {
+            ui.horizontal(|ui| {
+                ui.label("Repeat count");
+                ui.add(egui::DragValue::new(count).clamp_range(1..=1_000_000));
+            });
+        }
+        MkAction::If(condition) | MkAction::WhileStart { condition } => {
+            super::condition_editor::condition_ui(ui, condition);
+        }
+        MkAction::WaitUntil { condition, wait } => {
+            super::condition_editor::condition_ui(ui, condition);
+            ui.horizontal(|ui| {
+                ui.label("Timeout (ms)");
+                ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
+                ui.label("Poll (ms)");
+                ui.add(
+                    egui::DragValue::new(&mut wait.poll_interval_ms).clamp_range(1..=86_400_000),
+                );
+            });
+        }
         MkAction::LauncherCommand { command, args } => {
             ui.horizontal(|ui| {
                 ui.label("Canonical action");
