@@ -384,6 +384,7 @@ impl MkMacroDialog {
         }
         let mut open = self.open;
         eframe::egui::Window::new("Mouse/Keyboard Macros")
+            .id(eframe::egui::Id::new("mkmacro_main_window"))
             .open(&mut open)
             .default_size([920.0, 620.0])
             .min_size([680.0, 420.0])
@@ -396,7 +397,12 @@ impl MkMacroDialog {
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         toolbar::show(ui, self);
         if self.draft.macros.is_empty() {
-            macro_list::show_empty(ui, self);
+            let body_size = ui.available_size();
+            ui.allocate_ui_with_layout(
+                body_size,
+                eframe::egui::Layout::top_down(eframe::egui::Align::Center),
+                |ui| macro_list::show_empty(ui, self),
+            );
         } else {
             egui_extras::StripBuilder::new(ui)
                 .size(egui_extras::Size::exact(macro_list::SIDEBAR_WIDTH))

@@ -112,6 +112,17 @@ fn structural(a: &crate::mkmacro::MkAction) -> bool {
             | crate::mkmacro::MkAction::WhileEnd
     )
 }
+
+const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
+const QUICK_INSERT_HEIGHT: f32 = 82.0;
+const QUICK_INSERT_CAPTURE_HEIGHT: f32 = 104.0;
+
+/// Divides the height already assigned to the step area; the number of rows is
+/// deliberately irrelevant because rows belong to the table's scroll area.
+fn table_viewport_height(available_height: f32, footer_height: f32) -> f32 {
+    (available_height - footer_height).max(MIN_TABLE_VIEWPORT_HEIGHT)
+}
+
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let Some(mid) = d.selected_macro_id else {
         ui.label("Select a macro");
@@ -128,8 +139,21 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let mut changed = false;
     let mut updates = Vec::new();
     let mut command = None;
+    let footer_height = if d.quick_insert.capturing {
+        QUICK_INSERT_CAPTURE_HEIGHT
+    } else {
+        QUICK_INSERT_HEIGHT
+    };
+    let table_height = table_viewport_height(ui.available_height(), footer_height);
+    ui.allocate_ui_with_layout(
+        eframe::egui::vec2(ui.available_width(), table_height),
+        eframe::egui::Layout::top_down(eframe::egui::Align::Min),
+        |ui| {
+    let max_scroll_height = ui.available_height().max(MIN_TABLE_VIEWPORT_HEIGHT);
     egui_extras::TableBuilder::new(ui)
         .striped(true)
+        .auto_shrink([false, false])
+        .max_scroll_height(max_scroll_height)
         .column(egui_extras::Column::exact(28.0))
         .column(egui_extras::Column::exact(55.0))
         .column(egui_extras::Column::initial(100.0))
@@ -205,14 +229,23 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 });
                             }
                         }
-                        for x in diagnostics.iter().filter(|x| x.step_id == Some(s.id)) {
-                            ui.colored_label(eframe::egui::Color32::RED, &x.message);
+                        if let Some(x) = diagnostics.iter().find(|x| x.step_id == Some(s.id)) {
+                            ui.add(
+                                eframe::egui::Label::new(
+                                    eframe::egui::RichText::new(&x.message)
+                                        .color(eframe::egui::Color32::RED),
+                                )
+                                .truncate(true),
+                            )
+                            .on_hover_text(&x.message);
                         }
                     });
                 });
                 updates.push((s.id,s.enabled,s.repeat,s.delay_after_ms));
             }
         });
+        },
+    );
     if let Some((i, ctrl, shift)) = clicked {
         d.selection.click(&rows, i, ctrl, shift);
     }
@@ -403,5 +436,27 @@ fn quick_insert(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         let mut q = std::mem::take(&mut d.quick_insert);
         q.insert(d);
         d.quick_insert = q;
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn table_uses_body_height_remaining_after_footer() {
+        assert_eq!(table_viewport_height(500.0, 82.0), 418.0);
+        assert_eq!(table_viewport_height(250.0, 82.0), 168.0);
+        assert_eq!(
+            table_viewport_height(100.0, 82.0),
+            MIN_TABLE_VIEWPORT_HEIGHT
+        );
+    }
+
+    #[test]
+    fn row_count_cannot_affect_table_height() {
+        let allocations =
+            [0_usize, 10, 500].map(|_row_count| table_viewport_height(500.0, QUICK_INSERT_HEIGHT));
+        assert_eq!(allocations, [418.0; 3]);
     }
 }

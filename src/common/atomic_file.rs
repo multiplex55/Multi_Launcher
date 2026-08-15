@@ -98,20 +98,47 @@ fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
     }
     let s = wide(src);
     let d = wide(dst);
-    unsafe {
-        MoveFileExW(
-            PCWSTR(s.as_ptr()),
-            PCWSTR(d.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+    let mut attempt = 0;
+    loop {
+        match unsafe {
+            MoveFileExW(
+                PCWSTR(s.as_ptr()),
+                PCWSTR(d.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // File-system watchers, virus scanners, and indexers can briefly hold the
+                // destination without delete sharing. MoveFileExW then reports access denied
+                // (5) or a sharing violation (32), even though the same atomic replacement
+                // succeeds as soon as that handle is released.
+                let transient = matches!(error.code().0 as u32, 0x8007_0005 | 0x8007_0020);
+                let Some(delay) = transient.then(|| replace_retry_delay(attempt)).flatten() else {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "replace {} with {} using MoveFileExW",
+                            dst.display(),
+                            src.display()
+                        )
+                    });
+                };
+                std::thread::sleep(delay);
+                attempt += 1;
+            }
+        }
     }
-    .with_context(|| {
-        format!(
-            "replace {} with {} using MoveFileExW",
-            dst.display(),
-            src.display()
-        )
-    })
+}
+
+/// A short bounded retry window handles transient Windows file sharing without
+/// turning a genuine permissions failure into a long application stall.
+#[cfg(any(windows, test))]
+fn replace_retry_delay(attempt: u32) -> Option<std::time::Duration> {
+    const DELAYS_MS: [u64; 6] = [5, 10, 20, 40, 80, 160];
+    DELAYS_MS
+        .get(attempt as usize)
+        .copied()
+        .map(std::time::Duration::from_millis)
 }
 
 #[cfg(not(windows))]
@@ -152,5 +179,18 @@ mod tests {
             temp_entries.is_empty(),
             "temporary files should be removed after a failed replace: {temp_entries:?}"
         );
+    }
+
+    #[test]
+    fn windows_replace_retry_schedule_is_short_and_bounded() {
+        assert_eq!(
+            replace_retry_delay(0),
+            Some(std::time::Duration::from_millis(5))
+        );
+        assert_eq!(
+            replace_retry_delay(5),
+            Some(std::time::Duration::from_millis(160))
+        );
+        assert_eq!(replace_retry_delay(6), None);
     }
 }
