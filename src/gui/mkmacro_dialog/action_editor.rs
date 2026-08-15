@@ -17,6 +17,7 @@ pub struct ActionEditorState {
     pub editing_id: Option<u64>,
     pub capture_keys: bool,
     pub capture_message: Option<String>,
+    pub editor: Option<super::action_catalog::EditorKind>,
 }
 
 #[derive(Default)]
@@ -69,10 +70,18 @@ impl QuickInsertState {
 
 impl ActionEditorState {
     pub fn begin_new(&mut self, action: MkAction) {
+        self.begin_new_with_editor(action, super::action_catalog::EditorKind::Generic);
+    }
+    pub fn begin_new_with_editor(
+        &mut self,
+        action: MkAction,
+        editor: super::action_catalog::EditorKind,
+    ) {
         if self.draft.is_some() {
             return;
         }
         self.editing_id = None;
+        self.editor = Some(editor);
         self.draft = Some(MkStep {
             id: 0,
             enabled: true,
@@ -85,15 +94,18 @@ impl ActionEditorState {
     pub fn begin_edit(&mut self, step: &MkStep) {
         self.editing_id = Some(step.id);
         self.draft = Some(step.clone());
+        self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
     pub fn cancel(&mut self) {
         self.draft = None;
         self.editing_id = None;
         self.capture_keys = false;
+        self.editor = None;
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
         let mut step = self.draft.take()?;
         let edit = self.editing_id.take();
+        self.editor = None;
         let selected = dialog.selection.ids.clone();
         let m = dialog.selected_macro_mut()?;
         let index = if let Some(id) = edit {
@@ -333,6 +345,27 @@ fn action_ui(ui: &mut egui::Ui, step: &mut MkStep, capture: &mut bool) {
                 ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
             });
         }
+        MkAction::MouseDown(button) | MkAction::MouseUp(button) => {
+            egui::ComboBox::from_label("Button")
+                .selected_text(format!("{button:?}"))
+                .show_ui(ui, |ui| {
+                    for b in [
+                        MkMouseButton::Left,
+                        MkMouseButton::Right,
+                        MkMouseButton::Middle,
+                        MkMouseButton::X1,
+                        MkMouseButton::X2,
+                    ] {
+                        ui.selectable_value(button, b.clone(), format!("{b:?}"));
+                    }
+                });
+        }
+        MkAction::MouseScroll { i32_delta } => {
+            ui.horizontal(|ui| {
+                ui.label("Wheel units");
+                ui.add(egui::DragValue::new(i32_delta));
+            });
+        }
         MkAction::Delay { milliseconds } => {
             ui.horizontal(|ui| {
                 ui.label("Action duration (ms)");
@@ -373,6 +406,7 @@ fn action_ui(ui: &mut egui::Ui, step: &mut MkStep, capture: &mut bool) {
                 });
             }
         }
+        MkAction::WindowClose(m) => matcher_ui(ui, m),
         MkAction::LauncherCommand { command, args } => {
             ui.horizontal(|ui| {
                 ui.label("Canonical action");
@@ -390,8 +424,40 @@ fn action_ui(ui: &mut egui::Ui, step: &mut MkStep, capture: &mut bool) {
                 "Search uses canonical launcher action values; display labels are not persisted.",
             );
         }
+        MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
+            ui.horizontal(|ui| {
+                ui.label("Image asset ID");
+                ui.add(egui::DragValue::new(&mut p.asset_id));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Confidence");
+                ui.add(egui::Slider::new(&mut p.confidence, 0.0..=1.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Timeout (ms)");
+                ui.add(egui::DragValue::new(&mut p.wait.timeout_ms));
+                ui.label("Poll (ms)");
+                ui.add(egui::DragValue::new(&mut p.wait.poll_interval_ms));
+            });
+            ui.small("Search scope: screen");
+        }
+        MkAction::PixelCheck {
+            target,
+            color,
+            tolerance,
+        } => {
+            target_ui(ui, target);
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                ui.text_edit_singleline(color);
+                ui.label("Tolerance");
+                ui.add(egui::DragValue::new(tolerance));
+            });
+        }
         _ => {
-            ui.label("This action uses its existing specialized editor.");
+            ui.label(
+                "This legacy action is unavailable for editing; its saved payload is preserved.",
+            );
         }
     }
 }

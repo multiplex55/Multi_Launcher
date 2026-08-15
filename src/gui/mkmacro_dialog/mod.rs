@@ -51,7 +51,10 @@ pub struct MkMacroDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkAction, MkHotkey, MkKey, MkStep};
+    use crate::mkmacro::{
+        MkAction, MkCoordinateTarget, MkHotkey, MkImagePayload, MkKey, MkMouseButton,
+        MkMousePayload, MkStep, MkWaitOptions,
+    };
     fn dialog() -> (tempfile::TempDir, MkMacroDialog) {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
@@ -112,6 +115,147 @@ mod tests {
             assert!(!action_catalog::action_name(&a).is_empty());
             let _ = action_catalog::action_details(&a);
         }
+    }
+
+    #[test]
+    fn visible_catalog_metadata_is_routable_and_supported() {
+        for descriptor in action_catalog::visible_descriptors() {
+            assert_eq!(
+                descriptor.availability,
+                action_catalog::ActionAvailability::Ready
+            );
+            assert_eq!(
+                descriptor.runtime,
+                action_catalog::RuntimeAvailability::Supported
+            );
+            assert!(!descriptor.name.trim().is_empty());
+            let action = (descriptor.make_default)();
+            let details = action_catalog::action_details(&action);
+            assert!(
+                !details.trim().is_empty(),
+                "{} has empty details",
+                descriptor.name
+            );
+            assert!(!details.contains("existing specialized editor"));
+            assert!(crate::mkmacro::executor::has_runtime_support(&action));
+        }
+        for descriptor in action_catalog::descriptors()
+            .into_iter()
+            .filter(|d| matches!(d.editor, action_catalog::EditorKind::DirectInsert))
+        {
+            assert!(matches!(
+                (descriptor.make_default)(),
+                MkAction::Else
+                    | MkAction::EndIf
+                    | MkAction::RepeatEnd
+                    | MkAction::WhileEnd
+                    | MkAction::Break
+                    | MkAction::Continue
+            ));
+        }
+    }
+
+    #[test]
+    fn coordinate_targets_and_visual_details_are_exact() {
+        use crate::mkmacro::variables::MkPoint;
+        let screen = MkCoordinateTarget::Screen {
+            point: MkPoint { x: 824, y: 446 },
+        };
+        let window = MkCoordinateTarget::ActiveWindow {
+            point: MkPoint { x: -8, y: -12 },
+        };
+        assert_eq!(
+            action_catalog::format_coordinate_target(&screen),
+            "Screen (824, 446)"
+        );
+        assert_eq!(
+            action_catalog::format_coordinate_target(&window),
+            "Active Window (-8, -12)"
+        );
+        assert_eq!(
+            action_catalog::format_coordinate_target(&MkCoordinateTarget::Variable {
+                name: "cursor".into()
+            }),
+            "Variable <cursor>"
+        );
+        assert_eq!(
+            action_catalog::format_coordinate_target(&MkCoordinateTarget::Image {
+                asset_id: 9,
+                offset: MkPoint { x: -3, y: 5 }
+            }),
+            "Image asset 9 offset (-3, 5)"
+        );
+        assert_eq!(
+            action_catalog::action_details(&MkAction::MouseMove(screen.clone())),
+            "Screen (824, 446)"
+        );
+        for (clicks, expected) in [
+            (1, "Left ×1 @ Screen (824, 446)"),
+            (2, "Left ×2 @ Screen (824, 446)"),
+        ] {
+            assert_eq!(
+                action_catalog::action_details(&MkAction::MouseClick(MkMousePayload {
+                    target: screen.clone(),
+                    button: MkMouseButton::Left,
+                    clicks
+                })),
+                expected
+            );
+        }
+        assert_eq!(
+            action_catalog::action_details(&MkAction::PixelCheck {
+                target: MkCoordinateTarget::Screen {
+                    point: MkPoint { x: 410, y: 220 }
+                },
+                color: "#00FF00".into(),
+                tolerance: 8
+            }),
+            "#00FF00 ±8 @ Screen (410, 220)"
+        );
+        let image = MkImagePayload {
+            asset_id: 42,
+            confidence: 0.85,
+            wait: MkWaitOptions {
+                timeout_ms: 2500,
+                poll_interval_ms: 100,
+            },
+        };
+        assert_eq!(
+            action_catalog::action_details(&MkAction::ImageFind(image.clone())),
+            "Asset 42 · 85% confidence · screen · 2500 ms timeout"
+        );
+        assert_eq!(
+            action_catalog::action_details(&MkAction::ImageClick(image)),
+            "Asset 42 · 85% confidence · screen · 2500 ms timeout"
+        );
+    }
+
+    #[test]
+    fn coordinate_details_are_payload_only_and_non_mutating() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        for i in 0..500 {
+            action_catalog::insert_action(
+                &mut dialog,
+                MkAction::MouseMove(MkCoordinateTarget::Screen {
+                    point: crate::mkmacro::variables::MkPoint {
+                        x: i - 250,
+                        y: 250 - i,
+                    },
+                }),
+            );
+        }
+        let before = serde_json::to_vec(&dialog.draft).unwrap();
+        for step in &dialog.selected_macro().unwrap().steps {
+            let MkAction::MouseMove(MkCoordinateTarget::Screen { point }) = &step.action else {
+                panic!("unexpected action")
+            };
+            assert_eq!(
+                action_catalog::action_details(&step.action),
+                format!("Screen ({}, {})", point.x, point.y)
+            );
+        }
+        assert_eq!(serde_json::to_vec(&dialog.draft).unwrap(), before);
     }
 
     fn catalog_descriptor(name: &str) -> action_catalog::ActionDescriptor {
