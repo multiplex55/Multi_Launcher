@@ -61,8 +61,11 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
                     ),
                     s(
                         2,
-                        MkAction::MouseMove(MkCoordinateTarget::Screen {
-                            point: MkPoint { x: 10, y: -2 },
+                        MkAction::MouseMove(MkMouseMovePayload {
+                            target: MkCoordinateTarget::Screen {
+                                point: MkPoint { x: 10, y: -2 },
+                            },
+                            duration_ms: 0,
                         }),
                     ),
                     s(

@@ -2,7 +2,7 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -287,6 +287,20 @@ pub struct MkMousePayload {
     pub clicks: u32,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkMouseMovePayload {
+    pub target: MkCoordinateTarget,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkMouseDragPayload {
+    pub from: MkCoordinateTarget,
+    pub to: MkCoordinateTarget,
+    pub button: MkMouseButton,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkProcessPayload {
     pub program: String,
     #[serde(default)]
@@ -324,7 +338,8 @@ pub enum MkAction {
     KeyPress(MkKey),
     Hotkey(Vec<MkKey>),
     Text(MkTextPayload),
-    MouseMove(MkCoordinateTarget),
+    MouseMove(MkMouseMovePayload),
+    MouseDrag(MkMouseDragPayload),
     MouseClick(MkMousePayload),
     MouseDown(MkMouseButton),
     MouseUp(MkMouseButton),

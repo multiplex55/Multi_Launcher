@@ -324,7 +324,36 @@ fn action_ui(ui: &mut egui::Ui, step: &mut MkStep, capture: &mut bool) {
                 p.mode = MkTextMode::Type;
             }
         }
-        MkAction::MouseMove(t) => target_ui(ui, t),
+        MkAction::MouseMove(p) => {
+            target_ui(ui, &mut p.target);
+            ui.horizontal(|ui| {
+                ui.label("Duration (ms)");
+                ui.add(egui::DragValue::new(&mut p.duration_ms));
+            });
+        }
+        MkAction::MouseDrag(p) => {
+            ui.label("Start");
+            target_ui(ui, &mut p.from);
+            ui.label("Destination");
+            target_ui(ui, &mut p.to);
+            egui::ComboBox::from_label("Button")
+                .selected_text(format!("{:?}", p.button))
+                .show_ui(ui, |ui| {
+                    for b in [
+                        MkMouseButton::Left,
+                        MkMouseButton::Right,
+                        MkMouseButton::Middle,
+                        MkMouseButton::X1,
+                        MkMouseButton::X2,
+                    ] {
+                        ui.selectable_value(&mut p.button, b.clone(), format!("{b:?}"));
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.label("Duration (ms)");
+                ui.add(egui::DragValue::new(&mut p.duration_ms));
+            });
+        }
         MkAction::MouseClick(p) => {
             target_ui(ui, &mut p.target);
             egui::ComboBox::from_label("Button")

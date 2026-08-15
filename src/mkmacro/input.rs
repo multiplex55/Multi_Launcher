@@ -247,6 +247,9 @@ impl<S: InputSink> InputBackend for Win32InputBackend<S> {
             MOUSEEVENTF_MOVE_ | MOUSEEVENTF_ABSOLUTE_ | MOUSEEVENTF_VIRTUALDESK_,
         )
     }
+    fn cursor_position(&self) -> ExecResult<MkPoint> {
+        cursor_position()
+    }
     fn scroll(&self, d: i32) -> ExecResult {
         self.mouse(0, 0, d as u32, MOUSEEVENTF_WHEEL_)
     }
@@ -259,6 +262,25 @@ impl<S: InputSink> InputBackend for Win32InputBackend<S> {
             )),
         }
     }
+}
+#[cfg(windows)]
+fn cursor_position() -> ExecResult<MkPoint> {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) }.map_err(|e| {
+        ExecutionDiagnostic::new(DiagnosticKind::Backend, format!("GetCursorPos failed: {e}"))
+    })?;
+    Ok(MkPoint {
+        x: point.x,
+        y: point.y,
+    })
+}
+#[cfg(not(windows))]
+fn cursor_position() -> ExecResult<MkPoint> {
+    Err(ExecutionDiagnostic::new(
+        DiagnosticKind::UnsupportedOperation,
+        "GetCursorPos is available only on Windows",
+    ))
 }
 
 #[cfg(windows)]
