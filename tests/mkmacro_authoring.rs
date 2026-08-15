@@ -33,6 +33,28 @@ fn wait_for(runtime: &MacroRuntime, wanted: RuntimeState) -> RuntimeSnapshot {
     }
 }
 
+fn wait_for_successful_step(runtime: &MacroRuntime) -> RuntimeSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = runtime.snapshot();
+        if snapshot
+            .steps
+            .values()
+            .any(|state| *state == StepState::Success)
+        {
+            return (*snapshot).clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "runtime reached {:?} at step {:?} without completing a step; states: {:?}",
+            snapshot.state,
+            snapshot.step_id,
+            snapshot.steps
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 #[derive(Default)]
 struct FakeRecorderView;
 impl RecorderControllerView for FakeRecorderView {
@@ -158,6 +180,10 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
         CommandResult::Accepted
     );
     wait_for(&runtime, RuntimeState::Running);
+    // `Running` is published before the worker can finish its first step. Wait
+    // for observable progress so Stop cannot win that scheduling race and
+    // leave every step Pending/Running.
+    wait_for_successful_step(&runtime);
     assert_eq!(
         runtime.command(RuntimeCommand::Stop),
         CommandResult::Accepted
