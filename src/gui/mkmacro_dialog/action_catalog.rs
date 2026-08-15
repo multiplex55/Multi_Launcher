@@ -32,10 +32,16 @@ impl ActionCategory {
 }
 pub struct ActionDescriptor {
     pub category: ActionCategory,
+    pub availability: ActionAvailability,
     pub name: &'static str,
     pub description: &'static str,
     pub keywords: &'static [&'static str],
     pub make_default: fn() -> MkAction,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionAvailability {
+    Ready,
+    Hidden,
 }
 #[derive(Clone, Copy)]
 pub enum StructuralInsertion {
@@ -96,6 +102,17 @@ macro_rules! d {
     ($c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
         ActionDescriptor {
             category: ActionCategory::$c,
+            availability: ActionAvailability::Ready,
+            name: $n,
+            description: $desc,
+            keywords: $keys,
+            make_default: || $a,
+        }
+    };
+    (hidden,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
+        ActionDescriptor {
+            category: ActionCategory::$c,
+            availability: ActionAvailability::Hidden,
             name: $n,
             description: $desc,
             keywords: $keys,
@@ -344,6 +361,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             }
         ),
         d!(
+            hidden,
             UiAutomation,
             "Invoke UI Element",
             "Invoke a UI element",
@@ -351,6 +369,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::UiInvoke(up())
         ),
         d!(
+            hidden,
             UiAutomation,
             "Set UI Value",
             "Set an element value",
@@ -361,6 +380,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             }
         ),
         d!(
+            hidden,
             UiAutomation,
             "Read UI Value",
             "Read an element value",
@@ -371,6 +391,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             }
         ),
         d!(
+            hidden,
             UiAutomation,
             "Toggle UI Element",
             "Toggle an element",
@@ -378,6 +399,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::UiToggle(up())
         ),
         d!(
+            hidden,
             UiAutomation,
             "Select UI Element",
             "Select an element",
@@ -385,6 +407,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::UiSelect(up())
         ),
         d!(
+            hidden,
             UiAutomation,
             "Focus UI Element",
             "Focus an element",
@@ -392,6 +415,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::UiFocus(up())
         ),
         d!(
+            hidden,
             UiAutomation,
             "Wait for UI Element",
             "Wait for an element",
@@ -399,6 +423,12 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::UiWait(up())
         ),
     ]
+}
+/// Descriptors currently offered by the macro-authoring UI.
+pub fn visible_descriptors() -> impl Iterator<Item = ActionDescriptor> {
+    descriptors()
+        .into_iter()
+        .filter(|descriptor| descriptor.availability == ActionAvailability::Ready)
 }
 pub fn matches(d: &ActionDescriptor, q: &str) -> bool {
     let q = q.to_lowercase();
@@ -441,13 +471,13 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel",
-        MkAction::UiInvoke(_) => "Invoke UI Element",
-        MkAction::UiSetValue { .. } => "Set UI Value",
-        MkAction::UiReadValue { .. } => "Read UI Value",
-        MkAction::UiToggle(_) => "Toggle UI Element",
-        MkAction::UiSelect(_) => "Select UI Element",
-        MkAction::UiFocus(_) => "Focus UI Element",
-        MkAction::UiWait(_) => "Wait for UI Element",
+        MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => "UI Automation — currently unavailable",
     }
 }
 fn mouse(b: &MkMouseButton) -> &'static str {
@@ -489,8 +519,12 @@ pub fn action_details(a: &MkAction) -> String {
         MkAction::PixelCheck {
             color, tolerance, ..
         } => format!("Color {color}, tolerance {tolerance}"),
-        MkAction::UiSetValue { value, .. } => format!("Value: {value}"),
-        MkAction::UiReadValue { variable, .. } => format!("Store in {variable}"),
+        MkAction::UiSetValue { value, .. } => {
+            format!("Unavailable UI Automation action (set value to {value})")
+        }
+        MkAction::UiReadValue { variable, .. } => {
+            format!("Unavailable UI Automation action (read into {variable})")
+        }
         MkAction::MouseMove(_) => "Target coordinates".into(),
         MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
             format!("Window {}", p.matcher.title.as_deref().unwrap_or("match"))
@@ -508,7 +542,7 @@ pub fn action_details(a: &MkAction) -> String {
         | MkAction::UiToggle(_)
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
-        | MkAction::UiWait(_) => "UI Automation target".into(),
+        | MkAction::UiWait(_) => "Unavailable UI Automation action (saved target preserved)".into(),
     }
 }
 pub fn action_depths(m: &MkMacro) -> Vec<usize> {
@@ -605,7 +639,7 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .show(ui, |ui| {
                     let mut last = None;
                     let query = d.action_search.clone();
-                    for x in descriptors().into_iter().filter(|x| matches(x, &query)) {
+                    for x in visible_descriptors().filter(|x| matches(x, &query)) {
                         if last != Some(x.category) {
                             ui.heading(x.category.label());
                             last = Some(x.category)

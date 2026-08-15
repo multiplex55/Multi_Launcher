@@ -311,7 +311,23 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
             .and_then(|m| m.steps.iter().find(|s| s.id == id))
             .cloned()
         {
-            d.action_editor.begin_edit(&s);
+            if matches!(
+                s.action,
+                crate::mkmacro::MkAction::UiInvoke(_)
+                    | crate::mkmacro::MkAction::UiSetValue { .. }
+                    | crate::mkmacro::MkAction::UiReadValue { .. }
+                    | crate::mkmacro::MkAction::UiToggle(_)
+                    | crate::mkmacro::MkAction::UiSelect(_)
+                    | crate::mkmacro::MkAction::UiFocus(_)
+                    | crate::mkmacro::MkAction::UiWait(_)
+            ) {
+                d.command_error = Some(
+                    "UI Automation actions are currently unavailable; the saved action was left unchanged."
+                        .into(),
+                );
+            } else {
+                d.action_editor.begin_edit(&s);
+            }
         }
         return;
     }

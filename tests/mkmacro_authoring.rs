@@ -288,10 +288,13 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
     };
     let action: MkAction =
         serde_json::from_value(serde_json::to_value(MkAction::UiInvoke(payload)).unwrap()).unwrap();
-    assert_eq!(action_catalog::action_name(&action), "Invoke UI Element");
+    assert_eq!(
+        action_catalog::action_name(&action),
+        "UI Automation — currently unavailable"
+    );
     assert_eq!(
         action_catalog::action_details(&action),
-        "UI Automation target"
+        "Unavailable UI Automation action (saved target preserved)"
     );
     let plan = compile(&MkMacro {
         id: 1,
