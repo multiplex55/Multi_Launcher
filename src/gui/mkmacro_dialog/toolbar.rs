@@ -155,21 +155,34 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             );
             ui.label("Mouse movement");
             for (mode, label) in [
-                (MovementMode::SampledMovement, "Sampled"),
-                (MovementMode::DetailedMovement, "Detailed"),
-                (MovementMode::ClicksOnly, "Click positions only"),
                 (MovementMode::Off, "Off"),
+                (MovementMode::ClicksOnly, "Clicks Only"),
+                (MovementMode::SampledMovement, "Sampled Movement"),
+                (MovementMode::DetailedMovement, "Detailed Movement"),
             ] {
-                ui.radio_value(&mut dialog.recorder_options.movement_mode, mode, label);
+                let help = match mode {
+                    MovementMode::SampledMovement => {
+                        "Editable default: samples and simplifies the mouse path."
+                    }
+                    MovementMode::DetailedMovement => {
+                        "High-fidelity option: retains every distinct mouse position."
+                    }
+                    _ => "Does not record standalone mouse movement.",
+                };
+                ui.radio_value(&mut dialog.recorder_options.movement_mode, mode, label)
+                    .on_hover_text(help);
             }
-            ui.add(
+            let sampled = dialog.recorder_options.movement_mode == MovementMode::SampledMovement;
+            ui.add_enabled(
+                sampled,
                 eframe::egui::Slider::new(
                     &mut dialog.recorder_options.movement_distance_px,
                     1..=500,
                 )
                 .text("Sample distance (px)"),
             );
-            ui.add(
+            ui.add_enabled(
+                sampled,
                 eframe::egui::Slider::new(
                     &mut dialog.recorder_options.movement_interval_ms,
                     1..=5000,
