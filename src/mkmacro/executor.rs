@@ -542,6 +542,10 @@ mod tests {
                 "missing compatibility/runtime key {key}"
             );
         }
+        assert_eq!(
+            vars.get("last_image"),
+            Some(&MkValue::Point(MkPoint { x: 1, y: 1 }))
+        );
 
         fake.conditions
             .lock()
@@ -883,6 +887,7 @@ impl Executor {
         v.insert("last_image_found".into(), MkValue::Boolean(found.is_some()));
         if let Some(point) = found {
             v.insert(image_variable, MkValue::Point(point));
+            v.insert("last_image".into(), MkValue::Point(point));
             set_point(v, "last_image", point);
             v.insert("last_image_x".into(), MkValue::Number(point.x.into()));
             v.insert("last_image_y".into(), MkValue::Number(point.y.into()));
@@ -973,6 +978,7 @@ impl Executor {
                 );
                 v.insert("last_image_found".into(), MkValue::Boolean(point.is_some()));
                 if let Some(p) = point {
+                    v.insert("last_image".into(), MkValue::Point(p));
                     set_point(v, "last_image", p);
                     v.insert("last_image_x".into(), MkValue::Number(p.x.into()));
                     v.insert("last_image_y".into(), MkValue::Number(p.y.into()));
