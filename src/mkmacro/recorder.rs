@@ -704,9 +704,14 @@ mod tests {
             &c,
             None,
         );
-        assert_eq!(v.len(), 2);
+        // Although the second position is below the normal sampling threshold,
+        // it is the final waypoint before the key action and therefore forms the
+        // required end of that contiguous movement run.
+        assert_eq!(v.len(), 3);
+        assert!(matches!(v[0].action, RecordedAction::Move { x: 0, y: 0 }));
+        assert!(matches!(v[1].action, RecordedAction::Move { x: 2, y: 2 }));
         assert!(matches!(
-            v[1].action,
+            v[2].action,
             RecordedAction::Key {
                 down: false,
                 scan_code: 30,
@@ -714,7 +719,8 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(v[0].delay_after_ms, 100);
+        assert_eq!(v[0].delay_after_ms, 1);
+        assert_eq!(v[1].delay_after_ms, 99);
     }
 
     #[test]
