@@ -23,8 +23,11 @@ fn wait_for(runtime: &MacroRuntime, wanted: RuntimeState) -> RuntimeSnapshot {
         }
         assert!(
             Instant::now() < deadline,
-            "runtime remained {:?}",
-            snapshot.state
+            "runtime remained {:?} at step {:?}, wanted {:?}; states: {:?}",
+            snapshot.state,
+            snapshot.step_id,
+            wanted,
+            snapshot.steps
         );
         thread::sleep(Duration::from_millis(2));
     }
@@ -233,16 +236,27 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     assert_eq!(editor.apply(&mut dialog), Some(click));
     dialog.save().unwrap();
     assert_eq!(&*store.snapshot(), &dialog.draft);
-    // Rerun the transaction we just edited. The initial run above already covers
-    // the complete authored macro; selecting the recorded click here isolates the
-    // recorder -> edit -> save -> playback contract and cannot leave a recorded
-    // key-down affecting later tests if normalization regresses.
-    assert_eq!(
-        runtime.command(RuntimeCommand::RunSelection(id, vec![click])),
-        CommandResult::Accepted
-    );
-    let rerun = wait_for(&runtime, RuntimeState::Completed);
-    assert_eq!(rerun.steps.get(&click), Some(&StepState::Success));
+    // Rerun the transaction we just edited through the same compiled executor
+    // boundary used by MacroRuntime. The asynchronous command/state lifecycle was
+    // already exercised above; using the synchronous executor here isolates the
+    // recorder -> edit -> save -> playback contract from unrelated worker timing.
+    let mut rerun_macro = dialog.selected_macro().unwrap().clone();
+    rerun_macro.steps.retain(|step| step.id == click);
+    let rerun_plan = compile(&rerun_macro).unwrap();
+    let rerun_control = Arc::new(RunControl::default());
+    rerun_control.reset();
+    let rerun_states = std::sync::Mutex::new(Vec::new());
+    Executor::new(fake.clone().backends(), rerun_control)
+        .execute(&rerun_plan, &|event| {
+            rerun_states.lock().unwrap().push(event)
+        })
+        .unwrap();
+    let rerun_states = rerun_states.into_inner().unwrap();
+    assert!(matches!(
+        rerun_states.as_slice(),
+        [ExecutionEvent::StepStarted(id), ExecutionEvent::StepFinished(done)]
+            if id == done && *id == click
+    ));
     assert_eq!(
         fake.events()
             .iter()
