@@ -113,6 +113,134 @@ mod tests {
             let _ = action_catalog::action_details(&a);
         }
     }
+
+    fn uia_actions() -> Vec<MkAction> {
+        action_catalog::descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.category == action_catalog::ActionCategory::UiAutomation
+            })
+            .map(|descriptor| (descriptor.make_default)())
+            .collect()
+    }
+
+    #[test]
+    fn uia_catalog_entries_are_complete_but_not_visible_or_searchable() {
+        let complete: Vec<_> = action_catalog::descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.category == action_catalog::ActionCategory::UiAutomation
+            })
+            .collect();
+        assert_eq!(complete.len(), 7);
+        assert!(complete.iter().all(|descriptor| {
+            descriptor.availability == action_catalog::ActionAvailability::Hidden
+        }));
+
+        let visible: Vec<_> = action_catalog::visible_descriptors().collect();
+        assert!(visible.iter().all(|descriptor| {
+            descriptor.category != action_catalog::ActionCategory::UiAutomation
+        }));
+        for query in [
+            "UI Automation",
+            "UIA",
+            "Invoke UI Element",
+            "Set UI Value",
+            "Read UI Value",
+            "Toggle UI Element",
+            "Select UI Element",
+            "Focus UI Element",
+            "Wait for UI Element",
+        ] {
+            assert!(
+                !visible
+                    .iter()
+                    .any(|descriptor| action_catalog::matches(descriptor, query))
+            );
+        }
+    }
+
+    #[test]
+    fn every_uia_variant_has_an_unavailable_display_label() {
+        let actions = uia_actions();
+        assert_eq!(actions.len(), 7);
+        for action in actions {
+            assert_eq!(
+                action_catalog::action_name(&action),
+                "UI Automation — currently unavailable"
+            );
+            assert!(action_catalog::action_details(&action).contains("Unavailable"));
+        }
+    }
+
+    #[test]
+    fn uia_payloads_survive_display_roundtrip_repair_and_save() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        let original_actions = uia_actions();
+        d.selected_macro_mut().unwrap().steps = original_actions
+            .iter()
+            .cloned()
+            .map(|action| MkStep {
+                id: 0,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action,
+            })
+            .collect();
+
+        let encoded = serde_json::to_string(&d.draft).unwrap();
+        let mut decoded: MkMacroDocument = serde_json::from_str(&encoded).unwrap();
+        for step in &decoded.macros[0].steps {
+            let _ = action_catalog::action_name(&step.action);
+            let _ = action_catalog::action_details(&step.action);
+        }
+        let before_repair: Vec<_> = decoded.macros[0]
+            .steps
+            .iter()
+            .map(|step| step.action.clone())
+            .collect();
+        repair_ids(&mut decoded);
+        assert_eq!(
+            decoded.macros[0]
+                .steps
+                .iter()
+                .map(|step| &step.action)
+                .collect::<Vec<_>>(),
+            before_repair.iter().collect::<Vec<_>>()
+        );
+        d.draft = decoded;
+        d.save().unwrap();
+        let saved = d.store.snapshot();
+        assert_eq!(
+            saved.macros[0]
+                .steps
+                .iter()
+                .map(|step| &step.action)
+                .collect::<Vec<_>>(),
+            original_actions.iter().collect::<Vec<_>>()
+        );
+        let reencoded = serde_json::to_string(&*saved).unwrap();
+        let final_document: MkMacroDocument = serde_json::from_str(&reencoded).unwrap();
+        assert_eq!(
+            final_document.macros[0]
+                .steps
+                .iter()
+                .map(|step| &step.action)
+                .collect::<Vec<_>>(),
+            original_actions.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hidden_uia_editor_and_runtime_types_remain_compiled() {
+        let _: uia_editor::UiaEditorState = Default::default();
+        let _show: fn(&mut eframe::egui::Ui, &mut uia_editor::UiaEditorState) = uia_editor::show;
+        assert!(std::mem::size_of::<crate::mkmacro::MkUiPayload>() > 0);
+        assert!(std::mem::size_of::<crate::mkmacro::uia::UiCommand>() > 0);
+    }
 }
 impl MkMacroDialog {
     pub fn new(store: Arc<MkMacroStore>) -> Self {
@@ -419,7 +547,6 @@ impl MkMacroDialog {
         }
         action_catalog::show_modal(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
-        uia_editor::show(ui, &mut self.uia_editor);
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();
         }
