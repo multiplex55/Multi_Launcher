@@ -462,11 +462,11 @@ fn mouse(b: &MkMouseButton) -> &'static str {
 pub fn action_details(a: &MkAction) -> String {
     match a {
         MkAction::KeyDown(k) | MkAction::KeyUp(k) | MkAction::KeyPress(k) => {
-            super::macro_properties::key_name(k)
+            super::key_capture::key_name(k)
         }
         MkAction::Hotkey(k) => k
             .iter()
-            .map(super::macro_properties::key_name)
+            .map(super::key_capture::key_name)
             .collect::<Vec<_>>()
             .join(" + "),
         MkAction::Text(p) => format!("{} characters", p.text.chars().count()),

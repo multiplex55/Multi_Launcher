@@ -404,7 +404,7 @@ fn quick_insert(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         d.quick_insert
             .keys
             .iter()
-            .map(super::macro_properties::key_name)
+            .map(super::key_capture::key_name)
             .collect::<Vec<_>>()
             .join(" + ")
     };
@@ -423,9 +423,11 @@ fn quick_insert(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     });
     if d.quick_insert.capturing {
         ui.label("Press a key or combination; Escape cancels capture.");
-        if let Some(keys) = ui.input(super::action_editor::captured_from_input) {
+        if let Some(result) = ui.input(super::key_capture::captured_chord) {
             d.quick_insert.capturing = false;
-            d.quick_insert.keys = keys;
+            if let super::key_capture::CapturedChord::Keys(keys) = result {
+                d.quick_insert.keys = keys;
+            }
         }
     }
     let enabled = d.quick_insert.action().is_some();
