@@ -486,19 +486,14 @@ mod tests {
     }
 
     #[test]
-    fn every_uia_variant_keeps_its_specific_display_label() {
+    fn every_uia_variant_has_an_unavailable_display_label() {
         let actions = uia_actions();
         assert_eq!(actions.len(), 7);
-        for (action, expected) in actions.into_iter().zip([
-            "Invoke UI Element",
-            "Set UI Value",
-            "Read UI Value",
-            "Toggle UI Element",
-            "Select UI Element",
-            "Focus UI Element",
-            "Wait for UI Element",
-        ]) {
-            assert_eq!(action_catalog::action_name(&action), expected);
+        for action in actions {
+            assert_eq!(
+                action_catalog::action_name(&action),
+                "UI Automation — currently unavailable"
+            );
             assert!(action_catalog::action_details(&action).contains("Unavailable"));
         }
     }
@@ -700,11 +695,18 @@ mod tests {
                 names.insert(descriptor.name),
                 "{context}: duplicate descriptor name"
             );
-            assert_eq!(
-                descriptor.name,
-                action_catalog::action_name(&action),
-                "{context}: action-name mapping"
-            );
+            if descriptor.category != action_catalog::ActionCategory::UiAutomation {
+                assert_eq!(
+                    descriptor.name,
+                    action_catalog::action_name(&action),
+                    "{context}: action-name mapping"
+                );
+            } else {
+                assert!(
+                    !action_catalog::action_name(&action).trim().is_empty(),
+                    "{context}: hidden legacy action-name mapping"
+                );
+            }
             assert_eq!(
                 descriptor.runtime == action_catalog::RuntimeAvailability::Supported,
                 crate::mkmacro::executor::has_runtime_support(&action),

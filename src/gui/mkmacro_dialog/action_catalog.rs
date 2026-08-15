@@ -171,16 +171,16 @@ macro_rules! d {
     (direct,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
         ActionDescriptor {
             category: ActionCategory::$c,
-            // Terminators and context-sensitive control markers are generated
-            // by structural insertion, never offered as unsafe standalone rows.
-            availability: ActionAvailability::Hidden,
+            // These advanced markers are offered as context-checked structural
+            // insertions and deliberately never open a configuration editor.
+            availability: ActionAvailability::Ready,
             name: $n,
             description: $desc,
             keywords: $keys,
             make_default: || $a,
             editor: EditorKind::DirectInsert,
             runtime: runtime_availability(&$a),
-            hidden_reason: Some("Context-sensitive structural markers are inserted by block transactions or contextual controls"),
+            hidden_reason: None,
         }
     };
 }
@@ -693,13 +693,13 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel",
-        MkAction::UiInvoke(_) => "Invoke UI Element",
-        MkAction::UiSetValue { .. } => "Set UI Value",
-        MkAction::UiReadValue { .. } => "Read UI Value",
-        MkAction::UiToggle(_) => "Toggle UI Element",
-        MkAction::UiSelect(_) => "Select UI Element",
-        MkAction::UiFocus(_) => "Focus UI Element",
-        MkAction::UiWait(_) => "Wait for UI Element",
+        MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => "UI Automation — currently unavailable",
     }
 }
 fn mouse(b: &MkMouseButton) -> &'static str {
