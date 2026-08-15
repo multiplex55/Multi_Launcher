@@ -109,6 +109,88 @@ mod tests {
         action_catalog::insert_action(&mut d, MkAction::RepeatStart { count: 2 });
         assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
     }
+
+    #[test]
+    fn structural_editor_is_atomic_configurable_and_cancelable() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.action_catalog_visible = true;
+        action_catalog::select_descriptor(&mut d, &catalog_descriptor("Repeat"));
+        assert!(d.selected_macro().unwrap().steps.is_empty());
+        if let MkAction::RepeatStart { count } = &mut d.action_editor.draft.as_mut().unwrap().action
+        {
+            *count = 9;
+        }
+        let mut editor = std::mem::take(&mut d.action_editor);
+        editor.apply(&mut d).unwrap();
+        d.action_editor = editor;
+        assert!(matches!(
+            d.selected_macro().unwrap().steps[0].action,
+            MkAction::RepeatStart { count: 9 }
+        ));
+        assert!(matches!(
+            d.selected_macro().unwrap().steps[1].action,
+            MkAction::RepeatEnd
+        ));
+        assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
+        let before = d.selected_macro().unwrap().steps.len();
+        action_catalog::select_descriptor(&mut d, &catalog_descriptor("While"));
+        d.action_editor.cancel();
+        assert_eq!(d.selected_macro().unwrap().steps.len(), before);
+    }
+
+    #[test]
+    fn wrapping_rejects_noncontiguous_selection_atomically() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        for milliseconds in 1..=3 {
+            action_catalog::insert_action(&mut d, MkAction::Delay { milliseconds });
+        }
+        let ids: Vec<_> = d
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        d.selection.ids = [ids[0], ids[2]].into_iter().collect();
+        let before = serde_json::to_vec(d.selected_macro().unwrap()).unwrap();
+        action_catalog::select_descriptor(&mut d, &catalog_descriptor("If"));
+        let mut editor = std::mem::take(&mut d.action_editor);
+        assert!(editor.apply(&mut d).is_none());
+        d.action_editor = editor;
+        assert_eq!(
+            serde_json::to_vec(d.selected_macro().unwrap()).unwrap(),
+            before
+        );
+        assert!(d.command_error.as_deref().unwrap().contains("contiguous"));
+    }
+
+    #[test]
+    fn direct_loop_controls_require_context_and_keep_palette() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.action_catalog_visible = true;
+        let before = serde_json::to_vec(d.selected_macro().unwrap()).unwrap();
+        action_catalog::insert_action(&mut d, MkAction::Break);
+        assert_eq!(
+            serde_json::to_vec(d.selected_macro().unwrap()).unwrap(),
+            before
+        );
+        assert!(d.command_error.is_some());
+        assert!(d.action_catalog_visible);
+        action_catalog::insert_action(&mut d, MkAction::RepeatStart { count: 5 });
+        let opener = d.selected_macro().unwrap().steps[0].id;
+        d.selection.ids.clear();
+        d.selection.ids.insert(opener);
+        action_catalog::insert_action(&mut d, MkAction::Continue);
+        assert!(matches!(
+            d.selected_macro().unwrap().steps[1].action,
+            MkAction::Continue
+        ));
+        assert!(d.action_catalog_visible);
+        assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
+    }
     #[test]
     fn names_and_details_cover_catalog() {
         for x in action_catalog::descriptors() {
@@ -316,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_control_markers_are_deliberately_hidden() {
+    fn advanced_control_markers_are_directly_insertable() {
         for name in [
             "Else",
             "End If",
@@ -331,7 +413,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 descriptor.availability,
-                action_catalog::ActionAvailability::Hidden
+                action_catalog::ActionAvailability::Ready
             );
             assert_eq!(descriptor.editor, action_catalog::EditorKind::DirectInsert);
         }
