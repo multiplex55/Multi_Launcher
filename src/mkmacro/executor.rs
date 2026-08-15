@@ -796,7 +796,17 @@ impl Executor {
                 }),
                 || self.backends.uia.exists(p),
             ),
-            _ => Ok(()),
+            // Structural actions are deliberately executed by `run_program`; reaching
+            // this payload dispatcher for one is therefore an intentional no-op.
+            MkAction::If(_)
+            | MkAction::Else
+            | MkAction::EndIf
+            | MkAction::RepeatStart { .. }
+            | MkAction::RepeatEnd
+            | MkAction::WhileStart { .. }
+            | MkAction::WhileEnd
+            | MkAction::Break
+            | MkAction::Continue => Ok(()),
         }
     }
     fn move_to(&self, target: &MkCoordinateTarget, v: &mut RuntimeVariables) -> ExecResult {
@@ -949,6 +959,49 @@ impl Executor {
             }
             MkCondition::Not { condition } => Ok(!self.condition(condition, v)?),
         }
+    }
+}
+/// Testable declaration that every action has deliberate executor handling.
+pub fn has_runtime_support(action: &MkAction) -> bool {
+    match action {
+        MkAction::KeyDown(_)
+        | MkAction::KeyUp(_)
+        | MkAction::KeyPress(_)
+        | MkAction::Hotkey(_)
+        | MkAction::Text(_)
+        | MkAction::MouseMove(_)
+        | MkAction::MouseClick(_)
+        | MkAction::MouseDown(_)
+        | MkAction::MouseUp(_)
+        | MkAction::MouseScroll { .. }
+        | MkAction::Delay { .. }
+        | MkAction::Process(_)
+        | MkAction::LauncherCommand { .. }
+        | MkAction::WindowActivate(_)
+        | MkAction::WindowClose(_)
+        | MkAction::WindowWait(_)
+        | MkAction::WaitUntil { .. }
+        | MkAction::SetVariable { .. }
+        | MkAction::UnsetVariable { .. }
+        | MkAction::If(_)
+        | MkAction::Else
+        | MkAction::EndIf
+        | MkAction::RepeatStart { .. }
+        | MkAction::RepeatEnd
+        | MkAction::WhileStart { .. }
+        | MkAction::WhileEnd
+        | MkAction::Break
+        | MkAction::Continue
+        | MkAction::ImageFind(_)
+        | MkAction::ImageClick(_)
+        | MkAction::PixelCheck { .. }
+        | MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => true,
     }
 }
 fn action_name(a: &MkAction) -> &'static str {

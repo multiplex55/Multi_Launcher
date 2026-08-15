@@ -37,17 +37,26 @@ pub struct ActionDescriptor {
     pub description: &'static str,
     pub keywords: &'static [&'static str],
     pub make_default: fn() -> MkAction,
-    pub insertion: ActionInsertion,
+    pub editor: EditorKind,
+    pub runtime: RuntimeAvailability,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionInsertion {
-    Editor,
-    Direct,
+pub enum EditorKind {
+    Generic,
+    DirectInsert,
+    Structural,
+    Image,
+    Pixel,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionAvailability {
     Ready,
     Hidden,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeAvailability {
+    Supported,
+    Unavailable,
 }
 #[derive(Clone, Copy)]
 pub enum StructuralInsertion {
@@ -71,7 +80,7 @@ fn wait() -> MkWaitOptions {
 }
 fn matcher() -> MkWindowMatcher {
     MkWindowMatcher {
-        title: Some(String::new()),
+        title: Some("Window".into()),
         title_regex: None,
         process: None,
         class: None,
@@ -113,7 +122,8 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            insertion: ActionInsertion::Editor,
+            editor: EditorKind::Generic,
+            runtime: RuntimeAvailability::Supported,
         }
     };
     (hidden,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
@@ -124,7 +134,8 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            insertion: ActionInsertion::Editor,
+            editor: EditorKind::Generic,
+            runtime: RuntimeAvailability::Unavailable,
         }
     };
     (direct,$c:ident,$n:literal,$desc:literal,$keys:expr,$a:expr) => {
@@ -135,12 +146,13 @@ macro_rules! d {
             description: $desc,
             keywords: $keys,
             make_default: || $a,
-            insertion: ActionInsertion::Direct,
+            editor: EditorKind::DirectInsert,
+            runtime: RuntimeAvailability::Supported,
         }
     };
 }
 pub fn descriptors() -> Vec<ActionDescriptor> {
-    vec![
+    let mut entries = vec![
         d!(
             KeyboardText,
             "Key Press",
@@ -262,7 +274,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Start a program",
             &["run", "launch"],
             MkAction::Process(MkProcessPayload {
-                program: String::new(),
+                program: "program".into(),
                 arguments: vec![],
                 working_directory: None,
                 wait: false
@@ -274,7 +286,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Run a launcher command",
             &["run", "launch"],
             MkAction::LauncherCommand {
-                command: String::new(),
+                command: "command".into(),
                 args: None
             }
         ),
@@ -453,7 +465,36 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             &["uia", "wait"],
             MkAction::UiWait(up())
         ),
-    ]
+    ];
+    for descriptor in &mut entries {
+        let action = (descriptor.make_default)();
+        descriptor.editor = editor_for_action(&action);
+        if matches!(
+            action,
+            MkAction::WaitUntil { .. }
+                | MkAction::SetVariable { .. }
+                | MkAction::UnsetVariable { .. }
+        ) {
+            descriptor.availability = ActionAvailability::Hidden;
+        }
+    }
+    entries
+}
+pub fn editor_for_action(action: &MkAction) -> EditorKind {
+    match action {
+        MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. } => {
+            EditorKind::Structural
+        }
+        MkAction::Else
+        | MkAction::EndIf
+        | MkAction::RepeatEnd
+        | MkAction::WhileEnd
+        | MkAction::Break
+        | MkAction::Continue => EditorKind::DirectInsert,
+        MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
+        MkAction::PixelCheck { .. } => EditorKind::Pixel,
+        _ => EditorKind::Generic,
+    }
 }
 /// Descriptors currently offered by the macro-authoring UI.
 pub fn visible_descriptors() -> impl Iterator<Item = ActionDescriptor> {
@@ -531,7 +572,12 @@ pub fn action_details(a: &MkAction) -> String {
             .collect::<Vec<_>>()
             .join(" + "),
         MkAction::Text(p) => format!("{} characters", p.text.chars().count()),
-        MkAction::MouseClick(p) => format!("{} click ×{}", mouse(&p.button), p.clicks),
+        MkAction::MouseClick(p) => format!(
+            "{} ×{} @ {}",
+            mouse(&p.button),
+            p.clicks,
+            format_coordinate_target(&p.target)
+        ),
         MkAction::MouseDown(b) | MkAction::MouseUp(b) => mouse(b).into(),
         MkAction::MouseScroll { i32_delta } => format!("{i32_delta} wheel units"),
         MkAction::Delay { milliseconds } => format!("{milliseconds} ms"),
@@ -543,20 +589,26 @@ pub fn action_details(a: &MkAction) -> String {
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
         MkAction::RepeatStart { count } => format!("{count} times"),
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => format!(
-            "Image asset {} ({:.0}% confidence)",
+            "Asset {} · {:.0}% confidence · screen · {} ms timeout",
             p.asset_id,
-            p.confidence * 100.0
+            p.confidence * 100.0,
+            p.wait.timeout_ms
         ),
         MkAction::PixelCheck {
-            color, tolerance, ..
-        } => format!("Color {color}, tolerance {tolerance}"),
+            target,
+            color,
+            tolerance,
+        } => format!(
+            "{color} ±{tolerance} @ {}",
+            format_coordinate_target(target)
+        ),
         MkAction::UiSetValue { value, .. } => {
             format!("Unavailable UI Automation action (set value to {value})")
         }
         MkAction::UiReadValue { variable, .. } => {
             format!("Unavailable UI Automation action (read into {variable})")
         }
-        MkAction::MouseMove(_) => "Target coordinates".into(),
+        MkAction::MouseMove(target) => format_coordinate_target(target),
         MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
             format!("Window {}", p.matcher.title.as_deref().unwrap_or("match"))
         }
@@ -568,12 +620,24 @@ pub fn action_details(a: &MkAction) -> String {
         | MkAction::RepeatEnd
         | MkAction::WhileEnd
         | MkAction::Break
-        | MkAction::Continue => String::new(),
+        | MkAction::Continue => "Structural control marker".into(),
         MkAction::UiInvoke(_)
         | MkAction::UiToggle(_)
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => "Unavailable UI Automation action (saved target preserved)".into(),
+    }
+}
+pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
+    match target {
+        MkCoordinateTarget::Screen { point } => format!("Screen ({}, {})", point.x, point.y),
+        MkCoordinateTarget::ActiveWindow { point } => {
+            format!("Active Window ({}, {})", point.x, point.y)
+        }
+        MkCoordinateTarget::Variable { name } => format!("Variable <{name}>"),
+        MkCoordinateTarget::Image { asset_id, offset } => {
+            format!("Image asset {asset_id} offset ({}, {})", offset.x, offset.y)
+        }
     }
 }
 pub fn action_depths(m: &MkMacro) -> Vec<usize> {
@@ -661,9 +725,9 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
         return false;
     }
     let action = (descriptor.make_default)();
-    match descriptor.insertion {
-        ActionInsertion::Editor => d.action_editor.begin_new(action),
-        ActionInsertion::Direct => insert_action(d, action),
+    match descriptor.editor {
+        EditorKind::DirectInsert | EditorKind::Structural => insert_action(d, action),
+        kind => d.action_editor.begin_new_with_editor(action, kind),
     }
     true
 }
