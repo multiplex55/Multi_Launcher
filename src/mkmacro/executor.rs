@@ -218,26 +218,34 @@ impl ScreenBackend for Unsupported {
 }
 impl UiAutomationBackend for Unsupported {
     fn exists(&self, _: &MkUiPayload) -> ExecResult<bool> {
-        unsupported_context(self.backend, "exists")
+        uia_unavailable("exists")
     }
     fn invoke(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "invoke")
+        uia_unavailable("invoke")
     }
     fn set_value(&self, _: &MkUiPayload, _: &str) -> ExecResult {
-        unsupported_context(self.backend, "set value")
+        uia_unavailable("set value")
     }
     fn read_value(&self, _: &MkUiPayload) -> ExecResult<String> {
-        unsupported_context(self.backend, "read value")
+        uia_unavailable("read value")
     }
     fn toggle(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "toggle")
+        uia_unavailable("toggle")
     }
     fn select(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "select")
+        uia_unavailable("select")
     }
     fn focus(&self, _: &MkUiPayload) -> ExecResult {
-        unsupported_context(self.backend, "focus")
+        uia_unavailable("focus")
     }
+}
+fn uia_unavailable<T>(action: &'static str) -> ExecResult<T> {
+    Err(ExecutionDiagnostic::new(
+        DiagnosticKind::UnsupportedOperation,
+        "UI Automation backend is not available yet",
+    )
+    .context("backend", "UI Automation")
+    .context("action", action))
 }
 
 #[cfg(windows)]
@@ -377,6 +385,18 @@ impl RunControl {
         }
     }
 }
+
+/// Clears runtime activity on every executor exit path, including cancellation
+/// and backend failures. Without this guard, queued Pause/Resume commands can
+/// mistake a finished run for an active one and overwrite its terminal state.
+struct RunActivityGuard<'a>(&'a RunControl);
+impl Drop for RunActivityGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap();
+        state.active = false;
+        self.0.wake.notify_all();
+    }
+}
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {
     StepStarted(u64),
@@ -497,6 +517,34 @@ mod tests {
             DiagnosticKind::Cancelled
         );
     }
+    #[test]
+    fn cancelled_executor_clears_runtime_activity() {
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let worker_control = control.clone();
+        let worker = std::thread::spawn(move || {
+            Executor::new(Arc::new(FakeBackend::default()).backends(), worker_control).execute(
+                &plan(vec![step(
+                    1,
+                    MkAction::Delay {
+                        milliseconds: 60_000,
+                    },
+                )]),
+                &|_| {},
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !control.is_active() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        control.stop();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind,
+            DiagnosticKind::Cancelled
+        );
+        assert!(!control.is_active());
+    }
 }
 impl Drop for InputCleanupGuard {
     fn drop(&mut self) {
@@ -523,6 +571,7 @@ impl Executor {
         Self { backends, control }
     }
     pub fn execute(&self, plan: &MkExecutionPlan, observe: &dyn Fn(ExecutionEvent)) -> ExecResult {
+        let _activity = RunActivityGuard(&self.control);
         let mut guard = InputCleanupGuard::new(self.backends.input.clone());
         let mut vars = RuntimeVariables::new();
         let mut pc = 0;
@@ -633,7 +682,6 @@ impl Executor {
                 _ => pc + 1,
             };
         }
-        self.control.state.lock().unwrap().active = false;
         Ok(())
     }
     fn action(

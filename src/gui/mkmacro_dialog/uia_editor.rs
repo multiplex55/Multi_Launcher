@@ -4,6 +4,8 @@ use crate::mkmacro::{
     UiElementInfo, require_pattern, validate_selector,
 };
 
+pub const BACKEND_UNAVAILABLE: &str = "UI Automation backend is not available yet";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureState {
     Idle,
@@ -29,9 +31,14 @@ impl UiaEditorState {
     pub fn editor_hidden(&self) -> bool {
         !matches!(self.capture, CaptureState::Idle)
     }
-    pub fn begin_pick(&mut self, cursor: MkPoint) {
-        self.candidate = None;
-        self.capture = CaptureState::Capturing { cursor };
+    /// Picking is deliberately unavailable until an inspector producer is installed.
+    /// Keeping this transition behind a fallible command prevents the dialog from
+    /// entering a state which nothing in the application can complete or cancel.
+    pub fn begin_pick(&mut self, _cursor: MkPoint) -> ExecResult<()> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            BACKEND_UNAVAILABLE,
+        ))
     }
     pub fn preview(&mut self, info: UiElementInfo) {
         self.candidate = Some(info.clone());
@@ -59,9 +66,8 @@ impl UiaEditorState {
     }
     /// Starts the mouse editor's "Find UI Control At Recorded Position" flow without modifying
     /// the recorded action.
-    pub fn find_at_recorded_position(&mut self, step: u64, point: MkPoint) {
-        self.conversion_step = Some(step);
-        self.begin_pick(point);
+    pub fn find_at_recorded_position(&mut self, _step: u64, point: MkPoint) -> ExecResult<()> {
+        self.begin_pick(point)
     }
     /// The caller replaces exactly `step_id` only after this returns a validated draft.
     pub fn conversion_draft(&self, step_id: u64, target: MkUiPayload) -> ExecResult<MkAction> {
@@ -83,13 +89,9 @@ impl UiaEditorState {
 pub(super) fn show(ui: &mut eframe::egui::Ui, state: &mut UiaEditorState) {
     match &state.capture {
         CaptureState::Idle => {
-            if ui.button("Pick UI Control").clicked() {
-                let p = ui.ctx().pointer_latest_pos().unwrap_or_default();
-                state.begin_pick(MkPoint {
-                    x: p.x as i32,
-                    y: p.y as i32,
-                });
-            }
+            ui.add_enabled(false, eframe::egui::Button::new("Pick UI Control"))
+                .on_disabled_hover_text(BACKEND_UNAVAILABLE);
+            ui.label(BACKEND_UNAVAILABLE);
             ui.label("Mouse clicks remain physical unless explicitly converted.");
         }
         CaptureState::Capturing { .. } => {
@@ -173,11 +175,12 @@ mod tests {
     #[test]
     fn inspector_cancel_and_confirm() {
         let mut s = UiaEditorState::default();
-        s.begin_pick(MkPoint { x: 1, y: 2 });
-        assert!(s.editor_hidden());
+        let error = s.begin_pick(MkPoint { x: 1, y: 2 }).unwrap_err();
+        assert_eq!(error.message, BACKEND_UNAVAILABLE);
+        assert!(!s.editor_hidden());
         s.preview(info(true));
         assert_eq!(s.confirm().unwrap().user_facing_name, "X");
-        s.begin_pick(MkPoint { x: 0, y: 0 });
+        assert!(s.begin_pick(MkPoint { x: 0, y: 0 }).is_err());
         s.cancel();
         assert_eq!(s.capture, CaptureState::Idle);
     }

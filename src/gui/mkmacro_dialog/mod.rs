@@ -1,5 +1,5 @@
 pub mod action_catalog;
-mod action_editor;
+pub mod action_editor;
 pub mod image_search_editor;
 mod macro_list;
 mod macro_properties;
@@ -15,6 +15,12 @@ use crate::mkmacro::{
 };
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirtyDecision {
+    KeepEditing,
+    Discard,
+}
 
 pub struct MkMacroDialog {
     pub open: bool,
@@ -160,6 +166,73 @@ impl MkMacroDialog {
     }
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+    /// Rename intent shared by non-widget controllers and the dialog.
+    pub fn rename_selected(&mut self, name: impl Into<String>) -> bool {
+        let name = name.into();
+        let Some(m) = self.selected_macro_mut() else {
+            return false;
+        };
+        if m.name == name {
+            return false;
+        }
+        m.name = name;
+        self.mark_dirty();
+        true
+    }
+    /// Close/reload never silently destroys a dirty draft.
+    pub fn close_with_decision(&mut self, decision: DirtyDecision) -> bool {
+        if self.dirty && decision == DirtyDecision::KeepEditing {
+            return false;
+        }
+        if self.dirty {
+            let current = self.store.snapshot();
+            self.draft = (*current).clone();
+            self.baseline = current;
+            self.dirty = false;
+            self.conflict = false;
+        }
+        self.open = false;
+        true
+    }
+    pub fn reload_with_decision(&mut self, decision: DirtyDecision) -> bool {
+        if self.dirty && decision == DirtyDecision::KeepEditing {
+            return false;
+        }
+        let current = self.store.snapshot();
+        self.draft = (*current).clone();
+        self.baseline = current;
+        self.dirty = false;
+        self.conflict = false;
+        true
+    }
+    /// Applies normalized recorder output atomically. A missing target leaves the draft untouched.
+    pub fn apply_recording(
+        &mut self,
+        macro_id: u64,
+        recorded: &[RecordedStep],
+    ) -> Result<Vec<u64>, String> {
+        let next = self
+            .draft
+            .macros
+            .iter()
+            .flat_map(|m| &m.steps)
+            .map(|s| s.id)
+            .max()
+            .unwrap_or(0);
+        let inserted = crate::mkmacro::to_macro_steps(recorded, next);
+        let ids = inserted.iter().map(|s| s.id).collect::<Vec<_>>();
+        let m = self
+            .draft
+            .macros
+            .iter_mut()
+            .find(|m| m.id == macro_id)
+            .ok_or("recording target no longer exists")?;
+        m.steps.extend(inserted);
+        repair_ids(&mut self.draft);
+        self.selection.ids = ids.iter().copied().collect();
+        self.mark_dirty();
+        Ok(ids)
     }
     pub fn selected_macro(&self) -> Option<&MkMacro> {
         let id = self.selected_macro_id?;
