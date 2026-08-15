@@ -606,6 +606,56 @@ mod tests {
         );
         assert!(!control.is_active());
     }
+
+    #[test]
+    fn pixel_action_updates_outputs_for_match_mismatch_and_backend_error() {
+        let fake = Arc::new(FakeBackend::default());
+        let executor = Executor::new(fake.clone().backends(), Arc::new(RunControl::default()));
+        let action = MkAction::PixelCheck {
+            target: MkCoordinateTarget::Screen {
+                point: MkPoint { x: -1, y: 2 },
+            },
+            color: "#ABCDEF".into(),
+            tolerance: 3,
+        };
+        let mut vars = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        fake.conditions.lock().unwrap().insert("pixel".into(), true);
+        executor.action(7, &action, &mut vars, &mut guard).unwrap();
+        assert_eq!(vars.get("last_pixel_result"), Some(&MkValue::Boolean(true)));
+        assert_eq!(vars.get("last_pixel_found"), Some(&MkValue::Boolean(true)));
+
+        fake.conditions
+            .lock()
+            .unwrap()
+            .insert("pixel".into(), false);
+        assert_eq!(
+            executor
+                .action(7, &action, &mut vars, &mut guard)
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::TargetNotFound
+        );
+        assert_eq!(
+            vars.get("last_pixel_result"),
+            Some(&MkValue::Boolean(false))
+        );
+        assert_eq!(vars.get("last_pixel_found"), Some(&MkValue::Boolean(false)));
+
+        fake.conditions
+            .lock()
+            .unwrap()
+            .insert("pixel_error".into(), true);
+        assert_eq!(
+            executor
+                .action(7, &action, &mut vars, &mut guard)
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Backend
+        );
+        assert!(!vars.contains_key("last_pixel_result"));
+        assert!(!vars.contains_key("last_pixel_found"));
+    }
 }
 impl Drop for InputCleanupGuard {
     fn drop(&mut self) {
@@ -844,6 +894,10 @@ impl Executor {
                 color,
                 tolerance,
             } => {
+                // Never expose a result left behind by an earlier check if
+                // coordinate resolution, capture, or color parsing fails.
+                v.remove("last_pixel_result");
+                v.remove("last_pixel_found");
                 let matched = self
                     .backends
                     .screen
@@ -1060,6 +1114,8 @@ impl Executor {
                 color,
                 tolerance,
             } => {
+                v.remove("last_pixel_result");
+                v.remove("last_pixel_found");
                 let x = self
                     .backends
                     .screen
@@ -1357,6 +1413,19 @@ pub mod fake {
             _: u8,
             _: &RuntimeVariables,
         ) -> ExecResult<bool> {
+            if self
+                .conditions
+                .lock()
+                .unwrap()
+                .get("pixel_error")
+                .copied()
+                .unwrap_or(false)
+            {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "injected pixel capture failure",
+                ));
+            }
             Ok(*self
                 .conditions
                 .lock()

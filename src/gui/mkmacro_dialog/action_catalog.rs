@@ -478,9 +478,9 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Visual,
-            "Check Pixel",
-            "Check a pixel color",
-            &["pixel"],
+            "Check Pixel Color",
+            "Check the color at one pixel coordinate",
+            &["pixel", "color", "screen"],
             Pixel,
             MkAction::PixelCheck {
                 target: point(),
@@ -691,7 +691,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::Continue => "Continue",
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
-        MkAction::PixelCheck { .. } => "Check Pixel",
+        MkAction::PixelCheck { .. } => "Check Pixel Color",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }

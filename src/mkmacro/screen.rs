@@ -23,7 +23,42 @@ trait WindowsGeometry: Send + Sync {
 
 trait VisualSearch: Send + Sync {
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
-    fn pixel_matches(&self, point: MkPoint, color: &str, tolerance: u8) -> ExecResult<bool>;
+    fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]>;
+}
+
+/// Parse the persisted pixel-check color. The only accepted representation is
+/// canonical CSS-style RGB (`#RRGGBB`); callers may use [`format_rgb`] to
+/// normalize letter case after a successful parse.
+pub fn parse_rgb(value: &str) -> ExecResult<[u8; 3]> {
+    if value.len() != 7 || !value.starts_with('#') {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            format!("invalid pixel color '{value}': expected #RRGGBB"),
+        )
+        .context("color", value));
+    }
+    let digits = &value[1..];
+    if !digits.is_ascii() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            format!("invalid pixel color '{value}': expected hexadecimal #RRGGBB"),
+        )
+        .context("color", value));
+    }
+    let channel = |at: usize| {
+        u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                format!("invalid pixel color '{value}': expected hexadecimal #RRGGBB"),
+            )
+            .context("color", value)
+        })
+    };
+    Ok([channel(0)?, channel(2)?, channel(4)?])
+}
+
+pub fn format_rgb(rgb: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
 }
 
 /// Windows coordinate resolver. OS geometry and visual lookup are injected so
@@ -150,8 +185,16 @@ impl ScreenBackend for WindowsScreenBackend {
         tolerance: u8,
         variables: &RuntimeVariables,
     ) -> ExecResult<bool> {
-        self.visual
-            .pixel_matches(self.resolve(target, variables)?, color, tolerance)
+        let point = self
+            .resolve(target, variables)
+            .map_err(|e| e.context("coordinate_target", format!("{target:?}")))?;
+        let wanted = parse_rgb(color)?;
+        let actual = self.visual.read_pixel(point).map_err(|e| {
+            e.context("backend", "WindowsScreenBackend")
+                .context("coordinate", format!("{},{}", point.x, point.y))
+                .context("color", color)
+        })?;
+        Ok((0..3).all(|channel| actual[channel].abs_diff(wanted[channel]) <= tolerance))
     }
 }
 
@@ -226,12 +269,8 @@ impl VisualSearch for SystemVisualSearch {
         )
         .context("backend", "WindowsScreenBackend"))
     }
-    fn pixel_matches(&self, _: MkPoint, _: &str, _: u8) -> ExecResult<bool> {
-        Err(ExecutionDiagnostic::new(
-            DiagnosticKind::UnsupportedOperation,
-            "production pixel lookup is not configured",
-        )
-        .context("backend", "WindowsScreenBackend"))
+    fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]> {
+        WindowsScreenCaptureBackend::system().read_pixel(point)
     }
 }
 
@@ -432,6 +471,16 @@ impl WindowsScreenCaptureBackend {
             )
         });
         Ok(monitors)
+    }
+
+    /// Capture exactly one live desktop pixel at a signed desktop coordinate.
+    pub fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]> {
+        let rect = ScreenRect::new(point.x, point.y, 1, 1);
+        let image = self
+            .capture(&SearchRegion::Rectangle { rect }, &|| false)
+            .map_err(|e| e.context("coordinate", format!("{},{}", point.x, point.y)))?
+            .image;
+        Ok(image.get_pixel(0, 0).0)
     }
 }
 
@@ -787,8 +836,8 @@ mod windows_backend_tests {
             self.requested.lock().unwrap().push(id);
             Ok(None)
         }
-        fn pixel_matches(&self, _: MkPoint, _: &str, _: u8) -> ExecResult<bool> {
-            Ok(true)
+        fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {
+            Ok([0, 0, 0, 255])
         }
     }
     fn backend(
@@ -804,6 +853,83 @@ mod windows_backend_tests {
             }),
             Arc::new(Visual::default()),
         )
+    }
+
+    #[test]
+    fn strict_rgb_parser_accepts_case_and_formats_canonically() {
+        assert_eq!(parse_rgb("#00A1FF").unwrap(), [0, 161, 255]);
+        assert_eq!(parse_rgb("#00a1fF").unwrap(), [0, 161, 255]);
+        assert_eq!(format_rgb([0, 161, 255]), "#00A1FF");
+        for malformed in [
+            "000000", "#FFF", "#0000000", "#00GG00", "", "# 0000", "#aébcd",
+        ] {
+            let error = parse_rgb(malformed).unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+            assert!(error.to_string().contains("#RRGGBB"));
+        }
+    }
+
+    struct PixelVisual([u8; 4]);
+    impl VisualSearch for PixelVisual {
+        fn find_image(&self, _: u64, _: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+            Ok(None)
+        }
+        fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {
+            Ok(self.0)
+        }
+    }
+    fn pixel_backend(pixel: [u8; 4]) -> WindowsScreenBackend {
+        WindowsScreenBackend::new(
+            Arc::new(Geometry {
+                desktop: (-100, -100, 200, 200),
+                foreground: Some(1),
+                origin: MkPoint { x: -20, y: -30 },
+            }),
+            Arc::new(PixelVisual(pixel)),
+        )
+    }
+
+    #[test]
+    fn pixel_comparison_is_per_channel_overflow_safe_and_ignores_alpha() {
+        let vars = RuntimeVariables::new();
+        let target = screen(MkPoint { x: -50, y: -40 });
+        assert!(
+            pixel_backend([0, 255, 10, 0])
+                .pixel_matches(&target, "#00FF0A", 0, &vars)
+                .unwrap()
+        );
+        assert!(
+            pixel_backend([0, 255, 10, 255])
+                .pixel_matches(&target, "#05FA0F", 5, &vars)
+                .unwrap()
+        );
+        assert!(
+            !pixel_backend([0, 255, 10, 255])
+                .pixel_matches(&target, "#06FA0F", 5, &vars)
+                .unwrap()
+        );
+        assert!(
+            pixel_backend([0, 255, 0, 1])
+                .pixel_matches(&target, "#FF00FF", 255, &vars)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn pixel_target_is_resolved_before_reading() {
+        let backend = pixel_backend([1, 2, 3, 4]);
+        assert!(
+            backend
+                .pixel_matches(
+                    &MkCoordinateTarget::ActiveWindow {
+                        point: MkPoint { x: 2, y: 3 }
+                    },
+                    "#010203",
+                    0,
+                    &RuntimeVariables::new()
+                )
+                .unwrap()
+        );
     }
     fn screen(point: MkPoint) -> MkCoordinateTarget {
         MkCoordinateTarget::Screen { point }

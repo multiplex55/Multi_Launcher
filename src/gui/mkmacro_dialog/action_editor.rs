@@ -39,6 +39,8 @@ enum PositionCaptureSlot {
     ClickTarget,
     DragFrom,
     DragTo,
+    PixelPosition,
+    PixelColor,
 }
 #[derive(Clone, Debug)]
 struct PositionCaptureState {
@@ -259,6 +261,9 @@ impl ActionEditorState {
             (PositionCaptureSlot::ClickTarget, MkAction::MouseClick(p)) => Some(&mut p.target),
             (PositionCaptureSlot::DragFrom, MkAction::MouseDrag(p)) => Some(&mut p.from),
             (PositionCaptureSlot::DragTo, MkAction::MouseDrag(p)) => Some(&mut p.to),
+            (PositionCaptureSlot::PixelPosition, MkAction::PixelCheck { target, .. }) => {
+                Some(target)
+            }
             _ => None,
         }
     }
@@ -295,10 +300,31 @@ impl ActionEditorState {
     }
 
     fn confirm_position(&mut self, capture: PositionCaptureState) {
+        self.confirm_position_with(capture, read_live_desktop_pixel);
+    }
+
+    fn confirm_position_with(
+        &mut self,
+        capture: PositionCaptureState,
+        read_pixel: impl FnOnce(MkPoint) -> Result<[u8; 3], String>,
+    ) {
         let Some(screen) = capture.last_screen_position else {
             self.capture_message = Some("Unable to read the current pointer position".into());
             return;
         };
+        if capture.slot == PositionCaptureSlot::PixelColor {
+            let result = read_pixel(screen).map(|rgb| {
+                if let Some(MkStep {
+                    action: MkAction::PixelCheck { color, .. },
+                    ..
+                }) = self.draft.as_mut()
+                {
+                    *color = crate::mkmacro::screen::format_rgb(rgb);
+                }
+            });
+            self.capture_message = result.err();
+            return;
+        }
         let window = picked_foreground_window(&capture);
         let result = match self.target_mut(capture.slot) {
             Some(target @ MkCoordinateTarget::ActiveWindow { .. }) => {
@@ -331,6 +357,18 @@ impl ActionEditorState {
         self.capture_keys = false;
         true
     }
+}
+
+#[cfg(windows)]
+fn read_live_desktop_pixel(point: MkPoint) -> Result<[u8; 3], String> {
+    let rgba = WindowsScreenCaptureBackend::system()
+        .read_pixel(point)
+        .map_err(|e| e.to_string())?;
+    Ok([rgba[0], rgba[1], rgba[2]])
+}
+#[cfg(not(windows))]
+fn read_live_desktop_pixel(_: MkPoint) -> Result<[u8; 3], String> {
+    Err("Desktop color picking is available only on Windows".into())
 }
 
 fn is_modifier(k: &MkKey) -> bool {
@@ -929,12 +967,38 @@ fn action_ui(
             color,
             tolerance,
         } => {
-            let _ = target_ui(ui, target);
+            ui.heading("Coordinate");
+            if target_ui(ui, target) {
+                pick = Some(PositionCaptureSlot::PixelPosition);
+            }
+            ui.separator();
+            ui.heading("Color");
             ui.horizontal(|ui| {
                 ui.label("Color");
-                ui.text_edit_singleline(color);
+                let response = ui.text_edit_singleline(color);
+                if response.lost_focus() {
+                    if let Ok(rgb) = crate::mkmacro::screen::parse_rgb(color) {
+                        *color = crate::mkmacro::screen::format_rgb(rgb);
+                    }
+                }
+                match crate::mkmacro::screen::parse_rgb(color) {
+                    Ok(rgb) => {
+                        let swatch = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(28.0, 20.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 3.0, swatch);
+                    }
+                    Err(error) => {
+                        ui.colored_label(egui::Color32::RED, error.to_string());
+                    }
+                }
+                if ui.button("Pick Color").clicked() {
+                    pick = Some(PositionCaptureSlot::PixelColor);
+                }
+            });
+            ui.horizontal(|ui| {
                 ui.label("Tolerance");
-                ui.add(egui::DragValue::new(tolerance));
+                ui.add(egui::DragValue::new(tolerance).clamp_range(0..=255));
             });
         }
         _ => {
@@ -1047,6 +1111,19 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.set_captured_keys(keys);
     }
     if apply {
+        if let Some(MkStep {
+            action: MkAction::PixelCheck { color, .. },
+            ..
+        }) = d.action_editor.draft.as_mut()
+        {
+            match crate::mkmacro::screen::parse_rgb(color) {
+                Ok(rgb) => *color = crate::mkmacro::screen::format_rgb(rgb),
+                Err(error) => {
+                    d.action_editor.capture_message = Some(error.to_string());
+                    return;
+                }
+            }
+        }
         let mut state = std::mem::take(&mut d.action_editor);
         state.apply(d);
         d.action_editor = state;
@@ -1141,6 +1218,37 @@ mod tests {
         e.position_capture = Some(capture(PositionCaptureSlot::ClickTarget));
         e.cancel();
         assert!(e.position_capture.is_none());
+    }
+
+    #[test]
+    fn desktop_color_pick_updates_only_after_confirmation_and_escape_preserves_draft() {
+        let source = step(MkAction::PixelCheck {
+            target: MkCoordinateTarget::Screen {
+                point: MkPoint { x: -8, y: 4 },
+            },
+            color: "#112233".into(),
+            tolerance: 0,
+        });
+        let mut editor = ActionEditorState::default();
+        editor.begin_edit(&source);
+        editor.draft_generation = 1;
+        let mut pending = capture(PositionCaptureSlot::PixelColor);
+        pending.last_screen_position = Some(MkPoint { x: -8, y: 4 });
+        editor.confirm_position_with(pending, |point| {
+            assert_eq!(point, MkPoint { x: -8, y: 4 });
+            Ok([0xab, 0, 0xff])
+        });
+        let MkAction::PixelCheck { color, .. } = &editor.draft.as_ref().unwrap().action else {
+            panic!()
+        };
+        assert_eq!(color, "#AB00FF");
+
+        editor.position_capture = Some(capture(PositionCaptureSlot::PixelColor));
+        editor.process_position_event(PositionCaptureEvent::Escape);
+        let MkAction::PixelCheck { color, .. } = &editor.draft.as_ref().unwrap().action else {
+            panic!()
+        };
+        assert_eq!(color, "#AB00FF");
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! UI-neutral state shared by the Image Search and Pixel Search editor widgets.
-use crate::mkmacro::{AlphaPolicy, MkWindowMatcher, PixelScanOrder, ReturnPoint, SearchRegion};
+//! UI-neutral state for the regional Image Search editor widget.
+use crate::mkmacro::{AlphaPolicy, MkWindowMatcher, ReturnPoint, SearchRegion};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotFoundPolicy {
@@ -33,33 +33,6 @@ impl Default for ImageSearchEditorState {
             y_variable: String::new(),
             found_variable: String::new(),
             not_found: NotFoundPolicy::Error,
-        }
-    }
-}
-#[derive(Debug, Clone)]
-pub struct PixelSearchEditorState {
-    pub color: [u8; 4],
-    pub picking: bool,
-    pub tolerance: u8,
-    pub alpha: AlphaPolicy,
-    pub region: SearchRegion,
-    pub order: PixelScanOrder,
-    pub x_variable: String,
-    pub y_variable: String,
-    pub found_variable: String,
-}
-impl Default for PixelSearchEditorState {
-    fn default() -> Self {
-        Self {
-            color: [0, 0, 0, 255],
-            picking: false,
-            tolerance: 0,
-            alpha: AlphaPolicy::Compare,
-            region: SearchRegion::Desktop,
-            order: PixelScanOrder::TopLeftRows,
-            x_variable: String::new(),
-            y_variable: String::new(),
-            found_variable: String::new(),
         }
     }
 }
