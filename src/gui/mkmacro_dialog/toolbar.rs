@@ -1,5 +1,7 @@
 use super::MkMacroDialog;
-use crate::mkmacro::RuntimeState;
+use crate::mkmacro::{
+    MovementMode, RecorderRuntimeState, RuntimeState, repair_ids, to_macro_steps,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolbarState {
@@ -120,7 +122,94 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 "File changed externally; reload or save to overwrite",
             );
         }
+        let recorder = crate::mkmacro::runtime::recorder_snapshot();
+        let recorder_active = recorder
+            .as_ref()
+            .is_some_and(|s| s.state != RecorderRuntimeState::Idle);
+        if ui
+            .add_enabled(
+                !recorder_active && dialog.selected_macro().is_some(),
+                eframe::egui::Button::new("Record"),
+            )
+            .clicked()
+        {
+            if let Some(id) = dialog.selected_macro_id {
+                report(
+                    dialog,
+                    crate::mkmacro::runtime::record(id, dialog.recorder_options.clone()),
+                );
+            }
+        }
+        ui.menu_button("Record Options", |ui| {
+            ui.set_enabled(!recorder_active);
+            ui.checkbox(&mut dialog.recorder_options.record_keyboard, "Keyboard");
+            ui.checkbox(
+                &mut dialog.recorder_options.record_mouse_buttons,
+                "Mouse buttons",
+            );
+            ui.checkbox(
+                &mut dialog.recorder_options.record_mouse_wheel,
+                "Mouse wheel",
+            );
+            ui.checkbox(
+                &mut dialog.recorder_options.record_injected_input,
+                "Record injected input",
+            );
+            ui.label("Mouse movement");
+            for (mode, label) in [
+                (MovementMode::SampledMovement, "Sampled"),
+                (MovementMode::DetailedMovement, "Detailed"),
+                (MovementMode::ClicksOnly, "Click positions only"),
+                (MovementMode::Off, "Off"),
+            ] {
+                ui.radio_value(&mut dialog.recorder_options.movement_mode, mode, label);
+            }
+            ui.add(
+                eframe::egui::Slider::new(
+                    &mut dialog.recorder_options.movement_distance_px,
+                    1..=500,
+                )
+                .text("Sample distance (px)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(
+                    &mut dialog.recorder_options.movement_interval_ms,
+                    1..=5000,
+                )
+                .text("Sample interval (ms)"),
+            );
+        });
     });
+    if let Some(rec) = crate::mkmacro::runtime::recorder_snapshot()
+        .filter(|s| s.state != RecorderRuntimeState::Idle)
+    {
+        ui.horizontal(|ui| {
+            let secs=rec.elapsed.as_secs(); ui.label(format!("● Recording {:02}:{:02} — {} raw events — ~{} actions",secs/60,secs%60,rec.raw_event_count,rec.estimated_action_count));
+            if rec.dropped_event_count>0 { ui.colored_label(eframe::egui::Color32::YELLOW,format!("{} events dropped",rec.dropped_event_count)); }
+            match rec.state {
+                RecorderRuntimeState::Recording => if ui.button("Pause Recording").clicked(){report(dialog,crate::mkmacro::runtime::record_pause())},
+                RecorderRuntimeState::Paused => if ui.button("Resume Recording").clicked(){report(dialog,crate::mkmacro::runtime::record_resume())},
+                _ => {}
+            }
+            if rec.state!=RecorderRuntimeState::Stopping && ui.button("Stop Recording").clicked() {
+                match crate::mkmacro::runtime::record_stop() {
+                    Err(e)=>dialog.command_error=Some(e.to_string()),
+                    Ok(result)=> {
+                        let next=dialog.draft.macros.iter().flat_map(|m|m.steps.iter()).map(|s|s.id).max().unwrap_or(0);
+                        let inserted=to_macro_steps(&result.generated_steps,next);
+                        let ids:Vec<u64>=inserted.iter().map(|s|s.id).collect();
+                        if let Some(m)=dialog.draft.macros.iter_mut().find(|m|m.id==result.macro_id) {
+                            m.steps.extend(inserted); repair_ids(&mut dialog.draft); dialog.selection.ids=ids.into_iter().collect(); dialog.mark_dirty();
+                            if result.dropped_event_count>0 { dialog.command_error=Some(format!("Recording completed with {} dropped events",result.dropped_event_count)); }
+                        } else {
+                            dialog.pending_recording=Some((result.macro_id,result.generated_steps));
+                            dialog.command_error=Some("Recording target was deleted; captured actions were preserved for recovery".into());
+                        }
+                    }
+                }
+            }
+        });
+    }
     if let Some(error) = &dialog.command_error {
         ui.colored_label(eframe::egui::Color32::RED, error);
     }

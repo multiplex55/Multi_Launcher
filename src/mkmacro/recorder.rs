@@ -13,6 +13,9 @@ pub enum MovementMode {
 }
 #[derive(Debug, Clone)]
 pub struct NormalizationConfig {
+    pub record_keyboard: bool,
+    pub record_mouse_buttons: bool,
+    pub record_mouse_wheel: bool,
     pub movement_mode: MovementMode,
     pub movement_distance_px: i32,
     pub movement_interval_ms: u64,
@@ -20,10 +23,14 @@ pub struct NormalizationConfig {
     pub click_distance_px: i32,
     pub multi_click_ms: u64,
     pub record_injected_input: bool,
+    pub control_hotkeys: Vec<u32>,
 }
 impl Default for NormalizationConfig {
     fn default() -> Self {
         Self {
+            record_keyboard: true,
+            record_mouse_buttons: true,
+            record_mouse_wheel: true,
             movement_mode: MovementMode::SampledMovement,
             movement_distance_px: 4,
             movement_interval_ms: 25,
@@ -31,6 +38,7 @@ impl Default for NormalizationConfig {
             click_distance_px: 4,
             multi_click_ms: 500,
             record_injected_input: false,
+            control_hotkeys: Vec::new(),
         }
     }
 }
@@ -132,7 +140,9 @@ pub fn normalize(
                 }
             }
             RecordingBoundary::Event(e)
-                if !paused && should_record(&e, cfg.record_injected_input) =>
+                if !paused
+                    && should_record(&e, cfg.record_injected_input)
+                    && !matches!(e, HookEvent::Key { vk, .. } if cfg.control_hotkeys.contains(&vk)) =>
             {
                 raw.push((e, e.timestamp_us().saturating_sub(excluded)))
             }
@@ -143,6 +153,24 @@ pub fn normalize(
     let mut down: Option<(MouseButton, (i32, i32), u64, Option<EventContext>)> = None;
     let mut last_move: Option<((i32, i32), u64)> = None;
     for (e, t) in raw {
+        let enabled = match e {
+            HookEvent::Key { .. } => cfg.record_keyboard,
+            HookEvent::Mouse {
+                message: MouseMessage::Move,
+                ..
+            } => true,
+            HookEvent::Mouse {
+                message: MouseMessage::Down(_) | MouseMessage::Up(_),
+                ..
+            } => cfg.record_mouse_buttons,
+            HookEvent::Mouse {
+                message: MouseMessage::Wheel(_) | MouseMessage::HorizontalWheel(_),
+                ..
+            } => cfg.record_mouse_wheel,
+        };
+        if !enabled {
+            continue;
+        }
         let context = enricher.as_deref_mut().and_then(|x| x.enrich(&e));
         let action = match e {
             HookEvent::Key {

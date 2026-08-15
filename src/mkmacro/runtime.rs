@@ -1,6 +1,10 @@
 //! Worker-owned macro runtime.  The public methods only exchange messages and snapshots;
 //! action execution and all waits live on the worker.
 use super::{MkMacroStore, compile, executor::*};
+use super::{
+    NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
+    SharedOperationGuard, SystemRecorderClock, production_hook_service,
+};
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 use std::{
@@ -93,6 +97,7 @@ struct Shared {
     control: Arc<RunControl>,
     admission: Mutex<Option<u64>>,
     next_run_id: AtomicU64,
+    operations: Arc<SharedOperationGuard>,
 }
 pub struct MacroRuntime {
     tx: mpsc::Sender<RuntimeCommand>,
@@ -101,12 +106,20 @@ pub struct MacroRuntime {
 }
 impl MacroRuntime {
     pub fn new(store: Arc<MkMacroStore>, backends: Backends) -> Self {
+        Self::with_guard(store, backends, Arc::new(SharedOperationGuard::default()))
+    }
+    fn with_guard(
+        store: Arc<MkMacroStore>,
+        backends: Backends,
+        operations: Arc<SharedOperationGuard>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             snapshot: RwLock::new(Arc::new(RuntimeSnapshot::default())),
             control: Arc::new(RunControl::default()),
             admission: Mutex::new(None),
             next_run_id: AtomicU64::new(1),
+            operations,
         });
         let s = shared.clone();
         let worker = thread::Builder::new()
@@ -148,6 +161,12 @@ impl MacroRuntime {
             if let Some(a) = *active {
                 return CommandResult::AlreadyRunning { active_macro_id: a };
             }
+            if !self.shared.operations.claim(Operation::Playback) {
+                return CommandResult::Rejected(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "recording is active",
+                ));
+            }
             *active = Some(*id);
         }
         match c {
@@ -179,6 +198,7 @@ impl MacroRuntime {
         }
         if self.tx.send(c).is_err() {
             *self.shared.admission.lock().unwrap() = None;
+            self.shared.operations.release(Operation::Playback);
             return CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::RuntimeUnavailable,
                 "macro worker is shut down",
@@ -241,6 +261,7 @@ fn worker_loop(
     }
     shared.control.stop();
     *shared.admission.lock().unwrap() = None;
+    shared.operations.release(Operation::Playback);
 }
 fn run_one(
     store: &MkMacroStore,
@@ -425,9 +446,11 @@ fn run_one(
         }
     };
     *shared.admission.lock().unwrap() = None;
+    shared.operations.release(Operation::Playback);
 }
 
 static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::new(None));
+static RECORDER: Lazy<RwLock<Option<Arc<RecorderRuntime>>>> = Lazy::new(|| RwLock::new(None));
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
     set_shared_store_with_backends(store, production_backends())
 }
@@ -436,7 +459,21 @@ pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backen
     if let Some(old) = RUNTIME.write().unwrap().take() {
         old.shutdown()
     }
-    *RUNTIME.write().unwrap() = Some(Arc::new(MacroRuntime::new(store, backends)))
+    if let Some(old) = RECORDER.write().unwrap().take() {
+        old.shutdown()
+    }
+    let guard = Arc::new(SharedOperationGuard::default());
+    *RUNTIME.write().unwrap() = Some(Arc::new(MacroRuntime::with_guard(
+        store.clone(),
+        backends,
+        guard.clone(),
+    )));
+    *RECORDER.write().unwrap() = Some(Arc::new(RecorderRuntime::with_guard(
+        store,
+        production_hook_service(8192),
+        Arc::new(SystemRecorderClock::default()),
+        guard,
+    )))
 }
 fn global() -> Result<Arc<MacroRuntime>> {
     RUNTIME
@@ -473,9 +510,38 @@ pub fn stop() -> Result<()> {
 pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
 }
-pub fn record() -> Result<()> {
-    Err(anyhow!("macro recording is not implemented"))
+pub fn record(macro_id: u64, config: NormalizationConfig) -> Result<()> {
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .start(macro_id, config)
 }
-pub fn record_stop() -> Result<()> {
-    Err(anyhow!("macro recording is not implemented"))
+pub fn record_pause() -> Result<()> {
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .pause()
+}
+pub fn record_resume() -> Result<()> {
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .resume()
+}
+pub fn record_stop() -> Result<RecordingResult> {
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .stop()
+}
+pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
+    RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
 }
