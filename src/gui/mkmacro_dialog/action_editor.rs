@@ -69,6 +69,9 @@ impl QuickInsertState {
 
 impl ActionEditorState {
     pub fn begin_new(&mut self, action: MkAction) {
+        if self.draft.is_some() {
+            return;
+        }
         self.editing_id = None;
         self.draft = Some(MkStep {
             id: 0,
