@@ -10,7 +10,8 @@ pub mod uia_editor;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
-    DiagnosticSeverity, MkMacro, MkMacroDocument, MkMacroStore, repair_ids, validate_document,
+    DiagnosticSeverity, MkMacro, MkMacroDocument, MkMacroStore, NormalizationConfig, RecordedStep,
+    repair_ids, validate_document,
 };
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
@@ -34,6 +35,10 @@ pub struct MkMacroDialog {
     pub action_editor: action_editor::ActionEditorState,
     pub quick_insert: action_editor::QuickInsertState,
     pub command_error: Option<String>,
+    /// Editable options are copied into the runtime at Start and never mutate an active session.
+    pub recorder_options: NormalizationConfig,
+    /// Kept when the target was deleted so the user can restore it without losing captured data.
+    pub pending_recording: Option<(u64, Vec<RecordedStep>)>,
 }
 
 #[cfg(test)]
@@ -127,6 +132,8 @@ impl MkMacroDialog {
                 ..Default::default()
             },
             command_error: None,
+            recorder_options: Default::default(),
+            pending_recording: None,
         }
     }
     pub fn open(&mut self) {

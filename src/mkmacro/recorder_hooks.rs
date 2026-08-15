@@ -4,6 +4,7 @@ use crate::mkmacro::input::MKMACRO_EXTRA_INFO;
 use std::{
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -88,11 +89,17 @@ pub trait HookLoopAdapter: Send + 'static {
 #[derive(Clone)]
 pub struct CallbackSender {
     tx: SyncSender<HookEvent>,
-    dropped: Arc<std::sync::atomic::AtomicU64>,
+    dropped: Arc<AtomicU64>,
+    record_injected: Arc<AtomicBool>,
 }
 impl CallbackSender {
     /// Bounded and nonblocking; safe for direct use by a hook callback.
     pub fn submit(&self, event: HookEvent) {
+        // Do the cheap, immutable filtering in the callback, before an event can consume
+        // queue capacity.  Everything else belongs to the recorder worker.
+        if !should_record(&event, self.record_injected.load(Ordering::Relaxed)) {
+            return;
+        }
         if let Err(TrySendError::Full(_)) = self.tx.try_send(event) {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -104,16 +111,19 @@ pub struct HookService {
     commands: mpsc::Sender<HookCommand>,
     events: Mutex<mpsc::Receiver<HookEvent>>,
     dropped: Arc<std::sync::atomic::AtomicU64>,
+    record_injected: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 impl HookService {
     pub fn with_adapter<A: HookLoopAdapter>(adapter: A, capacity: usize) -> Self {
         let (commands, rx) = mpsc::channel();
         let (tx, events) = mpsc::sync_channel(capacity.max(1));
-        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let record_injected = Arc::new(AtomicBool::new(false));
         let callback = CallbackSender {
             tx,
             dropped: dropped.clone(),
+            record_injected: record_injected.clone(),
         };
         let thread = thread::Builder::new()
             .name("mkmacro-hooks".into())
@@ -123,6 +133,7 @@ impl HookService {
             commands,
             events: Mutex::new(events),
             dropped,
+            record_injected,
             thread: Mutex::new(Some(thread)),
         }
     }
@@ -131,6 +142,10 @@ impl HookService {
     }
     pub fn start(&self) -> bool {
         self.command(HookCommand::Start)
+    }
+    /// Sets callback filtering for the next session. Call before `start`.
+    pub fn set_record_injected_input(&self, enabled: bool) {
+        self.record_injected.store(enabled, Ordering::Relaxed);
     }
     pub fn pause(&self) -> bool {
         self.command(HookCommand::Pause)
@@ -173,6 +188,18 @@ impl HookLoopAdapter for NoopHookLoop {
                 break;
             }
         }
+    }
+}
+
+/// Application hook transport. Tests construct `HookService` with their own adapter instead.
+pub fn production_hook_service(capacity: usize) -> HookService {
+    #[cfg(windows)]
+    {
+        HookService::with_adapter(WindowsHookLoop, capacity)
+    }
+    #[cfg(not(windows))]
+    {
+        HookService::with_adapter(NoopHookLoop, capacity)
     }
 }
 

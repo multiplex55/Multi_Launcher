@@ -8,6 +8,7 @@ pub mod input;
 pub mod model;
 pub mod recorder;
 pub mod recorder_hooks;
+pub mod recorder_runtime;
 pub mod runtime;
 pub mod screen;
 pub mod store;
@@ -23,6 +24,7 @@ pub use image_search::*;
 pub use model::*;
 pub use recorder::*;
 pub use recorder_hooks::*;
+pub use recorder_runtime::*;
 pub use runtime::{
     CommandResult, DiagnosticKey, MacroRuntime, RuntimeCommand, RuntimeSnapshot, RuntimeState,
     StepState,
