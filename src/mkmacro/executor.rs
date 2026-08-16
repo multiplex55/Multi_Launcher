@@ -988,8 +988,8 @@ impl Executor {
             MkAction::Text(p) => self.backends.input.text(p),
             MkAction::MouseMove(p) => self.move_to(p, playback, v),
             MkAction::MouseDrag(p) => {
-                let from = self.finalize_target(&p.from, playback, v)?;
-                let to = self.finalize_target(&p.to, playback, v)?;
+                let from = self.finalize_target(&p.from, playback, v, "Mouse Drag")?;
+                let to = self.finalize_target(&p.to, playback, v, "Mouse Drag")?;
                 super::input::drag(
                     &*self.backends.input,
                     &self.control,
@@ -1006,7 +1006,7 @@ impl Executor {
                 Ok(())
             }
             MkAction::MouseClick(p) => {
-                let point = self.finalize_target(&p.target, playback, v)?;
+                let point = self.finalize_target(&p.target, playback, v, "Mouse Click")?;
                 set_point(v, "last_point", point);
                 self.backends.input.move_mouse(point)?;
                 set_point(v, "mouse", point);
@@ -1118,8 +1118,25 @@ impl Executor {
         target: &MkCoordinateTarget,
         playback: &MkPlayback,
         v: &RuntimeVariables,
+        action: &'static str,
     ) -> ExecResult<MkPoint> {
-        let configured = self.backends.screen.resolve(target, v)?;
+        let configured = self
+            .backends
+            .screen
+            .resolve(target, v)
+            .map_err(|mut error| {
+                if error.kind == DiagnosticKind::TypeMismatch {
+                    if let (Some(variable), Some(actual)) =
+                        (error.context.get("variable"), error.context.get("actual"))
+                    {
+                        error.message = format!(
+                            "Variable '{variable}' contains {actual}; {action} requires Point"
+                        );
+                    }
+                    error.context.insert("action".into(), action.into());
+                }
+                error
+            })?;
         let randomized = offset_point(
             configured,
             sample_offset(playback.random_offset_px),
@@ -1133,7 +1150,7 @@ impl Executor {
         playback: &MkPlayback,
         v: &mut RuntimeVariables,
     ) -> ExecResult {
-        let point = self.finalize_target(&payload.target, playback, v)?;
+        let point = self.finalize_target(&payload.target, playback, v, "Mouse Move")?;
         if payload.duration_ms == 0 {
             self.backends.input.move_mouse(point)?;
         } else {
@@ -1183,14 +1200,26 @@ impl Executor {
         }
         match (result, found) {
             (_, Some(point)) => Ok(point),
-            (Err(error), None) => Err(error
-                .context("macro_id", macro_id.to_string())
-                .context("asset_id", p.asset_id.to_string())
-                .context("region", format!("{:?}", p.region))),
+            (Err(mut error), None) => {
+                if error.kind == DiagnosticKind::Timeout {
+                    error.message =
+                        format!("Target image was not found within {} ms", p.wait.timeout_ms);
+                    error
+                        .context
+                        .insert("timeout_ms".into(), p.wait.timeout_ms.to_string());
+                }
+                Err(error
+                    .context("macro_id", macro_id.to_string())
+                    .context("asset_id", p.asset_id.to_string())
+                    .context("region", format!("{:?}", p.region)))
+            }
             (Ok(()), None) => Err(ExecutionDiagnostic::new(
                 DiagnosticKind::TargetNotFound,
-                "image not found",
-            )),
+                "Target image was not found",
+            )
+            .context("macro_id", macro_id.to_string())
+            .context("asset_id", p.asset_id.to_string())
+            .context("region", format!("{:?}", p.region))),
         }
     }
     fn wait_condition(

@@ -30,10 +30,7 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
         schema_version: SCHEMA_VERSION,
         macros: vec![m.clone()],
     };
-    let d = validate_document(&doc, None)
-        .into_iter()
-        .filter(|x| x.code != "missing_asset")
-        .collect::<Vec<_>>();
+    let d = validate_document(&doc, None);
     if !can_run(&d) {
         return Err(d);
     }

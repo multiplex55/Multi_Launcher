@@ -109,6 +109,22 @@ impl WindowsScreenBackend {
             y: point.y.clamp(min_y, max_y),
         })
     }
+
+    fn require_on_desktop(&self, point: MkPoint) -> ExecResult<MkPoint> {
+        let (min_x, min_y, max_x, max_y) = self.bounds()?;
+        if point.x < min_x || point.x > max_x || point.y < min_y || point.y > max_y {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Requested coordinate lies outside the virtual desktop",
+            )
+            .context("coordinate", format!("{},{}", point.x, point.y))
+            .context(
+                "virtual_desktop",
+                format!("{min_x},{min_y}..{max_x},{max_y}"),
+            ));
+        }
+        Ok(point)
+    }
 }
 
 impl ScreenBackend for WindowsScreenBackend {
@@ -118,12 +134,12 @@ impl ScreenBackend for WindowsScreenBackend {
         variables: &RuntimeVariables,
     ) -> ExecResult<MkPoint> {
         match target {
-            MkCoordinateTarget::Screen { point } => self.clamp_to_desktop(*point),
+            MkCoordinateTarget::Screen { point } => self.require_on_desktop(*point),
             MkCoordinateTarget::ActiveWindow { point } => {
                 let hwnd = self.geometry.foreground_window()?.ok_or_else(|| {
                     ExecutionDiagnostic::new(
                         DiagnosticKind::TargetNotFound,
-                        "no foreground window is available",
+                        "Active window coordinate target requires an active window",
                     )
                     .context("backend", "WindowsScreenBackend")
                     .context("action", "resolve active-window client point")
@@ -139,7 +155,7 @@ impl ScreenBackend for WindowsScreenBackend {
                         .checked_add(point.y)
                         .ok_or_else(|| invalid("active-window client Y coordinate overflow"))?,
                 };
-                self.clamp_to_desktop(desktop)
+                self.require_on_desktop(desktop)
             }
             MkCoordinateTarget::Variable { name } => match variables.get(name) {
                 Some(MkValue::Point(point)) => Ok(*point),
@@ -215,7 +231,7 @@ fn type_mismatch(name: &str, value: &MkValue) -> ExecutionDiagnostic {
     let actual = value_type(value);
     ExecutionDiagnostic::new(
         DiagnosticKind::TypeMismatch,
-        format!("variable '{name}' must be Point, but is {actual}"),
+        format!("Variable '{name}' contains {actual}; coordinate target requires Point"),
     )
     .context("variable", name)
     .context("expected", "Point")
