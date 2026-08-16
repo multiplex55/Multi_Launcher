@@ -27,6 +27,7 @@ pub struct SettingsEditor {
     pub(crate) note_panel_w: f32,
     pub(crate) note_panel_h: f32,
     pub(crate) note_save_on_close: bool,
+    pub(crate) note_confirm_discard_unsaved_changes: bool,
     pub(crate) note_always_overwrite: bool,
     pub(crate) note_images_as_links: bool,
     pub(crate) note_show_details: bool,

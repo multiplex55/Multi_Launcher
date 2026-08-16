@@ -76,6 +76,7 @@ impl SettingsEditor {
             Some(new_settings.note.clone()),
             Some(new_settings.note_panel_default_size),
             Some(new_settings.note_save_on_close),
+            Some(new_settings.note_confirm_discard_unsaved_changes),
             Some(new_settings.note_always_overwrite),
             Some(new_settings.note_images_as_links),
             Some(new_settings.note_show_details),

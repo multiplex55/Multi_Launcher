@@ -81,6 +81,7 @@ fn run_action(action: &str) -> bool {
         None,       // note_settings
         None,       // note_panel_default_size
         None,       // note_save_on_close
+        None,       // note_confirm_discard_unsaved_changes
         None,       // note_always_overwrite
         None,       // note_images_as_links
         None,       // note_show_details

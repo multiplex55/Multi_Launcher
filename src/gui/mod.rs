@@ -502,6 +502,7 @@ pub struct LauncherApp {
     pub note_settings: NoteSettings,
     pub note_panel_default_size: (f32, f32),
     pub note_save_on_close: bool,
+    pub note_confirm_discard_unsaved_changes: bool,
     pub note_always_overwrite: bool,
     pub note_images_as_links: bool,
     pub note_show_details: bool,
@@ -866,6 +867,7 @@ impl LauncherApp {
         note_settings: Option<NoteSettings>,
         note_panel_default_size: Option<(f32, f32)>,
         note_save_on_close: Option<bool>,
+        note_confirm_discard_unsaved_changes: Option<bool>,
         note_always_overwrite: Option<bool>,
         note_images_as_links: Option<bool>,
         note_show_details: Option<bool>,
@@ -978,6 +980,9 @@ impl LauncherApp {
         }
         if let Some(v) = note_save_on_close {
             self.note_save_on_close = v;
+        }
+        if let Some(v) = note_confirm_discard_unsaved_changes {
+            self.note_confirm_discard_unsaved_changes = v;
         }
         if let Some(v) = note_always_overwrite {
             self.note_always_overwrite = v;
@@ -1457,6 +1462,7 @@ impl LauncherApp {
             note_settings: settings.note.clone(),
             note_panel_default_size: settings.note_panel_default_size,
             note_save_on_close: settings.note_save_on_close,
+            note_confirm_discard_unsaved_changes: settings.note_confirm_discard_unsaved_changes,
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
             note_show_details: settings.note_show_details,
@@ -2208,12 +2214,17 @@ impl LauncherApp {
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
-                if let Some(mut panel) = self.note_panels.pop()
-                    && self.note_save_on_close
-                {
-                    panel.save(self);
+                if let Some(mut note_panel) = self.note_panels.pop() {
+                    note_panel.request_close(self);
+                    if note_panel.open {
+                        self.note_panels.push(note_panel);
+                        self.panel_stack.push(Panel::NotePanel);
+                    }
                 }
-                self.panel_states.note_panel = false;
+                self.panel_states.note_panel = !self.note_panels.is_empty();
+                if self.panel_states.note_panel && !self.panel_stack.contains(&Panel::NotePanel) {
+                    self.panel_stack.push(Panel::NotePanel);
+                }
             }
             Panel::ImagePanel => {
                 let _ = self.image_panels.pop();
@@ -2383,12 +2394,17 @@ impl LauncherApp {
                 self.panel_states.unused_assets_dialog = false;
             }
             Panel::NotePanel => {
-                if let Some(mut panel) = self.note_panels.pop()
-                    && self.note_save_on_close
-                {
-                    panel.save(self);
+                if let Some(mut note_panel) = self.note_panels.pop() {
+                    note_panel.request_close(self);
+                    if note_panel.open {
+                        self.note_panels.push(note_panel);
+                        self.panel_stack.push(Panel::NotePanel);
+                    }
                 }
-                self.panel_states.note_panel = false;
+                self.panel_states.note_panel = !self.note_panels.is_empty();
+                if self.panel_states.note_panel && !self.panel_stack.contains(&Panel::NotePanel) {
+                    self.panel_stack.push(Panel::NotePanel);
+                }
             }
             Panel::ImagePanel => {
                 let _ = self.image_panels.pop();
@@ -3429,6 +3445,7 @@ mod tests {
             None, // note_settings
             None, // note_panel_default_size
             None, // note_save_on_close
+            None, // note_confirm_discard_unsaved_changes
             None, // note_always_overwrite
             None, // note_images_as_links
             None, // note_show_details
@@ -3486,7 +3503,8 @@ mod tests {
             None,                // page_jump
             Some(note_settings), // note_settings
             None,                // note_panel_default_size
-            None,                // note_save_on_close
+            Some(false),         // note_save_on_close
+            Some(false),         // note_confirm_discard_unsaved_changes
             None,                // note_always_overwrite
             None,                // note_images_as_links
             None,                // note_show_details
@@ -3495,6 +3513,8 @@ mod tests {
         );
 
         assert!(!app.note_settings.split_view_enabled);
+        assert!(!app.note_save_on_close);
+        assert!(!app.note_confirm_discard_unsaved_changes);
     }
 
     #[test]

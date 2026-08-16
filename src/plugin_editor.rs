@@ -136,6 +136,7 @@ impl PluginEditor {
                         Some(s.note.clone()),
                         Some(s.note_panel_default_size),
                         Some(s.note_save_on_close),
+                        Some(s.note_confirm_discard_unsaved_changes),
                         Some(s.note_always_overwrite),
                         Some(s.note_images_as_links),
                         Some(s.note_show_details),

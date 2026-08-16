@@ -68,6 +68,7 @@ impl SettingsEditor {
             note_panel_w: settings.note_panel_default_size.0,
             note_panel_h: settings.note_panel_default_size.1,
             note_save_on_close: settings.note_save_on_close,
+            note_confirm_discard_unsaved_changes: settings.note_confirm_discard_unsaved_changes,
             note_always_overwrite: settings.note_always_overwrite,
             note_images_as_links: settings.note_images_as_links,
             note_show_details: settings.note_show_details,
@@ -239,6 +240,7 @@ impl SettingsEditor {
                 self.note_panel_h.clamp(150.0, 1600.0),
             ),
             note_save_on_close: self.note_save_on_close,
+            note_confirm_discard_unsaved_changes: self.note_confirm_discard_unsaved_changes,
             note_always_overwrite: self.note_always_overwrite,
             note_images_as_links: self.note_images_as_links,
             note_show_details: self.note_show_details,
@@ -335,6 +337,18 @@ mod tests {
     use crate::plugins::note::NotePluginSettings;
     use crate::plugins::screenshot::ScreenshotPluginSettings;
     use crate::settings::Settings;
+
+    #[test]
+    fn discard_confirmation_round_trips_both_values() {
+        for expected in [true, false] {
+            let mut settings = Settings::default();
+            settings.note_confirm_discard_unsaved_changes = expected;
+            let editor = SettingsEditor::from_settings(&settings);
+            assert_eq!(editor.note_confirm_discard_unsaved_changes, expected);
+            let restored = editor.to_settings(&settings);
+            assert_eq!(restored.note_confirm_discard_unsaved_changes, expected);
+        }
+    }
 
     #[test]
     fn query_results_layout_round_trip_editor_conversion() {

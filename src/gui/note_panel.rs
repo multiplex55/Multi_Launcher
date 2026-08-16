@@ -543,6 +543,8 @@ enum PlainLinkConfirmOutcome {
 pub struct NotePanel {
     pub open: bool,
     note: Note,
+    saved_content_baseline: String,
+    discard_unsaved_prompt: bool,
     link_search: String,
     link_menu_targets: Vec<LinkMenuResult>,
     link_menu_targets_version: Option<u64>,
@@ -826,9 +828,12 @@ impl NotePanel {
         view_mode: NoteViewMode,
         backlinks_enabled: bool,
     ) -> Self {
+        let saved_content_baseline = note.content.clone();
         let mut panel = Self {
             open: true,
             note,
+            saved_content_baseline,
+            discard_unsaved_prompt: false,
             link_search: String::new(),
             link_menu_targets: Vec::new(),
             link_menu_targets_version: None,
@@ -1016,6 +1021,7 @@ impl NotePanel {
             Ok(true) => {
                 self.note = note;
                 self.sync_aliases_from_content();
+                self.mark_current_content_saved();
             }
             Ok(false) => self.overwrite_prompt = true,
             Err(err) => app.report_error("note save", format!("Failed to save aliases: {err}")),
@@ -1293,6 +1299,49 @@ impl NotePanel {
         self.last_edit_at_secs
     }
 
+    pub(crate) fn has_unsaved_changes(&self) -> bool {
+        self.note.content != self.saved_content_baseline
+    }
+
+    fn mark_current_content_saved(&mut self) {
+        self.saved_content_baseline.clone_from(&self.note.content);
+    }
+
+    pub(crate) fn request_close(&mut self, app: &mut LauncherApp) {
+        if app.note_save_on_close {
+            self.save(app);
+            if !self.overwrite_prompt {
+                self.open = false;
+            }
+        } else if !app.note_confirm_discard_unsaved_changes || !self.has_unsaved_changes() {
+            self.open = false;
+            self.discard_unsaved_prompt = false;
+        } else {
+            self.open = true;
+            self.discard_unsaved_prompt = true;
+        }
+    }
+
+    fn keep_editing(&mut self) {
+        self.discard_unsaved_prompt = false;
+        self.open = true;
+        self.focus_textedit_next_frame = true;
+    }
+
+    fn discard_changes(&mut self) {
+        self.discard_unsaved_prompt = false;
+        self.open = false;
+    }
+
+    pub(crate) fn replace_content_after_saved_external_mutation(
+        &mut self,
+        content: String,
+        now_secs: f64,
+    ) {
+        self.replace_content_from_mutation(content, now_secs);
+        self.mark_current_content_saved();
+    }
+
     pub(crate) fn replace_content_from_mutation(&mut self, content: String, now_secs: f64) {
         if self.note.content == content {
             return;
@@ -1457,9 +1506,6 @@ impl NotePanel {
         // If the panel is closing, ensure we don't leave egui focus on a widget
         // that will no longer exist this frame. This avoids AccessKit panics
         // about focused nodes missing from the accessibility tree.
-        if !open && let Some(id) = self.last_textedit_id {
-            ctx.memory_mut(|m| m.surrender_focus(id));
-        }
 
         if self.link_dialog_open {
             let mut open_link = true;
@@ -1562,13 +1608,41 @@ impl NotePanel {
                 Self::show_no_plain_links_toast(app);
             }
         }
-        if save_now || (!open && app.note_save_on_close) {
+        if save_now {
             self.save(app);
-            if self.overwrite_prompt {
-                open = true;
+        }
+        if !open {
+            self.request_close(app);
+        }
+
+        if self.discard_unsaved_prompt {
+            let mut prompt_open = true;
+            let mut discard = false;
+            let mut keep_editing = false;
+            egui::Window::new("Discard unsaved changes?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut prompt_open)
+                .show(ctx, |ui| {
+                    ui.label("This note has changes that have not been saved.");
+                    ui.horizontal(|ui| {
+                        discard = ui.button("Discard Changes").clicked();
+                        keep_editing = ui.button("Keep Editing").clicked();
+                    });
+                });
+            if discard {
+                self.discard_changes();
+            } else if keep_editing || !prompt_open {
+                self.keep_editing();
             }
         }
-        self.open = open;
+
+        if !self.open
+            && let Some(id) = self.last_textedit_id
+        {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
         if self.overwrite_prompt {
             egui::Window::new("Note exists")
                 .collapsible(false)
@@ -1589,6 +1663,7 @@ impl NotePanel {
                                     true,
                                     app.note_settings.backlinks_enabled,
                                 );
+                                self.mark_current_content_saved();
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -1607,6 +1682,7 @@ impl NotePanel {
                                     true,
                                     app.note_settings.backlinks_enabled,
                                 );
+                                self.mark_current_content_saved();
                                 self.finish_save(app);
                                 self.overwrite_prompt = false;
                             }
@@ -2936,6 +3012,7 @@ impl NotePanel {
             Ok(true) => {
                 self.refresh_fast_derived();
                 self.refresh_heavy_derived(true, app.note_settings.backlinks_enabled);
+                self.mark_current_content_saved();
                 self.finish_save(app);
                 self.link_menu_targets_version = None;
                 self.invalidate_link_menu_results();
@@ -6960,5 +7037,38 @@ body"
         let _ = crate::plugins::note::refresh_cache();
         assert_eq!(app.note_panels.len(), 1);
         assert_eq!(slugify(&app.note_panels[0].note.title), "linked-note");
+    }
+
+    #[test]
+    fn persistence_baseline_tracks_exact_content() {
+        let mut panel = NotePanel::from_note(empty_note("original"));
+        assert!(!panel.has_unsaved_changes());
+        panel.replace_content_from_mutation("changed".into(), 1.0);
+        assert!(panel.has_unsaved_changes());
+        panel.replace_content_from_mutation("original".into(), 2.0);
+        assert!(!panel.has_unsaved_changes());
+    }
+
+    #[test]
+    fn saved_external_mutation_is_clean_but_unsaved_mutation_is_dirty() {
+        let mut panel = NotePanel::from_note(empty_note("original"));
+        panel.replace_content_after_saved_external_mutation("persisted".into(), 1.0);
+        assert!(!panel.has_unsaved_changes());
+        panel.replace_content_from_mutation("unpersisted".into(), 2.0);
+        assert!(panel.has_unsaved_changes());
+    }
+
+    #[test]
+    fn discard_prompt_actions_have_explicit_transitions() {
+        let mut panel = NotePanel::from_note(empty_note("original"));
+        panel.discard_unsaved_prompt = true;
+        panel.keep_editing();
+        assert!(panel.open);
+        assert!(!panel.discard_unsaved_prompt);
+        assert!(panel.focus_textedit_next_frame);
+        panel.discard_unsaved_prompt = true;
+        panel.discard_changes();
+        assert!(!panel.open);
+        assert!(!panel.discard_unsaved_prompt);
     }
 }

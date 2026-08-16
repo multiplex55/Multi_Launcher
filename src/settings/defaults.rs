@@ -75,6 +75,9 @@ pub fn default_note_panel_size() -> (f32, f32) {
 pub fn default_note_save_on_close() -> bool {
     false
 }
+pub fn default_note_confirm_discard_unsaved_changes() -> bool {
+    true
+}
 pub fn default_note_show_details() -> bool {
     false
 }
