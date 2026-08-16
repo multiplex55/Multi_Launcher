@@ -13,6 +13,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClipboardModifyPluginSettings {
+    pub hide_launcher_after_apply: bool,
     pub dialog_width: f32,
     pub dialog_height: f32,
     pub navigation_width: f32,
@@ -26,6 +27,7 @@ pub struct ClipboardModifyPluginSettings {
 impl Default for ClipboardModifyPluginSettings {
     fn default() -> Self {
         Self {
+            hide_launcher_after_apply: true,
             dialog_width: 900.0,
             dialog_height: 640.0,
             navigation_width: 150.0,
@@ -35,6 +37,33 @@ impl Default for ClipboardModifyPluginSettings {
             management_sort_field: "name".into(),
             management_sort_ascending: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod clipboard_modify_plugin_settings_tests {
+    use super::ClipboardModifyPluginSettings;
+
+    #[test]
+    fn hide_launcher_default_and_legacy_json_preserve_historical_behavior() {
+        assert!(ClipboardModifyPluginSettings::default().hide_launcher_after_apply);
+        let legacy = serde_json::json!({ "dialog_width": 777.0 });
+        let decoded: ClipboardModifyPluginSettings = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.hide_launcher_after_apply);
+    }
+
+    #[test]
+    fn explicit_keep_open_value_round_trips() {
+        let settings = ClipboardModifyPluginSettings {
+            hide_launcher_after_apply: false,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["hide_launcher_after_apply"], false);
+        assert_eq!(
+            serde_json::from_value::<ClipboardModifyPluginSettings>(value).unwrap(),
+            settings
+        );
     }
 }
 

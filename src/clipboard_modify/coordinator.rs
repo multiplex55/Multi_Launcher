@@ -331,6 +331,7 @@ pub struct ImmediateRequestMetadata {
     pub action: Action,
     pub query: String,
     pub source: ActivationSource,
+    pub hide_launcher_on_success: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredClipboardModifyError {
@@ -618,6 +619,7 @@ mod tests {
                     action: action(),
                     query: "cm upper".into(),
                     source: ActivationSource::Enter,
+                    hide_launcher_on_success: true,
                 },
             )
             .unwrap();
@@ -641,6 +643,7 @@ mod tests {
                     action: action(),
                     query: "q".into(),
                     source: ActivationSource::Enter,
+                    hide_launcher_on_success: true,
                 },
             )
             .unwrap();
@@ -686,6 +689,7 @@ mod tests {
             action: action(),
             query: query.into(),
             source: ActivationSource::Enter,
+            hide_launcher_on_success: true,
         }
     }
 
@@ -858,6 +862,7 @@ mod tests {
                 action: action(),
                 query: "q".into(),
                 source: ActivationSource::Click,
+                hide_launcher_on_success: true,
             },
         )
         .unwrap();

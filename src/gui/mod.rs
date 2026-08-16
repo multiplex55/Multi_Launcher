@@ -468,6 +468,7 @@ pub struct LauncherApp {
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
     pending_clipboard_modify_immediate: HashMap<u64, ImmediateRequestMetadata>,
+    pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
     clipboard_modify_immediate: ImmediateExecutionCoordinator<
         crate::clipboard_modify::clipboard::ProductionClipboardService,
     >,
@@ -1431,6 +1432,8 @@ impl LauncherApp {
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
             pending_clipboard_modify_immediate: HashMap::new(),
+            clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
+                .hide_launcher_after_apply,
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
             clipboard_modify_events: Vec::new(),
             convert_panel: ConvertPanel::default(),

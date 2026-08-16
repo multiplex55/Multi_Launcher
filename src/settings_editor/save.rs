@@ -1,6 +1,7 @@
 use super::state::SettingsEditor;
 use crate::dashboard::config::DashboardConfig;
 use crate::gui::{LauncherApp, UiErrorEvent};
+use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::NotePluginSettings;
 use crate::settings::Settings;
 use eframe::egui;
@@ -160,6 +161,11 @@ impl SettingsEditor {
             && let Ok(cfg) = serde_json::from_value::<NotePluginSettings>(val.clone())
         {
             app.note_external_open = cfg.external_open;
+        }
+        if let Some(val) = new_settings.plugin_settings.get("clipboard_modify")
+            && let Ok(cfg) = serde_json::from_value::<ClipboardModifyPluginSettings>(val.clone())
+        {
+            app.clipboard_modify_hide_launcher_after_apply = cfg.hide_launcher_after_apply;
         }
         crate::request_hotkey_restart(new_settings);
         if app.enable_toasts {
