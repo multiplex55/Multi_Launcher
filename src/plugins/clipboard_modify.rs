@@ -98,6 +98,10 @@ impl Plugin for ClipboardModifyPlugin {
         let mut cfg = serde_json::from_value::<ClipboardModifyPluginSettings>(value.clone())
             .unwrap_or_default();
         ui.small("Clipboard Modify stores only UI preferences here; templates, pipelines, source text, previews, and undo text are not stored in settings.");
+        ui.checkbox(
+            &mut cfg.hide_launcher_after_apply,
+            "Hide Launcher after applying template or pipeline",
+        );
         ui.horizontal(|ui| {
             ui.label("Dialog size");
             ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).clamp_range(320.0..=2400.0));

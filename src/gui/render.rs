@@ -1464,10 +1464,15 @@ impl eframe::App for LauncherApp {
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default();
+            let hide_launcher_after_apply = clipboard_modify_preferences.hide_launcher_after_apply;
             clipboard_modify_preferences.dialog_width =
                 self.clipboard_modify_dialog.persisted_window_size.x;
             clipboard_modify_preferences.dialog_height =
                 self.clipboard_modify_dialog.persisted_window_size.y;
+            debug_assert_eq!(
+                clipboard_modify_preferences.hide_launcher_after_apply, hide_launcher_after_apply,
+                "persisting dialog geometry must not reset the live visibility preference"
+            );
             if let Ok(value) = serde_json::to_value(clipboard_modify_preferences) {
                 settings
                     .plugin_settings

@@ -368,6 +368,7 @@ mod tests {
     fn clipboard_modify_settings_round_trip_editor_conversion() {
         let mut initial = Settings::default();
         let cfg = ClipboardModifyPluginSettings {
+            hide_launcher_after_apply: false,
             dialog_width: 777.0,
             dialog_height: 555.0,
             navigation_width: 123.0,

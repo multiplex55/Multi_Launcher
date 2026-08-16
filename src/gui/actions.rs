@@ -962,17 +962,22 @@ impl LauncherApp {
                     return true;
                 }
             };
-            let (intent, canonical_command) = match payload {
+            let (intent, canonical_command, hide_launcher_on_success) = match payload {
                 ClipboardModifyActionPayload::ExecuteAdHocStages {
                     canonical_command,
                     stages,
-                } => (ClipboardModifyIntent::Stages(stages), canonical_command),
+                } => (
+                    ClipboardModifyIntent::Stages(stages),
+                    canonical_command,
+                    true,
+                ),
                 ClipboardModifyActionPayload::ExecuteTemplate {
                     canonical_command,
                     name,
                 } => (
                     ClipboardModifyIntent::ApplyTemplate { name },
                     canonical_command,
+                    self.clipboard_modify_hide_launcher_after_apply,
                 ),
                 ClipboardModifyActionPayload::ExecuteSavedPipeline {
                     canonical_command,
@@ -980,6 +985,7 @@ impl LauncherApp {
                 } => (
                     ClipboardModifyIntent::ApplySavedPipeline { name },
                     canonical_command,
+                    self.clipboard_modify_hide_launcher_after_apply,
                 ),
                 _ => {
                     self.report_clipboard_modify_action_error("unexpected execute payload".into());
@@ -990,6 +996,7 @@ impl LauncherApp {
                 action: action.clone(),
                 query: canonical_command,
                 source,
+                hide_launcher_on_success,
             };
             match self.clipboard_modify_immediate.start(
                 intent,
@@ -1031,7 +1038,18 @@ impl LauncherApp {
                     if let Some(meta) = meta.as_ref() {
                         self.record_history_usage(&meta.action, &meta.query, meta.source);
                     }
-                    self.visible_flag.store(false, Ordering::SeqCst);
+                    // Missing metadata uses the conservative historical policy: hide.
+                    if meta
+                        .as_ref()
+                        .map(|meta| meta.hide_launcher_on_success)
+                        .unwrap_or(true)
+                    {
+                        self.visible_flag.store(false, Ordering::SeqCst);
+                    } else {
+                        self.visible_flag.store(true, Ordering::SeqCst);
+                        self.move_cursor_end = true;
+                        self.focus_input();
+                    }
                     if self.enable_toasts {
                         push_toast(
                             &mut self.toasts,
@@ -1615,7 +1633,8 @@ mod tests {
 mod clipboard_modify_gui_action_tests {
     use super::*;
     use crate::clipboard_modify::actions::{
-        encode_action_payload, execute_stages_payload, open_dialog_payload, undo_payload,
+        encode_action_payload, execute_saved_pipeline_payload, execute_stages_payload,
+        execute_template_payload, open_dialog_payload, undo_payload,
     };
     use crate::clipboard_modify::model::{OperationId, StageArguments, StageSpec};
     use crate::clipboard_modify::parser::ModifySection;
@@ -1695,6 +1714,32 @@ mod clipboard_modify_gui_action_tests {
             .expect("pending immediate metadata");
         assert_eq!(meta.query, "cm camel-case");
         assert_eq!(meta.action.action, "clipboard_modify:execute");
+        assert!(meta.hide_launcher_on_success, "ad-hoc stages always hide");
+    }
+
+    #[test]
+    fn template_and_pipeline_snapshot_the_runtime_visibility_preference() {
+        let ctx = egui::Context::default();
+        for payload in [
+            execute_template_payload("example".into()),
+            execute_saved_pipeline_payload("example".into()),
+        ] {
+            for expected in [true, false] {
+                let mut app = super::tests::new_app(&ctx);
+                app.clipboard_modify_hide_launcher_after_apply = expected;
+                let args = encode_action_payload(&payload).unwrap();
+                assert!(app.handle_clipboard_modify_action(
+                    &action("clipboard_modify:execute", Some(args)),
+                    ActivationSource::Enter,
+                ));
+                let meta = app
+                    .pending_clipboard_modify_immediate
+                    .values()
+                    .next()
+                    .unwrap();
+                assert_eq!(meta.hide_launcher_on_success, expected);
+            }
+        }
     }
 
     #[test]
@@ -1816,6 +1861,7 @@ mod clipboard_modify_gui_action_tests {
             action: action("clipboard_modify:execute", None),
             query: "cm uppercase".into(),
             source: ActivationSource::Enter,
+            hide_launcher_on_success: false,
         };
         app.pending_clipboard_modify_immediate
             .insert(7, meta.clone());
@@ -1855,6 +1901,7 @@ mod clipboard_modify_gui_action_tests {
             action: action("clipboard_modify:execute", None),
             query: "cm uppercase".into(),
             source: ActivationSource::Gesture,
+            hide_launcher_on_success: true,
         };
         app.pending_clipboard_modify_immediate
             .insert(8, meta.clone());
@@ -1879,6 +1926,38 @@ mod clipboard_modify_gui_action_tests {
             "cm uppercase"
         );
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn immediate_success_keep_open_restores_visibility_cursor_and_focus() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.move_cursor_end = false;
+        app.focus_query = false;
+        let meta = ImmediateRequestMetadata {
+            action: action("clipboard_modify:execute", None),
+            query: "cm template example".into(),
+            source: ActivationSource::Enter,
+            hide_launcher_on_success: false,
+        };
+        app.pending_clipboard_modify_immediate
+            .insert(9, meta.clone());
+        app.clipboard_modify_immediate.inject_completion_for_test(
+            meta,
+            crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
+                request_id: crate::clipboard_modify::coordinator::OperationId(9),
+                display_label: "Test".into(),
+                character_count: 1,
+                line_count: 1,
+                undo_available: true,
+                result: Ok(()),
+            },
+        );
+        app.drain_clipboard_modify_immediate();
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.move_cursor_end);
+        assert!(app.focus_query);
     }
 
     #[test]
