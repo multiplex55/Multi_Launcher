@@ -679,10 +679,15 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
     }
 }
 /// Descriptors currently offered by the macro-authoring UI.
+pub fn is_available_in_palette(descriptor: &ActionDescriptor) -> bool {
+    descriptor.availability == ActionAvailability::Ready
+        && descriptor.category != ActionCategory::UiAutomation
+        && descriptor.hidden_reason.is_none()
+        && descriptor.runtime == RuntimeAvailability::Supported
+}
+
 pub fn visible_descriptors() -> impl Iterator<Item = ActionDescriptor> {
-    descriptors()
-        .into_iter()
-        .filter(|descriptor| descriptor.availability == ActionAvailability::Ready)
+    descriptors().into_iter().filter(is_available_in_palette)
 }
 pub fn matches(d: &ActionDescriptor, q: &str) -> bool {
     let q = q.to_lowercase();
@@ -1063,11 +1068,7 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
     // Selection is an authoring capability, not a generic model-loading route.
     // Hidden actions remain deserializable but cannot bypass the catalog filter
     // through a direct call to this function.
-    if descriptor.availability != ActionAvailability::Ready
-        || descriptor.hidden_reason.is_some()
-        || descriptor.runtime != RuntimeAvailability::Supported
-        || d.action_editor.draft.is_some()
-    {
+    if !is_available_in_palette(descriptor) || d.action_editor.draft.is_some() {
         return false;
     }
     let action = (descriptor.make_default)();

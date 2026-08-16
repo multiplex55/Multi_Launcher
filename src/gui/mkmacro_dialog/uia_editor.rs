@@ -88,12 +88,9 @@ impl UiaEditorState {
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, state: &mut UiaEditorState) {
     match &state.capture {
-        CaptureState::Idle => {
-            ui.add_enabled(false, eframe::egui::Button::new("Pick UI Control"))
-                .on_disabled_hover_text(BACKEND_UNAVAILABLE);
-            ui.label(BACKEND_UNAVAILABLE);
-            ui.label("Mouse clicks remain physical unless explicitly converted.");
-        }
+        // Capture remains a model/runtime boundary for saved actions and future
+        // authoring work, but Phase 1 intentionally exposes no unavailable footer.
+        CaptureState::Idle => {}
         CaptureState::Capturing { .. } => {
             ui.label("UI control capture active — move the pointer, then confirm or press Escape to cancel.");
         }

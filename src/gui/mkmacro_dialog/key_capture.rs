@@ -144,6 +144,28 @@ pub(crate) fn captured_chord(input: &egui::InputState) -> Option<CapturedChord> 
     })
 }
 
+pub(crate) fn chord_hotkey(chord: CapturedChord) -> Option<MkHotkey> {
+    let CapturedChord::Keys(mut keys) = chord else {
+        return None;
+    };
+    let key = keys.pop()?;
+    Some(MkHotkey {
+        key,
+        modifiers: keys,
+    })
+}
+
+pub(crate) fn apply_captured_hotkey(current: &mut Option<MkHotkey>, chord: CapturedChord) -> bool {
+    let Some(hotkey) = chord_hotkey(chord) else {
+        return false;
+    };
+    if current.as_ref() == Some(&hotkey) {
+        return false;
+    }
+    *current = Some(hotkey);
+    true
+}
+
 pub(crate) fn key_name(key: &MkKey) -> String {
     match key {
         MkKey::Character(v) => v.to_uppercase(),
@@ -286,6 +308,116 @@ mod tests {
             capture(Escape, Default::default()),
             CapturedChord::Cancelled
         );
+    }
+
+    #[test]
+    fn exact_macro_hotkeys_cover_plain_and_modified_capture() {
+        let cases = [
+            (
+                A,
+                egui::Modifiers::NONE,
+                MkHotkey {
+                    key: MkKey::Character("A".into()),
+                    modifiers: vec![],
+                },
+            ),
+            (
+                M,
+                egui::Modifiers::NONE,
+                MkHotkey {
+                    key: MkKey::Character("M".into()),
+                    modifiers: vec![],
+                },
+            ),
+            (
+                Num0,
+                egui::Modifiers::NONE,
+                MkHotkey {
+                    key: MkKey::Character("0".into()),
+                    modifiers: vec![],
+                },
+            ),
+            (
+                Num9,
+                egui::Modifiers::NONE,
+                MkHotkey {
+                    key: MkKey::Character("9".into()),
+                    modifiers: vec![],
+                },
+            ),
+            (
+                M,
+                egui::Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+                MkHotkey {
+                    key: MkKey::Character("M".into()),
+                    modifiers: vec![MkKey::Control],
+                },
+            ),
+            (
+                F8,
+                egui::Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                MkHotkey {
+                    key: MkKey::Function(8),
+                    modifiers: vec![MkKey::Control, MkKey::Shift],
+                },
+            ),
+            (
+                Enter,
+                egui::Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+                MkHotkey {
+                    key: MkKey::Enter,
+                    modifiers: vec![MkKey::Alt],
+                },
+            ),
+        ];
+        for (key, modifiers, expected) in cases {
+            assert_eq!(chord_hotkey(capture(key, modifiers)), Some(expected));
+        }
+    }
+
+    #[test]
+    fn escape_is_not_a_hotkey_and_does_not_supply_a_replacement() {
+        let original = MkHotkey {
+            key: MkKey::Function(4),
+            modifiers: vec![MkKey::Alt],
+        };
+        let mut current = Some(original.clone());
+        assert!(!apply_captured_hotkey(
+            &mut current,
+            capture(Escape, Default::default())
+        ));
+        assert_eq!(current, Some(original));
+    }
+
+    #[test]
+    fn control_alt_m_has_canonical_storage_and_friendly_display() {
+        let hotkey = chord_hotkey(capture(
+            M,
+            egui::Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            hotkey,
+            MkHotkey {
+                key: MkKey::Character("M".into()),
+                modifiers: vec![MkKey::Control, MkKey::Alt],
+            }
+        );
+        assert_eq!(hotkey_name(&hotkey), "Ctrl + Alt + M");
     }
     use egui::Key::*;
 }

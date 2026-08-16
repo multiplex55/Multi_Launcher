@@ -1,5 +1,5 @@
 use super::MkMacroDialog;
-use super::key_capture::{CapturedChord, captured_chord, hotkey_name};
+use super::key_capture::{apply_captured_hotkey, captured_chord, hotkey_name};
 use eframe::egui;
 
 fn clear_hotkey(hotkey: &mut Option<crate::mkmacro::MkHotkey>) -> bool {
@@ -71,19 +71,8 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     if capturing {
         if let Some(result) = ui.input(captured_chord) {
             d.hotkey_capture = false;
-            if let CapturedChord::Keys(mut keys) = result {
-                if let Some(key) = keys.pop() {
-                    let hotkey = crate::mkmacro::MkHotkey {
-                        key,
-                        modifiers: keys,
-                    };
-                    if let Some(m) = d.selected_macro_mut() {
-                        if m.hotkey.as_ref() != Some(&hotkey) {
-                            m.hotkey = Some(hotkey);
-                            changed = true;
-                        }
-                    }
-                }
+            if let Some(m) = d.selected_macro_mut() {
+                changed |= apply_captured_hotkey(&mut m.hotkey, result);
             }
         }
     }
