@@ -203,16 +203,21 @@ mod tests {
     #[test]
     fn visible_catalog_metadata_is_routable_and_supported() {
         for descriptor in action_catalog::visible_descriptors() {
+            let action = (descriptor.make_default)();
             assert_eq!(
                 descriptor.availability,
                 action_catalog::ActionAvailability::Ready
+            );
+            assert!(
+                descriptor.category.is_enabled(),
+                "disabled category leaked through visible descriptor {:?}",
+                descriptor.name
             );
             assert_eq!(
                 descriptor.runtime,
                 action_catalog::RuntimeAvailability::Supported
             );
             assert!(!descriptor.name.trim().is_empty());
-            let action = (descriptor.make_default)();
             let details = action_catalog::action_details(&action);
             assert!(
                 !details.trim().is_empty(),
@@ -604,6 +609,11 @@ mod tests {
                 )
             };
             let action = (descriptor.make_default)();
+            assert!(
+                descriptor.category.is_enabled(),
+                "{}",
+                context("enabled category", &action)
+            );
             assert_eq!(
                 descriptor.availability,
                 action_catalog::ActionAvailability::Ready,
@@ -643,8 +653,16 @@ mod tests {
                 "duplicate action variant for {}",
                 descriptor.name
             );
+            let no_configuration = action_catalog::requires_no_configuration(&action);
+            assert_eq!(
+                no_configuration,
+                matches!(descriptor.editor, action_catalog::EditorKind::DirectInsert),
+                "{}",
+                context("no-configuration classification", &action)
+            );
             assert!(
-                action_catalog::editor_route_recognizes(&action, descriptor.editor),
+                no_configuration
+                    || action_catalog::editor_route_recognizes(&action, descriptor.editor),
                 "{}",
                 context("implemented editor route", &action)
             );
