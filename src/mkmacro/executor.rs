@@ -510,6 +510,69 @@ mod tests {
         }
         assert!(fake.events().is_empty());
     }
+
+    #[test]
+    fn timed_recording_actions_use_smooth_move_and_drag_cleanup() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let target = |x, y| MkCoordinateTarget::Screen {
+            point: MkPoint { x, y },
+        };
+        let p = plan(vec![
+            step(
+                1,
+                MkAction::MouseMove(super::super::MkMouseMovePayload {
+                    target: target(5, 6),
+                    duration_ms: 1,
+                }),
+            ),
+            step(
+                2,
+                MkAction::MouseDrag(super::super::MkMouseDragPayload {
+                    from: target(5, 6),
+                    to: target(9, 10),
+                    button: MkMouseButton::Right,
+                    duration_ms: 1,
+                }),
+            ),
+        ]);
+        Executor::new(fake.clone().backends(), control)
+            .execute(&p, &|_| {})
+            .unwrap();
+        let events = fake.events();
+        assert_eq!(events.iter().filter(|e| *e == "cursor_position").count(), 1);
+        let down = events
+            .iter()
+            .position(|e| e == "button_down:Right")
+            .unwrap();
+        let up = events.iter().position(|e| e == "button_up:Right").unwrap();
+        assert_eq!(
+            events.iter().filter(|e| *e == "button_down:Right").count(),
+            1
+        );
+        assert_eq!(events.iter().filter(|e| *e == "button_up:Right").count(), 1);
+        assert!(down < up);
+
+        let cancelled = Arc::new(RunControl::default());
+        cancelled.reset();
+        cancelled.stop();
+        let error = super::super::input::drag(
+            &*fake,
+            &cancelled,
+            MkMouseButton::Left,
+            MkPoint { x: 0, y: 0 },
+            MkPoint { x: 100, y: 100 },
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert!(fake.events().ends_with(&[
+            "move:0,0".into(),
+            "button_down:Left".into(),
+            "button_up:Left".into(),
+        ]));
+    }
     #[test]
     fn wait_image_records_legacy_and_asset_scoped_results_and_clears_stale_data() {
         let fake = Arc::new(FakeBackend::default());
