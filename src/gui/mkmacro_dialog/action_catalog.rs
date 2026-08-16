@@ -29,6 +29,12 @@ impl ActionCategory {
             Self::UiAutomation => "UI Automation",
         }
     }
+
+    /// Product-level palette switch. Keeping this explicit makes catalog tests
+    /// fail at the descriptor boundary if a disabled category leaks into UI.
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::UiAutomation)
+    }
 }
 pub struct ActionDescriptor {
     pub category: ActionCategory,
@@ -632,6 +638,20 @@ pub enum EditorContract {
     DirectInsert { context: InsertionContextRoute },
 }
 
+/// Structural markers are complete actions at insertion time and intentionally
+/// have no configurable fields. All other actions must pass through an editor.
+pub fn requires_no_configuration(action: &MkAction) -> bool {
+    matches!(
+        action,
+        MkAction::Else
+            | MkAction::EndIf
+            | MkAction::RepeatEnd
+            | MkAction::WhileEnd
+            | MkAction::Break
+            | MkAction::Continue
+    )
+}
+
 /// The concrete validation path used before a structural marker is inserted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InsertionContextRoute {
@@ -681,7 +701,7 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
 /// Descriptors currently offered by the macro-authoring UI.
 pub fn is_available_in_palette(descriptor: &ActionDescriptor) -> bool {
     descriptor.availability == ActionAvailability::Ready
-        && descriptor.category != ActionCategory::UiAutomation
+        && descriptor.category.is_enabled()
         && descriptor.hidden_reason.is_none()
         && descriptor.runtime == RuntimeAvailability::Supported
 }

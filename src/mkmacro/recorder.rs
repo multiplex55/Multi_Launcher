@@ -686,6 +686,123 @@ mod tests {
         assert_eq!(positions, vec![(0, 0), (30, 0), (31, 0)]);
         assert_eq!(sampled[1].delay_after_ms, 1);
     }
+
+    #[test]
+    fn detailed_and_sampled_share_a_long_timed_pointer_fixture() {
+        // Exact 10 ms spacing makes the expected timeline independent of
+        // fractional rounding while 101 points provide meaningful compression.
+        let events: Vec<_> = (0..=100)
+            .map(|i| mouse(i * 10_000, MouseMessage::Move, -500 + i as i32 * 10, -75))
+            .collect();
+        let mut cfg = NormalizationConfig::default();
+        cfg.movement_distance_px = 40;
+        cfg.movement_interval_ms = 1_000;
+        cfg.movement_mode = MovementMode::DetailedMovement;
+        let detailed = normalize(&events, &cfg, None);
+        cfg.movement_mode = MovementMode::SampledMovement;
+        let sampled = normalize(&events, &cfg, None);
+
+        let detailed_moves: Vec<_> = detailed.iter().filter_map(point).collect();
+        let sampled_moves: Vec<_> = sampled.iter().filter_map(point).collect();
+        assert!(detailed_moves.len() > sampled_moves.len());
+        assert!(
+            sampled_moves.len() * 10 <= detailed_moves.len(),
+            "straight-line sampling should remove at least 90%: detailed={}, sampled={}",
+            detailed_moves.len(),
+            sampled_moves.len()
+        );
+        assert_eq!(sampled_moves.first(), Some(&(-500, -75)));
+        assert_eq!(sampled_moves.last(), Some(&(500, -75)));
+
+        let elapsed = |steps: &[RecordedStep]| -> u64 {
+            steps
+                .iter()
+                .map(|step| match step.action {
+                    RecordedAction::Move { duration_ms, .. } => duration_ms,
+                    _ => 0,
+                })
+                .sum::<u64>()
+                + steps.iter().map(|step| step.delay_after_ms).sum::<u64>()
+        };
+        assert_eq!(elapsed(&detailed), 1_000);
+        assert_eq!(elapsed(&sampled), 1_000);
+    }
+
+    #[test]
+    fn sampling_preserves_click_drag_and_button_transition_anchors() {
+        let events = [
+            mouse(0, MouseMessage::Move, -100, -50),
+            mouse(500, MouseMessage::Move, -99, -50),
+            mouse(1_000, MouseMessage::Down(MouseButton::Left), -90, -40),
+            mouse(1_500, MouseMessage::Up(MouseButton::Left), -90, -40),
+            mouse(2_000, MouseMessage::Down(MouseButton::Left), -90, -40),
+            mouse(2_500, MouseMessage::Up(MouseButton::Left), -90, -40),
+            mouse(3_000, MouseMessage::Move, -80, -30),
+            mouse(3_100, MouseMessage::Move, -79, -29),
+            mouse(3_200, MouseMessage::Down(MouseButton::Right), -70, -20),
+            mouse(3_300, MouseMessage::Move, -10, 10),
+            mouse(3_400, MouseMessage::Up(MouseButton::Right), 40, 25),
+            mouse(3_500, MouseMessage::Move, 41, 26),
+            mouse(3_600, MouseMessage::Move, 42, 27),
+        ];
+        let mut cfg = NormalizationConfig::default();
+        cfg.movement_distance_px = 1_000;
+        cfg.movement_interval_ms = 1_000;
+        let normalized = normalize(&events, &cfg, None);
+
+        assert!(matches!(
+            normalized[0].action,
+            RecordedAction::Move {
+                x: -100,
+                y: -50,
+                ..
+            }
+        ));
+        assert!(matches!(
+            normalized[1].action,
+            RecordedAction::Move { x: -99, y: -50, .. }
+        ));
+        assert!(matches!(
+            normalized[2].action,
+            RecordedAction::Click {
+                button: MouseButton::Left,
+                x: -90,
+                y: -40,
+                count: 2
+            }
+        ));
+        assert!(matches!(
+            normalized[3].action,
+            RecordedAction::Move { x: -80, y: -30, .. }
+        ));
+        assert!(matches!(
+            normalized[4].action,
+            RecordedAction::Move { x: -79, y: -29, .. }
+        ));
+        assert!(matches!(
+            normalized[5].action,
+            RecordedAction::Drag {
+                button: MouseButton::Right,
+                from: (-70, -20),
+                to: (40, 25),
+                down_timestamp_us: 3_200,
+                up_timestamp_us: 3_400
+            }
+        ));
+        assert!(matches!(
+            normalized[6].action,
+            RecordedAction::Move { x: 41, y: 26, .. }
+        ));
+        assert!(matches!(
+            normalized[7].action,
+            RecordedAction::Move { x: 42, y: 27, .. }
+        ));
+        assert_eq!(
+            normalized.len(),
+            8,
+            "in-drag movement must not escape as a waypoint"
+        );
+    }
     #[test]
     fn clicks_repeats_drag_wheels_and_delay() {
         let c = NormalizationConfig::default();

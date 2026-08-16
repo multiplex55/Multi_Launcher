@@ -207,6 +207,11 @@ mod tests {
                 descriptor.availability,
                 action_catalog::ActionAvailability::Ready
             );
+            assert!(
+                descriptor.category.is_enabled(),
+                "{}",
+                context("enabled category", &action)
+            );
             assert_eq!(
                 descriptor.runtime,
                 action_catalog::RuntimeAvailability::Supported
@@ -643,8 +648,16 @@ mod tests {
                 "duplicate action variant for {}",
                 descriptor.name
             );
+            let no_configuration = action_catalog::requires_no_configuration(&action);
+            assert_eq!(
+                no_configuration,
+                matches!(descriptor.editor, action_catalog::EditorKind::DirectInsert),
+                "{}",
+                context("no-configuration classification", &action)
+            );
             assert!(
-                action_catalog::editor_route_recognizes(&action, descriptor.editor),
+                no_configuration
+                    || action_catalog::editor_route_recognizes(&action, descriptor.editor),
                 "{}",
                 context("implemented editor route", &action)
             );
