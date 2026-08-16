@@ -309,12 +309,14 @@ impl Drop for MkMacroHotkeyService {
     }
 }
 
-fn tick(
+fn tick<F>(
     store: &MkMacroStore,
     state: &Mutex<PollState>,
     backend: &dyn KeyStateBackend,
-    trigger: &Trigger,
-) {
+    trigger: &F,
+) where
+    F: Fn(u64) + ?Sized,
+{
     let snapshot = store.snapshot();
     let mut fire = Vec::new();
     {
