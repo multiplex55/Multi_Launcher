@@ -770,7 +770,13 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(v[0].delay_after_ms, 1);
+        assert!(matches!(
+            v[1].action,
+            RecordedAction::Move { duration_ms: 1, .. }
+        ));
+        // The millisecond between retained waypoints is travel owned by the
+        // destination move, not idle time duplicated on the anchor.
+        assert_eq!(v[0].delay_after_ms, 0);
         assert_eq!(v[1].delay_after_ms, 99);
     }
 
