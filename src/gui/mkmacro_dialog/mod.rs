@@ -203,21 +203,21 @@ mod tests {
     #[test]
     fn visible_catalog_metadata_is_routable_and_supported() {
         for descriptor in action_catalog::visible_descriptors() {
+            let action = (descriptor.make_default)();
             assert_eq!(
                 descriptor.availability,
                 action_catalog::ActionAvailability::Ready
             );
             assert!(
                 descriptor.category.is_enabled(),
-                "{}",
-                context("enabled category", &action)
+                "disabled category leaked through visible descriptor {:?}",
+                descriptor.name
             );
             assert_eq!(
                 descriptor.runtime,
                 action_catalog::RuntimeAvailability::Supported
             );
             assert!(!descriptor.name.trim().is_empty());
-            let action = (descriptor.make_default)();
             let details = action_catalog::action_details(&action);
             assert!(
                 !details.trim().is_empty(),
@@ -609,6 +609,11 @@ mod tests {
                 )
             };
             let action = (descriptor.make_default)();
+            assert!(
+                descriptor.category.is_enabled(),
+                "{}",
+                context("enabled category", &action)
+            );
             assert_eq!(
                 descriptor.availability,
                 action_catalog::ActionAvailability::Ready,
