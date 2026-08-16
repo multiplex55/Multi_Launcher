@@ -1,6 +1,6 @@
 use super::MkMacroDialog;
 use crate::mkmacro::{MkStep, validate_document};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Default, Debug, Clone)]
 pub struct Selection {
@@ -129,6 +129,23 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         return;
     };
     let diagnostics = validate_document(&d.draft, None);
+    let mut row_diagnostics = HashMap::<u64, Vec<_>>::new();
+    for diagnostic in diagnostics.iter().filter(|x| x.macro_id == mid) {
+        if let Some(step_id) = diagnostic.step_id {
+            row_diagnostics.entry(step_id).or_default().push(diagnostic);
+        }
+    }
+    for diagnostic in diagnostics
+        .iter()
+        .filter(|x| x.macro_id == mid && x.step_id.is_none())
+    {
+        let color = match diagnostic.severity {
+            crate::mkmacro::DiagnosticSeverity::Fatal => eframe::egui::Color32::RED,
+            crate::mkmacro::DiagnosticSeverity::Warning => eframe::egui::Color32::YELLOW,
+        };
+        ui.colored_label(color, format!("⚠ {}", diagnostic.message))
+            .on_hover_text(format!("{}\nCode: {}", diagnostic.message, diagnostic.code));
+    }
     let runtime = crate::mkmacro::runtime::snapshot();
     let Some(m) = d.draft.macros.iter().find(|m| m.id == mid) else {
         return;
@@ -195,6 +212,15 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         let response=if structural { ui.strong(label) } else { ui.label(label) };
                         if response.double_clicked(){command=Some(Command::Edit(s.id));}
                         response.context_menu(|ui| context_menu(ui,s.id,&mut command));
+                        if let Some(items) = row_diagnostics.get(&s.id) {
+                            let first = items[0];
+                            let color = match first.severity {
+                                crate::mkmacro::DiagnosticSeverity::Fatal => eframe::egui::Color32::RED,
+                                crate::mkmacro::DiagnosticSeverity::Warning => eframe::egui::Color32::YELLOW,
+                            };
+                            let hover = items.iter().map(|x| format!("{}\nCode: {}", x.message, x.code)).collect::<Vec<_>>().join("\n\n");
+                            ui.colored_label(color, format!("⚠ {}", first.message)).on_hover_text(hover);
+                        }
                     });
                     r.col(|ui| {
                         let full=super::action_catalog::action_details(&s.action); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}response.context_menu(|ui|context_menu(ui,s.id,&mut command));
@@ -228,16 +254,6 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                     }
                                 });
                             }
-                        }
-                        if let Some(x) = diagnostics.iter().find(|x| x.step_id == Some(s.id)) {
-                            ui.add(
-                                eframe::egui::Label::new(
-                                    eframe::egui::RichText::new(&x.message)
-                                        .color(eframe::egui::Color32::RED),
-                                )
-                                .truncate(true),
-                            )
-                            .on_hover_text(&x.message);
                         }
                     });
                 });

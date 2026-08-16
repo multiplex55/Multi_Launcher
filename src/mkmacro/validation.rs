@@ -162,7 +162,13 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                 }
                 MkAction::SetVariable { name, .. } | MkAction::UnsetVariable { name } => {
                     if let Err(e) = validate_variable_name(name) {
-                        push(&mut out, m.id, sid, "invalid_variable", e)
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_variable",
+                            format!("Variable name is invalid: {e}"),
+                        )
                     }
                 }
                 MkAction::WaitUntil {
@@ -194,6 +200,26 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                         )
                     }
                 }
+                MkAction::MouseMove(p) => target(&p.target, m.id, sid, asset_root, &mut out),
+                MkAction::MouseClick(p) => target(&p.target, m.id, sid, asset_root, &mut out),
+                MkAction::MouseDrag(p) => {
+                    target(&p.from, m.id, sid, asset_root, &mut out);
+                    target(&p.to, m.id, sid, asset_root, &mut out);
+                }
+                MkAction::PixelCheck {
+                    target: t, color, ..
+                } => {
+                    target(t, m.id, sid, asset_root, &mut out);
+                    if super::screen::parse_rgb(color).is_err() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_pixel_color",
+                            "Enter a color as #RRGGBB",
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -221,13 +247,14 @@ fn wait(w: &MkWaitOptions, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
     }
 }
 fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
-    if x.title.is_none() && x.title_regex.is_none() && x.process.is_none() && x.class.is_none() {
+    let usable = |value: &Option<String>| value.as_ref().is_some_and(|v| !v.trim().is_empty());
+    if !usable(&x.title) && !usable(&x.title_regex) && !usable(&x.process) && !usable(&x.class) {
         push(
             o,
             m,
             s,
             "empty_window_matcher",
-            "Window matcher needs at least one criterion",
+            "Enter at least one window matcher",
         )
     };
     if let Some(r) = &x.title_regex
@@ -237,7 +264,9 @@ fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic
     }
 }
 fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDiagnostic>) {
-    if id == 0 || root.is_some_and(|r| !r.join(m.to_string()).join(format!("{id}.png")).is_file()) {
+    if id == 0 {
+        push(o, m, s, "missing_asset", "Select a reference image")
+    } else if root.is_some_and(|r| !r.join(m.to_string()).join(format!("{id}.png")).is_file()) {
         push(
             o,
             m,
@@ -245,6 +274,33 @@ fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDia
             "missing_asset",
             format!("Image asset {id} is missing"),
         )
+    }
+}
+
+fn target(
+    target: &MkCoordinateTarget,
+    m: u64,
+    s: Option<u64>,
+    root: Option<&Path>,
+    out: &mut Vec<MkDiagnostic>,
+) {
+    match target {
+        MkCoordinateTarget::Variable { name } if name.trim().is_empty() => push(
+            out,
+            m,
+            s,
+            "empty_point_variable",
+            "Enter a point variable name",
+        ),
+        MkCoordinateTarget::Variable { name } if validate_variable_name(name).is_err() => push(
+            out,
+            m,
+            s,
+            "invalid_point_variable",
+            "Point variable name is invalid",
+        ),
+        MkCoordinateTarget::Image { asset_id, .. } => asset(*asset_id, m, s, root, out),
+        _ => {}
     }
 }
 fn condition(
