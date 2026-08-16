@@ -118,7 +118,7 @@ impl ScreenBackend for WindowsScreenBackend {
         variables: &RuntimeVariables,
     ) -> ExecResult<MkPoint> {
         match target {
-            MkCoordinateTarget::Screen { point } => Ok(*point),
+            MkCoordinateTarget::Screen { point } => self.clamp_to_desktop(*point),
             MkCoordinateTarget::ActiveWindow { point } => {
                 let hwnd = self.geometry.foreground_window()?.ok_or_else(|| {
                     ExecutionDiagnostic::new(
@@ -139,7 +139,7 @@ impl ScreenBackend for WindowsScreenBackend {
                         .checked_add(point.y)
                         .ok_or_else(|| invalid("active-window client Y coordinate overflow"))?,
                 };
-                Ok(desktop)
+                self.clamp_to_desktop(desktop)
             }
             MkCoordinateTarget::Variable { name } => match variables.get(name) {
                 Some(MkValue::Point(point)) => Ok(*point),
