@@ -66,6 +66,33 @@ impl Default for QuickToolsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickToolRowAction {
+    MoveUp(usize),
+    MoveDown(usize),
+    Remove(usize),
+}
+
+fn apply_row_action(cfg: &mut QuickToolsConfig, action: QuickToolRowAction) -> bool {
+    match action {
+        QuickToolRowAction::MoveUp(idx) if idx > 0 && idx < cfg.queries.len() => {
+            cfg.queries.swap(idx, idx - 1);
+            true
+        }
+        QuickToolRowAction::MoveDown(idx)
+            if idx < cfg.queries.len() && idx + 1 < cfg.queries.len() =>
+        {
+            cfg.queries.swap(idx, idx + 1);
+            true
+        }
+        QuickToolRowAction::Remove(idx) if idx < cfg.queries.len() => {
+            cfg.queries.remove(idx);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub struct QuickToolsWidget {
     cfg: QuickToolsConfig,
 }
@@ -82,20 +109,34 @@ impl QuickToolsWidget {
     ) -> WidgetSettingsUiResult {
         edit_typed_settings(ui, value, ctx, |ui, cfg: &mut QuickToolsConfig, _ctx| {
             let mut changed = false;
-            let mut remove_idx = None;
+            let mut row_action = None;
+            let query_count = cfg.queries.len();
             for (idx, entry) in cfg.queries.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(format!("Tool {}", idx + 1));
                     changed |= ui.text_edit_singleline(&mut entry.query).changed();
                     changed |= ui.checkbox(&mut entry.auto_submit, "Auto submit").changed();
-                    if ui.small_button("✕").clicked() {
-                        remove_idx = Some(idx);
+                    if ui
+                        .add_enabled(idx > 0, egui::Button::new("↑").small())
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        row_action = Some(QuickToolRowAction::MoveUp(idx));
+                    }
+                    if ui
+                        .add_enabled(idx + 1 < query_count, egui::Button::new("↓").small())
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        row_action = Some(QuickToolRowAction::MoveDown(idx));
+                    }
+                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                        row_action = Some(QuickToolRowAction::Remove(idx));
                     }
                 });
             }
-            if let Some(idx) = remove_idx {
-                cfg.queries.remove(idx);
-                changed = true;
+            if let Some(action) = row_action {
+                changed |= apply_row_action(cfg, action);
             }
             if ui.button("Add tool").clicked() {
                 cfg.queries.push(QuickToolEntry::manual(""));
@@ -183,6 +224,133 @@ impl Widget for QuickToolsWidget {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn config_with_abc() -> QuickToolsConfig {
+        QuickToolsConfig {
+            queries: vec![
+                QuickToolEntry {
+                    query: "A".into(),
+                    auto_submit: true,
+                },
+                QuickToolEntry {
+                    query: "B".into(),
+                    auto_submit: false,
+                },
+                QuickToolEntry {
+                    query: "C".into(),
+                    auto_submit: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn row_actions_move_complete_entries_up_and_down() {
+        let mut moved_up = config_with_abc();
+        assert!(apply_row_action(
+            &mut moved_up,
+            QuickToolRowAction::MoveUp(1)
+        ));
+        assert_eq!(
+            moved_up.queries,
+            vec![
+                QuickToolEntry {
+                    query: "B".into(),
+                    auto_submit: false,
+                },
+                QuickToolEntry {
+                    query: "A".into(),
+                    auto_submit: true,
+                },
+                QuickToolEntry {
+                    query: "C".into(),
+                    auto_submit: true,
+                },
+            ]
+        );
+
+        let mut moved_down = config_with_abc();
+        assert!(apply_row_action(
+            &mut moved_down,
+            QuickToolRowAction::MoveDown(1)
+        ));
+        assert_eq!(
+            moved_down.queries,
+            vec![
+                QuickToolEntry {
+                    query: "A".into(),
+                    auto_submit: true,
+                },
+                QuickToolEntry {
+                    query: "C".into(),
+                    auto_submit: true,
+                },
+                QuickToolEntry {
+                    query: "B".into(),
+                    auto_submit: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_and_boundary_row_actions_are_no_ops() {
+        for action in [
+            QuickToolRowAction::MoveUp(0),
+            QuickToolRowAction::MoveDown(2),
+            QuickToolRowAction::MoveUp(3),
+            QuickToolRowAction::MoveDown(3),
+            QuickToolRowAction::MoveDown(usize::MAX),
+            QuickToolRowAction::Remove(3),
+            QuickToolRowAction::Remove(usize::MAX),
+        ] {
+            let mut cfg = config_with_abc();
+            let original = cfg.clone();
+            assert!(!apply_row_action(&mut cfg, action));
+            assert_eq!(cfg, original);
+        }
+    }
+
+    #[test]
+    fn remove_row_action_removes_only_the_selected_entry() {
+        let mut cfg = config_with_abc();
+        assert!(apply_row_action(&mut cfg, QuickToolRowAction::Remove(1)));
+        assert_eq!(
+            cfg.queries,
+            vec![
+                QuickToolEntry {
+                    query: "A".into(),
+                    auto_submit: true,
+                },
+                QuickToolEntry {
+                    query: "C".into(),
+                    auto_submit: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reordered_entries_serialize_and_generate_actions_in_the_new_sequence() {
+        let mut cfg = config_with_abc();
+        assert!(apply_row_action(&mut cfg, QuickToolRowAction::MoveDown(1)));
+
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap(),
+            json!({"queries":[
+                {"query":"A","auto_submit":true},
+                {"query":"C","auto_submit":true},
+                {"query":"B","auto_submit":false}
+            ]})
+        );
+        assert_eq!(
+            cfg.queries
+                .iter()
+                .map(|entry| QuickToolsWidget::action_for(entry).unwrap().action.action)
+                .collect::<Vec<_>>(),
+            ["queryexec:A", "queryexec:C", "query:B"]
+        );
+    }
 
     #[test]
     fn deserializes_legacy_structured_mixed_and_missing_flag_entries() {
