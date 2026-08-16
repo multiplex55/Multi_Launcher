@@ -956,44 +956,56 @@ mod windows_backend_tests {
     }
 
     #[test]
-    fn screen_coordinates_are_desktop_pixels_and_clamp_every_edge() {
+    fn configured_screen_coordinates_must_be_on_desktop_and_randomized_points_clamp() {
         let b = backend((-100, -50, 300, 100), None, MkPoint { x: 0, y: 0 });
-        for (input, expected) in [
-            ((0, 0), (0, 0)),
-            ((-101, -51), (-100, -50)),
-            ((200, 50), (199, 49)),
-            ((-200, 20), (-100, 20)),
-            ((20, 100), (20, 49)),
-        ] {
-            assert_eq!(
-                b.resolve(
-                    &screen(MkPoint {
-                        x: input.0,
-                        y: input.1
-                    }),
-                    &RuntimeVariables::new()
-                )
+        assert_eq!(
+            b.resolve(&screen(MkPoint { x: 0, y: 0 }), &RuntimeVariables::new())
                 .unwrap(),
-                MkPoint {
-                    x: expected.0,
-                    y: expected.1
-                }
+            MkPoint { x: 0, y: 0 }
+        );
+        for point in [
+            MkPoint { x: -101, y: -51 },
+            MkPoint { x: 200, y: 50 },
+            MkPoint { x: -200, y: 20 },
+            MkPoint { x: 20, y: 100 },
+        ] {
+            let error = b
+                .resolve(&screen(point), &RuntimeVariables::new())
+                .unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+            assert_eq!(
+                error.message,
+                "Requested coordinate lies outside the virtual desktop"
             );
         }
+        // `resolve` validates configured input, while `finalize_point` deliberately
+        // clamps a valid point after playback randomization shifts it over an edge.
+        assert_eq!(
+            b.finalize_point(MkPoint { x: -101, y: 50 }).unwrap(),
+            MkPoint { x: -100, y: 49 }
+        );
     }
     #[test]
     fn one_pixel_and_invalid_or_overflowing_desktops() {
         let one = backend((-7, 9, 1, 1), None, MkPoint { x: 0, y: 0 });
         assert_eq!(
-            one.resolve(
+            one.resolve(&screen(MkPoint { x: -7, y: 9 }), &RuntimeVariables::new())
+                .unwrap(),
+            MkPoint { x: -7, y: 9 }
+        );
+        let outside = one
+            .resolve(
                 &screen(MkPoint {
                     x: i32::MAX,
-                    y: i32::MIN
+                    y: i32::MIN,
                 }),
-                &RuntimeVariables::new()
+                &RuntimeVariables::new(),
             )
-            .unwrap(),
-            MkPoint { x: -7, y: 9 }
+            .unwrap_err();
+        assert_eq!(outside.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(
+            outside.message,
+            "Requested coordinate lies outside the virtual desktop"
         );
         for desktop in [
             (0, 0, 0, 1),
