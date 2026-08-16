@@ -1,8 +1,8 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
-    MkKey, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload, MkUiPayload,
-    MkValue, MkWaitOptions, MkWindowMatcher, MkWindowPayload, RuntimeVariables,
+    MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload,
+    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowPayload, RuntimeVariables,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -312,6 +312,19 @@ pub fn production_backends() -> Backends {
     {
         unsupported
     }
+}
+
+/// Store-aware production wiring used by the macro runtime. Keeping this
+/// separate preserves callers that only need non-visual production boundaries.
+pub fn production_backends_with_store(store: Arc<MkMacroStore>) -> Backends {
+    let mut backends = production_backends();
+    #[cfg(windows)]
+    {
+        backends.screen = Arc::new(super::screen::WindowsScreenBackend::production(store));
+    }
+    #[cfg(not(windows))]
+    let _ = store;
+    backends
 }
 impl LauncherBackend for Unsupported {
     fn launch_process(&self, _: &MkProcessPayload) -> ExecResult {

@@ -454,7 +454,7 @@ static RECORDER: Lazy<RwLock<Option<Arc<RecorderRuntime>>>> = Lazy::new(|| RwLoc
 static HOTKEYS: Lazy<RwLock<Option<Arc<super::hotkeys::MkMacroHotkeyService>>>> =
     Lazy::new(|| RwLock::new(None));
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
-    set_shared_store_with_backends(store, production_backends())
+    set_shared_store_with_backends(store.clone(), production_backends_with_store(store))
 }
 /// Installs a shared runtime with injected effects (intended for tests).
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {

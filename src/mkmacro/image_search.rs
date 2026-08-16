@@ -4,7 +4,13 @@ use crate::mkmacro::{
     CapturedRegion, DiagnosticKind, ExecResult, ExecutionDiagnostic, cancelled_error,
 };
 use image::{Rgba, RgbaImage};
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+use super::{MkImagePayload, MkPoint, ScreenCaptureBackend, SearchRegion, VisualSearch};
 
 /// Run-scoped decode cache. Construct one for each playback; repeated visual waits
 /// and searches using the same stable reference share the decoded pixels.
@@ -25,12 +31,22 @@ impl ImageDecodeCache {
         let path = store
             .resolve_asset_reference(macro_id, Path::new(reference))
             .map_err(|e| ExecutionDiagnostic::new(DiagnosticKind::InvalidTarget, e.to_string()))?;
-        let image = image::open(&path)
+        let bytes = std::fs::read(&path).map_err(|e| {
+            let message = if e.kind() == std::io::ErrorKind::NotFound {
+                format!("reference image is missing: {}", path.display())
+            } else {
+                format!("reference image is unreadable: {}: {e}", path.display())
+            };
+            ExecutionDiagnostic::new(DiagnosticKind::InvalidTarget, message)
+                .context("asset_path", path.display().to_string())
+        })?;
+        let image = image::load_from_memory(&bytes)
             .map_err(|e| {
                 ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidTarget,
-                    format!("decode reference image {}: {e}", path.display()),
+                    format!("reference image is undecodable: {}: {e}", path.display()),
                 )
+                .context("asset_path", path.display().to_string())
             })?
             .to_rgba8();
         let image = Arc::new(image);
@@ -42,6 +58,64 @@ impl ImageDecodeCache {
     }
     pub fn is_empty(&self) -> bool {
         self.images.is_empty()
+    }
+}
+
+/// Production orchestration for one image-search attempt. Polling and deadlines
+/// deliberately remain in `Executor`, so this adapter never sleeps and is easy
+/// to exercise with deterministic capture fixtures.
+pub struct ProductionVisualSearch {
+    store: Arc<MkMacroStore>,
+    capture: Arc<dyn ScreenCaptureBackend>,
+    cache: Mutex<ImageDecodeCache>,
+}
+
+impl ProductionVisualSearch {
+    pub fn new(store: Arc<MkMacroStore>, capture: Arc<dyn ScreenCaptureBackend>) -> Self {
+        Self {
+            store,
+            capture,
+            cache: Mutex::new(ImageDecodeCache::default()),
+        }
+    }
+
+    fn asset_reference(macro_id: u64, asset_id: u64) -> String {
+        format!(
+            "{}/{macro_id}/{asset_id}.png",
+            super::store::ASSET_DIRECTORY
+        )
+    }
+}
+
+impl VisualSearch for ProductionVisualSearch {
+    fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+        let reference = Self::asset_reference(macro_id, payload.asset_id);
+        let needle = self
+            .cache
+            .lock()
+            .unwrap()
+            .get_or_decode(&self.store, macro_id, &reference)?;
+        let frame = self.capture.capture(&payload.region, &|| false)?;
+        find_template(
+            &frame,
+            &needle,
+            MatchOptions {
+                tolerance: payload.tolerance,
+                alpha: payload.alpha,
+                return_point: payload.return_point,
+                first_result: true,
+            },
+            &|| false,
+        )
+        .map(|point| point.map(|(x, y)| MkPoint { x, y }))
+    }
+
+    fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]> {
+        let rect = super::ScreenRect::new(point.x, point.y, 1, 1);
+        let frame = self
+            .capture
+            .capture(&SearchRegion::Rectangle { rect }, &|| false)?;
+        Ok(frame.image.get_pixel(0, 0).0)
     }
 }
 
@@ -207,6 +281,7 @@ pub fn find_pixel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     fn cap(w: u32, h: u32) -> CapturedRegion {
         CapturedRegion {
             image: RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255])),
@@ -253,6 +328,115 @@ mod tests {
         assert!(find_template(&f, &n, o, &|| false).unwrap().is_some());
         o.tolerance = 1;
         assert_eq!(find_template(&f, &n, o, &|| false).unwrap(), None)
+    }
+    #[test]
+    fn cancellation_is_reported_without_finishing_the_scan() {
+        let calls = AtomicUsize::new(0);
+        let error = find_template(
+            &cap(8, 8),
+            &RgbaImage::from_pixel(2, 2, Rgba([1, 1, 1, 255])),
+            MatchOptions::default(),
+            &|| calls.fetch_add(1, Ordering::SeqCst) >= 2,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+    }
+
+    struct FakeCapture {
+        frame: CapturedRegion,
+        captures: AtomicUsize,
+    }
+    impl ScreenCaptureBackend for FakeCapture {
+        fn virtual_desktop(&self) -> ExecResult<super::super::ScreenRect> {
+            Ok(self.frame.rect())
+        }
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<super::super::ScreenRect> {
+            Ok(self.frame.rect())
+        }
+        fn capture_rect(
+            &self,
+            _: super::super::ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<RgbaImage> {
+            self.captures.fetch_add(1, Ordering::SeqCst);
+            Ok(self.frame.image.clone())
+        }
+    }
+    fn payload(asset_id: u64, tolerance: u8) -> MkImagePayload {
+        MkImagePayload {
+            asset_id,
+            wait: super::super::MkWaitOptions {
+                timeout_ms: 0,
+                poll_interval_ms: 0,
+            },
+            region: SearchRegion::Desktop,
+            tolerance,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+        }
+    }
+    fn adapter_fixture(
+        frame: CapturedRegion,
+        needle: &RgbaImage,
+    ) -> (tempfile::TempDir, Arc<MkMacroStore>, ProductionVisualSearch) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store.write_png_asset(7, 3, needle).unwrap();
+        let store = Arc::new(store);
+        let capture = Arc::new(FakeCapture {
+            frame,
+            captures: AtomicUsize::new(0),
+        });
+        let adapter = ProductionVisualSearch::new(store.clone(), capture);
+        (dir, store, adapter)
+    }
+    #[test]
+    fn production_adapter_loads_store_asset_forwards_tolerance_and_translates_center() {
+        let mut frame = CapturedRegion {
+            image: RgbaImage::from_pixel(5, 4, Rgba([0, 0, 0, 255])),
+            origin: (-120, 35),
+        };
+        let needle = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+        for y in 1..3 {
+            for x in 2..4 {
+                frame.image.put_pixel(x, y, Rgba([12, 20, 30, 255]));
+            }
+        }
+        let (_dir, _store, adapter) = adapter_fixture(frame, &needle);
+        assert_eq!(adapter.find_image(7, &payload(3, 1)).unwrap(), None);
+        assert_eq!(
+            adapter.find_image(7, &payload(3, 2)).unwrap(),
+            Some(MkPoint { x: -117, y: 37 })
+        );
+    }
+    #[test]
+    fn production_adapter_distinguishes_asset_failures() {
+        let frame = cap(2, 2);
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let store = Arc::new(store);
+        let make = || {
+            ProductionVisualSearch::new(
+                store.clone(),
+                Arc::new(FakeCapture {
+                    frame: frame.clone(),
+                    captures: AtomicUsize::new(0),
+                }),
+            )
+        };
+        let missing = make().find_image(7, &payload(3, 0)).unwrap_err();
+        assert!(missing.message.contains("missing"));
+
+        let path = store.asset_path(7, 3).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not a png").unwrap();
+        let undecodable = make().find_image(7, &payload(3, 0)).unwrap_err();
+        assert!(undecodable.message.contains("undecodable"));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let unreadable = make().find_image(7, &payload(3, 0)).unwrap_err();
+        assert!(unreadable.message.contains("unreadable"));
     }
     #[test]
     fn too_large_and_deterministic() {
