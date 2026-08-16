@@ -451,11 +451,17 @@ fn run_one(
 
 static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::new(None));
 static RECORDER: Lazy<RwLock<Option<Arc<RecorderRuntime>>>> = Lazy::new(|| RwLock::new(None));
+static HOTKEYS: Lazy<RwLock<Option<Arc<super::hotkeys::MkMacroHotkeyService>>>> =
+    Lazy::new(|| RwLock::new(None));
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
     set_shared_store_with_backends(store, production_backends())
 }
 /// Installs a shared runtime with injected effects (intended for tests).
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {
+    // Stop the old poller before replacing the runtime it dispatches into.
+    if let Some(old) = HOTKEYS.write().unwrap().take() {
+        old.shutdown()
+    }
     if let Some(old) = RUNTIME.write().unwrap().take() {
         old.shutdown()
     }
@@ -469,11 +475,12 @@ pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backen
         guard.clone(),
     )));
     *RECORDER.write().unwrap() = Some(Arc::new(RecorderRuntime::with_guard(
-        store,
+        store.clone(),
         production_hook_service(8192),
         Arc::new(SystemRecorderClock::default()),
         guard,
-    )))
+    )));
+    *HOTKEYS.write().unwrap() = Some(Arc::new(super::hotkeys::MkMacroHotkeyService::new(store)));
 }
 fn global() -> Result<Arc<MacroRuntime>> {
     RUNTIME
