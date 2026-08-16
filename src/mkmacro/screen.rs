@@ -13,7 +13,7 @@ pub(crate) fn image_result_variable(asset_id: u64) -> String {
     format!("__image.{asset_id}")
 }
 
-trait WindowsGeometry: Send + Sync {
+pub(crate) trait WindowsGeometry: Send + Sync {
     /// `(x, y, width, height)`, in desktop pixels. Width/height remain signed so
     /// malformed platform data can be diagnosed rather than silently cast.
     fn virtual_desktop(&self) -> ExecResult<(i32, i32, i32, i32)>;
@@ -21,7 +21,7 @@ trait WindowsGeometry: Send + Sync {
     fn client_origin(&self, hwnd: isize) -> ExecResult<MkPoint>;
 }
 
-trait VisualSearch: Send + Sync {
+pub(crate) trait VisualSearch: Send + Sync {
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
     fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]>;
 }
@@ -74,6 +74,21 @@ impl WindowsScreenBackend {
         Self {
             geometry: Arc::new(SystemWindowsGeometry),
             visual: Arc::new(SystemVisualSearch),
+        }
+    }
+
+    /// Constructs the live geometry/capture adapter while keeping asset access
+    /// explicit.  This is the constructor used by the runtime; tests use the
+    /// same adapter shape with fake capture and geometry boundaries.
+    #[cfg(windows)]
+    pub fn production(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
+        let capture: Arc<dyn ScreenCaptureBackend> =
+            Arc::new(WindowsScreenCaptureBackend::system());
+        Self {
+            geometry: Arc::new(SystemWindowsGeometry),
+            visual: Arc::new(crate::mkmacro::image_search::ProductionVisualSearch::new(
+                store, capture,
+            )),
         }
     }
 
