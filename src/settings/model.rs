@@ -451,6 +451,8 @@ pub struct Settings {
     pub note_panel_default_size: (f32, f32),
     #[serde(default = "default_note_save_on_close")]
     pub note_save_on_close: bool,
+    #[serde(default = "default_note_confirm_discard_unsaved_changes")]
+    pub note_confirm_discard_unsaved_changes: bool,
     #[serde(default)]
     pub note_always_overwrite: bool,
     #[serde(default)]
@@ -558,6 +560,7 @@ impl Default for Settings {
             window_size: Some((400, 220)),
             note_panel_default_size: default_note_panel_size(),
             note_save_on_close: default_note_save_on_close(),
+            note_confirm_discard_unsaved_changes: default_note_confirm_discard_unsaved_changes(),
             note_always_overwrite: false,
             note_images_as_links: false,
             note_show_details: default_note_show_details(),
@@ -902,5 +905,20 @@ mod tests {
             serde_json::to_string_pretty(&snapshot).unwrap(),
             "{\n  \"multi_manager\": {\n    \"auto_reconnect_on_load\": true,\n    \"auto_save\": true,\n    \"bindings_path\": \"multi_manager_bindings.json\",\n    \"developer_debugging\": false,\n    \"enabled\": true,\n    \"hide_launcher_before_toggle\": false,\n    \"hotkey_poll_ms\": 50,\n    \"ignore_launcher_window_on_capture\": true,\n    \"save_on_exit\": true,\n    \"show_force_recapture_prompt\": false,\n    \"workspaces_path\": \"multi_manager_workspaces.json\"\n  },\n  \"note_show_details\": false,\n  \"query_results_layout\": {\n    \"cols\": 2,\n    \"enabled\": false,\n    \"plugin_opt_out\": [],\n    \"respect_plugin_capability\": true,\n    \"rows\": 3\n  },\n  \"show_error_toasts\": true,\n  \"show_inline_errors\": true\n}"
         );
+    }
+
+    #[test]
+    fn legacy_settings_default_to_confirming_discard() {
+        let parsed: Settings = serde_json::from_str("{}").expect("deserialize legacy settings");
+        assert!(parsed.note_confirm_discard_unsaved_changes);
+    }
+
+    #[test]
+    fn disabled_discard_confirmation_round_trips() {
+        let mut settings = Settings::default();
+        settings.note_confirm_discard_unsaved_changes = false;
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert!(!restored.note_confirm_discard_unsaved_changes);
     }
 }

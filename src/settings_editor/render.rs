@@ -493,6 +493,10 @@ impl SettingsEditor {
                 ui.heading("Legacy note options");
                 ui.checkbox(&mut self.note_save_on_close, "Save note on close (Esc)");
                 ui.checkbox(
+                    &mut self.note_confirm_discard_unsaved_changes,
+                    "Confirm before discarding unsaved note changes",
+                );
+                ui.checkbox(
                     &mut self.note_always_overwrite,
                     "Always overwrite existing notes",
                 );
