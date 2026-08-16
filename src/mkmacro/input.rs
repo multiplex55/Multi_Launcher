@@ -224,6 +224,17 @@ fn key_metadata(k: &MkKey) -> ExecResult<(u16, u16, bool)> {
     Ok((v, 0, ext))
 }
 impl<S: InputSink> InputBackend for Win32InputBackend<S> {
+    fn escape_pressed(&self) -> bool {
+        #[cfg(windows)]
+        unsafe {
+            unsafe extern "system" {
+                fn GetAsyncKeyState(v_key: i32) -> i16;
+            }
+            GetAsyncKeyState(0x1B) < 0
+        }
+        #[cfg(not(windows))]
+        false
+    }
     fn key_down(&self, k: &MkKey) -> ExecResult {
         self.key_event(k, false)
     }

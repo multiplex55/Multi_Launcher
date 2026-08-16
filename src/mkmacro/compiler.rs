@@ -21,6 +21,7 @@ pub struct MkInstruction {
 #[derive(Debug, Clone)]
 pub struct MkExecutionPlan {
     pub macro_id: u64,
+    pub playback: MkPlayback,
     pub instructions: Arc<[MkInstruction]>,
     pub step_to_instruction: HashMap<u64, usize>,
 }
@@ -89,6 +90,7 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
     }
     Ok(MkExecutionPlan {
         macro_id: m.id,
+        playback: m.playback.clone(),
         instructions: ins.into(),
         step_to_instruction: map,
     })
@@ -165,5 +167,15 @@ mod tests {
     fn invalid_rows_rejected() {
         assert!(compile(&mac(vec![step(1, MkAction::Else)])).is_err());
         assert!(compile(&mac(vec![step(1, MkAction::Break)])).is_err())
+    }
+    #[test]
+    fn playback_is_carried_into_plan() {
+        let mut m = mac(vec![]);
+        m.playback = MkPlayback {
+            speed_percent: 200,
+            random_delay_ms: 7,
+            random_offset_px: 9,
+        };
+        assert_eq!(compile(&m).unwrap().playback, m.playback);
     }
 }

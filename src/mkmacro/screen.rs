@@ -174,6 +174,10 @@ impl ScreenBackend for WindowsScreenBackend {
         }
     }
 
+    fn finalize_point(&self, point: MkPoint) -> ExecResult<MkPoint> {
+        self.clamp_to_desktop(point)
+    }
+
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
         self.visual.find_image(macro_id, payload)
     }

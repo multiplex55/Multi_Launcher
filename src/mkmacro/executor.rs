@@ -1,8 +1,8 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
-    MkKey, MkMouseButton, MkPoint, MkProcessPayload, MkTextPayload, MkUiPayload, MkValue,
-    MkWaitOptions, MkWindowMatcher, MkWindowPayload, RuntimeVariables,
+    MkKey, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload, MkUiPayload,
+    MkValue, MkWaitOptions, MkWindowMatcher, MkWindowPayload, RuntimeVariables,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -60,6 +60,10 @@ impl std::error::Error for ExecutionDiagnostic {}
 pub type ExecResult<T = ()> = Result<T, ExecutionDiagnostic>;
 
 pub trait InputBackend: Send + Sync {
+    /// Reports the physical Escape key state so playback can be cancelled.
+    fn escape_pressed(&self) -> bool {
+        false
+    }
     fn key_down(&self, key: &MkKey) -> ExecResult;
     fn key_up(&self, key: &MkKey) -> ExecResult;
     fn button_down(&self, button: MkMouseButton) -> ExecResult;
@@ -81,6 +85,10 @@ pub trait ScreenBackend: Send + Sync {
         target: &MkCoordinateTarget,
         variables: &RuntimeVariables,
     ) -> ExecResult<MkPoint>;
+    /// Applies platform desktop bounds to a fully resolved and randomized point.
+    fn finalize_point(&self, point: MkPoint) -> ExecResult<MkPoint> {
+        Ok(point)
+    }
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
     fn pixel_matches(
         &self,
@@ -480,6 +488,22 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn playback_duration_scaling_is_ceiling_and_saturating() {
+        assert_eq!(scale_playback_duration(0, 50), 0);
+        assert_eq!(scale_playback_duration(5, 50), 10);
+        assert_eq!(scale_playback_duration(5, 100), 5);
+        assert_eq!(scale_playback_duration(5, 200), 3);
+        assert_eq!(scale_playback_duration(1, 1000), 1);
+        assert_eq!(scale_playback_duration(u64::MAX, 50), u64::MAX);
+    }
+
+    #[test]
+    fn sampled_delay_addition_is_deterministic_and_saturating() {
+        assert_eq!(add_sampled_random_delay(10, 0), 10);
+        assert_eq!(add_sampled_random_delay(10, 7), 17);
+        assert_eq!(add_sampled_random_delay(u64::MAX, 1), u64::MAX);
+    }
+    #[test]
     fn sequential_order_and_owned_input_cleanup() {
         let fake = Arc::new(FakeBackend::default());
         let control = Arc::new(RunControl::default());
@@ -684,7 +708,9 @@ mod tests {
         let mut vars = RuntimeVariables::new();
         let mut guard = InputCleanupGuard::new(fake.clone());
         fake.conditions.lock().unwrap().insert("pixel".into(), true);
-        executor.action(7, &action, &mut vars, &mut guard).unwrap();
+        executor
+            .action(7, &action, &MkPlayback::default(), &mut vars, &mut guard)
+            .unwrap();
         assert_eq!(vars.get("last_pixel_result"), Some(&MkValue::Boolean(true)));
         assert_eq!(vars.get("last_pixel_found"), Some(&MkValue::Boolean(true)));
 
@@ -694,7 +720,7 @@ mod tests {
             .insert("pixel".into(), false);
         assert_eq!(
             executor
-                .action(7, &action, &mut vars, &mut guard)
+                .action(7, &action, &MkPlayback::default(), &mut vars, &mut guard)
                 .unwrap_err()
                 .kind,
             DiagnosticKind::TargetNotFound
@@ -711,7 +737,7 @@ mod tests {
             .insert("pixel_error".into(), true);
         assert_eq!(
             executor
-                .action(7, &action, &mut vars, &mut guard)
+                .action(7, &action, &MkPlayback::default(), &mut vars, &mut guard)
                 .unwrap_err()
                 .kind,
             DiagnosticKind::Backend
@@ -739,10 +765,71 @@ pub struct Executor {
     backends: Backends,
     control: Arc<RunControl>,
 }
+
+/// Scales playback pacing using ceiling division. Thus a non-zero duration remains
+/// non-zero at every valid speed, and widened arithmetic cannot overflow.
+pub fn scale_playback_duration(milliseconds: u64, speed_percent: u32) -> u64 {
+    if milliseconds == 0 {
+        return 0;
+    }
+    debug_assert!(
+        speed_percent > 0,
+        "compiler validation rejects zero playback speed"
+    );
+    if speed_percent == 0 {
+        return u64::MAX;
+    }
+    let numerator = u128::from(milliseconds) * 100;
+    let scaled = (numerator + u128::from(speed_percent) - 1) / u128::from(speed_percent);
+    scaled.min(u128::from(u64::MAX)) as u64
+}
+
+fn offset_point(point: MkPoint, x: i64, y: i64) -> MkPoint {
+    let add = |value: i32, delta: i64| {
+        (i64::from(value).saturating_add(delta)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32
+    };
+    MkPoint {
+        x: add(point.x, x),
+        y: add(point.y, y),
+    }
+}
+
+/// Combines an already-scaled normal delay with a deterministic sampled value.
+pub fn add_sampled_random_delay(normal: u64, sampled: u64) -> u64 {
+    normal.saturating_add(sampled)
+}
+
+fn sample_delay(max: u64) -> u64 {
+    if max == 0 {
+        0
+    } else {
+        rand::random_range(0..=max)
+    }
+}
+fn sample_offset(max: u32) -> i64 {
+    if max == 0 {
+        0
+    } else {
+        rand::random_range(-i64::from(max)..=i64::from(max))
+    }
+}
 impl Executor {
     const MAX_CONTROL_TRANSITIONS: u64 = 100_000;
     pub fn new(backends: Backends, control: Arc<RunControl>) -> Self {
         Self { backends, control }
+    }
+    fn wait(&self, duration: Duration) -> ExecResult {
+        let mut remaining = duration;
+        while !remaining.is_zero() {
+            if self.backends.input.escape_pressed() {
+                self.control.stop();
+            }
+            let slice = remaining.min(Duration::from_millis(10));
+            self.control.wait(slice)?;
+            remaining = remaining.saturating_sub(slice);
+        }
+        Ok(())
     }
     pub fn execute(&self, plan: &MkExecutionPlan, observe: &dyn Fn(ExecutionEvent)) -> ExecResult {
         let _activity = RunActivityGuard(&self.control);
@@ -754,6 +841,9 @@ impl Executor {
         vars.insert("macro.id".into(), MkValue::Number(plan.macro_id as f64));
         vars.insert("last_action_success".into(), MkValue::Boolean(true));
         while pc < plan.instructions.len() {
+            if self.backends.input.escape_pressed() {
+                self.control.stop();
+            }
             self.control.checkpoint()?;
             transitions += 1;
             if transitions > Self::MAX_CONTROL_TRANSITIONS {
@@ -787,7 +877,13 @@ impl Executor {
                         attempt,
                         "executing macro step"
                     );
-                    match self.action(plan.macro_id, &step.action, &mut vars, &mut guard) {
+                    match self.action(
+                        plan.macro_id,
+                        &step.action,
+                        &plan.playback,
+                        &mut vars,
+                        &mut guard,
+                    ) {
                         Ok(()) => {
                             vars.insert("last_action_success".into(), MkValue::Boolean(true));
                             final_error = None;
@@ -804,7 +900,7 @@ impl Executor {
                             if attempt < attempts
                                 && let super::MkErrorPolicy::Retry(r) = &step.on_error
                             {
-                                self.control.wait(Duration::from_millis(r.delay_ms))?
+                                self.wait(Duration::from_millis(r.delay_ms))?
                             }
                         }
                     }
@@ -812,9 +908,16 @@ impl Executor {
                 if final_error.is_some() {
                     break;
                 }
-                if step.delay_after_ms > 0 {
-                    self.control
-                        .wait(Duration::from_millis(step.delay_after_ms))?
+                // Retry delay is error-policy backoff, not playback pacing, and is intentionally unscaled.
+                let normal =
+                    scale_playback_duration(step.delay_after_ms, plan.playback.speed_percent);
+                let delay = if step.action.is_structural() {
+                    normal
+                } else {
+                    add_sampled_random_delay(normal, sample_delay(plan.playback.random_delay_ms))
+                };
+                if delay > 0 {
+                    self.wait(Duration::from_millis(delay))?
                 }
             }
             if let Some(e) = final_error {
@@ -862,6 +965,7 @@ impl Executor {
         &self,
         macro_id: u64,
         a: &MkAction,
+        playback: &MkPlayback,
         v: &mut RuntimeVariables,
         g: &mut InputCleanupGuard,
     ) -> ExecResult {
@@ -882,24 +986,27 @@ impl Executor {
                 Ok(())
             }
             MkAction::Text(p) => self.backends.input.text(p),
-            MkAction::MouseMove(p) => self.move_to(p, v),
+            MkAction::MouseMove(p) => self.move_to(p, playback, v),
             MkAction::MouseDrag(p) => {
-                let from = self.backends.screen.resolve(&p.from, v)?;
-                let to = self.backends.screen.resolve(&p.to, v)?;
+                let from = self.finalize_target(&p.from, playback, v)?;
+                let to = self.finalize_target(&p.to, playback, v)?;
                 super::input::drag(
                     &*self.backends.input,
                     &self.control,
                     p.button.clone(),
                     from,
                     to,
-                    Duration::from_millis(p.duration_ms),
+                    Duration::from_millis(scale_playback_duration(
+                        p.duration_ms,
+                        playback.speed_percent,
+                    )),
                 )?;
                 set_point(v, "mouse", to);
                 set_point(v, "last_point", to);
                 Ok(())
             }
             MkAction::MouseClick(p) => {
-                let point = self.backends.screen.resolve(&p.target, v)?;
+                let point = self.finalize_target(&p.target, playback, v)?;
                 set_point(v, "last_point", point);
                 self.backends.input.move_mouse(point)?;
                 set_point(v, "mouse", point);
@@ -912,9 +1019,9 @@ impl Executor {
             MkAction::MouseDown(b) => g.down_button(b.clone()),
             MkAction::MouseUp(b) => g.up_button(b.clone()),
             MkAction::MouseScroll { i32_delta } => self.backends.input.scroll(*i32_delta),
-            MkAction::Delay { milliseconds } => {
-                self.control.wait(Duration::from_millis(*milliseconds))
-            }
+            MkAction::Delay { milliseconds } => self.wait(Duration::from_millis(
+                scale_playback_duration(*milliseconds, playback.speed_percent),
+            )),
             MkAction::Process(p) => self.backends.launcher.launch_process(p),
             MkAction::LauncherCommand { command, args } => {
                 self.backends.launcher.command(command, args.as_deref())
@@ -1006,8 +1113,27 @@ impl Executor {
             | MkAction::Continue => Ok(()),
         }
     }
-    fn move_to(&self, payload: &super::MkMouseMovePayload, v: &mut RuntimeVariables) -> ExecResult {
-        let point = self.backends.screen.resolve(&payload.target, v)?;
+    fn finalize_target(
+        &self,
+        target: &MkCoordinateTarget,
+        playback: &MkPlayback,
+        v: &RuntimeVariables,
+    ) -> ExecResult<MkPoint> {
+        let configured = self.backends.screen.resolve(target, v)?;
+        let randomized = offset_point(
+            configured,
+            sample_offset(playback.random_offset_px),
+            sample_offset(playback.random_offset_px),
+        );
+        self.backends.screen.finalize_point(randomized)
+    }
+    fn move_to(
+        &self,
+        payload: &super::MkMouseMovePayload,
+        playback: &MkPlayback,
+        v: &mut RuntimeVariables,
+    ) -> ExecResult {
+        let point = self.finalize_target(&payload.target, playback, v)?;
         if payload.duration_ms == 0 {
             self.backends.input.move_mouse(point)?;
         } else {
@@ -1017,7 +1143,10 @@ impl Executor {
                 &self.control,
                 from,
                 point,
-                Duration::from_millis(payload.duration_ms),
+                Duration::from_millis(scale_playback_duration(
+                    payload.duration_ms,
+                    playback.speed_percent,
+                )),
             )?;
         }
         set_point(v, "mouse", point);
@@ -1089,7 +1218,7 @@ impl Executor {
                 .context("poll_interval_ms", o.poll_interval_ms.to_string())
                 .context("polls", polls.to_string()));
             }
-            self.control.wait(
+            self.wait(
                 Duration::from_millis(o.poll_interval_ms.max(1))
                     .min(Duration::from_millis(o.timeout_ms).saturating_sub(elapsed)),
             )?;
@@ -1112,8 +1241,7 @@ impl Executor {
                     format!("condition timed out after {} ms", o.timeout_ms),
                 ));
             }
-            self.control
-                .wait(Duration::from_millis(o.poll_interval_ms.max(1)))?
+            self.wait(Duration::from_millis(o.poll_interval_ms.max(1)))?
         }
     }
     fn condition(
