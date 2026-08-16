@@ -388,6 +388,26 @@ mod tests {
     }
 
     #[test]
+    fn palette_supports_five_consecutive_configurable_insertions() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.action_catalog_visible = true;
+        d.action_search = "delay".into();
+        for _ in 0..5 {
+            assert!(action_catalog::select_descriptor(
+                &mut d,
+                &catalog_descriptor("Delay")
+            ));
+            let mut editor = std::mem::take(&mut d.action_editor);
+            assert!(editor.apply(&mut d).is_some());
+            d.action_editor = editor;
+            assert!(d.action_catalog_visible);
+            assert_eq!(d.action_search, "delay");
+        }
+        assert_eq!(d.selected_macro().unwrap().steps.len(), 5);
+    }
+
+    #[test]
     fn cancelling_catalog_editor_preserves_macro_and_catalog() {
         let (_dir, mut d) = dialog();
         d.create_macro();
@@ -1145,6 +1165,8 @@ impl MkMacroDialog {
             return;
         }
         let mut open = self.open;
+        // Manual regression: resize this window, add 100 steps, expand/edit rows,
+        // and delete them again. Its chosen outer height must remain unchanged.
         eframe::egui::Window::new("Mouse/Keyboard Macros")
             .id(eframe::egui::Id::new("mkmacro_main_window"))
             .open(&mut open)
