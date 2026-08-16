@@ -84,6 +84,10 @@ pub enum RecordedAction {
     Move {
         x: i32,
         y: i32,
+        /// Travel time into this retained waypoint. Microsecond differences are
+        /// truncated to whole milliseconds; sub-millisecond remainders are not
+        /// accumulated or rounded up.
+        duration_ms: u64,
     },
     Down {
         button: MouseButton,
@@ -105,6 +109,8 @@ pub enum RecordedAction {
         button: MouseButton,
         from: (i32, i32),
         to: (i32, i32),
+        down_timestamp_us: u64,
+        up_timestamp_us: u64,
     },
     Wheel {
         delta: i32,
@@ -129,7 +135,7 @@ fn distance(a: (i32, i32), b: (i32, i32)) -> i64 {
 
 fn point(step: &RecordedStep) -> Option<(i32, i32)> {
     match step.action {
-        RecordedAction::Move { x, y } => Some((x, y)),
+        RecordedAction::Move { x, y, .. } => Some((x, y)),
         _ => None,
     }
 }
@@ -336,7 +342,11 @@ pub fn normalize(
                 };
                 if keep {
                     last_move = Some(((x, y), t));
-                    Some(RecordedAction::Move { x, y })
+                    Some(RecordedAction::Move {
+                        x,
+                        y,
+                        duration_ms: 0,
+                    })
                 } else {
                     None
                 }
@@ -375,6 +385,8 @@ pub fn normalize(
                             button: b,
                             from: p,
                             to: (x, y),
+                            down_timestamp_us: dt,
+                            up_timestamp_us: t,
                         })
                     } else {
                         out.push(RecordedStep {
@@ -463,10 +475,35 @@ pub fn normalize(
     }
     // Phase 4: stage-one sampling followed by pure geometric simplification.
     out = simplify_sampled_runs(sample_move_runs(out, cfg), cfg);
-    // Phase 5: finalize chronology and calculate delays only from retained timestamps.
+    // Phase 5: finalize chronology. A move timestamp is its arrival time. Each
+    // contiguous run's anchor is instantaneous, and later waypoints own all
+    // elapsed travel since the preceding retained waypoint (including time
+    // across points removed by either simplifier). Saturating subtraction means
+    // equal/reversed timestamps never fabricate movement time. Conversion from
+    // microseconds truncates each interval independently to whole milliseconds.
     out.sort_by_key(|x| x.timestamp_us);
+    for i in 1..out.len() {
+        let elapsed_ms = out[i].timestamp_us.saturating_sub(out[i - 1].timestamp_us) / 1000;
+        if matches!(out[i - 1].action, RecordedAction::Move { .. })
+            && let RecordedAction::Move { duration_ms, .. } = &mut out[i].action
+        {
+            *duration_ms = elapsed_ms;
+        }
+    }
+    // Delays contain idle time only. Timed actions begin before their arrival/end,
+    // so their owned interval is subtracted by comparing this action's end with
+    // the next action's start.
     for i in 0..out.len().saturating_sub(1) {
-        out[i].delay_after_ms = out[i + 1].timestamp_us.saturating_sub(out[i].timestamp_us) / 1000;
+        let next_start_us = match out[i + 1].action {
+            RecordedAction::Move { duration_ms, .. } => out[i + 1]
+                .timestamp_us
+                .saturating_sub(duration_ms.saturating_mul(1000)),
+            RecordedAction::Drag {
+                down_timestamp_us, ..
+            } => down_timestamp_us,
+            _ => out[i + 1].timestamp_us,
+        };
+        out[i].delay_after_ms = next_start_us.saturating_sub(out[i].timestamp_us) / 1000;
     }
     out
 }
@@ -506,10 +543,12 @@ pub fn to_macro_steps(items: &[RecordedStep], mut next_id: u64) -> Vec<MkStep> {
             RecordedAction::Key {
                 down: false, vk, ..
             } => vec![MkAction::KeyUp(key(vk))],
-            RecordedAction::Move { x, y } => vec![MkAction::MouseMove(MkMouseMovePayload {
-                target: point(x, y),
-                duration_ms: 0,
-            })],
+            RecordedAction::Move { x, y, duration_ms } => {
+                vec![MkAction::MouseMove(MkMouseMovePayload {
+                    target: point(x, y),
+                    duration_ms,
+                })]
+            }
             RecordedAction::Click {
                 button: b,
                 x,
@@ -526,11 +565,13 @@ pub fn to_macro_steps(items: &[RecordedStep], mut next_id: u64) -> Vec<MkStep> {
                 button: b,
                 from,
                 to,
+                down_timestamp_us,
+                up_timestamp_us,
             } => vec![MkAction::MouseDrag(MkMouseDragPayload {
                 from: point(from.0, from.1),
                 to: point(to.0, to.1),
                 button: button(b),
-                duration_ms: 0,
+                duration_ms: up_timestamp_us.saturating_sub(down_timestamp_us) / 1000,
             })],
             RecordedAction::Wheel { delta, .. } => vec![MkAction::MouseScroll { i32_delta: delta }],
         };
@@ -572,7 +613,11 @@ mod tests {
         RecordedStep {
             timestamp_us: t,
             delay_after_ms: 0,
-            action: RecordedAction::Move { x, y },
+            action: RecordedAction::Move {
+                x,
+                y,
+                duration_ms: 0,
+            },
             context: None,
         }
     }
@@ -708,8 +753,14 @@ mod tests {
         // it is the final waypoint before the key action and therefore forms the
         // required end of that contiguous movement run.
         assert_eq!(v.len(), 3);
-        assert!(matches!(v[0].action, RecordedAction::Move { x: 0, y: 0 }));
-        assert!(matches!(v[1].action, RecordedAction::Move { x: 2, y: 2 }));
+        assert!(matches!(
+            v[0].action,
+            RecordedAction::Move { x: 0, y: 0, .. }
+        ));
+        assert!(matches!(
+            v[1].action,
+            RecordedAction::Move { x: 2, y: 2, .. }
+        ));
         assert!(matches!(
             v[2].action,
             RecordedAction::Key {
@@ -719,7 +770,13 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(v[0].delay_after_ms, 1);
+        assert!(matches!(
+            v[1].action,
+            RecordedAction::Move { duration_ms: 1, .. }
+        ));
+        // The millisecond between retained waypoints is travel owned by the
+        // destination move, not idle time duplicated on the anchor.
+        assert_eq!(v[0].delay_after_ms, 0);
         assert_eq!(v[1].delay_after_ms, 99);
     }
 
@@ -731,6 +788,8 @@ mod tests {
                 button: MouseButton::Right,
                 from: (3, 4),
                 to: (30, 40),
+                down_timestamp_us: 12_000,
+                up_timestamp_us: 45_000,
             },
             delay_after_ms: 77,
             context: None,
@@ -742,7 +801,7 @@ mod tests {
             panic!()
         };
         assert_eq!(payload.button, MkMouseButton::Right);
-        assert_eq!(payload.duration_ms, 0);
+        assert_eq!(payload.duration_ms, 33);
         assert_eq!(
             payload.from,
             MkCoordinateTarget::Screen {
@@ -755,5 +814,201 @@ mod tests {
                 point: MkPoint { x: 30, y: 40 }
             }
         );
+    }
+
+    #[test]
+    fn retained_waypoints_own_independent_travel_without_duplicate_delays() {
+        let mut c = NormalizationConfig::default();
+        c.movement_mode = MovementMode::DetailedMovement;
+        let normalized = normalize(
+            &[
+                mouse(1_000, MouseMessage::Move, 0, 0),
+                mouse(11_500, MouseMessage::Move, 10, 0),
+                mouse(31_900, MouseMessage::Move, 20, 10),
+                mouse(46_900, MouseMessage::Wheel(120), 20, 10),
+            ],
+            &c,
+            None,
+        );
+        let steps = to_macro_steps(&normalized, 40);
+        let durations: Vec<_> = steps
+            .iter()
+            .filter_map(|step| match step.action {
+                MkAction::MouseMove(ref payload) => Some(payload.duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(durations, [0, 10, 20]);
+        assert_eq!(
+            steps.iter().map(|step| step.id).collect::<Vec<_>>(),
+            [41, 42, 43, 44]
+        );
+        assert_eq!(steps[0].delay_after_ms, 0);
+        assert_eq!(steps[1].delay_after_ms, 0);
+        assert_eq!(steps[2].delay_after_ms, 15);
+    }
+
+    #[test]
+    fn simplification_rolls_removed_time_into_destination_and_equal_time_stays_zero() {
+        let mut c = NormalizationConfig::default();
+        c.movement_distance_px = 100;
+        c.movement_interval_ms = 100;
+        let normalized = normalize(
+            &[
+                mouse(5_000, MouseMessage::Move, 0, 0),
+                mouse(10_000, MouseMessage::Move, 1, 0),
+                mouse(25_000, MouseMessage::Move, 2, 0),
+            ],
+            &c,
+            None,
+        );
+        assert_eq!(normalized.len(), 2);
+        assert!(matches!(
+            normalized[1].action,
+            RecordedAction::Move {
+                duration_ms: 20,
+                ..
+            }
+        ));
+
+        c.movement_mode = MovementMode::DetailedMovement;
+        let equal = normalize(
+            &[
+                mouse(9_000, MouseMessage::Move, 0, 0),
+                mouse(9_000, MouseMessage::Move, 1, 0),
+            ],
+            &c,
+            None,
+        );
+        assert!(matches!(
+            equal[1].action,
+            RecordedAction::Move { duration_ms: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn key_boundary_and_pause_prevent_travel_time_leaking_between_runs() {
+        let mut c = NormalizationConfig::default();
+        c.movement_mode = MovementMode::DetailedMovement;
+        let key = |t| {
+            RecordingBoundary::Event(HookEvent::Key {
+                timestamp_us: t,
+                transition: KeyTransition::Down,
+                vk: 65,
+                scan_code: 30,
+                flags: 0,
+                extra_info: 0,
+            })
+        };
+        let normalized = normalize(
+            &[
+                mouse(0, MouseMessage::Move, 0, 0),
+                mouse(10_000, MouseMessage::Move, 10, 0),
+                key(15_000),
+                mouse(20_000, MouseMessage::Move, 20, 0),
+                RecordingBoundary::Pause {
+                    timestamp_us: 22_000,
+                },
+                RecordingBoundary::Resume {
+                    timestamp_us: 122_000,
+                },
+                mouse(130_000, MouseMessage::Move, 30, 0),
+            ],
+            &c,
+            None,
+        );
+        assert!(matches!(
+            normalized[1].action,
+            RecordedAction::Move {
+                duration_ms: 10,
+                ..
+            }
+        ));
+        assert_eq!(normalized[1].delay_after_ms, 5);
+        assert!(matches!(
+            normalized[3].action,
+            RecordedAction::Move { duration_ms: 0, .. }
+        ));
+        assert!(matches!(
+            normalized[4].action,
+            RecordedAction::Move {
+                duration_ms: 10,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mismatched_and_unmatched_buttons_remain_fallback_transitions() {
+        let normalized = normalize(
+            &[
+                mouse(0, MouseMessage::Down(MouseButton::Left), 1, 2),
+                mouse(20_000, MouseMessage::Up(MouseButton::Right), 30, 40),
+                mouse(30_000, MouseMessage::Up(MouseButton::Middle), 30, 40),
+            ],
+            &NormalizationConfig::default(),
+            None,
+        );
+        assert_eq!(normalized.len(), 3);
+        assert!(matches!(
+            normalized[0].action,
+            RecordedAction::Down {
+                button: MouseButton::Left,
+                ..
+            }
+        ));
+        assert!(matches!(
+            normalized[1].action,
+            RecordedAction::Up {
+                button: MouseButton::Right,
+                ..
+            }
+        ));
+        assert!(matches!(
+            normalized[2].action,
+            RecordedAction::Up {
+                button: MouseButton::Middle,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn click_splits_move_runs_without_absorbing_click_time() {
+        let mut c = NormalizationConfig::default();
+        c.movement_mode = MovementMode::DetailedMovement;
+        let normalized = normalize(
+            &[
+                mouse(0, MouseMessage::Move, 0, 0),
+                mouse(10_000, MouseMessage::Move, 10, 0),
+                mouse(20_000, MouseMessage::Down(MouseButton::Left), 10, 0),
+                mouse(25_000, MouseMessage::Up(MouseButton::Left), 10, 0),
+                mouse(35_000, MouseMessage::Move, 20, 0),
+                mouse(45_000, MouseMessage::Move, 30, 0),
+            ],
+            &c,
+            None,
+        );
+        assert!(matches!(
+            normalized[1].action,
+            RecordedAction::Move {
+                duration_ms: 10,
+                ..
+            }
+        ));
+        assert_eq!(normalized[1].delay_after_ms, 15);
+        assert!(matches!(normalized[2].action, RecordedAction::Click { .. }));
+        assert_eq!(normalized[2].delay_after_ms, 10);
+        assert!(matches!(
+            normalized[3].action,
+            RecordedAction::Move { duration_ms: 0, .. }
+        ));
+        assert!(matches!(
+            normalized[4].action,
+            RecordedAction::Move {
+                duration_ms: 10,
+                ..
+            }
+        ));
     }
 }
