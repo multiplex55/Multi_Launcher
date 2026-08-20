@@ -114,13 +114,11 @@ fn structural(a: &crate::mkmacro::MkAction) -> bool {
 }
 
 const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
-const QUICK_INSERT_HEIGHT: f32 = 82.0;
-const QUICK_INSERT_CAPTURE_HEIGHT: f32 = 104.0;
 
-/// Divides the height already assigned to the step area; the number of rows is
-/// deliberately irrelevant because rows belong to the table's scroll area.
-fn table_viewport_height(available_height: f32, footer_height: f32) -> f32 {
-    (available_height - footer_height).max(MIN_TABLE_VIEWPORT_HEIGHT)
+/// Uses all height assigned to the step area; the number of rows is deliberately
+/// irrelevant because rows belong to the table's scroll area.
+fn table_viewport_height(available_height: f32) -> f32 {
+    available_height.max(MIN_TABLE_VIEWPORT_HEIGHT)
 }
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
@@ -156,12 +154,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let mut changed = false;
     let mut updates = Vec::new();
     let mut command = None;
-    let footer_height = if d.quick_insert.capturing {
-        QUICK_INSERT_CAPTURE_HEIGHT
-    } else {
-        QUICK_INSERT_HEIGHT
-    };
-    let table_height = table_viewport_height(ui.available_height(), footer_height);
+    let table_height = table_viewport_height(ui.available_height());
     ui.allocate_ui_with_layout(
         eframe::egui::vec2(ui.available_width(), table_height),
         eframe::egui::Layout::top_down(eframe::egui::Align::Min),
@@ -298,7 +291,6 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     if let Some(c) = command {
         apply_command(d, c);
     }
-    quick_insert(ui, d);
 }
 
 fn context_menu(ui: &mut eframe::egui::Ui, id: u64, out: &mut Option<Command>) {
@@ -427,70 +419,20 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
     }
     d.mark_dirty();
 }
-fn quick_insert(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
-    ui.separator();
-    ui.heading("Quick Insert");
-    let text = if d.quick_insert.keys.is_empty() {
-        "No key captured".into()
-    } else {
-        d.quick_insert
-            .keys
-            .iter()
-            .map(super::key_capture::key_name)
-            .collect::<Vec<_>>()
-            .join(" + ")
-    };
-    ui.horizontal(|ui| {
-        ui.label(text);
-        if ui.button("Capture key/chord").clicked() {
-            d.quick_insert.capturing = true;
-        }
-        ui.label("Repeat");
-        ui.add(eframe::egui::DragValue::new(&mut d.quick_insert.repeat).clamp_range(1..=1_000_000));
-        ui.label("Delay (ms)");
-        ui.add(
-            eframe::egui::DragValue::new(&mut d.quick_insert.delay_after_ms)
-                .clamp_range(0..=86_400_000),
-        );
-    });
-    if d.quick_insert.capturing {
-        ui.label("Press a key or combination; Escape cancels capture.");
-        if let Some(result) = ui.input(super::key_capture::captured_chord) {
-            d.quick_insert.capturing = false;
-            if let super::key_capture::CapturedChord::Keys(keys) = result {
-                d.quick_insert.keys = keys;
-            }
-        }
-    }
-    let enabled = d.quick_insert.action().is_some();
-    if ui
-        .add_enabled(enabled, eframe::egui::Button::new("Insert"))
-        .clicked()
-    {
-        let mut q = std::mem::take(&mut d.quick_insert);
-        q.insert(d);
-        d.quick_insert = q;
-    }
-}
-
 #[cfg(test)]
 mod layout_tests {
     use super::*;
 
     #[test]
-    fn table_uses_body_height_remaining_after_footer() {
-        assert_eq!(table_viewport_height(500.0, 82.0), 418.0);
-        assert_eq!(table_viewport_height(250.0, 82.0), 168.0);
-        assert_eq!(
-            table_viewport_height(100.0, 82.0),
-            MIN_TABLE_VIEWPORT_HEIGHT
-        );
+    fn table_uses_all_remaining_height() {
+        assert_eq!(table_viewport_height(500.0), 500.0);
+        assert_eq!(table_viewport_height(250.0), 250.0);
+        assert_eq!(table_viewport_height(20.0), MIN_TABLE_VIEWPORT_HEIGHT);
     }
 
     #[test]
     fn row_count_cannot_affect_table_height() {
-        let allocations =
-            [0_usize, 10, 500].map(|_row_count| table_viewport_height(500.0, QUICK_INSERT_HEIGHT));
-        assert_eq!(allocations, [418.0; 3]);
+        let allocations = [0_usize, 10, 500].map(|_row_count| table_viewport_height(500.0));
+        assert_eq!(allocations, [500.0; 3]);
     }
 }

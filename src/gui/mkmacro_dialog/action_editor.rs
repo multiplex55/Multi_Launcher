@@ -80,54 +80,6 @@ struct NativePositionPicker {
     escape_down: bool,
 }
 
-#[derive(Default)]
-pub struct QuickInsertState {
-    pub keys: Vec<MkKey>,
-    pub repeat: u32,
-    pub delay_after_ms: u64,
-    pub capturing: bool,
-}
-impl QuickInsertState {
-    pub fn action(&self) -> Option<MkAction> {
-        let primary = self.keys.iter().rposition(|k| !is_modifier(k))?;
-        if self.keys.len() == 1 {
-            Some(MkAction::KeyPress(self.keys[primary].clone()))
-        } else {
-            Some(MkAction::Hotkey(self.keys.clone()))
-        }
-    }
-    pub fn insert(&mut self, d: &mut MkMacroDialog) -> Option<u64> {
-        let action = self.action()?;
-        let repeat = self.repeat.max(1);
-        let delay = self.delay_after_ms;
-        let selected = d.selection.ids.clone();
-        let m = d.selected_macro_mut()?;
-        let pos = m
-            .steps
-            .iter()
-            .rposition(|s| selected.contains(&s.id))
-            .map_or(m.steps.len(), |i| i + 1);
-        m.steps.insert(
-            pos,
-            MkStep {
-                id: 0,
-                enabled: true,
-                repeat,
-                delay_after_ms: delay,
-                on_error: MkErrorPolicy::Stop,
-                action,
-            },
-        );
-        repair_ids(&mut d.draft);
-        let id = d.selected_macro()?.steps[pos].id;
-        d.selection.ids.clear();
-        d.selection.ids.insert(id);
-        d.mark_dirty();
-        self.keys.clear();
-        Some(id)
-    }
-}
-
 impl ActionEditorState {
     pub fn begin_new(&mut self, action: MkAction) {
         let editor = super::action_catalog::editor_for_action(&action);
