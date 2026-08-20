@@ -92,7 +92,8 @@ pub fn remove_child(c: &mut MkCondition, index: usize) -> bool {
     }
 }
 
-pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) {
+pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Vec<usize>> {
+    let mut requested = None;
     ui.group(|ui| {
         let kind = condition_kind(condition);
         let mut next = kind;
@@ -143,7 +144,9 @@ pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) {
                 value_ui(ui, value);
             }
             MkCondition::WindowExists { matcher } | MkCondition::WindowActive { matcher } => {
-                matcher_ui(ui, matcher)
+                if matcher_ui(ui, matcher) {
+                    requested = Some(vec![]);
+                }
             }
             MkCondition::ImageResult { asset_id, found } => {
                 ui.horizontal(|ui| {
@@ -171,19 +174,29 @@ pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) {
                 });
             }
             MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-                group_ui(ui, conditions)
+                requested = group_ui(ui, conditions)
             }
             MkCondition::Not { condition } => {
-                ui.indent("not-child", |ui| condition_ui(ui, condition));
+                ui.indent("not-child", |ui| {
+                    if let Some(mut p) = condition_ui(ui, condition) {
+                        p.insert(0, 0);
+                        requested = Some(p)
+                    }
+                });
             }
         }
     });
+    requested
 }
-fn group_ui(ui: &mut egui::Ui, conditions: &mut Vec<MkCondition>) {
+fn group_ui(ui: &mut egui::Ui, conditions: &mut Vec<MkCondition>) -> Option<Vec<usize>> {
     let mut remove = None;
+    let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
-            condition_ui(ui, child);
+            if let Some(mut p) = condition_ui(ui, child) {
+                p.insert(0, index);
+                requested = Some(p);
+            }
             if ui.button("Remove").clicked() {
                 remove = Some(index);
             }
@@ -195,6 +208,7 @@ fn group_ui(ui: &mut egui::Ui, conditions: &mut Vec<MkCondition>) {
     if ui.button("+ Add Condition").clicked() {
         conditions.push(default_condition(ConditionKind::Variable));
     }
+    requested
 }
 fn kind_label(k: ConditionKind) -> &'static str {
     match k {
