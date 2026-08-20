@@ -514,7 +514,8 @@ mod tests {
         s.executable_enabled = false;
         s.title_enabled = false;
         assert!(matcher_from_preview(&s).is_err());
-        let json = serde_json::to_string(&preview().request).unwrap();
+        let matcher = matcher_from_preview(&preview()).unwrap();
+        let json = serde_json::to_string(&matcher).unwrap();
         assert!(!json.contains("99"));
     }
     #[test]

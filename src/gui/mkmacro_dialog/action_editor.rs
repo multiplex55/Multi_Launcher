@@ -1262,7 +1262,10 @@ mod tests {
                         matcher: MkWindowMatcher::default(),
                     },
                     return_point: ReturnPoint::Center,
-                    wait: MkWaitOptions::default(),
+                    wait: MkWaitOptions {
+                        timeout_ms: 0,
+                        poll_interval_ms: 1,
+                    },
                 }),
                 super::super::window_picker::MatcherPath::ImageRegion,
             ),

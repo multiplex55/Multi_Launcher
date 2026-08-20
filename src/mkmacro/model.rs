@@ -154,7 +154,7 @@ pub enum MkCoordinateTarget {
     Variable { name: String },
     Image { asset_id: u64, offset: MkPoint },
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkWindowMatcher {
     #[serde(default)]
     pub title: Option<String>,
