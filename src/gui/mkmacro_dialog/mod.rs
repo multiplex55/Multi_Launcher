@@ -52,9 +52,57 @@ pub struct MkMacroDialog {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        AlphaPolicy, MkAction, MkCoordinateTarget, MkHotkey, MkImagePayload, MkKey, MkMouseButton,
-        MkMouseMovePayload, MkMousePayload, MkStep, MkWaitOptions, ReturnPoint, SearchRegion,
+        AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCoordinateTarget, MkHotkey,
+        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload, MkStep,
+        MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
     };
+    use std::{
+        fs, thread,
+        time::{Duration, Instant},
+    };
+
+    fn five_macros() -> MkMacroDocument {
+        MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            macros: (1..=5)
+                .map(|id| MkMacro {
+                    id,
+                    name: format!("Macro {id}"),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    playback: Default::default(),
+                    steps: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    fn wait_for_empty_and_stable(dialog: &mut MkMacroDialog, path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut stable_since = None;
+        loop {
+            let snapshot_count = dialog.store.snapshot().macros.len();
+            let contents =
+                fs::read_to_string(path).unwrap_or_else(|e| format!("<read error: {e}>"));
+            let disk_count = serde_json::from_str::<MkMacroDocument>(&contents)
+                .map(|d| d.macros.len())
+                .unwrap_or(usize::MAX);
+            if snapshot_count == 0 && disk_count == 0 {
+                let since = stable_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(250) {
+                    return;
+                }
+            } else {
+                stable_since = None;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "watcher did not stabilize on empty document: snapshot_count={snapshot_count}, disk_count={disk_count}, file={contents:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     fn dialog() -> (tempfile::TempDir, MkMacroDialog) {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
@@ -90,6 +138,79 @@ mod tests {
         assert_eq!(d.selected_macro_id, Some(first));
         assert!(d.dirty);
         assert!(Arc::ptr_eq(&baseline, &d.store.snapshot()));
+    }
+
+    #[test]
+    fn delete_every_macro_save_empty_and_reopen_loaded_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let store = Arc::new(store);
+        store.save(five_macros()).unwrap();
+        let mut dialog = MkMacroDialog::new(Arc::clone(&store));
+
+        while !dialog.draft.macros.is_empty() {
+            let id = dialog.draft.macros[0].id;
+            dialog.selected_macro_id = Some(id);
+            dialog.delete_selected_macro();
+            if dialog.draft.macros.is_empty() {
+                assert!(dialog.selected_macro_id.is_none());
+            } else {
+                let selected = dialog.selected_macro_id.expect("selection advances");
+                assert_ne!(selected, id);
+                assert!(dialog.draft.macros.iter().any(|m| m.id == selected));
+            }
+        }
+        assert!(dialog.draft.macros.is_empty());
+        assert!(dialog.selected_macro_id.is_none());
+        assert!(dialog.dirty);
+        assert_eq!(
+            store.snapshot().macros.len(),
+            5,
+            "deletes remain draft-only"
+        );
+
+        dialog.save().unwrap();
+        assert!(dialog.store.snapshot().macros.is_empty());
+        assert!(dialog.draft.macros.is_empty());
+        assert!(dialog.baseline.macros.is_empty());
+        assert!(!dialog.dirty);
+        assert!(!dialog.conflict);
+
+        let path = dir.path().join(MKMACROS_FILE);
+        let bytes = fs::read(&path).unwrap();
+        assert!(!bytes.is_empty());
+        let disk: MkMacroDocument = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(disk.schema_version, SCHEMA_VERSION);
+        assert!(disk.macros.is_empty());
+
+        drop(dialog);
+        drop(store);
+        let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        assert!(reopened.snapshot().macros.is_empty());
+    }
+
+    #[test]
+    fn watcher_and_external_sync_cannot_restore_macros_after_empty_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let store = Arc::new(store);
+        store.save(five_macros()).unwrap();
+        let mut dialog = MkMacroDialog::new(store);
+        dialog.draft.macros.clear();
+        dialog.dirty = true;
+        dialog.save().unwrap();
+        dialog.sync_external();
+        assert!(dialog.draft.macros.is_empty());
+        assert!(dialog.baseline.macros.is_empty());
+        assert!(!dialog.conflict);
+
+        wait_for_empty_and_stable(&mut dialog, &dir.path().join(MKMACROS_FILE));
+        dialog.sync_external();
+        assert!(dialog.store.snapshot().macros.is_empty());
+        assert!(dialog.draft.macros.is_empty());
+        assert!(dialog.baseline.macros.is_empty());
+        assert!(!dialog.conflict);
     }
     #[test]
     fn catalog_search_and_structures() {
@@ -981,7 +1102,7 @@ impl MkMacroDialog {
     }
     pub fn sync_external(&mut self) {
         let current = self.store.snapshot();
-        if !Arc::ptr_eq(&current, &self.baseline) {
+        if *current != *self.baseline {
             if self.dirty {
                 self.conflict = true;
             } else {

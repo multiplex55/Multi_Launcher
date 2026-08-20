@@ -10,7 +10,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Component, Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 pub const MKMACROS_FILE: &str = "mkmacros.json";
 pub const ASSET_DIRECTORY: &str = "mkmacro_assets";
@@ -23,6 +23,9 @@ pub enum LoadDisposition {
 }
 struct Inner {
     path: PathBuf,
+    /// Orders the entire disk-read/write and publication transaction. In particular,
+    /// a watcher may not publish bytes it read before a completed local save.
+    transaction: Mutex<()>,
     snapshot: RwLock<Arc<MkMacroDocument>>,
     diagnostics: RwLock<Arc<[MkDiagnostic]>>,
     last_external_error: RwLock<Option<String>>,
@@ -84,6 +87,7 @@ impl MkMacroStore {
         let path = directory.as_ref().join(MKMACROS_FILE);
         let inner = Arc::new(Inner {
             path: path.clone(),
+            transaction: Mutex::new(()),
             snapshot: RwLock::new(Arc::new(MkMacroDocument::default())),
             diagnostics: RwLock::new(Arc::from([])),
             last_external_error: RwLock::new(None),
@@ -110,16 +114,7 @@ impl MkMacroStore {
         let weak = Arc::downgrade(&inner);
         let watcher = watch_json(&path, move || {
             if let Some(i) = weak.upgrade() {
-                match read_document(&i.path) {
-                    Ok(Some((d, changed))) => {
-                        if !changed || persist(&i.path, &d).is_ok() {
-                            publish(&i, d);
-                            *i.last_external_error.write().unwrap() = None
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => *i.last_external_error.write().unwrap() = Some(e.to_string()),
-                }
+                reload_from_disk(&i);
             }
         })
         .ok();
@@ -144,11 +139,29 @@ impl MkMacroStore {
         self.inner.last_external_error.read().unwrap().clone()
     }
     pub fn save(&self, mut doc: MkMacroDocument) -> Result<Arc<MkMacroDocument>> {
+        self.save_transaction(&mut doc, || {})
+    }
+    fn save_transaction(
+        &self,
+        doc: &mut MkMacroDocument,
+        before_publication: impl FnOnce(),
+    ) -> Result<Arc<MkMacroDocument>> {
+        let _transaction = self.inner.transaction.lock().unwrap();
+        let before = self.snapshot().macros.len();
         doc.schema_version = SCHEMA_VERSION;
-        repair_ids(&mut doc);
-        persist(&self.inner.path, &doc)?;
-        publish(&self.inner, doc);
-        Ok(self.snapshot())
+        repair_ids(doc);
+        persist(&self.inner.path, doc)?;
+        before_publication();
+        publish(&self.inner, doc.clone());
+        let saved = self.snapshot();
+        tracing::info!(
+            path = %resolved_path(&self.inner.path).display(),
+            macro_count = saved.macros.len(),
+            snapshot_macro_count_before = before,
+            snapshot_macro_count_after = saved.macros.len(),
+            "mkmacro save"
+        );
+        Ok(saved)
     }
     pub fn asset_path(&self, macro_id: u64, asset_id: u64) -> Result<PathBuf> {
         if macro_id == 0 || asset_id == 0 {
@@ -258,6 +271,27 @@ impl MkMacroStore {
         }
         Ok(())
     }
+}
+fn reload_from_disk(i: &Inner) {
+    let _transaction = i.transaction.lock().unwrap();
+    match read_document(&i.path) {
+        Ok(Some((d, changed))) => {
+            if !changed || persist(&i.path, &d).is_ok() {
+                publish(i, d);
+                *i.last_external_error.write().unwrap() = None
+            }
+        }
+        Ok(None) => {}
+        Err(e) => *i.last_external_error.write().unwrap() = Some(e.to_string()),
+    }
+}
+
+fn resolved_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    })
 }
 fn publish(i: &Inner, d: MkMacroDocument) {
     let ds = validate_document(
@@ -427,6 +461,7 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
 mod tests {
     use super::*;
     use crate::mkmacro::{MkPoint, SearchRegion};
+    use std::{sync::mpsc, thread, time::Duration};
     fn document() -> MkMacroDocument {
         MkMacroDocument {
             schema_version: SCHEMA_VERSION,
@@ -470,6 +505,52 @@ mod tests {
         let (s, _) = MkMacroStore::open(d.path()).unwrap();
         assert_eq!(s.snapshot().macros[0].id, 7);
         assert_eq!(s.snapshot().macros[0].steps[0].id, 9)
+    }
+    #[test]
+    fn saving_empty_document_preserves_canonical_file_and_snapshot() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = MkMacroStore::open(d.path()).unwrap();
+        s.save(document()).unwrap();
+        let saved = s.save(MkMacroDocument::default()).unwrap();
+        assert_eq!(saved.schema_version, SCHEMA_VERSION);
+        assert!(saved.macros.is_empty());
+        assert!(s.snapshot().macros.is_empty());
+
+        let path = d.path().join(MKMACROS_FILE);
+        let bytes = fs::read(&path).unwrap();
+        assert!(!bytes.is_empty());
+        let disk: MkMacroDocument = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(disk.schema_version, SCHEMA_VERSION);
+        assert!(disk.macros.is_empty());
+    }
+
+    #[test]
+    fn watcher_reload_cannot_publish_across_newer_save_transaction() {
+        let d = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(d.path()).unwrap();
+        store.save(document()).unwrap();
+        let store = Arc::new(store);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let reload_inner = Arc::clone(&store.inner);
+
+        store
+            .save_transaction(&mut MkMacroDocument::default(), || {
+                thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    reload_from_disk(&reload_inner);
+                    done_tx.send(()).unwrap();
+                });
+                started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            })
+            .unwrap();
+
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(store.snapshot().macros.is_empty());
+        let disk: MkMacroDocument =
+            serde_json::from_slice(&fs::read(d.path().join(MKMACROS_FILE)).unwrap()).unwrap();
+        assert!(disk.macros.is_empty());
     }
     #[test]
     fn old_migrates_and_future_is_rejected() {
