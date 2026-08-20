@@ -9,6 +9,7 @@ pub mod recorder_controller;
 mod step_table;
 mod toolbar;
 pub mod uia_editor;
+pub mod window_picker;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
@@ -41,6 +42,7 @@ pub struct MkMacroDialog {
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
+    pub window_picker: window_picker::WindowPickerState,
     pub command_error: Option<String>,
     /// Editable options are copied into the runtime at Start and never mutate an active session.
     pub recorder_options: NormalizationConfig,
@@ -1091,6 +1093,7 @@ impl MkMacroDialog {
             structural_insertion: None,
             uia_editor: Default::default(),
             action_editor: Default::default(),
+            window_picker: Default::default(),
             command_error: None,
             recorder_options: Default::default(),
             pending_recording: None,
@@ -1358,6 +1361,8 @@ impl MkMacroDialog {
         self.action_catalog_visible = false;
         self.action_editor.cancel();
         self.structural_insertion = None;
+        self.window_picker
+            .cancel("Window picker closed because the macro dialog closed");
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         toolbar::show(ui, self);
@@ -1383,6 +1388,20 @@ impl MkMacroDialog {
         }
         action_catalog::show_modal(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
+        window_picker::show(ui.ctx(), &mut self.window_picker);
+        if self.window_picker.confirm_ready {
+            self.window_picker.confirm_ready = false;
+            if let Some((request, matcher)) = self.window_picker.take_confirmation() {
+                if !self.action_editor.apply_window_matcher(
+                    &request,
+                    matcher,
+                    self.selected_macro_id,
+                ) {
+                    self.command_error =
+                        Some("The matcher target no longer exists; no changes were made".into());
+                }
+            }
+        }
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();
         }

@@ -81,6 +81,31 @@ struct NativePositionPicker {
 }
 
 impl ActionEditorState {
+    pub fn apply_window_matcher(
+        &mut self,
+        request: &super::window_picker::MatcherEditRequest,
+        matcher: MkWindowMatcher,
+        current_macro_id: Option<u64>,
+    ) -> bool {
+        let super::window_picker::MatcherDestination::Action {
+            macro_id,
+            draft_generation,
+            path,
+        } = &request.destination;
+        if Some(*macro_id) != current_macro_id || *draft_generation != self.draft_generation {
+            return false;
+        }
+        let Some(step) = self.draft.as_mut() else {
+            return false;
+        };
+        let Some(target) = matcher_at_path(&mut step.action, path) else {
+            return false;
+        };
+        if *target != matcher {
+            *target = matcher;
+        }
+        true
+    }
     pub fn begin_new(&mut self, action: MkAction) {
         let editor = super::action_catalog::editor_for_action(&action);
         self.begin_new_with_editor(action, editor);
@@ -466,15 +491,12 @@ fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
         *value = None;
     }
 }
-pub(super) fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) {
+pub(super) fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> bool {
     optional_field(ui, "Executable", &mut m.process);
     optional_field(ui, "Title contains", &mut m.title);
     optional_field(ui, "Title regex", &mut m.title_regex);
     optional_field(ui, "Class", &mut m.class);
-    ui.add_enabled(
-        false,
-        egui::Button::new("Pick window (unavailable on this platform/session)"),
-    );
+    ui.button("Choose Window…").clicked()
 }
 pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> bool {
     let kind = match target {
@@ -609,8 +631,12 @@ fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
     capture: &mut bool,
-) -> Option<PositionCaptureSlot> {
+) -> (
+    Option<PositionCaptureSlot>,
+    Option<super::window_picker::MatcherPath>,
+) {
     let mut pick = None;
+    let mut window_pick = None;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
@@ -794,7 +820,9 @@ fn action_ui(
             ui.checkbox(&mut p.wait, "Wait for completion");
         }
         MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
-            matcher_ui(ui, &mut p.matcher);
+            if matcher_ui(ui, &mut p.matcher) {
+                window_pick = Some(super::window_picker::MatcherPath::Action);
+            }
             if let Some(w) = &mut p.wait {
                 ui.horizontal(|ui| {
                     ui.label("Timeout (ms)");
@@ -806,7 +834,11 @@ fn action_ui(
                 });
             }
         }
-        MkAction::WindowClose(m) => matcher_ui(ui, m),
+        MkAction::WindowClose(m) => {
+            if matcher_ui(ui, m) {
+                window_pick = Some(super::window_picker::MatcherPath::Action);
+            }
+        }
         MkAction::SetVariable { name, value } => {
             ui.horizontal(|ui| {
                 ui.label("Name");
@@ -827,10 +859,14 @@ fn action_ui(
             });
         }
         MkAction::If(condition) | MkAction::WhileStart { condition } => {
-            super::condition_editor::condition_ui(ui, condition);
+            if let Some(path) = super::condition_editor::condition_ui(ui, condition) {
+                window_pick = Some(super::window_picker::MatcherPath::Condition(path));
+            }
         }
         MkAction::WaitUntil { condition, wait } => {
-            super::condition_editor::condition_ui(ui, condition);
+            if let Some(path) = super::condition_editor::condition_ui(ui, condition) {
+                window_pick = Some(super::window_picker::MatcherPath::Condition(path));
+            }
             ui.horizontal(|ui| {
                 ui.label("Timeout (ms)");
                 ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
@@ -892,7 +928,32 @@ fn action_ui(
                         rect: ScreenRect::new(0, 0, 1, 1),
                     };
                 }
+                if ui
+                    .selectable_label(matches!(p.region, SearchRegion::Window { .. }), "Window")
+                    .clicked()
+                {
+                    p.region = SearchRegion::Window {
+                        matcher: MkWindowMatcher::default(),
+                    };
+                }
+                if ui
+                    .selectable_label(
+                        matches!(p.region, SearchRegion::ClientArea { .. }),
+                        "Client area",
+                    )
+                    .clicked()
+                {
+                    p.region = SearchRegion::ClientArea {
+                        matcher: MkWindowMatcher::default(),
+                    };
+                }
             });
+            if let SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } =
+                &mut p.region
+                && matcher_ui(ui, matcher)
+            {
+                window_pick = Some(super::window_picker::MatcherPath::ImageRegion);
+            }
             if let SearchRegion::Rectangle { rect } = &mut p.region {
                 ui.horizontal(|ui| {
                     ui.label("X");
@@ -959,7 +1020,57 @@ fn action_ui(
             );
         }
     }
-    pick
+    (pick, window_pick)
+}
+
+fn condition_at_path<'a>(
+    mut c: &'a mut MkCondition,
+    path: &[usize],
+) -> Option<&'a mut MkWindowMatcher> {
+    for &index in path {
+        c = match c {
+            MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+                conditions.get_mut(index)?
+            }
+            MkCondition::Not { condition } if index == 0 => condition,
+            _ => return None,
+        };
+    }
+    match c {
+        MkCondition::WindowExists { matcher } | MkCondition::WindowActive { matcher } => {
+            Some(matcher)
+        }
+        _ => None,
+    }
+}
+
+fn matcher_at_path<'a>(
+    action: &'a mut MkAction,
+    path: &super::window_picker::MatcherPath,
+) -> Option<&'a mut MkWindowMatcher> {
+    use super::window_picker::MatcherPath;
+    match path {
+        MatcherPath::Action => match action {
+            MkAction::WindowActivate(p) | MkAction::WindowWait(p) => Some(&mut p.matcher),
+            MkAction::WindowClose(m) => Some(m),
+            _ => None,
+        },
+        MatcherPath::Condition(path) => match action {
+            MkAction::If(c)
+            | MkAction::WhileStart { condition: c }
+            | MkAction::WaitUntil { condition: c, .. } => condition_at_path(c, path),
+            _ => None,
+        },
+        MatcherPath::ImageRegion => match action {
+            MkAction::ImageFind(p) | MkAction::ImageClick(p) => match &mut p.region {
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    Some(matcher)
+                }
+                _ => None,
+            },
+            _ => None,
+        },
+    }
 }
 
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
@@ -991,7 +1102,13 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
-            pick_request = action_ui(ui, step, &mut state.capture_keys);
+            let (position, window)=action_ui(ui, step, &mut state.capture_keys);
+            pick_request = position;
+            if let Some(path)=window {
+                let original=matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone();
+                let macro_id=d.selected_macro_id.unwrap_or(0);
+                d.window_picker.open(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, path }, original });
+            }
             if state.position_capture.is_some() {
                 ui.colored_label(egui::Color32::YELLOW, "Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels.");
             }
@@ -1079,8 +1196,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         let mut state = std::mem::take(&mut d.action_editor);
         state.apply(d);
         d.action_editor = state;
+        d.window_picker
+            .cancel("Window picker closed because the action editor was applied");
     } else if cancel || !open {
         d.action_editor.cancel();
+        d.window_picker
+            .cancel("Window picker closed because the action editor was cancelled");
     }
 }
 
@@ -1106,6 +1227,65 @@ mod tests {
             last_screen_position: None,
             #[cfg(windows)]
             foreground_window: 0,
+        }
+    }
+
+    #[test]
+    fn window_picker_routes_root_nested_and_image_matchers() {
+        let replacement = MkWindowMatcher {
+            process: Some("picked.exe".into()),
+            title: Some("Picked".into()),
+            title_regex: None,
+            class: None,
+        };
+        for (action, path) in [
+            (
+                MkAction::WindowClose(MkWindowMatcher::default()),
+                super::super::window_picker::MatcherPath::Action,
+            ),
+            (
+                MkAction::WhileStart {
+                    condition: MkCondition::All {
+                        conditions: vec![MkCondition::WindowExists {
+                            matcher: MkWindowMatcher::default(),
+                        }],
+                    },
+                },
+                super::super::window_picker::MatcherPath::Condition(vec![0]),
+            ),
+            (
+                MkAction::ImageFind(MkImagePayload {
+                    asset_id: 1,
+                    tolerance: 0,
+                    alpha: AlphaPolicy::Compare,
+                    region: SearchRegion::Window {
+                        matcher: MkWindowMatcher::default(),
+                    },
+                    return_point: ReturnPoint::Center,
+                    wait: MkWaitOptions::default(),
+                }),
+                super::super::window_picker::MatcherPath::ImageRegion,
+            ),
+        ] {
+            let mut editor = ActionEditorState::default();
+            editor.begin_edit(&step(action));
+            let request = super::super::window_picker::MatcherEditRequest {
+                destination: super::super::window_picker::MatcherDestination::Action {
+                    macro_id: 5,
+                    draft_generation: editor.draft_generation,
+                    path: path.clone(),
+                },
+                original: MkWindowMatcher::default(),
+            };
+            assert!(editor.apply_window_matcher(&request, replacement.clone(), Some(5)));
+            assert_eq!(
+                matcher_at_path(&mut editor.draft.as_mut().unwrap().action, &path),
+                Some(&mut replacement.clone())
+            );
+            assert!(
+                !editor.apply_window_matcher(&request, MkWindowMatcher::default(), Some(6)),
+                "another macro must not be modified"
+            );
         }
     }
 

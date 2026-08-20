@@ -11,6 +11,17 @@ pub struct WindowCandidate {
     pub process_path: String,
     pub class_name: String,
 }
+impl From<crate::multi_manager::win::EnumeratedWindow> for WindowCandidate {
+    fn from(w: crate::multi_manager::win::EnumeratedWindow) -> Self {
+        Self {
+            handle: w.hwnd,
+            title: w.title,
+            executable: w.executable,
+            process_path: w.process_path,
+            class_name: w.class_name,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmbiguityPolicy {
     Error,
@@ -95,17 +106,7 @@ pub struct Win32WindowBackend;
 impl Win32WindowBackend {
     fn candidates(&self) -> ExecResult<Vec<WindowCandidate>> {
         crate::multi_manager::win::enumerate_top_level_windows()
-            .map(|v| {
-                v.into_iter()
-                    .map(|w| WindowCandidate {
-                        handle: w.hwnd,
-                        title: w.title,
-                        executable: w.executable,
-                        process_path: w.process_path,
-                        class_name: w.class_name,
-                    })
-                    .collect()
-            })
+            .map(|v| v.into_iter().map(WindowCandidate::from).collect())
             .map_err(|e| {
                 ExecutionDiagnostic::new(
                     DiagnosticKind::Backend,
