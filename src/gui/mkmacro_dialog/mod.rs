@@ -41,7 +41,6 @@ pub struct MkMacroDialog {
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
-    pub quick_insert: action_editor::QuickInsertState,
     pub command_error: Option<String>,
     /// Editable options are copied into the runtime at Start and never mutate an active session.
     pub recorder_options: NormalizationConfig,
@@ -390,6 +389,45 @@ mod tests {
         assert_eq!(d.selected_macro().unwrap().steps.len(), 1);
         assert!(d.action_catalog_visible);
         assert_eq!(d.action_search, "key");
+    }
+
+    #[test]
+    fn keyboard_actions_are_visible_ready_and_insertable_through_catalog_editor() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+
+        for name in ["Key Press", "Key Down", "Key Up", "Hotkey"] {
+            let descriptor = catalog_descriptor(name);
+            assert_eq!(descriptor.name, name);
+            assert_eq!(
+                descriptor.availability,
+                action_catalog::ActionAvailability::Ready
+            );
+            assert!(action_catalog::is_available_in_palette(&descriptor));
+
+            let expected = (descriptor.make_default)();
+            assert!(
+                matches!(
+                    (name, &expected),
+                    ("Key Press", MkAction::KeyPress(_))
+                        | ("Key Down", MkAction::KeyDown(_))
+                        | ("Key Up", MkAction::KeyUp(_))
+                        | ("Hotkey", MkAction::Hotkey(_))
+                ),
+                "{name} produced the wrong default keyboard action: {expected:?}"
+            );
+
+            assert!(action_catalog::select_descriptor(&mut d, &descriptor));
+            let mut editor = std::mem::take(&mut d.action_editor);
+            assert!(editor.apply(&mut d).is_some());
+            d.action_editor = editor;
+            assert_eq!(
+                d.selected_macro().unwrap().steps.last().unwrap().action,
+                expected
+            );
+        }
+
+        assert_eq!(d.selected_macro().unwrap().steps.len(), 4);
     }
 
     #[test]
@@ -932,10 +970,6 @@ impl MkMacroDialog {
             structural_insertion: None,
             uia_editor: Default::default(),
             action_editor: Default::default(),
-            quick_insert: action_editor::QuickInsertState {
-                repeat: 1,
-                ..Default::default()
-            },
             command_error: None,
             recorder_options: Default::default(),
             pending_recording: None,
