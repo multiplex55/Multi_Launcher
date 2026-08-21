@@ -196,38 +196,50 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     assert_eq!(recorder.status.state, RecorderState::Recording);
     let recorded = normalize(
         &[
-            RecordingBoundary::Event(HookEvent::Key {
-                transition: KeyTransition::Down,
-                vk: 65,
-                scan_code: 30,
-                flags: 0,
-                extra_info: 0,
-                timestamp_us: 1,
-            }),
-            RecordingBoundary::Event(HookEvent::Key {
-                transition: KeyTransition::Up,
-                vk: 65,
-                scan_code: 30,
-                flags: 0,
-                extra_info: 0,
-                timestamp_us: 2,
-            }),
-            RecordingBoundary::Event(HookEvent::Mouse {
-                message: MouseMessage::Down(MouseButton::Left),
-                x: 10,
-                y: 20,
-                flags: 0,
-                extra_info: 0,
-                timestamp_us: 3,
-            }),
-            RecordingBoundary::Event(HookEvent::Mouse {
-                message: MouseMessage::Up(MouseButton::Left),
-                x: 10,
-                y: 20,
-                flags: 0,
-                extra_info: 0,
-                timestamp_us: 4,
-            }),
+            RecordingBoundary::Event(
+                HookEvent::Key {
+                    transition: KeyTransition::Down,
+                    vk: 65,
+                    scan_code: 30,
+                    flags: 0,
+                    extra_info: 0,
+                    timestamp_us: 1,
+                },
+                None,
+            ),
+            RecordingBoundary::Event(
+                HookEvent::Key {
+                    transition: KeyTransition::Up,
+                    vk: 65,
+                    scan_code: 30,
+                    flags: 0,
+                    extra_info: 0,
+                    timestamp_us: 2,
+                },
+                None,
+            ),
+            RecordingBoundary::Event(
+                HookEvent::Mouse {
+                    message: MouseMessage::Down(MouseButton::Left),
+                    x: 10,
+                    y: 20,
+                    flags: 0,
+                    extra_info: 0,
+                    timestamp_us: 3,
+                },
+                None,
+            ),
+            RecordingBoundary::Event(
+                HookEvent::Mouse {
+                    message: MouseMessage::Up(MouseButton::Left),
+                    x: 10,
+                    y: 20,
+                    flags: 0,
+                    extra_info: 0,
+                    timestamp_us: 4,
+                },
+                None,
+            ),
         ],
         &NormalizationConfig {
             movement_mode: MovementMode::ClicksOnly,
