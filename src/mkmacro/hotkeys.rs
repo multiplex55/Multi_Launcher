@@ -235,7 +235,7 @@ fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
 /// Windows virtual-key representation used for recorder-control suppression.
 pub(crate) fn primary_virtual_key(key: &MkKey) -> Option<u32> {
     Some(match key {
-        MkKey::Character(s) if s.len() == 1 && s.is_ascii_alphanumeric() => {
+        MkKey::Character(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_alphanumeric() => {
             s.as_bytes()[0].to_ascii_uppercase() as u32
         }
         MkKey::Enter => 0x0D,
@@ -482,6 +482,19 @@ mod tests {
             .len(),
             1
         );
+    }
+    #[test]
+    fn primary_virtual_keys_accept_only_supported_ascii_characters() {
+        assert_eq!(
+            primary_virtual_key(&MkKey::Character("a".into())),
+            Some(0x41)
+        );
+        assert_eq!(
+            primary_virtual_key(&MkKey::Character("7".into())),
+            Some(0x37)
+        );
+        assert_eq!(primary_virtual_key(&MkKey::Character("é".into())), None);
+        assert_eq!(primary_virtual_key(&MkKey::Character("AB".into())), None);
     }
     struct Fake(RwLock<Vec<MkKey>>);
     impl KeyStateBackend for Fake {
