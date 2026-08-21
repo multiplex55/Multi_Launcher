@@ -142,8 +142,9 @@ mod tests {
             triggered: false,
         });
         let fake = Fake(RwLock::new(vec![MkKey::Function(9)]));
-        let count = Mutex::new(0);
-        let callback = || *count.lock().unwrap() += 1;
+        let count = Arc::new(Mutex::new(0));
+        let callback_count = count.clone();
+        let callback = move || *callback_count.lock().unwrap() += 1;
         tick(&store, &state, &fake, &callback);
         tick(&store, &state, &fake, &callback);
         assert_eq!(*count.lock().unwrap(), 1);
@@ -169,8 +170,9 @@ mod tests {
             MkKey::Control,
             MkKey::Character("K".into()),
         ]));
-        let count = Mutex::new(0);
-        let callback = || *count.lock().unwrap() += 1;
+        let count = Arc::new(Mutex::new(0));
+        let callback_count = count.clone();
+        let callback = move || *callback_count.lock().unwrap() += 1;
         let mut doc = MkMacroDocument::default();
         doc.settings.record_toggle_hotkey = MkHotkey {
             key: MkKey::Character("K".into()),
