@@ -25,7 +25,7 @@ fn playback_emergency_and_controller_feedback_are_excluded() {
     );
     let boundaries = [
         RecordingBoundary::Pause { timestamp_us: 0 },
-        RecordingBoundary::Event(key(0, 0)),
+        RecordingBoundary::Event(key(0, 0), None),
         RecordingBoundary::Resume { timestamp_us: 2 },
     ];
     assert!(
@@ -39,7 +39,7 @@ fn ordinary_physical_input_remains_recordable() {
     assert!(should_record(&key(0, 0), false));
     assert_eq!(
         normalize(
-            &[RecordingBoundary::Event(key(0, 0))],
+            &[RecordingBoundary::Event(key(0, 0), None)],
             &NormalizationConfig::default(),
             None
         )
@@ -49,14 +49,17 @@ fn ordinary_physical_input_remains_recordable() {
 }
 
 fn mouse(timestamp_us: u64, message: MouseMessage, x: i32, y: i32) -> RecordingBoundary {
-    RecordingBoundary::Event(HookEvent::Mouse {
-        timestamp_us,
-        message,
-        x,
-        y,
-        flags: 0,
-        extra_info: 0,
-    })
+    RecordingBoundary::Event(
+        HookEvent::Mouse {
+            timestamp_us,
+            message,
+            x,
+            y,
+            flags: 0,
+            extra_info: 0,
+        },
+        None,
+    )
 }
 
 #[test]
@@ -75,7 +78,7 @@ fn normalized_timed_move_and_drag_keep_final_row_count_and_stable_ids() {
         &cfg,
         None,
     );
-    let steps = to_macro_steps(&normalized, 100);
+    let steps = to_macro_steps(&normalized, 100, false);
     assert_eq!(steps.len(), 4, "in-drag hook movement must not create rows");
     assert_eq!(
         steps.iter().map(|step| step.id).collect::<Vec<_>>(),

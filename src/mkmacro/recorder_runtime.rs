@@ -1,7 +1,7 @@
 //! Recording lifecycle. This is deliberately separate from playback execution.
 use super::{
-    HookEvent, HookService, MkMacroStore, NormalizationConfig, RecordedStep, RecordingBoundary,
-    normalize, should_record,
+    EventEnricher, HookEvent, HookService, MkMacroStore, NormalizationConfig, RecordedStep,
+    RecordingBoundary, WindowsEventEnricher, normalize, should_record,
 };
 use anyhow::{Result, anyhow, bail};
 use std::{
@@ -149,11 +149,17 @@ impl RecorderRuntime {
         }
     }
     fn drain(&self, s: &mut State) {
+        let mut enricher = WindowsEventEnricher::default();
         while let Some(e) = self.hooks.try_event() {
             if s.mode == RecorderRuntimeState::Recording
                 && should_record(&e, s.config.record_injected_input)
             {
-                s.raw.push(RecordingBoundary::Event(e));
+                let context = s
+                    .config
+                    .record_window_context
+                    .then(|| enricher.enrich(&e))
+                    .flatten();
+                s.raw.push(RecordingBoundary::Event(e, context));
             }
         }
     }
@@ -174,12 +180,12 @@ impl RecorderRuntime {
             raw_event_count: s
                 .raw
                 .iter()
-                .filter(|x| matches!(x, RecordingBoundary::Event(_)))
+                .filter(|x| matches!(x, RecordingBoundary::Event(_, _)))
                 .count() as u64,
             estimated_action_count: s
                 .raw
                 .iter()
-                .filter(|x| matches!(x, RecordingBoundary::Event(_)))
+                .filter(|x| matches!(x, RecordingBoundary::Event(_, _)))
                 .count(),
             dropped_event_count: self.hooks.dropped_events(),
             revision: revision + 1,
