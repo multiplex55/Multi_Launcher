@@ -16,6 +16,16 @@ pub enum MatcherPath {
     Action,
     Condition(Vec<usize>),
     ImageRegion,
+    Coordinate(CoordinateMatcherPath),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordinateMatcherPath {
+    MoveTarget,
+    ClickTarget,
+    DragFrom,
+    DragTo,
+    PixelPosition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
