@@ -285,6 +285,7 @@ fn target(
     out: &mut Vec<MkDiagnostic>,
 ) {
     match target {
+        MkCoordinateTarget::WindowClient { matcher: value, .. } => matcher(value, m, s, out),
         MkCoordinateTarget::Variable { name } if name.trim().is_empty() => push(
             out,
             m,
@@ -355,5 +356,50 @@ fn condition(
         }
         MkCondition::Not { condition: x } => condition(x, m, s, root, o),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod coordinate_target_tests {
+    use super::*;
+
+    fn diagnostics(matcher: MkWindowMatcher) -> Vec<MkDiagnostic> {
+        let mut out = Vec::new();
+        target(
+            &MkCoordinateTarget::WindowClient {
+                matcher,
+                point: MkPoint { x: 0, y: 0 },
+            },
+            1,
+            Some(2),
+            None,
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn matched_coordinate_validates_matcher() {
+        assert!(
+            diagnostics(MkWindowMatcher::default())
+                .iter()
+                .any(|d| d.code == "empty_window_matcher")
+        );
+        assert!(
+            diagnostics(MkWindowMatcher {
+                title_regex: Some("[".into()),
+                ..Default::default()
+            })
+            .iter()
+            .any(|d| d.code == "invalid_regex")
+        );
+        assert!(
+            diagnostics(MkWindowMatcher {
+                process: Some("app.exe".into()),
+                title: Some("Editor".into()),
+                ..Default::default()
+            })
+            .is_empty()
+        );
     }
 }

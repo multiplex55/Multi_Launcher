@@ -149,10 +149,23 @@ pub enum MkMouseButton {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MkCoordinateTarget {
-    Screen { point: MkPoint },
-    ActiveWindow { point: MkPoint },
-    Variable { name: String },
-    Image { asset_id: u64, offset: MkPoint },
+    Screen {
+        point: MkPoint,
+    },
+    ActiveWindow {
+        point: MkPoint,
+    },
+    WindowClient {
+        matcher: MkWindowMatcher,
+        point: MkPoint,
+    },
+    Variable {
+        name: String,
+    },
+    Image {
+        asset_id: u64,
+        offset: MkPoint,
+    },
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkWindowMatcher {
@@ -449,5 +462,30 @@ mod image_payload_tests {
         assert_eq!(p.return_point, ReturnPoint::Center);
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<MkImagePayload>(&json).unwrap(), p);
+    }
+    #[test]
+    fn matched_window_coordinate_has_stable_tag_and_round_trips() {
+        let target = MkCoordinateTarget::WindowClient {
+            matcher: MkWindowMatcher {
+                process: Some("app.exe".into()),
+                title: Some("Editor".into()),
+                ..Default::default()
+            },
+            point: MkPoint { x: -4, y: 12 },
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        assert!(json.contains(r#""kind":"window_client""#));
+        assert_eq!(
+            serde_json::from_str::<MkCoordinateTarget>(&json).unwrap(),
+            target
+        );
+        let old: MkCoordinateTarget =
+            serde_json::from_str(r#"{"kind":"active_window","point":{"x":1,"y":2}}"#).unwrap();
+        assert_eq!(
+            old,
+            MkCoordinateTarget::ActiveWindow {
+                point: MkPoint { x: 1, y: 2 }
+            }
+        );
     }
 }

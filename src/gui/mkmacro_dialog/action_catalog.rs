@@ -855,6 +855,16 @@ pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
         MkCoordinateTarget::ActiveWindow { point } => {
             format!("Active Window ({}, {})", point.x, point.y)
         }
+        MkCoordinateTarget::WindowClient { matcher, point } => {
+            let identity = matcher
+                .process
+                .as_deref()
+                .or(matcher.title.as_deref())
+                .or(matcher.title_regex.as_deref())
+                .or(matcher.class.as_deref())
+                .unwrap_or("unconfigured window");
+            format!("Matched Window {identity} ({}, {})", point.x, point.y)
+        }
         MkCoordinateTarget::Variable { name } => format!("Variable <{name}>"),
         MkCoordinateTarget::Image { asset_id, offset } => {
             format!("Image asset {asset_id} offset ({}, {})", offset.x, offset.y)

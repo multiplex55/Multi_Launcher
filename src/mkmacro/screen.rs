@@ -19,6 +19,7 @@ pub(crate) trait WindowsGeometry: Send + Sync {
     fn virtual_desktop(&self) -> ExecResult<(i32, i32, i32, i32)>;
     fn foreground_window(&self) -> ExecResult<Option<isize>>;
     fn client_origin(&self, hwnd: isize) -> ExecResult<MkPoint>;
+    fn top_level_windows(&self) -> ExecResult<Vec<crate::mkmacro::windows::WindowCandidate>>;
 }
 
 pub(crate) trait VisualSearch: Send + Sync {
@@ -172,6 +173,39 @@ impl ScreenBackend for WindowsScreenBackend {
                 };
                 self.require_on_desktop(desktop)
             }
+            MkCoordinateTarget::WindowClient { matcher, point } => {
+                let candidates = self.geometry.top_level_windows().map_err(|e| {
+                    e.context("backend", "WindowsScreenBackend")
+                        .context("action", "enumerate matched-window coordinate candidates")
+                })?;
+                let candidate = crate::mkmacro::windows::resolve_window(
+                    matcher,
+                    &candidates,
+                    crate::mkmacro::windows::AmbiguityPolicy::Error,
+                )
+                .map_err(|e| e.context("window_matcher", format!("{matcher:?}")))?;
+                let origin = self
+                    .geometry
+                    .client_origin(candidate.handle as isize)
+                    .map_err(|e| {
+                        e.context(
+                            "window",
+                            format!("{} ({})", candidate.title, candidate.executable),
+                        )
+                        .context("action", "read matched-window client origin")
+                    })?;
+                let desktop =
+                    MkPoint {
+                        x: origin.x.checked_add(point.x).ok_or_else(|| {
+                            invalid("matched-window client X coordinate overflow")
+                        })?,
+                        y: origin.y.checked_add(point.y).ok_or_else(|| {
+                            invalid("matched-window client Y coordinate overflow")
+                        })?,
+                    };
+                self.require_on_desktop(desktop)
+                    .map_err(|e| e.context("action", "resolve matched-window client point"))
+            }
             MkCoordinateTarget::Variable { name } => match variables.get(name) {
                 Some(MkValue::Point(point)) => Ok(*point),
                 Some(value) => Err(type_mismatch(name, value)),
@@ -290,6 +324,16 @@ impl WindowsGeometry for SystemWindowsGeometry {
             x: point.x,
             y: point.y,
         })
+    }
+    fn top_level_windows(&self) -> ExecResult<Vec<crate::mkmacro::windows::WindowCandidate>> {
+        crate::multi_manager::win::enumerate_top_level_windows()
+            .map(|items| items.into_iter().map(Into::into).collect())
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("window enumeration failed: {e}"),
+                )
+            })
     }
 }
 
@@ -849,6 +893,7 @@ mod windows_backend_tests {
         desktop: (i32, i32, i32, i32),
         foreground: Option<isize>,
         origin: MkPoint,
+        candidates: Vec<crate::mkmacro::windows::WindowCandidate>,
     }
     impl WindowsGeometry for Geometry {
         fn virtual_desktop(&self) -> ExecResult<(i32, i32, i32, i32)> {
@@ -859,6 +904,9 @@ mod windows_backend_tests {
         }
         fn client_origin(&self, _: isize) -> ExecResult<MkPoint> {
             Ok(self.origin)
+        }
+        fn top_level_windows(&self) -> ExecResult<Vec<crate::mkmacro::windows::WindowCandidate>> {
+            Ok(self.candidates.clone())
         }
     }
     #[derive(Default)]
@@ -885,6 +933,7 @@ mod windows_backend_tests {
                 desktop,
                 foreground,
                 origin,
+                candidates: vec![],
             }),
             Arc::new(Visual::default()),
         )
@@ -919,6 +968,7 @@ mod windows_backend_tests {
                 desktop: (-100, -100, 200, 200),
                 foreground: Some(1),
                 origin: MkPoint { x: -20, y: -30 },
+                candidates: vec![],
             }),
             Arc::new(PixelVisual(pixel)),
         )
@@ -1076,6 +1126,76 @@ mod windows_backend_tests {
             .unwrap_err();
         assert_eq!(err.kind, DiagnosticKind::InvalidTarget);
         assert!(err.message.contains("overflow"));
+    }
+    fn candidate(handle: usize, title: &str) -> crate::mkmacro::windows::WindowCandidate {
+        crate::mkmacro::windows::WindowCandidate {
+            handle,
+            title: title.into(),
+            executable: "app.exe".into(),
+            process_path: "C:\\app.exe".into(),
+            class_name: "App".into(),
+        }
+    }
+    fn matched_backend(
+        candidates: Vec<crate::mkmacro::windows::WindowCandidate>,
+        origin: MkPoint,
+    ) -> WindowsScreenBackend {
+        WindowsScreenBackend::new(
+            Arc::new(Geometry {
+                desktop: (-1000, -1000, 2000, 2000),
+                foreground: Some(999),
+                origin,
+                candidates,
+            }),
+            Arc::new(Visual::default()),
+        )
+    }
+    #[test]
+    fn matched_window_resolves_without_foreground_and_translates_negative_origin() {
+        let backend = matched_backend(vec![candidate(7, "Editor")], MkPoint { x: -200, y: -100 });
+        let target = MkCoordinateTarget::WindowClient {
+            matcher: MkWindowMatcher {
+                process: Some("app.exe".into()),
+                title: Some("Edit".into()),
+                ..Default::default()
+            },
+            point: MkPoint { x: 25, y: 30 },
+        };
+        assert_eq!(
+            backend.resolve(&target, &RuntimeVariables::new()).unwrap(),
+            MkPoint { x: -175, y: -70 }
+        );
+    }
+    #[test]
+    fn matched_window_reports_missing_ambiguity_and_overflow() {
+        let target = |point| MkCoordinateTarget::WindowClient {
+            matcher: MkWindowMatcher {
+                process: Some("app.exe".into()),
+                ..Default::default()
+            },
+            point,
+        };
+        assert_eq!(
+            matched_backend(vec![], MkPoint { x: 0, y: 0 })
+                .resolve(&target(MkPoint { x: 0, y: 0 }), &RuntimeVariables::new())
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::TargetNotFound
+        );
+        assert_eq!(
+            matched_backend(
+                vec![candidate(1, "One"), candidate(2, "Two")],
+                MkPoint { x: 0, y: 0 }
+            )
+            .resolve(&target(MkPoint { x: 0, y: 0 }), &RuntimeVariables::new())
+            .unwrap_err()
+            .kind,
+            DiagnosticKind::AmbiguousTarget
+        );
+        let error = matched_backend(vec![candidate(1, "One")], MkPoint { x: i32::MAX, y: 0 })
+            .resolve(&target(MkPoint { x: 1, y: 0 }), &RuntimeVariables::new())
+            .unwrap_err();
+        assert!(error.message.contains("overflow"));
     }
     #[test]
     fn variables_are_strictly_typed() {

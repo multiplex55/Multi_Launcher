@@ -383,6 +383,17 @@ mod tests {
             "Active Window (-8, -12)"
         );
         assert_eq!(
+            action_catalog::format_coordinate_target(&MkCoordinateTarget::WindowClient {
+                matcher: crate::mkmacro::MkWindowMatcher {
+                    process: Some("editor.exe".into()),
+                    title: Some("Document".into()),
+                    ..Default::default()
+                },
+                point: MkPoint { x: 8, y: -2 },
+            }),
+            "Matched Window editor.exe (8, -2)"
+        );
+        assert_eq!(
             action_catalog::format_coordinate_target(&MkCoordinateTarget::Variable {
                 name: "cursor".into()
             }),

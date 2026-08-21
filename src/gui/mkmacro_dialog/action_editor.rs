@@ -302,11 +302,20 @@ impl ActionEditorState {
             self.capture_message = result.err();
             return;
         }
-        let window = picked_foreground_window(&capture);
+        let needs_matched = matches!(
+            self.target_mut(capture.slot),
+            Some(MkCoordinateTarget::WindowClient { .. })
+        );
+        let window = if needs_matched {
+            picked_window_at(screen)
+        } else {
+            picked_foreground_window(&capture)
+        };
         let result = match self.target_mut(capture.slot) {
-            Some(target @ MkCoordinateTarget::ActiveWindow { .. }) => {
-                window.and_then(|w| apply_picked_position(target, screen, Some(&w)))
-            }
+            Some(
+                target @ (MkCoordinateTarget::ActiveWindow { .. }
+                | MkCoordinateTarget::WindowClient { .. }),
+            ) => window.and_then(|w| apply_picked_position(target, screen, Some(&w))),
             Some(target) => apply_picked_position(target, screen, None),
             None => Err("The captured field no longer exists".into()),
         };
@@ -455,6 +464,50 @@ fn picked_foreground_window(c: &PositionCaptureState) -> Result<PickedWindow, St
 fn picked_foreground_window(_: &PositionCaptureState) -> Result<PickedWindow, String> {
     Err("Active-window capture is available only on Windows".into())
 }
+#[cfg(windows)]
+fn picked_window_at(screen: MkPoint) -> Result<PickedWindow, String> {
+    use ::windows::Win32::{
+        Foundation::{HWND, POINT},
+        Graphics::Gdi::ClientToScreen,
+        UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsWindow, WindowFromPoint},
+    };
+    let child = unsafe {
+        WindowFromPoint(POINT {
+            x: screen.x,
+            y: screen.y,
+        })
+    };
+    let root = unsafe { GetAncestor(child, GA_ROOT) };
+    if child.0.is_null() || root.0.is_null() || !unsafe { IsWindow(root) }.as_bool() {
+        return Err("The pointed window disappeared; move the pointer and retry".into());
+    }
+    let handle = root.0 as usize;
+    let candidate = crate::multi_manager::win::enumerate_top_level_windows()
+        .map_err(|e| format!("Could not read the pointed window identity: {e}"))?
+        .into_iter()
+        .find(|w| w.hwnd == handle)
+        .ok_or("The pointed window disappeared before its identity could be read")?;
+    let mut origin = POINT::default();
+    if !unsafe { ClientToScreen(HWND(root.0), &mut origin) }.as_bool() {
+        return Err("Could not determine the pointed window client origin".into());
+    }
+    Ok(PickedWindow {
+        matcher: MkWindowMatcher {
+            title: Some(candidate.title),
+            title_regex: None,
+            process: Some(candidate.executable),
+            class: None,
+        },
+        client_origin: MkPoint {
+            x: origin.x,
+            y: origin.y,
+        },
+    })
+}
+#[cfg(not(windows))]
+fn picked_window_at(_: MkPoint) -> Result<PickedWindow, String> {
+    Err("Matched-window capture is available only on Windows".into())
+}
 pub trait WindowPicker {
     fn pick_window(&mut self) -> Result<Option<PickedWindow>, String>;
 }
@@ -468,14 +521,39 @@ pub fn apply_picked_position(
         MkCoordinateTarget::Screen { point } => *point = screen,
         MkCoordinateTarget::ActiveWindow { point } => {
             let w = window.ok_or("No matching active window is available")?;
-            *point = MkPoint {
-                x: screen.x - w.client_origin.x,
-                y: screen.y - w.client_origin.y,
+            *point = translated_client_point(screen, w.client_origin)?;
+        }
+        MkCoordinateTarget::WindowClient { matcher, point } => {
+            let w = window.ok_or("No pointed window is available")?;
+            let candidate = crate::mkmacro::windows::WindowCandidate {
+                handle: 0,
+                title: w.matcher.title.clone().unwrap_or_default(),
+                executable: w.matcher.process.clone().unwrap_or_default(),
+                process_path: String::new(),
+                class_name: w.matcher.class.clone().unwrap_or_default(),
             };
+            if !crate::mkmacro::windows::candidate_matches(matcher, &candidate)
+                .map_err(|e| e.to_string())?
+            {
+                return Err("The pointed window does not match this target. Use Choose Window… to deliberately replace the matcher, then pick the position again".into());
+            }
+            *point = translated_client_point(screen, w.client_origin)?;
         }
         _ => return Err("This target does not store a fixed position".into()),
     }
     Ok(())
+}
+fn translated_client_point(screen: MkPoint, origin: MkPoint) -> Result<MkPoint, String> {
+    Ok(MkPoint {
+        x: screen
+            .x
+            .checked_sub(origin.x)
+            .ok_or("Client-relative X coordinate overflow")?,
+        y: screen
+            .y
+            .checked_sub(origin.y)
+            .ok_or("Client-relative Y coordinate overflow")?,
+    })
 }
 pub fn apply_picked_window(payload: &mut MkWindowPayload, picked: &PickedWindow) {
     payload.matcher = picked.matcher.clone();
@@ -498,21 +576,36 @@ pub(super) fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> bool {
     optional_field(ui, "Class", &mut m.class);
     ui.button("Choose Window…").clicked()
 }
-pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> bool {
+#[derive(Default)]
+pub(super) struct TargetUiOutcome {
+    pick_position: bool,
+    pick_matcher: bool,
+}
+pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> TargetUiOutcome {
     let kind = match target {
         MkCoordinateTarget::Screen { .. } => 0,
         MkCoordinateTarget::ActiveWindow { .. } => 1,
-        MkCoordinateTarget::Variable { .. } => 2,
-        MkCoordinateTarget::Image { .. } => 3,
+        MkCoordinateTarget::WindowClient { .. } => 2,
+        MkCoordinateTarget::Variable { .. } => 3,
+        MkCoordinateTarget::Image { .. } => 4,
     };
     let mut next = kind;
     egui::ComboBox::from_label("Target")
-        .selected_text(["Screen", "Active Window", "Variable", "Image Result"][kind])
+        .selected_text(
+            [
+                "Screen",
+                "Active Window",
+                "Matched Window",
+                "Variable",
+                "Image Result",
+            ][kind],
+        )
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut next, 0, "Screen");
             ui.selectable_value(&mut next, 1, "Active Window");
-            ui.selectable_value(&mut next, 2, "Variable");
-            ui.selectable_value(&mut next, 3, "Image Result");
+            ui.selectable_value(&mut next, 2, "Matched Window");
+            ui.selectable_value(&mut next, 3, "Variable");
+            ui.selectable_value(&mut next, 4, "Image Result");
         });
     if next != kind {
         *target = match next {
@@ -522,7 +615,11 @@ pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> b
             1 => MkCoordinateTarget::ActiveWindow {
                 point: MkPoint { x: 0, y: 0 },
             },
-            2 => MkCoordinateTarget::Variable {
+            2 => MkCoordinateTarget::WindowClient {
+                matcher: MkWindowMatcher::default(),
+                point: MkPoint { x: 0, y: 0 },
+            },
+            3 => MkCoordinateTarget::Variable {
                 name: String::new(),
             },
             _ => MkCoordinateTarget::Image {
@@ -546,7 +643,34 @@ pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> b
                 ui.add_enabled(false, egui::Button::new("Pick Position (Windows only)"));
                 false
             };
-            return picked;
+            return TargetUiOutcome {
+                pick_position: picked,
+                pick_matcher: false,
+            };
+        }
+        MkCoordinateTarget::WindowClient { matcher, point } => {
+            ui.heading("Window");
+            let choose = matcher_ui(ui, matcher);
+            ui.heading("Position");
+            ui.horizontal(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut point.x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut point.y));
+            });
+            #[cfg(windows)]
+            let position = ui.button("Pick Position").clicked();
+            #[cfg(not(windows))]
+            let position = {
+                ui.add_enabled(false, egui::Button::new("Pick Position (Windows only)"));
+                false
+            };
+            // The matcher picker is routed by the action-level caller; position capture remains
+            // the boolean return for backward-compatible shared condition editing.
+            return TargetUiOutcome {
+                pick_position: position,
+                pick_matcher: choose,
+            };
         }
         MkCoordinateTarget::Variable { name } => {
             ui.horizontal(|ui| {
@@ -564,7 +688,7 @@ pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> b
             });
         }
     }
-    false
+    TargetUiOutcome::default()
 }
 
 /// A shared typed editor. Switching type constructs a fresh value rather than
@@ -671,8 +795,14 @@ fn action_ui(
             }
         }
         MkAction::MouseMove(p) => {
-            if target_ui(ui, &mut p.target) {
+            let response = target_ui(ui, &mut p.target);
+            if response.pick_position {
                 pick = Some(PositionCaptureSlot::MoveTarget);
+            }
+            if response.pick_matcher {
+                window_pick = Some(super::window_picker::MatcherPath::Coordinate(
+                    super::window_picker::CoordinateMatcherPath::MoveTarget,
+                ));
             }
             let mut smooth = p.duration_ms != 0;
             ui.horizontal(|ui| {
@@ -695,12 +825,24 @@ fn action_ui(
         }
         MkAction::MouseDrag(p) => {
             ui.label("Start");
-            if target_ui(ui, &mut p.from) {
+            let response = target_ui(ui, &mut p.from);
+            if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragFrom);
             }
+            if response.pick_matcher {
+                window_pick = Some(super::window_picker::MatcherPath::Coordinate(
+                    super::window_picker::CoordinateMatcherPath::DragFrom,
+                ));
+            }
             ui.label("Destination");
-            if target_ui(ui, &mut p.to) {
+            let response = target_ui(ui, &mut p.to);
+            if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragTo);
+            }
+            if response.pick_matcher {
+                window_pick = Some(super::window_picker::MatcherPath::Coordinate(
+                    super::window_picker::CoordinateMatcherPath::DragTo,
+                ));
             }
             egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
@@ -721,8 +863,14 @@ fn action_ui(
             });
         }
         MkAction::MouseClick(p) => {
-            if target_ui(ui, &mut p.target) {
+            let response = target_ui(ui, &mut p.target);
+            if response.pick_position {
                 pick = Some(PositionCaptureSlot::ClickTarget);
+            }
+            if response.pick_matcher {
+                window_pick = Some(super::window_picker::MatcherPath::Coordinate(
+                    super::window_picker::CoordinateMatcherPath::ClickTarget,
+                ));
             }
             egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
@@ -981,8 +1129,14 @@ fn action_ui(
             tolerance,
         } => {
             ui.heading("Coordinate");
-            if target_ui(ui, target) {
+            let response = target_ui(ui, target);
+            if response.pick_position {
                 pick = Some(PositionCaptureSlot::PixelPosition);
+            }
+            if response.pick_matcher {
+                window_pick = Some(super::window_picker::MatcherPath::Coordinate(
+                    super::window_picker::CoordinateMatcherPath::PixelPosition,
+                ));
             }
             ui.separator();
             ui.heading("Color");
@@ -1070,6 +1224,21 @@ fn matcher_at_path<'a>(
             },
             _ => None,
         },
+        MatcherPath::Coordinate(path) => {
+            use super::window_picker::CoordinateMatcherPath::*;
+            let target = match (path, action) {
+                (MoveTarget, MkAction::MouseMove(p)) => &mut p.target,
+                (ClickTarget, MkAction::MouseClick(p)) => &mut p.target,
+                (DragFrom, MkAction::MouseDrag(p)) => &mut p.from,
+                (DragTo, MkAction::MouseDrag(p)) => &mut p.to,
+                (PixelPosition, MkAction::PixelCheck { target, .. }) => target,
+                _ => return None,
+            };
+            match target {
+                MkCoordinateTarget::WindowClient { matcher, .. } => Some(matcher),
+                _ => None,
+            }
+        }
     }
 }
 
