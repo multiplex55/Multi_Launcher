@@ -1188,7 +1188,7 @@ impl MkMacroDialog {
             .map(|s| s.id)
             .max()
             .unwrap_or(0);
-        let inserted = crate::mkmacro::to_macro_steps(recorded, next);
+        let inserted = crate::mkmacro::to_macro_steps(recorded, next, true);
         let ids = inserted.iter().map(|s| s.id).collect::<Vec<_>>();
         let m = self
             .draft

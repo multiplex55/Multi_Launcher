@@ -149,10 +149,12 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 &mut dialog.recorder_options.record_mouse_wheel,
                 "Mouse wheel",
             );
+            ui.label("Input");
             ui.checkbox(
                 &mut dialog.recorder_options.record_injected_input,
                 "Record injected input",
             );
+            ui.separator();
             ui.label("Mouse movement");
             for (mode, label) in [
                 (MovementMode::Off, "Off"),
@@ -172,6 +174,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 ui.radio_value(&mut dialog.recorder_options.movement_mode, mode, label)
                     .on_hover_text(help);
             }
+            ui.separator();
+            ui.label("Window context");
+            ui.checkbox(&mut dialog.recorder_options.record_window_context, "Record active/target windows")
+                .on_hover_text("Captures active and target windows and generates Activate Window actions.");
+            ui.small("Uses client-relative coordinates when reliable metadata is available; otherwise falls back to Screen.");
             let sampled = dialog.recorder_options.movement_mode == MovementMode::SampledMovement;
             ui.add_enabled(
                 sampled,

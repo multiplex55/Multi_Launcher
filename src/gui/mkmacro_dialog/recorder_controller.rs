@@ -122,7 +122,7 @@ impl<V: RecorderControllerView> RecorderController<V> {
             .unwrap_or(0);
         let transaction = DraftTransaction {
             macro_id,
-            inserted: to_macro_steps(recorded, next),
+            inserted: to_macro_steps(recorded, next, true),
         };
         transaction.clone_apply(draft)?;
         self.status.produced_step_count = transaction.inserted.len();

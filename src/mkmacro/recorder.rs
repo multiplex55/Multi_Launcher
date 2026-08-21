@@ -1,8 +1,8 @@
 //! Worker-side, pure recording normalization. No OS, UI automation, or persistence is used here.
 use super::{
     HookEvent, KeyTransition, MkAction, MkCoordinateTarget, MkErrorPolicy, MkKey, MkMouseButton,
-    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkPoint, MkStep, MouseButton,
-    MouseMessage, should_record,
+    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkPoint, MkStep, MkWindowMatcher,
+    MkWindowPayload, MouseButton, MouseMessage, should_record,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub struct NormalizationConfig {
     pub click_distance_px: i32,
     pub multi_click_ms: u64,
     pub record_injected_input: bool,
+    /// Capture target-window metadata and author activation/client-relative actions.
+    pub record_window_context: bool,
     pub control_hotkeys: Vec<u32>,
 }
 impl Default for NormalizationConfig {
@@ -39,6 +41,7 @@ impl Default for NormalizationConfig {
             click_distance_px: 4,
             multi_click_ms: 500,
             record_injected_input: false,
+            record_window_context: true,
             control_hotkeys: Vec::new(),
         }
     }
@@ -52,9 +55,33 @@ pub const DEFAULT_MOVEMENT_INTERVAL_MS: u64 = 80;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WindowContext {
     pub executable: String,
+    pub process_path: String,
     pub title: String,
     pub class: String,
     pub rect: Option<(i32, i32, i32, i32)>,
+    pub client_origin: Option<MkPoint>,
+    /// Stable only within the capture session; never persisted.
+    pub native_root_id: Option<usize>,
+}
+impl WindowContext {
+    /// Produces a non-empty, normalized matcher, preferring executable + title.
+    pub fn matcher(&self) -> Option<MkWindowMatcher> {
+        let value = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_owned());
+        let title = value(&self.title);
+        let process = value(&self.executable).or_else(|| value(&self.process_path));
+        let class = (title.is_none() || process.is_none())
+            .then(|| value(&self.class))
+            .flatten();
+        if title.is_none() && process.is_none() && class.is_none() {
+            return None;
+        }
+        Some(MkWindowMatcher {
+            title,
+            title_regex: None,
+            process,
+            class,
+        })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventContext {
@@ -64,9 +91,9 @@ pub struct EventContext {
 pub trait EventEnricher: Send {
     fn enrich(&mut self, event: &HookEvent) -> Option<EventContext>;
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordingBoundary {
-    Event(HookEvent),
+    Event(HookEvent, Option<EventContext>),
     Pause { timestamp_us: u64 },
     Resume { timestamp_us: u64 },
 }
@@ -259,10 +286,10 @@ pub fn normalize(
     let mut pause_at = 0;
     let mut excluded = 0;
     for item in input {
-        match *item {
+        match item {
             RecordingBoundary::Pause { timestamp_us } => {
                 paused = true;
-                pause_at = timestamp_us;
+                pause_at = *timestamp_us;
             }
             RecordingBoundary::Resume { timestamp_us } => {
                 if paused {
@@ -270,12 +297,16 @@ pub fn normalize(
                     paused = false;
                 }
             }
-            RecordingBoundary::Event(e)
+            RecordingBoundary::Event(e, captured_context)
                 if !paused
-                    && should_record(&e, cfg.record_injected_input)
-                    && !matches!(e, HookEvent::Key { vk, .. } if cfg.control_hotkeys.contains(&vk)) =>
+                    && should_record(e, cfg.record_injected_input)
+                    && !matches!(e, HookEvent::Key { vk, .. } if cfg.control_hotkeys.contains(vk)) =>
             {
-                raw.push((e, e.timestamp_us().saturating_sub(excluded)))
+                raw.push((
+                    *e,
+                    e.timestamp_us().saturating_sub(excluded),
+                    captured_context.clone(),
+                ))
             }
             _ => {}
         }
@@ -284,7 +315,7 @@ pub fn normalize(
     // Phase 2/3: retain distinct raw positions, then recognize clicks and drags.
     let mut down: Option<(MouseButton, (i32, i32), u64, Option<EventContext>, usize)> = None;
     let mut last_move: Option<((i32, i32), u64)> = None;
-    for (e, t) in raw {
+    for (e, t, captured_context) in raw {
         let enabled = match e {
             HookEvent::Key { .. } => cfg.record_keyboard,
             HookEvent::Mouse {
@@ -303,7 +334,11 @@ pub fn normalize(
         if !enabled {
             continue;
         }
-        let context = enricher.as_deref_mut().and_then(|x| x.enrich(&e));
+        let context = if cfg.record_window_context {
+            captured_context.or_else(|| enricher.as_deref_mut().and_then(|x| x.enrich(&e)))
+        } else {
+            None
+        };
         if !matches!(
             e,
             HookEvent::Mouse {
@@ -532,61 +567,94 @@ fn button(b: MouseButton) -> MkMouseButton {
     }
 }
 /// Converts a normalized batch to draft steps. IDs are allocated only at insertion time.
-pub fn to_macro_steps(items: &[RecordedStep], mut next_id: u64) -> Vec<MkStep> {
+pub fn to_macro_steps(
+    items: &[RecordedStep],
+    mut next_id: u64,
+    record_window_context: bool,
+) -> Vec<MkStep> {
     let mut result = Vec::new();
+    let mut last_target: Option<MkWindowMatcher> = None;
     for s in items {
-        let point = |x, y| MkCoordinateTarget::Screen {
-            point: MkPoint { x, y },
+        let window = if record_window_context {
+            match s.action {
+                RecordedAction::Key { .. } => s.context.as_ref().map(|c| &c.foreground),
+                _ => s
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.window_under_point.as_ref()),
+            }
+        } else {
+            None
         };
-        let actions: Vec<MkAction> = match s.action {
-            RecordedAction::Key { down: true, vk, .. } => vec![MkAction::KeyDown(key(vk))],
+        let matcher = window.and_then(WindowContext::matcher);
+        let target = |x, y| {
+            if let Some((w, matcher)) = window.zip(matcher.clone())
+                && let Some(origin) = w.client_origin
+            {
+                return MkCoordinateTarget::WindowClient {
+                    matcher,
+                    point: MkPoint {
+                        x: x - origin.x,
+                        y: y - origin.y,
+                    },
+                };
+            }
+            MkCoordinateTarget::Screen {
+                point: MkPoint { x, y },
+            }
+        };
+        let relevant = !matches!(s.action, RecordedAction::Move { .. });
+        let mut actions = Vec::new();
+        if relevant && matcher.is_some() && matcher != last_target {
+            actions.push(MkAction::WindowActivate(MkWindowPayload {
+                matcher: matcher.clone().unwrap(),
+                wait: None,
+            }));
+            last_target = matcher.clone();
+        }
+        actions.push(match s.action {
+            RecordedAction::Key { down: true, vk, .. } => MkAction::KeyDown(key(vk)),
             RecordedAction::Key {
                 down: false, vk, ..
-            } => vec![MkAction::KeyUp(key(vk))],
-            RecordedAction::Move { x, y, duration_ms } => {
-                vec![MkAction::MouseMove(MkMouseMovePayload {
-                    target: point(x, y),
-                    duration_ms,
-                })]
-            }
+            } => MkAction::KeyUp(key(vk)),
+            RecordedAction::Move { x, y, duration_ms } => MkAction::MouseMove(MkMouseMovePayload {
+                target: target(x, y),
+                duration_ms,
+            }),
             RecordedAction::Click {
                 button: b,
                 x,
                 y,
                 count,
-            } => vec![MkAction::MouseClick(MkMousePayload {
-                target: point(x, y),
+            } => MkAction::MouseClick(MkMousePayload {
+                target: target(x, y),
                 button: button(b),
                 clicks: count,
-            })],
-            RecordedAction::Down { button: b, .. } => vec![MkAction::MouseDown(button(b))],
-            RecordedAction::Up { button: b, .. } => vec![MkAction::MouseUp(button(b))],
+            }),
+            RecordedAction::Down { button: b, .. } => MkAction::MouseDown(button(b)),
+            RecordedAction::Up { button: b, .. } => MkAction::MouseUp(button(b)),
             RecordedAction::Drag {
                 button: b,
                 from,
                 to,
                 down_timestamp_us,
                 up_timestamp_us,
-            } => vec![MkAction::MouseDrag(MkMouseDragPayload {
-                from: point(from.0, from.1),
-                to: point(to.0, to.1),
+            } => MkAction::MouseDrag(MkMouseDragPayload {
+                from: target(from.0, from.1),
+                to: target(to.0, to.1),
                 button: button(b),
                 duration_ms: up_timestamp_us.saturating_sub(down_timestamp_us) / 1000,
-            })],
-            RecordedAction::Wheel { delta, .. } => vec![MkAction::MouseScroll { i32_delta: delta }],
-        };
-        let action_count = actions.len();
+            }),
+            RecordedAction::Wheel { delta, .. } => MkAction::MouseScroll { i32_delta: delta },
+        });
+        let count = actions.len();
         for (i, action) in actions.into_iter().enumerate() {
             next_id += 1;
             result.push(MkStep {
                 id: next_id,
                 enabled: true,
                 repeat: 1,
-                delay_after_ms: if i + 1 == action_count {
-                    s.delay_after_ms
-                } else {
-                    0
-                },
+                delay_after_ms: if i + 1 == count { s.delay_after_ms } else { 0 },
                 on_error: MkErrorPolicy::Stop,
                 action,
             });
@@ -600,14 +668,17 @@ mod tests {
     use super::*;
     use crate::mkmacro::recorder_hooks::LLKHF_EXTENDED;
     fn mouse(t: u64, m: MouseMessage, x: i32, y: i32) -> RecordingBoundary {
-        RecordingBoundary::Event(HookEvent::Mouse {
-            timestamp_us: t,
-            message: m,
-            x,
-            y,
-            flags: 0,
-            extra_info: 0,
-        })
+        RecordingBoundary::Event(
+            HookEvent::Mouse {
+                timestamp_us: t,
+                message: m,
+                x,
+                y,
+                flags: 0,
+                extra_info: 0,
+            },
+            None,
+        )
     }
     fn move_step(t: u64, x: i32, y: i32) -> RecordedStep {
         RecordedStep {
@@ -861,7 +932,7 @@ mod tests {
                 RecordingBoundary::Resume {
                     timestamp_us: 102_000,
                 },
-                RecordingBoundary::Event(k),
+                RecordingBoundary::Event(k, None),
             ],
             &c,
             None,
@@ -911,7 +982,7 @@ mod tests {
             delay_after_ms: 77,
             context: None,
         };
-        let steps = to_macro_steps(&[recorded], 10);
+        let steps = to_macro_steps(&[recorded], 10, false);
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].delay_after_ms, 77);
         let MkAction::MouseDrag(payload) = &steps[0].action else {
@@ -947,7 +1018,7 @@ mod tests {
             &c,
             None,
         );
-        let steps = to_macro_steps(&normalized, 40);
+        let steps = to_macro_steps(&normalized, 40, false);
         let durations: Vec<_> = steps
             .iter()
             .filter_map(|step| match step.action {
@@ -1008,14 +1079,17 @@ mod tests {
         let mut c = NormalizationConfig::default();
         c.movement_mode = MovementMode::DetailedMovement;
         let key = |t| {
-            RecordingBoundary::Event(HookEvent::Key {
-                timestamp_us: t,
-                transition: KeyTransition::Down,
-                vk: 65,
-                scan_code: 30,
-                flags: 0,
-                extra_info: 0,
-            })
+            RecordingBoundary::Event(
+                HookEvent::Key {
+                    timestamp_us: t,
+                    transition: KeyTransition::Down,
+                    vk: 65,
+                    scan_code: 30,
+                    flags: 0,
+                    extra_info: 0,
+                },
+                None,
+            )
         };
         let normalized = normalize(
             &[
