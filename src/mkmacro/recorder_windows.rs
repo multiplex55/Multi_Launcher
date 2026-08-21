@@ -78,13 +78,13 @@ impl WindowMetadata for SystemWindowMetadata {
     fn context(&self, root: usize) -> Option<WindowContext> {
         use windows::Win32::{
             Foundation::{HWND, POINT},
-            UI::WindowsAndMessaging::ClientToScreen,
+            Graphics::Gdi::ClientToScreen,
         };
         let rect =
             crate::multi_manager::win::window_rect(root).map(|r| (r.x, r.y, r.x + r.w, r.y + r.h));
         let mut origin = POINT::default();
         let client_origin = unsafe { ClientToScreen(HWND(root as *mut _), &mut origin) }
-            .is_ok()
+            .as_bool()
             .then_some(MkPoint {
                 x: origin.x,
                 y: origin.y,
