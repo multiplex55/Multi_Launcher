@@ -331,8 +331,11 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if version <= 2 {
         migrate_v2_to_v3(&mut value)?;
     }
+    if version <= 3 {
+        migrate_v3_to_v4(&mut value);
+    }
     let mut doc: MkMacroDocument = match version {
-        0 | 1 | 2 | 3 => serde_json::from_value(value)
+        0 | 1 | 2 | 3 | 4 => serde_json::from_value(value)
             .context("mkmacros.json does not match the macro schema")?,
         _ => unreachable!(),
     };
@@ -340,6 +343,16 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+/// Adds the document-wide recorder control without replacing a value supplied by
+/// a forward-compatible older writer.
+fn migrate_v3_to_v4(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("settings")
+            .or_insert_with(|| serde_json::to_value(MkMacroSettings::default()).unwrap());
+        object.insert("schema_version".into(), serde_json::json!(SCHEMA_VERSION));
+    }
 }
 /// Adds schema-3 image matching defaults. Legacy `confidence` is removed rather
 /// than translated because its floating-point semantics never matched byte
@@ -464,6 +477,7 @@ mod tests {
     use std::{sync::mpsc, thread, time::Duration};
     fn document() -> MkMacroDocument {
         MkMacroDocument {
+            settings: Default::default(),
             schema_version: SCHEMA_VERSION,
             macros: vec![MkMacro {
                 id: 7,

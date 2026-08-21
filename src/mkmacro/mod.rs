@@ -8,6 +8,7 @@ pub mod input;
 pub mod model;
 pub mod recorder;
 pub mod recorder_hooks;
+pub mod recorder_hotkeys;
 pub mod recorder_runtime;
 pub mod recorder_windows;
 pub mod runtime;

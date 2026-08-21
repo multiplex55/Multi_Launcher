@@ -6,7 +6,7 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -22,12 +22,30 @@ pub struct MkMacroDocument {
     pub schema_version: u32,
     #[serde(default)]
     pub macros: Vec<MkMacro>,
+    /// Document-wide authoring controls shared by every macro.
+    #[serde(default)]
+    pub settings: MkMacroSettings,
 }
 impl Default for MkMacroDocument {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             macros: vec![],
+            settings: MkMacroSettings::default(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkMacroSettings {
+    pub record_toggle_hotkey: MkHotkey,
+}
+impl Default for MkMacroSettings {
+    fn default() -> Self {
+        Self {
+            record_toggle_hotkey: MkHotkey {
+                key: MkKey::Function(9),
+                modifiers: vec![],
+            },
         }
     }
 }

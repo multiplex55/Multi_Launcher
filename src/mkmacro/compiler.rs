@@ -27,6 +27,7 @@ pub struct MkExecutionPlan {
 }
 pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
     let doc = MkMacroDocument {
+        settings: Default::default(),
         schema_version: SCHEMA_VERSION,
         macros: vec![m.clone()],
     };

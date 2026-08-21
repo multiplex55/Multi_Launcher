@@ -16,7 +16,7 @@ pub trait KeyStateBackend: Send + Sync {
 }
 
 #[derive(Default)]
-struct SystemKeyStateBackend;
+pub(crate) struct SystemKeyStateBackend;
 
 #[cfg(windows)]
 impl KeyStateBackend for SystemKeyStateBackend {
@@ -115,7 +115,7 @@ pub fn canonical_hotkey(h: &MkHotkey) -> String {
     mods.join("+")
 }
 
-fn compile_hotkey(h: &MkHotkey) -> Option<(BTreeSet<String>, MkKey)> {
+pub(crate) fn compile_hotkey(h: &MkHotkey) -> Option<(BTreeSet<String>, MkKey)> {
     // A modifier in the primary slot, or any non-modifier in the modifier list, is malformed.
     if modifier(&h.key).is_some() || !usable_primary(&h.key) {
         return None;
@@ -200,6 +200,7 @@ struct Binding {
     triggered: bool,
 }
 fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
+    let recorder = canonical_hotkey(&doc.settings.record_toggle_hotkey);
     let mut frequency = HashMap::new();
     for m in doc.macros.iter().filter(|m| m.enabled) {
         if let Some(h) = &m.hotkey {
@@ -212,6 +213,9 @@ fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
         .filter(|m| m.enabled)
         .filter_map(|m| {
             let h = m.hotkey.as_ref()?;
+            if canonical_hotkey(h) == recorder {
+                return None;
+            }
             if frequency[&canonical_hotkey(h)] != 1 {
                 return None;
             }
@@ -226,6 +230,31 @@ fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
         .collect::<Vec<_>>();
     out.sort_by_key(|b| b.macro_id);
     out
+}
+
+/// Windows virtual-key representation used for recorder-control suppression.
+pub(crate) fn primary_virtual_key(key: &MkKey) -> Option<u32> {
+    Some(match key {
+        MkKey::Character(s) if s.len() == 1 && s.is_ascii_alphanumeric() => {
+            s.as_bytes()[0].to_ascii_uppercase() as u32
+        }
+        MkKey::Enter => 0x0D,
+        MkKey::Tab => 0x09,
+        MkKey::Escape => 0x1B,
+        MkKey::Space => 0x20,
+        MkKey::Backspace => 0x08,
+        MkKey::Delete => 0x2E,
+        MkKey::Up => 0x26,
+        MkKey::Down => 0x28,
+        MkKey::Left => 0x25,
+        MkKey::Right => 0x27,
+        MkKey::Home => 0x24,
+        MkKey::End => 0x23,
+        MkKey::PageUp => 0x21,
+        MkKey::PageDown => 0x22,
+        MkKey::Function(n @ 1..=12) => 0x6F + *n as u32,
+        _ => return None,
+    })
 }
 
 struct PollState {
@@ -378,6 +407,7 @@ mod tests {
     #[test]
     fn every_duplicate_is_diagnosed_and_unarmed() {
         let d = MkMacroDocument {
+            settings: Default::default(),
             schema_version: 1,
             macros: vec![mac(9, true), mac(2, true), mac(1, true)],
         };
@@ -387,6 +417,7 @@ mod tests {
     #[test]
     fn disabled_duplicate_does_not_conflict() {
         let d = MkMacroDocument {
+            settings: Default::default(),
             schema_version: 1,
             macros: vec![mac(2, true), mac(1, false)],
         };
@@ -399,6 +430,7 @@ mod tests {
         let mut b = mac(2, true);
         b.hotkey.as_mut().unwrap().modifiers = vec![MkKey::LeftControl];
         let d = MkMacroDocument {
+            settings: Default::default(),
             schema_version: 1,
             macros: vec![a, b],
         };
@@ -411,6 +443,7 @@ mod tests {
             .push(MkKey::Character("X".into()));
         assert!(
             compile_bindings(&MkMacroDocument {
+                settings: Default::default(),
                 schema_version: 1,
                 macros: vec![bad]
             })
@@ -420,6 +453,7 @@ mod tests {
     #[test]
     fn deterministic_rebuild() {
         let d = MkMacroDocument {
+            settings: Default::default(),
             schema_version: 1,
             macros: vec![mac(9, true), {
                 let mut m = mac(2, true);
@@ -439,6 +473,7 @@ mod tests {
         assert_eq!(
             validate_hotkeys(
                 &MkMacroDocument {
+                    settings: Default::default(),
                     schema_version: 1,
                     macros: vec![mac(1, true)]
                 },
@@ -460,6 +495,7 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         store
             .save(MkMacroDocument {
+                settings: Default::default(),
                 schema_version: 1,
                 macros: vec![mac(1, true)],
             })
@@ -489,6 +525,7 @@ mod tests {
         assert_eq!(*fired.lock().unwrap(), vec![1, 1]);
         store
             .save(MkMacroDocument {
+                settings: Default::default(),
                 schema_version: 1,
                 macros: vec![],
             })

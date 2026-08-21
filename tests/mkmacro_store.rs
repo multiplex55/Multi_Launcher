@@ -4,6 +4,7 @@ use tempfile::tempdir;
 
 fn invalid_doc() -> MkMacroDocument {
     MkMacroDocument {
+        settings: Default::default(),
         schema_version: SCHEMA_VERSION,
         macros: vec![MkMacro {
             id: 7,

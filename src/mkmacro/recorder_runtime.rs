@@ -113,6 +113,12 @@ pub struct RecorderRuntime {
     snapshot: RwLock<Arc<RecorderSnapshot>>,
 }
 impl RecorderRuntime {
+    pub(crate) fn store_contains(&self, id: u64) -> bool {
+        self.store.snapshot().macros.iter().any(|m| m.id == id)
+    }
+    pub(crate) fn document_snapshot(&self) -> Option<Arc<super::MkMacroDocument>> {
+        Some(self.store.snapshot())
+    }
     pub fn new(
         store: Arc<MkMacroStore>,
         hooks: HookService,
