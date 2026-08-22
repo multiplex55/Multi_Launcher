@@ -212,7 +212,19 @@ fn refused_activation_diagnostic_is_not_converted_to_success() {
         |fake| fake.fail("window_activate", diagnostic.clone()),
     );
     assert_eq!(snapshot.state, RuntimeState::Failed);
-    assert_eq!(snapshot.latest_failure, Some(diagnostic));
+    let failure = snapshot.latest_failure.unwrap();
+    assert_eq!(failure.kind, diagnostic.kind);
+    assert_eq!(failure.message, diagnostic.message);
+    assert_eq!(failure.context.get("process"), Some(&"notepad.exe".into()));
+    assert_eq!(
+        failure.context.get("backend_operation"),
+        Some(&"window".into())
+    );
+    assert_eq!(failure.context.get("attempt"), Some(&"1".into()));
+    assert_eq!(
+        failure.context.get("attempts_exhausted"),
+        Some(&"true".into())
+    );
     assert_eq!(fake.window_calls.lock().unwrap().len(), 1);
 }
 
@@ -227,7 +239,22 @@ fn missing_and_ambiguous_diagnostics_propagate_kind_and_context() {
         let (snapshot, _) = run_window_action(MkAction::WindowClose(matcher()), |fake| {
             fake.fail("window_close", diagnostic.clone())
         });
-        assert_eq!(snapshot.latest_failure, Some(diagnostic));
+        let failure = snapshot.latest_failure.unwrap();
+        assert_eq!(failure.kind, diagnostic.kind);
+        assert_eq!(failure.message, diagnostic.message);
+        assert_eq!(
+            failure.context.get("matcher.process"),
+            Some(&"notepad.exe".into())
+        );
+        assert_eq!(
+            failure.context.get("backend_operation"),
+            Some(&"window".into())
+        );
+        assert_eq!(failure.context.get("attempt"), Some(&"1".into()));
+        assert_eq!(
+            failure.context.get("attempts_exhausted"),
+            Some(&"true".into())
+        );
     }
 }
 

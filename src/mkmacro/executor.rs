@@ -772,7 +772,18 @@ mod tests {
                 &|_| {},
             )
             .unwrap_err();
-        assert_eq!(error, diagnostic);
+        assert_eq!(error.kind, diagnostic.kind);
+        assert_eq!(error.message, diagnostic.message);
+        assert_eq!(error.context.get("operation"), Some(&"create".into()));
+        assert_eq!(
+            error.context.get("backend_operation"),
+            Some(&"virtual desktop".into())
+        );
+        assert_eq!(error.context.get("attempt"), Some(&"1".into()));
+        assert_eq!(
+            error.context.get("attempts_exhausted"),
+            Some(&"true".into())
+        );
     }
 
     #[test]
