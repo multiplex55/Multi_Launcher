@@ -114,7 +114,7 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
                         2,
                         MkAction::Text(MkTextPayload {
                             text: "received:${answer}".into(),
-                            interval_ms: 0,
+                            mode: MkTextMode::Type,
                         }),
                     ),
                 ],
@@ -142,7 +142,7 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
         CommandResult::Accepted
     );
     let snapshot = wait(&runtime, RuntimeState::Completed);
-    assert!(snapshot.last_error.is_none());
+    assert!(snapshot.latest_failure.is_none());
     let prompts = fake.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0].title, "Title 東京 !");
@@ -180,7 +180,7 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
                         2,
                         MkAction::Text(MkTextPayload {
                             text: "must-not-run".into(),
-                            interval_ms: 0,
+                            mode: MkTextMode::Type,
                         }),
                     ),
                 ],
@@ -192,7 +192,13 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
     let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
     runtime.command(RuntimeCommand::Run(8));
     let snapshot = wait(&runtime, RuntimeState::Failed);
-    assert!(snapshot.last_error.unwrap().message.contains("cancelled"));
+    assert!(
+        snapshot
+            .latest_failure
+            .unwrap()
+            .message
+            .contains("cancelled")
+    );
     assert!(
         !fake
             .events()
