@@ -893,7 +893,14 @@ pub fn action_details(a: &MkAction) -> String {
             .map(super::key_capture::key_name)
             .collect::<Vec<_>>()
             .join(" + "),
-        MkAction::Text(p) => format!("{} characters", p.text.chars().count()),
+        MkAction::Text(p) => format!(
+            "{} {} characters",
+            match p.mode {
+                MkTextMode::Type => "Type",
+                MkTextMode::Paste => "Paste",
+            },
+            p.text.chars().count()
+        ),
         MkAction::MouseClick(p) => format!(
             "{} ×{} @ {}",
             mouse(&p.button),
@@ -1002,6 +1009,30 @@ pub fn action_details(a: &MkAction) -> String {
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => "Unavailable UI Automation action (saved target preserved)".into(),
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    #[test]
+    fn text_details_distinguish_type_and_paste() {
+        let action = |mode| {
+            MkAction::Text(MkTextPayload {
+                text: "abc".into(),
+                mode,
+            })
+        };
+        assert_eq!(
+            action_details(&action(MkTextMode::Type)),
+            "Type 3 characters"
+        );
+        assert_eq!(
+            action_details(&action(MkTextMode::Paste)),
+            "Paste 3 characters"
+        );
+        assert!(!action_details(&action(MkTextMode::Paste)).contains("Coming"));
     }
 }
 pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {

@@ -127,6 +127,9 @@ pub trait LauncherBackend: Send + Sync {
     fn command(&self, command: &str, args: Option<&str>) -> ExecResult;
 }
 pub trait ClipboardBackend: Send + Sync {
+    /// Captures the text clipboard. Backends which cannot preserve non-text
+    /// formats must reject those contents rather than destroying them.
+    fn snapshot_text(&self) -> ExecResult<String>;
     fn set_text(&self, text: &str) -> ExecResult;
 }
 #[derive(Clone)]
@@ -375,24 +378,79 @@ impl PromptBackend for Unsupported {
     }
 }
 impl ClipboardBackend for Unsupported {
+    fn snapshot_text(&self) -> ExecResult<String> {
+        unsupported_context(self.backend, "snapshot text")
+    }
     fn set_text(&self, _: &str) -> ExecResult {
         unsupported_context(self.backend, "set text")
     }
 }
 struct ProductionClipboard;
 impl ClipboardBackend for ProductionClipboard {
+    fn snapshot_text(&self) -> ExecResult<String> {
+        arboard::Clipboard::new()
+            .and_then(|mut c| c.get_text())
+            .map_err(|e| clipboard_error("snapshot", e))
+    }
     fn set_text(&self, text: &str) -> ExecResult {
         arboard::Clipboard::new()
             .and_then(|mut c| c.set_text(text.to_owned()))
-            .map_err(|e| {
-                ExecutionDiagnostic::new(
-                    DiagnosticKind::Backend,
-                    format!("failed to copy prompt result: {e}"),
-                )
-                .context("backend", "clipboard")
-            })
+            .map_err(|e| clipboard_error("set_text", e))
     }
 }
+fn clipboard_error(operation: &'static str, error: impl fmt::Display) -> ExecutionDiagnostic {
+    ExecutionDiagnostic::new(
+        DiagnosticKind::Backend,
+        format!("clipboard {operation} failed: {error}"),
+    )
+    .context("backend", "clipboard")
+    .context("operation", operation)
+}
+
+/// A text-only clipboard transaction. Drop is a last-resort restoration path;
+/// `finish` is used normally so restoration errors can be reported.
+struct ClipboardTransaction {
+    backend: Arc<dyn ClipboardBackend>,
+    snapshot: Option<String>,
+}
+impl ClipboardTransaction {
+    fn install(backend: Arc<dyn ClipboardBackend>, text: &str) -> ExecResult<Self> {
+        let snapshot = backend
+            .snapshot_text()
+            .map_err(|e| e.context("operation", "snapshot"))?;
+        backend
+            .set_text(text)
+            .map_err(|e| e.context("operation", "temporary_write"))?;
+        Ok(Self {
+            backend,
+            snapshot: Some(snapshot),
+        })
+    }
+    fn finish(mut self, primary: ExecResult) -> ExecResult {
+        let restore = self
+            .backend
+            .set_text(self.snapshot.as_deref().unwrap())
+            .map_err(|e| e.context("operation", "restore"));
+        self.snapshot = None;
+        match (primary, restore) {
+            (Err(e), Err(r)) => Err(e.context("clipboard_restoration_failure", r.to_string())),
+            (Err(e), _) => Err(e),
+            (Ok(()), Err(e)) => Err(e),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+}
+impl Drop for ClipboardTransaction {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.snapshot.take() {
+            let _ = self.backend.set_text(&snapshot);
+        }
+    }
+}
+
+/// Intentionally unscaled safety delay: this allows the target application to
+/// consume clipboard data before the user's clipboard text is restored.
+const PASTE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Default)]
 struct ControlState {
     paused: bool,
@@ -1196,7 +1254,23 @@ impl Executor {
                 let mut expanded = p.clone();
                 expanded.text =
                     interpolate(&p.text, v).map_err(|error| error.context("field", "text.text"))?;
-                self.backends.input.text(&expanded)
+                match expanded.mode {
+                    crate::mkmacro::MkTextMode::Type => self.backends.input.text(&expanded),
+                    crate::mkmacro::MkTextMode::Paste => {
+                        let transaction = ClipboardTransaction::install(
+                            self.backends.clipboard.clone(),
+                            &expanded.text,
+                        )?;
+                        let primary = (|| {
+                            g.down_key(&MkKey::Control)?;
+                            g.down_key(&MkKey::V)?;
+                            g.up_key(&MkKey::V)?;
+                            g.up_key(&MkKey::Control)?;
+                            self.wait(PASTE_SETTLE_INTERVAL)
+                        })();
+                        transaction.finish(primary)
+                    }
+                }
             }
             MkAction::MouseMove(p) => self.move_to(p, playback, v),
             MkAction::MouseDrag(p) => {
@@ -1984,6 +2058,10 @@ pub mod fake {
         }
     }
     impl ClipboardBackend for FakeBackend {
+        fn snapshot_text(&self) -> ExecResult<String> {
+            self.event("clipboard_snapshot".into())?;
+            Ok("original".into())
+        }
         fn set_text(&self, text: &str) -> ExecResult {
             self.event(format!("clipboard:{text}"))
         }
@@ -2006,6 +2084,204 @@ mod phase_d_tests {
             on_error: MkErrorPolicy::Stop,
             action,
         }
+    }
+
+    fn paste(text: &str) -> MkAction {
+        MkAction::Text(MkTextPayload {
+            text: text.into(),
+            mode: MkTextMode::Paste,
+        })
+    }
+
+    #[test]
+    fn paste_interpolates_and_restores_in_guarded_input_order() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let mut vars = RuntimeVariables::new();
+        vars.insert("who".into(), MkValue::String("world".into()));
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        executor
+            .action(
+                7,
+                &paste("hello ${who}"),
+                &MkPlayback::default(),
+                &mut vars,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(
+            fake.events(),
+            vec![
+                "clipboard_snapshot",
+                "clipboard:hello world",
+                "key_down:Control",
+                "key_down:V",
+                "key_up:V",
+                "key_up:Control",
+                "clipboard:original"
+            ]
+        );
+    }
+
+    #[test]
+    fn paste_failures_restore_once_and_release_modifiers() {
+        for failed in ["key_down:Control", "key_down:V", "key_up:V"] {
+            let fake = Arc::new(FakeBackend::default());
+            fake.fail(
+                failed,
+                ExecutionDiagnostic::new(DiagnosticKind::InputRejected, "primary"),
+            );
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let executor = Executor::new(fake.clone().backends(), control);
+            let mut guard = InputCleanupGuard::new(fake.clone());
+            assert!(
+                executor
+                    .action(
+                        7,
+                        &paste("temporary"),
+                        &MkPlayback::default(),
+                        &mut RuntimeVariables::new(),
+                        &mut guard
+                    )
+                    .is_err()
+            );
+            drop(guard);
+            let events = fake.events();
+            assert_eq!(
+                events.iter().filter(|e| *e == "clipboard:original").count(),
+                1
+            );
+            if events.iter().any(|e| e == "key_down:Control") {
+                assert!(events.iter().any(|e| e == "key_up:Control"));
+            }
+        }
+    }
+
+    #[test]
+    fn paste_does_not_restore_when_snapshot_or_temporary_write_fails() {
+        for failed in ["clipboard_snapshot", "clipboard:temporary"] {
+            let fake = Arc::new(FakeBackend::default());
+            fake.fail(
+                failed,
+                ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected"),
+            );
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let executor = Executor::new(fake.clone().backends(), control);
+            let mut guard = InputCleanupGuard::new(fake.clone());
+            assert!(
+                executor
+                    .action(
+                        7,
+                        &paste("temporary"),
+                        &MkPlayback::default(),
+                        &mut RuntimeVariables::new(),
+                        &mut guard
+                    )
+                    .is_err()
+            );
+            assert!(!fake.events().iter().any(|e| e == "clipboard:original"));
+        }
+    }
+
+    #[test]
+    fn primary_error_wins_over_restoration_error() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "key_down:V",
+            ExecutionDiagnostic::new(DiagnosticKind::InputRejected, "primary"),
+        );
+        fake.fail(
+            "clipboard:original",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "restore"),
+        );
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let mut guard = InputCleanupGuard::new(fake);
+        let error = executor
+            .action(
+                7,
+                &paste("temporary"),
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InputRejected);
+        assert!(error.context.contains_key("clipboard_restoration_failure"));
+    }
+
+    #[test]
+    fn restoration_error_is_reported_after_successful_paste() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "clipboard:original",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "restore"),
+        );
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        let error = executor
+            .action(
+                7,
+                &paste("temporary"),
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            error.context.get("operation").map(String::as_str),
+            Some("restore")
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|e| *e == "clipboard:original")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cancellation_during_settle_restores_clipboard_once() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let worker_fake = fake.clone();
+        let worker_control = control.clone();
+        let worker = std::thread::spawn(move || {
+            let executor = Executor::new(worker_fake.clone().backends(), worker_control);
+            let mut guard = InputCleanupGuard::new(worker_fake);
+            executor.action(
+                7,
+                &paste("temporary"),
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut guard,
+            )
+        });
+        while !fake.events().iter().any(|event| event == "key_up:Control") {
+            std::thread::yield_now();
+        }
+        control.stop();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind,
+            DiagnosticKind::Cancelled
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|e| *e == "clipboard:original")
+                .count(),
+            1
+        );
     }
     fn plan(steps: Vec<MkStep>) -> MkExecutionPlan {
         compile(&MkMacro {

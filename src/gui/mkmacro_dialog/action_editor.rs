@@ -790,13 +790,10 @@ fn action_ui(
             );
             ui.horizontal(|ui| {
                 ui.radio_value(&mut p.mode, MkTextMode::Type, "Type");
-                ui.add_enabled(
-                    false,
-                    egui::RadioButton::new(p.mode == MkTextMode::Paste, "Paste (Coming later)"),
-                );
+                ui.radio_value(&mut p.mode, MkTextMode::Paste, "Paste");
             });
             if p.mode == MkTextMode::Paste {
-                p.mode = MkTextMode::Type;
+                ui.small("Temporarily replaces clipboard text during playback and attempts to restore it. Non-text clipboard contents cannot be preserved.");
             }
         }
         MkAction::MouseMove(p) => {
