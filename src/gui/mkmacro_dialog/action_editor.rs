@@ -1570,7 +1570,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 });
             ui.separator();
             ui.horizontal(|ui| {
-                let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err());
+                let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
+                    && !matches!(
+                        super::action_catalog::draft_validation_contract(&step.action),
+                        super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
+                    );
                 apply = ui.add_enabled(valid, egui::Button::new("Apply")).clicked();
                 cancel = ui.button("Cancel").on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
@@ -1765,6 +1769,102 @@ mod tests {
                 !editor.apply_window_matcher(&request, MkWindowMatcher::default(), Some(6)),
                 "another macro must not be modified"
             );
+        }
+    }
+
+    #[test]
+    fn condition_window_picker_routes_every_host_kind_and_preserves_siblings_on_apply_or_cancel() {
+        fn matcher(title: &str) -> MkWindowMatcher {
+            MkWindowMatcher {
+                title: Some(title.into()),
+                ..Default::default()
+            }
+        }
+        for active in [false, true] {
+            for host in ["if", "while", "wait"] {
+                let target = if active {
+                    MkCondition::WindowActive {
+                        matcher: matcher("original"),
+                    }
+                } else {
+                    MkCondition::WindowExists {
+                        matcher: matcher("original"),
+                    }
+                };
+                // Exercise all recursive containers and retain two sentinels to
+                // prove MatcherPath::Condition mutates only the requested leaf.
+                let condition = MkCondition::All {
+                    conditions: vec![
+                        MkCondition::WindowExists {
+                            matcher: matcher("all-sibling"),
+                        },
+                        MkCondition::Any {
+                            conditions: vec![
+                                MkCondition::WindowActive {
+                                    matcher: matcher("any-sibling"),
+                                },
+                                MkCondition::Not {
+                                    condition: Box::new(target),
+                                },
+                            ],
+                        },
+                    ],
+                };
+                let picker_path =
+                    super::super::condition_editor::first_window_picker_path(match &condition {
+                        MkCondition::All { conditions } => &conditions[1],
+                        _ => unreachable!(),
+                    })
+                    .unwrap();
+                let mut full_path = vec![1];
+                full_path.extend(picker_path);
+                assert_eq!(full_path, vec![1, 0], "condition_ui recursive picker path");
+                // Select the second Any child (the Not branch), exactly as a
+                // picker request emitted from that rendered control does.
+                let path = super::super::window_picker::MatcherPath::Condition(vec![1, 1, 0]);
+                let action = match host {
+                    "if" => MkAction::If(condition),
+                    "while" => MkAction::WhileStart { condition },
+                    _ => MkAction::WaitUntil {
+                        condition,
+                        wait: MkWaitOptions {
+                            timeout_ms: 1000,
+                            poll_interval_ms: 50,
+                        },
+                    },
+                };
+                let mut editor = ActionEditorState::default();
+                editor.begin_edit(&step(action));
+                let before_cancel = editor.draft.as_ref().unwrap().action.clone();
+                // Cancellation never calls apply_window_matcher.
+                assert_eq!(
+                    editor.draft.as_ref().unwrap().action,
+                    before_cancel,
+                    "{host}: picker cancellation"
+                );
+                let request = super::super::window_picker::MatcherEditRequest {
+                    destination: super::super::window_picker::MatcherDestination::Action {
+                        macro_id: 9,
+                        draft_generation: editor.draft_generation,
+                        path: path.clone(),
+                    },
+                    original: matcher("original"),
+                };
+                assert!(editor.apply_window_matcher(&request, matcher("chosen"), Some(9)));
+                assert_eq!(
+                    matcher_at_path(&mut editor.draft.as_mut().unwrap().action, &path)
+                        .unwrap()
+                        .title
+                        .as_deref(),
+                    Some("chosen")
+                );
+                let serialized =
+                    serde_json::to_string(&editor.draft.as_ref().unwrap().action).unwrap();
+                assert!(
+                    serialized.contains("all-sibling") && serialized.contains("any-sibling"),
+                    "{host}: sibling changed"
+                );
+            }
         }
     }
 

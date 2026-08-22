@@ -900,18 +900,31 @@ mod tests {
             let (_dir, mut dialog) = dialog();
             dialog.create_macro();
             assert!(action_catalog::select_descriptor(&mut dialog, &descriptor));
-            if configurable {
+            let draft_contract = action_catalog::draft_validation_contract(&action);
+            if configurable
+                && draft_contract == action_catalog::DraftValidationContract::CommitReady
+            {
                 assert!(dialog.action_editor.draft.is_some());
                 let mut editor = std::mem::take(&mut dialog.action_editor);
                 assert!(editor.apply(&mut dialog).is_some());
                 dialog.action_editor = editor;
             }
             let diagnostics = validate_document(&dialog.draft, None);
-            assert!(
-                crate::mkmacro::can_run(&diagnostics),
-                "invalid default {}: {diagnostics:?}",
-                descriptor.name
-            );
+            match draft_contract {
+                action_catalog::DraftValidationContract::CommitReady => assert!(
+                    crate::mkmacro::can_run(&diagnostics),
+                    "invalid default {}: {diagnostics:?}",
+                    descriptor.name
+                ),
+                action_catalog::DraftValidationContract::AwaitingRequiredAsset => {
+                    assert!(dialog.action_editor.draft.is_some());
+                    assert!(dialog.selected_macro().unwrap().steps.is_empty());
+                    let draft = &dialog.action_editor.draft.as_ref().unwrap().action;
+                    assert!(
+                        matches!(draft, MkAction::ImageFind(p) | MkAction::ImageClick(p) if p.asset_id == 0)
+                    );
+                }
+            }
         }
     }
 
@@ -953,6 +966,11 @@ mod tests {
                 "{context}: runtime contract"
             );
             if descriptor.availability == action_catalog::ActionAvailability::Hidden {
+                assert_eq!(
+                    descriptor.category,
+                    action_catalog::ActionCategory::UiAutomation,
+                    "{context}: only explicitly deferred UI Automation actions may be hidden"
+                );
                 assert!(
                     descriptor
                         .hidden_reason
@@ -986,6 +1004,105 @@ mod tests {
                 let encoded = serde_json::to_vec(&action).unwrap();
                 let decoded: MkAction = serde_json::from_slice(&encoded).unwrap();
                 assert_eq!(decoded, action, "{context}: saved payload changed");
+            }
+        }
+    }
+
+    #[test]
+    fn authoritative_capability_audit_covers_every_descriptor() {
+        for descriptor in action_catalog::descriptors() {
+            let action = (descriptor.make_default)();
+            let context = format!(
+                "descriptor={:?}, action={}",
+                descriptor.name,
+                action_catalog::action_name(&action)
+            );
+            match descriptor.availability {
+                action_catalog::ActionAvailability::Ready => {
+                    assert_eq!(
+                        descriptor.runtime,
+                        action_catalog::RuntimeAvailability::Supported,
+                        "{context}: runtime metadata"
+                    );
+                    assert!(
+                        crate::mkmacro::executor::has_runtime_support(&action),
+                        "{context}: executor support"
+                    );
+                    let contract = descriptor
+                        .editor
+                        .contract()
+                        .unwrap_or_else(|| panic!("{context}: missing editor contract"));
+                    match contract {
+                        action_catalog::EditorContract::DirectInsert { .. } => assert_eq!(
+                            descriptor.editor,
+                            action_catalog::EditorKind::DirectInsert,
+                            "{context}"
+                        ),
+                        action_catalog::EditorContract::Configurable { field_count } => {
+                            assert!(field_count > 0, "{context}: editor has no fields");
+                            assert!(
+                                action_catalog::editor_route_recognizes(&action, descriptor.editor),
+                                "{context}: editor route"
+                            );
+                            let completeness =
+                                action_catalog::editor_completeness(descriptor.editor)
+                                    .expect("complete editor metadata");
+                            assert!(
+                                completeness.has_primary_control,
+                                "{context}: no primary control"
+                            );
+                            assert!(
+                                !completeness.intentionally_disabled,
+                                "{context}: permanently disabled editor"
+                            );
+                            assert!(
+                                completeness.placeholder_copy.is_none(),
+                                "{context}: placeholder editor copy"
+                            );
+                        }
+                    }
+                    assert!(
+                        serde_json::to_vec(&action).is_ok(),
+                        "{context}: serialization"
+                    );
+                    assert_eq!(
+                        descriptor.name,
+                        action_catalog::action_name(&action),
+                        "{context}: action name"
+                    );
+                    let details = action_catalog::action_details(&action);
+                    assert!(
+                        !details.trim().is_empty() && details.trim() != descriptor.name,
+                        "{context}: meaningful details"
+                    );
+                    for text in [
+                        descriptor.name,
+                        descriptor.description,
+                        action_catalog::action_name(&action),
+                        details.as_str(),
+                    ] {
+                        assert!(
+                            !action_catalog::contains_placeholder_wording(text),
+                            "{context}: deferred wording: {text:?}"
+                        );
+                    }
+                }
+                action_catalog::ActionAvailability::Hidden => {
+                    assert_eq!(
+                        descriptor.category,
+                        action_catalog::ActionCategory::UiAutomation,
+                        "{context}: hidden non-UIA action"
+                    );
+                    assert_eq!(
+                        descriptor.runtime,
+                        action_catalog::RuntimeAvailability::Unavailable,
+                        "{context}: hidden UIA must remain unavailable until independently complete"
+                    );
+                    assert!(
+                        !action_catalog::is_available_in_palette(&descriptor),
+                        "{context}: hidden palette leak"
+                    );
+                }
             }
         }
     }

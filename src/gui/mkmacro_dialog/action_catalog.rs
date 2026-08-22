@@ -124,7 +124,9 @@ fn wp() -> MkWindowPayload {
 }
 fn ip() -> MkImagePayload {
     MkImagePayload {
-        asset_id: 1,
+        // Zero is the documented editor-draft sentinel. The editor requires an
+        // imported/captured asset before enabling Apply.
+        asset_id: 0,
         wait: wait(),
         region: SearchRegion::Desktop,
         tolerance: 0,
@@ -729,6 +731,67 @@ pub enum EditorContract {
     DirectInsert { context: InsertionContextRoute },
 }
 
+/// Static completeness declaration for a configurable editor.  This is kept
+/// separate from transient widget state: an Apply button may be disabled while
+/// required input is missing, but the feature itself must never be presented
+/// as a permanently disabled/placeholder control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditorCompleteness {
+    pub has_primary_control: bool,
+    pub intentionally_disabled: bool,
+    pub placeholder_copy: Option<&'static str>,
+}
+
+pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
+    match editor {
+        EditorKind::General => None,
+        EditorKind::DirectInsert => Some(EditorCompleteness {
+            has_primary_control: false,
+            intentionally_disabled: false,
+            placeholder_copy: None,
+        }),
+        EditorKind::Keyboard
+        | EditorKind::Text
+        | EditorKind::MouseMove
+        | EditorKind::MouseClick
+        | EditorKind::MouseDrag
+        | EditorKind::MouseButton
+        | EditorKind::MouseScroll
+        | EditorKind::Timing
+        | EditorKind::Window
+        | EditorKind::Process
+        | EditorKind::Launcher
+        | EditorKind::Image
+        | EditorKind::Pixel
+        | EditorKind::Condition
+        | EditorKind::Repeat
+        | EditorKind::Variable
+        | EditorKind::PromptInput => Some(EditorCompleteness {
+            has_primary_control: true,
+            intentionally_disabled: false,
+            placeholder_copy: None,
+        }),
+    }
+}
+
+/// Contract for validating a freshly-created editor value. Image actions are
+/// valid drafts before an asset is chosen, but cannot be committed until the
+/// editor has attached an asset. All other defaults are commit-ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftValidationContract {
+    CommitReady,
+    AwaitingRequiredAsset,
+}
+
+pub fn draft_validation_contract(action: &MkAction) -> DraftValidationContract {
+    match action {
+        MkAction::ImageFind(payload) | MkAction::ImageClick(payload) if payload.asset_id == 0 => {
+            DraftValidationContract::AwaitingRequiredAsset
+        }
+        _ => DraftValidationContract::CommitReady,
+    }
+}
+
 /// Structural markers are complete actions at insertion time and intentionally
 /// have no configurable fields. All other actions must pass through an editor.
 pub fn requires_no_configuration(action: &MkAction) -> bool {
@@ -753,12 +816,15 @@ pub enum InsertionContextRoute {
 /// Shared product-copy guard used by catalog invariants.  This deliberately
 /// complements (rather than replaces) the exact historical-string regression.
 pub fn contains_placeholder_wording(value: &str) -> bool {
-    const PLACEHOLDERS: [&str; 5] = [
+    const PLACEHOLDERS: [&str; 8] = [
         "existing specialized editor",
         "legacy action",
         "not implemented",
         "unavailable",
         "placeholder",
+        "coming later",
+        "coming soon",
+        "todo",
     ];
     let value = value.to_ascii_lowercase();
     PLACEHOLDERS.iter().any(|wording| value.contains(wording))
