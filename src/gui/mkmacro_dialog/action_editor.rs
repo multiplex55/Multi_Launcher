@@ -755,14 +755,17 @@ fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
     capture: &mut bool,
+    image_assets: &[u64],
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
     Option<super::launcher_action_picker::PickerPurpose>,
+    Option<ImageAuthoringRequest>,
 ) {
     let mut pick = None;
     let mut window_pick = None;
     let mut launcher_pick = None;
+    let mut image_request = None;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
@@ -1100,12 +1103,16 @@ fn action_ui(
             });
         }
         MkAction::If(condition) | MkAction::WhileStart { condition } => {
-            if let Some(path) = super::condition_editor::condition_ui(ui, condition) {
+            if let Some(path) =
+                super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
+            {
                 window_pick = Some(super::window_picker::MatcherPath::Condition(path));
             }
         }
         MkAction::WaitUntil { condition, wait } => {
-            if let Some(path) = super::condition_editor::condition_ui(ui, condition) {
+            if let Some(path) =
+                super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
+            {
                 window_pick = Some(super::window_picker::MatcherPath::Condition(path));
             }
             ui.horizontal(|ui| {
@@ -1140,8 +1147,18 @@ fn action_ui(
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
             ui.heading("Reference Image");
             ui.horizontal(|ui| {
-                ui.add_enabled(false, egui::Button::new("Select PNG..."));
-                ui.add_enabled(false, egui::Button::new("Capture..."));
+                if ui.button("Select PNG...").clicked() {
+                    image_request = Some(ImageAuthoringRequest::Import);
+                }
+                if ui
+                    .button("Capture...")
+                    .on_hover_text(
+                        "Capture the currently configured search region as the reference image",
+                    )
+                    .clicked()
+                {
+                    image_request = Some(ImageAuthoringRequest::Capture);
+                }
             });
             ui.label(format!("mkmacro_assets/<macro>/{}.png", p.asset_id));
             ui.horizontal(|ui| {
@@ -1156,10 +1173,16 @@ fn action_ui(
             ui.horizontal(|ui| {
                 ui.label("Search region");
                 if ui
-                    .selectable_label(matches!(p.region, SearchRegion::Desktop), "Desktop")
+                    .selectable_label(matches!(p.region, SearchRegion::Desktop), "Entire Desktop")
                     .clicked()
                 {
                     p.region = SearchRegion::Desktop;
+                }
+                if ui
+                    .selectable_label(matches!(p.region, SearchRegion::Monitor { .. }), "Monitor")
+                    .clicked()
+                {
+                    p.region = SearchRegion::Monitor { index: 0 };
                 }
                 if ui
                     .selectable_label(
@@ -1183,7 +1206,7 @@ fn action_ui(
                 if ui
                     .selectable_label(
                         matches!(p.region, SearchRegion::ClientArea { .. }),
-                        "Client area",
+                        "Window Client Area",
                     )
                     .clicked()
                 {
@@ -1197,6 +1220,13 @@ fn action_ui(
                 && matcher_ui(ui, matcher)
             {
                 window_pick = Some(super::window_picker::MatcherPath::ImageRegion);
+            }
+            if let SearchRegion::Monitor { index } = &mut p.region {
+                ui.horizontal(|ui| {
+                    ui.label("Zero-based monitor index");
+                    ui.add(egui::DragValue::new(index));
+                });
+                ui.small("Monitor numbering is supplied by the production screen backend; an unavailable stored index is preserved.");
             }
             if let SearchRegion::Rectangle { rect } = &mut p.region {
                 ui.horizontal(|ui| {
@@ -1270,7 +1300,44 @@ fn action_ui(
             );
         }
     }
-    (pick, window_pick, launcher_pick)
+    (pick, window_pick, launcher_pick, image_request)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageAuthoringRequest {
+    Import,
+    Capture,
+}
+
+fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
+    match &mut step.action {
+        MkAction::ImageFind(p) | MkAction::ImageClick(p) => Some(p),
+        _ => None,
+    }
+}
+
+fn apply_import(
+    store: &MkMacroStore,
+    macro_id: u64,
+    payload: &mut MkImagePayload,
+    source: &std::path::Path,
+) -> anyhow::Result<()> {
+    let id = store.next_asset_id(macro_id)?;
+    store.import_png_asset(macro_id, id, source)?;
+    payload.asset_id = id;
+    Ok(())
+}
+
+fn apply_capture(
+    store: &MkMacroStore,
+    macro_id: u64,
+    payload: &mut MkImagePayload,
+    image: &image::RgbaImage,
+) -> anyhow::Result<()> {
+    let id = store.next_asset_id(macro_id)?;
+    store.write_png_asset(macro_id, id, image)?;
+    payload.asset_id = id;
+    Ok(())
 }
 
 fn condition_at_path<'a>(
@@ -1360,6 +1427,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         }
     }
     let mut pick_request = None;
+    let mut image_request = None;
+    let image_assets = d
+        .selected_macro_id
+        .and_then(|id| d.store.asset_ids(id).ok())
+        .unwrap_or_default();
     egui::Window::new("Action Editor")
         .open(&mut open)
         .collapsible(false)
@@ -1369,8 +1441,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
-            let (position, window, launcher)=action_ui(ui, step, &mut state.capture_keys);
+            let (position, window, launcher, image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
             pick_request = position;
+            image_request = image;
             if let Some(path)=window {
                 let original=matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone();
                 let macro_id=d.selected_macro_id.unwrap_or(0);
@@ -1387,6 +1460,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
             if state.position_capture.is_some() {
                 ui.colored_label(egui::Color32::YELLOW, "Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels.");
+            }
+            if let Some(payload)=image_payload_mut(step) {
+                super::image_preview::show(ui, &d.store, d.selected_macro_id.unwrap_or(0), payload.asset_id);
             }
             if let Some(message) = &state.capture_message { ui.colored_label(egui::Color32::RED, message); }
             if state.capture_keys {
@@ -1448,6 +1524,44 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 cancel = ui.button("Cancel").on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
         });
+    if let Some(request) = image_request {
+        let macro_id = d.selected_macro_id.unwrap_or(0);
+        let result = match request {
+            ImageAuthoringRequest::Import => rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .pick_file()
+                .map(|path| {
+                    apply_import(
+                        &d.store,
+                        macro_id,
+                        image_payload_mut(d.action_editor.draft.as_mut().unwrap()).unwrap(),
+                        &path,
+                    )
+                })
+                .transpose(),
+            ImageAuthoringRequest::Capture => {
+                let region = image_payload_mut(d.action_editor.draft.as_mut().unwrap())
+                    .unwrap()
+                    .region
+                    .clone();
+                crate::mkmacro::WindowsScreenCaptureBackend::system()
+                    .capture(&region, &|| false)
+                    .map_err(anyhow::Error::msg)
+                    .and_then(|captured| {
+                        apply_capture(
+                            &d.store,
+                            macro_id,
+                            image_payload_mut(d.action_editor.draft.as_mut().unwrap()).unwrap(),
+                            &captured.image,
+                        )
+                    })
+                    .map(Some)
+            }
+        };
+        if let Err(error) = result {
+            d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
+        }
+    }
     if let Some(slot) = pick_request {
         if let Err(error) = d.action_editor.start_position_capture(slot) {
             d.action_editor.capture_message = Some(error);
@@ -1487,6 +1601,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{Rgba, RgbaImage};
     fn step(a: MkAction) -> MkStep {
         MkStep {
             id: 7,
@@ -1496,6 +1611,34 @@ mod tests {
             on_error: Default::default(),
             action: a,
         }
+    }
+
+    #[test]
+    fn image_asset_updates_are_transactional() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let mut payload = MkImagePayload {
+            asset_id: 9,
+            wait: MkWaitOptions::default(),
+            region: SearchRegion::Desktop,
+            tolerance: 0,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+        };
+        let bad = dir.path().join("bad.png");
+        std::fs::write(&bad, b"not png").unwrap();
+        assert!(apply_import(&store, 4, &mut payload, &bad).is_err());
+        assert_eq!(payload.asset_id, 9);
+
+        let image = RgbaImage::from_pixel(3, 2, Rgba([1, 2, 3, 255]));
+        apply_capture(&store, 4, &mut payload, &image).unwrap();
+        assert_eq!(payload.asset_id, 1);
+        assert_eq!(
+            image::open(store.asset_path(4, 1).unwrap())
+                .unwrap()
+                .width(),
+            3
+        );
     }
     fn capture(slot: PositionCaptureSlot) -> PositionCaptureState {
         PositionCaptureState {
