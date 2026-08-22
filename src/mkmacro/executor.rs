@@ -2159,7 +2159,12 @@ mod phase_d_tests {
                 events.iter().filter(|e| *e == "clipboard:original").count(),
                 1
             );
-            if events.iter().any(|e| e == "key_down:Control") {
+            // A rejected key-down is never added to InputCleanupGuard's owned
+            // keys, so it must not synthesize a matching key-up. Once Control
+            // was accepted, every later failure must release it during cleanup.
+            if failed == "key_down:Control" {
+                assert!(!events.iter().any(|e| e == "key_up:Control"));
+            } else {
                 assert!(events.iter().any(|e| e == "key_up:Control"));
             }
         }
