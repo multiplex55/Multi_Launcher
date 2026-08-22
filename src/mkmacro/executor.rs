@@ -1,7 +1,7 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
-    MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload,
+    MkKey, MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkPlayback, MkPoint, MkProcessPayload,
     MkPromptInputPayload, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher,
     MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend, PromptRequest,
     PromptResponse, RuntimeVariables, interpolate,
@@ -72,7 +72,7 @@ pub trait InputBackend: Send + Sync {
     fn button_up(&self, button: MkMouseButton) -> ExecResult;
     fn move_mouse(&self, point: MkPoint) -> ExecResult;
     fn cursor_position(&self) -> ExecResult<MkPoint>;
-    fn scroll(&self, delta: i32) -> ExecResult;
+    fn scroll(&self, axis: MkMouseScrollAxis, delta: i32) -> ExecResult;
     fn text(&self, payload: &MkTextPayload) -> ExecResult;
 }
 pub trait WindowBackend: Send + Sync {
@@ -207,7 +207,7 @@ impl InputBackend for Unsupported {
     fn cursor_position(&self) -> ExecResult<MkPoint> {
         unsupported()
     }
-    fn scroll(&self, _: i32) -> ExecResult {
+    fn scroll(&self, _: MkMouseScrollAxis, _: i32) -> ExecResult {
         unsupported()
     }
     fn text(&self, _: &MkTextPayload) -> ExecResult {
@@ -1305,7 +1305,9 @@ impl Executor {
             }
             MkAction::MouseDown(b) => g.down_button(b.clone()),
             MkAction::MouseUp(b) => g.up_button(b.clone()),
-            MkAction::MouseScroll { i32_delta } => self.backends.input.scroll(*i32_delta),
+            MkAction::MouseScroll { axis, i32_delta } => {
+                self.backends.input.scroll(*axis, *i32_delta)
+            }
             MkAction::Delay { milliseconds } => self.wait(Duration::from_millis(
                 scale_playback_duration(*milliseconds, playback.speed_percent),
             )),
@@ -1927,8 +1929,8 @@ pub mod fake {
             self.event("cursor_position".into())?;
             Ok(*self.cursor.lock().unwrap())
         }
-        fn scroll(&self, d: i32) -> ExecResult {
-            self.event(format!("scroll:{d}"))
+        fn scroll(&self, axis: MkMouseScrollAxis, d: i32) -> ExecResult {
+            self.event(format!("scroll:{axis:?}:{d}"))
         }
         fn text(&self, p: &MkTextPayload) -> ExecResult {
             self.event(format!("text:{}", p.text))
@@ -2315,6 +2317,35 @@ mod phase_d_tests {
         let c = Arc::new(RunControl::default());
         c.reset();
         Executor::new(fake.backends(), c).execute(&plan(steps), &|_| {})
+    }
+
+    #[test]
+    fn playback_passes_exact_scroll_axis_and_delta_to_backend() {
+        let fake = Arc::new(FakeBackend::default());
+        run(
+            vec![
+                s(
+                    1,
+                    MkAction::MouseScroll {
+                        axis: MkMouseScrollAxis::Vertical,
+                        i32_delta: -37,
+                    },
+                ),
+                s(
+                    2,
+                    MkAction::MouseScroll {
+                        axis: MkMouseScrollAxis::Horizontal,
+                        i32_delta: 241,
+                    },
+                ),
+            ],
+            fake.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            fake.events(),
+            ["scroll:Vertical:-37", "scroll:Horizontal:241"]
+        );
     }
 
     #[test]

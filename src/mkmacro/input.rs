@@ -1,7 +1,7 @@
 //! Production input synthesis. This is intentionally independent of legacy `actions::keys`.
 use super::{
-    DiagnosticKind, ExecResult, ExecutionDiagnostic, InputBackend, MkKey, MkMouseButton, MkPoint,
-    MkTextMode, MkTextPayload,
+    DiagnosticKind, ExecResult, ExecutionDiagnostic, InputBackend, MkKey, MkMouseButton,
+    MkMouseScrollAxis, MkPoint, MkTextMode, MkTextPayload,
 };
 use std::time::{Duration, Instant};
 
@@ -261,8 +261,12 @@ impl<S: InputSink> InputBackend for Win32InputBackend<S> {
     fn cursor_position(&self) -> ExecResult<MkPoint> {
         cursor_position()
     }
-    fn scroll(&self, d: i32) -> ExecResult {
-        self.mouse(0, 0, d as u32, MOUSEEVENTF_WHEEL_)
+    fn scroll(&self, axis: MkMouseScrollAxis, d: i32) -> ExecResult {
+        // Casting retains the signed two's-complement bit pattern required in mouseData.
+        match axis {
+            MkMouseScrollAxis::Vertical => self.mouse(0, 0, d as u32, MOUSEEVENTF_WHEEL_),
+            MkMouseScrollAxis::Horizontal => self.horizontal_scroll(d),
+        }
     }
     fn text(&self, p: &MkTextPayload) -> ExecResult {
         match p.mode {
@@ -475,6 +479,25 @@ mod tests {
             RawInputEvent::Mouse {
                 data: 2,
                 flags: MOUSEEVENTF_XDOWN_,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn scroll_axis_selects_flag_and_preserves_signed_data_bits() {
+        let s = Sink::default();
+        let b = Win32InputBackend::with_sink(&s);
+        b.scroll(MkMouseScrollAxis::Vertical, -120).unwrap();
+        b.scroll(MkMouseScrollAxis::Horizontal, 37).unwrap();
+        let events = s.0.lock().unwrap();
+        assert!(matches!(events[0], RawInputEvent::Mouse {
+            data, flags: MOUSEEVENTF_WHEEL_, ..
+        } if data == (-120_i32) as u32));
+        assert!(matches!(
+            events[1],
+            RawInputEvent::Mouse {
+                data: 37,
+                flags: MOUSEEVENTF_HWHEEL_,
                 ..
             }
         ));

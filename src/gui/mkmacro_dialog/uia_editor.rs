@@ -135,7 +135,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, state: &mut UiaEditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkUiControlType, MkUiSelector, MkWindowMatcher};
+    use crate::mkmacro::{MkMouseScrollAxis, MkUiControlType, MkUiSelector, MkWindowMatcher};
     use std::collections::HashSet;
     fn info(invoke: bool) -> UiElementInfo {
         UiElementInfo {
@@ -183,14 +183,23 @@ mod tests {
     }
     #[test]
     fn conversion_is_explicit_and_preserves_unrelated_action() {
-        let original = MkAction::MouseScroll { i32_delta: 1 };
+        let original = MkAction::MouseScroll {
+            axis: MkMouseScrollAxis::Vertical,
+            i32_delta: 1,
+        };
         let mut s = UiaEditorState::default();
         s.begin_recorded_click_conversion(7, info(true));
         assert!(matches!(
             s.conversion_draft(7, payload()).unwrap(),
             MkAction::UiInvoke(_)
         ));
-        assert_eq!(original, MkAction::MouseScroll { i32_delta: 1 });
+        assert_eq!(
+            original,
+            MkAction::MouseScroll {
+                axis: MkMouseScrollAxis::Vertical,
+                i32_delta: 1
+            }
+        );
         assert!(s.conversion_draft(8, payload()).is_err());
     }
     #[test]

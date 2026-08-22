@@ -313,7 +313,10 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Scroll the mouse wheel",
             &["mouse"],
             MouseScroll,
-            MkAction::MouseScroll { i32_delta: -120 }
+            MkAction::MouseScroll {
+                axis: MkMouseScrollAxis::Vertical,
+                i32_delta: -120,
+            }
         ),
         d!(
             Timing,
@@ -908,7 +911,25 @@ pub fn action_details(a: &MkAction) -> String {
             format_coordinate_target(&p.target)
         ),
         MkAction::MouseDown(b) | MkAction::MouseUp(b) => mouse(b).into(),
-        MkAction::MouseScroll { i32_delta } => format!("{i32_delta} wheel units"),
+        MkAction::MouseScroll { axis, i32_delta } => {
+            let direction = match (axis, i32_delta.is_negative()) {
+                (MkMouseScrollAxis::Vertical, false) => "Vertical Up",
+                (MkMouseScrollAxis::Vertical, true) => "Vertical Down",
+                (MkMouseScrollAxis::Horizontal, false) => "Horizontal Right",
+                (MkMouseScrollAxis::Horizontal, true) => "Horizontal Left",
+            };
+            if *i32_delta % 120 == 0 {
+                format!(
+                    "{direction} · {} notch(es) · {i32_delta} wheel units",
+                    (i32_delta / 120).unsigned_abs()
+                )
+            } else {
+                format!(
+                    "{direction} · raw delta {} wheel units",
+                    i32_delta.unsigned_abs()
+                )
+            }
+        }
         MkAction::Delay { milliseconds } => format!("{milliseconds} ms"),
         MkAction::Process(p) => format!("{} {}", p.program, p.arguments.join(" ")),
         MkAction::LauncherCommand { command, args } => {
@@ -1033,6 +1054,17 @@ mod paste_tests {
             "Paste 3 characters"
         );
         assert!(!action_details(&action(MkTextMode::Paste)).contains("Coming"));
+    }
+
+    #[test]
+    fn horizontal_scroll_details_include_axis_direction_and_magnitude() {
+        let details = action_details(&MkAction::MouseScroll {
+            axis: MkMouseScrollAxis::Horizontal,
+            i32_delta: -240,
+        });
+        assert!(details.contains("Horizontal Left"));
+        assert!(details.contains("2 notch(es)"));
+        assert!(details.contains("-240 wheel units"));
     }
 }
 pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {

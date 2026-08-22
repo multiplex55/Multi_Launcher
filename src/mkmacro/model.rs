@@ -429,6 +429,15 @@ pub enum MkVirtualDesktopAction {
     SwitchRight,
     CloseCurrent,
 }
+/// The wheel axis used by a mouse-scroll action.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkMouseScrollAxis {
+    /// The default preserves compatibility with actions serialized before axes existed.
+    #[default]
+    Vertical,
+    Horizontal,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MkAction {
@@ -443,6 +452,8 @@ pub enum MkAction {
     MouseDown(MkMouseButton),
     MouseUp(MkMouseButton),
     MouseScroll {
+        #[serde(default)]
+        axis: MkMouseScrollAxis,
         i32_delta: i32,
     },
     Delay {
@@ -691,5 +702,34 @@ mod prompt_payload_tests {
         let json = r#"{"schema_version":4,"macros":[{"id":1,"name":"old","steps":[{"id":1,"action":{"type":"delay","data":{"milliseconds":1}}}]}]}"#;
         let doc: MkMacroDocument = serde_json::from_str(json).unwrap();
         assert_eq!(doc.macros[0].steps.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod mouse_scroll_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_scroll_without_axis_defaults_to_vertical() {
+        let action: MkAction =
+            serde_json::from_str(r#"{"type":"mouse_scroll","data":{"i32_delta":-37}}"#).unwrap();
+        assert_eq!(
+            action,
+            MkAction::MouseScroll {
+                axis: MkMouseScrollAxis::Vertical,
+                i32_delta: -37,
+            }
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_round_trips_losslessly() {
+        let action = MkAction::MouseScroll {
+            axis: MkMouseScrollAxis::Horizontal,
+            i32_delta: i32::MIN + 1,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains(r#""axis":"horizontal""#));
+        assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
     }
 }
