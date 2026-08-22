@@ -1619,7 +1619,10 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         let mut payload = MkImagePayload {
             asset_id: 9,
-            wait: MkWaitOptions::default(),
+            wait: MkWaitOptions {
+                timeout_ms: 5_000,
+                poll_interval_ms: 100,
+            },
             region: SearchRegion::Desktop,
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
