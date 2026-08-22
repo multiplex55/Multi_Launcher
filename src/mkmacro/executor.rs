@@ -1261,10 +1261,11 @@ impl Executor {
                             self.backends.clipboard.clone(),
                             &expanded.text,
                         )?;
+                        let paste_key = MkKey::Character("V".into());
                         let primary = (|| {
                             g.down_key(&MkKey::Control)?;
-                            g.down_key(&MkKey::V)?;
-                            g.up_key(&MkKey::V)?;
+                            g.down_key(&paste_key)?;
+                            g.up_key(&paste_key)?;
                             g.up_key(&MkKey::Control)?;
                             self.wait(PASTE_SETTLE_INTERVAL)
                         })();
@@ -2117,8 +2118,8 @@ mod phase_d_tests {
                 "clipboard_snapshot",
                 "clipboard:hello world",
                 "key_down:Control",
-                "key_down:V",
-                "key_up:V",
+                "key_down:Character(\"V\")",
+                "key_up:Character(\"V\")",
                 "key_up:Control",
                 "clipboard:original"
             ]
@@ -2127,7 +2128,11 @@ mod phase_d_tests {
 
     #[test]
     fn paste_failures_restore_once_and_release_modifiers() {
-        for failed in ["key_down:Control", "key_down:V", "key_up:V"] {
+        for failed in [
+            "key_down:Control",
+            "key_down:Character(\"V\")",
+            "key_up:Character(\"V\")",
+        ] {
             let fake = Arc::new(FakeBackend::default());
             fake.fail(
                 failed,
@@ -2191,7 +2196,7 @@ mod phase_d_tests {
     fn primary_error_wins_over_restoration_error() {
         let fake = Arc::new(FakeBackend::default());
         fake.fail(
-            "key_down:V",
+            "key_down:Character(\"V\")",
             ExecutionDiagnostic::new(DiagnosticKind::InputRejected, "primary"),
         );
         fake.fail(
