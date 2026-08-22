@@ -21,16 +21,16 @@ fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
             "Create a new virtual desktop",
         ),
         (
-            "Switch to Desktop on Left",
+            "Switch Virtual Desktop Left",
             MkVirtualDesktopAction::SwitchLeft,
             "previous",
-            "Switch to the previous virtual desktop (native boundary no-op)",
+            "Switch virtual desktop left",
         ),
         (
-            "Switch to Desktop on Right",
+            "Switch Virtual Desktop Right",
             MkVirtualDesktopAction::SwitchRight,
             "next",
-            "Switch to the next virtual desktop (native boundary no-op)",
+            "Switch virtual desktop right",
         ),
         (
             "Close Current Virtual Desktop",
@@ -47,6 +47,7 @@ fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
         assert_eq!(action, MkAction::VirtualDesktop(operation));
         assert_eq!(action_catalog::action_name(&action), name);
         assert_eq!(action_catalog::action_details(&action), summary);
+        assert_eq!(descriptor.category, action_catalog::ActionCategory::Windows);
         assert_eq!(descriptor.editor, action_catalog::EditorKind::DirectInsert);
     }
 }
