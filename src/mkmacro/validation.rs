@@ -185,6 +185,50 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                     }
                 }
                 MkAction::WindowClose(x) => matcher(x, m.id, sid, &mut out),
+                MkAction::WindowState { matcher: x, .. } => matcher(x, m.id, sid, &mut out),
+                MkAction::WindowMoveResize(p) => {
+                    matcher(&p.matcher, m.id, sid, &mut out);
+                    match (p.x, p.y) {
+                        (Some(_), Some(_)) | (None, None) => {}
+                        _ => push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "incomplete_window_move",
+                            "Move requires both X and Y",
+                        ),
+                    }
+                    match (p.width, p.height) {
+                        (Some(w), Some(h)) => {
+                            if w == 0 || h == 0 {
+                                push(
+                                    &mut out,
+                                    m.id,
+                                    sid,
+                                    "invalid_window_resize",
+                                    "Resize Width and Height must be at least 1",
+                                );
+                            }
+                        }
+                        (None, None) => {}
+                        _ => push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "incomplete_window_resize",
+                            "Resize requires both Width and Height",
+                        ),
+                    }
+                    if p.x.is_none() && p.y.is_none() && p.width.is_none() && p.height.is_none() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "empty_window_move_resize",
+                            "Enable Move or Resize",
+                        );
+                    }
+                }
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                     wait(&p.wait, m.id, sid, &mut out);
                     asset(p.asset_id, m.id, sid, asset_root, &mut out);

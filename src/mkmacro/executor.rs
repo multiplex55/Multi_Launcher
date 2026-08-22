@@ -2,7 +2,8 @@
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
     MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload,
-    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowPayload, RuntimeVariables,
+    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
+    MkWindowPayload, MkWindowState, RuntimeVariables,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -78,6 +79,8 @@ pub trait WindowBackend: Send + Sync {
     fn is_active(&self, m: &MkWindowMatcher) -> ExecResult<bool>;
     fn activate(&self, p: &MkWindowPayload) -> ExecResult;
     fn close(&self, m: &MkWindowMatcher) -> ExecResult;
+    fn move_resize(&self, p: &MkWindowMoveResizePayload) -> ExecResult;
+    fn set_state(&self, m: &MkWindowMatcher, state: MkWindowState) -> ExecResult;
 }
 pub trait ScreenBackend: Send + Sync {
     fn resolve(
@@ -208,6 +211,12 @@ impl WindowBackend for Unsupported {
         unsupported()
     }
     fn close(&self, _: &MkWindowMatcher) -> ExecResult {
+        unsupported()
+    }
+    fn move_resize(&self, _: &MkWindowMoveResizePayload) -> ExecResult {
+        unsupported()
+    }
+    fn set_state(&self, _: &MkWindowMatcher, _: MkWindowState) -> ExecResult {
         unsupported()
     }
 }
@@ -1041,6 +1050,10 @@ impl Executor {
             }
             MkAction::WindowActivate(p) => self.backends.window.activate(p),
             MkAction::WindowClose(m) => self.backends.window.close(m),
+            MkAction::WindowMoveResize(p) => self.backends.window.move_resize(p),
+            MkAction::WindowState { matcher, state } => {
+                self.backends.window.set_state(matcher, *state)
+            }
             MkAction::WindowWait(p) => self.wait_condition(
                 macro_id,
                 &MkCondition::WindowExists {
@@ -1407,6 +1420,8 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WindowActivate(_)
         | MkAction::WindowClose(_)
         | MkAction::WindowWait(_)
+        | MkAction::WindowMoveResize(_)
+        | MkAction::WindowState { .. }
         | MkAction::WaitUntil { .. }
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
@@ -1439,9 +1454,11 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::MouseDown(_)
         | MkAction::MouseUp(_)
         | MkAction::MouseScroll { .. } => "SendInput",
-        MkAction::WindowActivate(_) | MkAction::WindowClose(_) | MkAction::WindowWait(_) => {
-            "window"
-        }
+        MkAction::WindowActivate(_)
+        | MkAction::WindowClose(_)
+        | MkAction::WindowWait(_)
+        | MkAction::WindowMoveResize(_)
+        | MkAction::WindowState { .. } => "window",
         MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::PixelCheck { .. } => "screen",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
@@ -1611,6 +1628,12 @@ pub mod fake {
         }
         fn close(&self, _: &MkWindowMatcher) -> ExecResult {
             self.event("window_close".into())
+        }
+        fn move_resize(&self, _: &MkWindowMoveResizePayload) -> ExecResult {
+            self.event("window_move_resize".into())
+        }
+        fn set_state(&self, _: &MkWindowMatcher, state: MkWindowState) -> ExecResult {
+            self.event(format!("window_state:{state:?}"))
         }
     }
     impl ScreenBackend for FakeBackend {
