@@ -447,30 +447,21 @@ impl EventEnricher for FakeEnricher {
 }
 #[test]
 fn enrichment_is_used_only_when_capture_context_is_missing() {
+    let enriched_context = context(explorer(), Some(notepad())).unwrap();
+    let captured_context = context(explorer(), Some(explorer())).unwrap();
     let mut fake = FakeEnricher {
         calls: 0,
-        value: context(explorer(), Some(notepad())).unwrap(),
+        value: enriched_context.clone(),
     };
     let normalized = normalize(
         &[
             keyboard(1, KeyTransition::Down, 65, None),
-            keyboard(
-                2,
-                KeyTransition::Up,
-                65,
-                context(explorer(), Some(explorer())),
-            ),
+            keyboard(2, KeyTransition::Up, 65, Some(captured_context.clone())),
         ],
         &NormalizationConfig::default(),
         Some(&mut fake),
     );
     assert_eq!(fake.calls, 1);
-    assert_eq!(
-        normalized[0].context.as_ref().unwrap().foreground.matcher(),
-        notepad().matcher()
-    );
-    assert_eq!(
-        normalized[1].context.as_ref().unwrap().foreground.matcher(),
-        explorer().matcher()
-    );
+    assert_eq!(normalized[0].context.as_ref(), Some(&enriched_context));
+    assert_eq!(normalized[1].context.as_ref(), Some(&captured_context));
 }
