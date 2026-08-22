@@ -85,6 +85,123 @@ fn matcher() -> MkWindowMatcher {
 }
 
 #[test]
+fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
+    let d = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(d.path()).unwrap();
+    store
+        .save(MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            settings: Default::default(),
+            macros: vec![MkMacro {
+                id: 7,
+                name: "prompt plumbing".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps: vec![
+                    s(
+                        1,
+                        MkAction::PromptInput(MkPromptInputPayload {
+                            title: "Title ${seed}".into(),
+                            prompt: "Value for ${seed}?".into(),
+                            default_value: "$${seed} / ${seed}".into(),
+                            variable: "answer".into(),
+                            copy_to_clipboard: false,
+                        }),
+                    ),
+                    s(
+                        2,
+                        MkAction::Text(MkTextPayload {
+                            text: "received:${answer}".into(),
+                            interval_ms: 0,
+                        }),
+                    ),
+                ],
+            }],
+        })
+        .unwrap();
+    // Seed through a preceding SetVariable so interpolation demonstrably occurs at execution time.
+    let mut doc = store.snapshot().as_ref().clone();
+    doc.macros[0].steps.insert(
+        0,
+        s(
+            3,
+            MkAction::SetVariable {
+                name: "seed".into(),
+                value: MkValue::String("東京 !".into()),
+            },
+        ),
+    );
+    store.save(doc).unwrap();
+    let fake = Arc::new(FakeBackend::default());
+    fake.script_prompt(PromptResponse::Submitted("accepted ✓".into()));
+    let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
+    assert_eq!(
+        runtime.command(RuntimeCommand::Run(7)),
+        CommandResult::Accepted
+    );
+    let snapshot = wait(&runtime, RuntimeState::Completed);
+    assert!(snapshot.last_error.is_none());
+    let prompts = fake.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].title, "Title 東京 !");
+    assert_eq!(prompts[0].prompt, "Value for 東京 !?");
+    assert_eq!(
+        prompts[0].default_value, "${seed} / 東京 !",
+        "escaped placeholders stay literal and expansion is nonrecursive"
+    );
+    drop(prompts);
+    assert!(
+        fake.events()
+            .contains(&"text:received:accepted ✓".to_string()),
+        "the prompt answer is immediately consumable"
+    );
+}
+
+#[test]
+fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
+    let d = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(d.path()).unwrap();
+    store
+        .save(MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            settings: Default::default(),
+            macros: vec![MkMacro {
+                id: 8,
+                name: "cancel".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps: vec![
+                    s(1, MkAction::PromptInput(MkPromptInputPayload::default())),
+                    s(
+                        2,
+                        MkAction::Text(MkTextPayload {
+                            text: "must-not-run".into(),
+                            interval_ms: 0,
+                        }),
+                    ),
+                ],
+            }],
+        })
+        .unwrap();
+    let fake = Arc::new(FakeBackend::default());
+    fake.script_prompt(PromptResponse::Cancelled);
+    let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
+    runtime.command(RuntimeCommand::Run(8));
+    let snapshot = wait(&runtime, RuntimeState::Failed);
+    assert!(snapshot.last_error.unwrap().message.contains("cancelled"));
+    assert!(
+        !fake
+            .events()
+            .iter()
+            .any(|event| event == "text:must-not-run")
+    );
+}
+
+#[test]
 fn window_activate_forwards_complete_payload() {
     let payload = MkWindowPayload {
         matcher: matcher(),

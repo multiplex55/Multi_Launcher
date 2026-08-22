@@ -53,6 +53,185 @@ fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
 }
 
 #[test]
+fn catalog_is_a_complete_bidirectional_capability_contract() {
+    use action_catalog::{
+        ActionAvailability, DraftValidationContract, EditorKind, RuntimeAvailability,
+    };
+
+    let all = action_catalog::descriptors();
+    for descriptor in &all {
+        let action =
+            std::panic::catch_unwind(|| (descriptor.make_default)()).unwrap_or_else(|_| {
+                panic!("{}: default action construction panicked", descriptor.name)
+            });
+        assert!(
+            !descriptor.name.trim().is_empty(),
+            "catalog action has an empty name"
+        );
+        assert!(
+            !action_catalog::action_name(&action).trim().is_empty(),
+            "{} has no stable action_name",
+            descriptor.name
+        );
+        assert!(
+            !action_catalog::action_details(&action).trim().is_empty(),
+            "{} has no stable action_details",
+            descriptor.name
+        );
+
+        match descriptor.availability {
+            ActionAvailability::Ready => {
+                assert_eq!(
+                    descriptor.hidden_reason, None,
+                    "{} is Ready but has a hidden reason",
+                    descriptor.name
+                );
+                assert_eq!(
+                    descriptor.runtime,
+                    RuntimeAvailability::Supported,
+                    "{} was marked Ready without runtime support; implement both runtime and editor paths and their tests, or hide the entry with a concrete reason",
+                    descriptor.name
+                );
+                assert!(
+                    executor::has_runtime_support(&action),
+                    "{} was marked Ready without has_runtime_support; implement both runtime and editor paths and their tests, or hide the entry with a concrete reason",
+                    descriptor.name
+                );
+                let contract = descriptor.editor.contract().unwrap_or_else(|| panic!(
+                    "{} was marked Ready without EditorContract; implement both runtime and editor paths and their tests, or hide the entry with a concrete reason", descriptor.name));
+                assert!(
+                    action_catalog::editor_route_recognizes(&action, descriptor.editor),
+                    "{} editor/action route drifted",
+                    descriptor.name
+                );
+                if descriptor.editor == EditorKind::DirectInsert {
+                    assert!(
+                        action_catalog::requires_no_configuration(&action),
+                        "{} is not an intentional structural DirectInsert",
+                        descriptor.name
+                    );
+                } else {
+                    assert!(
+                        matches!(contract, action_catalog::EditorContract::Configurable { field_count } if field_count > 0)
+                    );
+                }
+                if action_catalog::draft_validation_contract(&action)
+                    != DraftValidationContract::CommitReady
+                {
+                    assert_eq!(
+                        action_catalog::draft_validation_contract(&action),
+                        DraftValidationContract::AwaitingRequiredAsset,
+                        "{} must explain the missing required configuration",
+                        descriptor.name
+                    );
+                }
+            }
+            ActionAvailability::Hidden => {
+                assert!(
+                    !descriptor
+                        .hidden_reason
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty(),
+                    "{} lacks a product/capability hidden_reason",
+                    descriptor.name
+                );
+                assert!(!action_catalog::is_available_in_palette(descriptor));
+                assert!(
+                    !action_catalog::visible_descriptors()
+                        .any(|visible| visible.name == descriptor.name)
+                );
+                // Matching a descriptor is deliberately separate from palette filtering:
+                // exact names and every advertised keyword still cannot make a hidden row selectable.
+                assert!(action_catalog::matches(descriptor, descriptor.name));
+                for keyword in descriptor.keywords {
+                    assert!(
+                        !action_catalog::visible_descriptors()
+                            .any(|visible| action_catalog::matches(&visible, keyword)
+                                && visible.name == descriptor.name)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn catalog_window_desktop_prompt_and_image_inventory_is_intentional() {
+    let visible: Vec<_> = action_catalog::visible_descriptors().collect();
+    let names = |category| {
+        visible
+            .iter()
+            .filter(|d| d.category == category)
+            .map(|d| d.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(action_catalog::ActionCategory::Windows),
+        vec![
+            "Activate Window",
+            "Close Window",
+            "Wait for Window",
+            "Move / Resize Window",
+            "Minimize Window",
+            "Create Virtual Desktop",
+            "Switch Virtual Desktop Left",
+            "Switch Virtual Desktop Right",
+            "Close Current Virtual Desktop",
+            "Maximize Window",
+            "Restore Window",
+        ]
+    );
+    for expected in ["Prompt for Input", "Find Image", "Click Image"] {
+        assert_eq!(
+            visible.iter().filter(|d| d.name == expected).count(),
+            1,
+            "catalog inventory drift for {expected}"
+        );
+    }
+}
+
+#[test]
+fn prompt_input_authoring_apply_and_cancel_are_transactional() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let mut dialog = MkMacroDialog::new(Arc::new(store));
+    dialog.create_macro();
+    let payload = MkPromptInputPayload {
+        title: "Customer label".into(),
+        prompt: "Enter a value".into(),
+        default_value: "Unicode ✓ default".into(),
+        variable: "answer_2".into(),
+        copy_to_clipboard: true,
+    };
+    dialog.action_editor.begin_new_with_editor(
+        MkAction::PromptInput(payload.clone()),
+        action_catalog::EditorKind::PromptInput,
+    );
+    assert_eq!(
+        dialog.action_editor.editor,
+        Some(action_catalog::EditorKind::PromptInput)
+    );
+    let mut editor = std::mem::take(&mut dialog.action_editor);
+    editor
+        .apply(&mut dialog)
+        .expect("valid prompt draft applies");
+    dialog.action_editor = editor;
+    assert_eq!(
+        dialog.selected_macro().unwrap().steps[0].action,
+        MkAction::PromptInput(payload.clone())
+    );
+
+    let saved = dialog.selected_macro().unwrap().steps[0].clone();
+    dialog.action_editor.begin_edit(&saved);
+    if let MkAction::PromptInput(draft) = &mut dialog.action_editor.draft.as_mut().unwrap().action {
+        draft.prompt = "discard me".into();
+    }
+    dialog.action_editor.cancel();
+    assert_eq!(dialog.selected_macro().unwrap().steps[0], saved);
+}
+
+#[test]
 fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = MkMacroStore::open(dir.path()).unwrap();
