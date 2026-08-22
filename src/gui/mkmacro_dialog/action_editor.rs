@@ -22,7 +22,7 @@ pub struct ActionEditorState {
     pub capture_message: Option<String>,
     pub editor: Option<super::action_catalog::EditorKind>,
     position_capture: Option<PositionCaptureState>,
-    draft_generation: u64,
+    pub(crate) draft_generation: u64,
     picker: NativePositionPicker,
 }
 
@@ -758,9 +758,11 @@ fn action_ui(
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
+    Option<super::launcher_action_picker::PickerPurpose>,
 ) {
     let mut pick = None;
     let mut window_pick = None;
+    let mut launcher_pick = None;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
@@ -950,6 +952,16 @@ fn action_ui(
             ui.horizontal(|ui| {
                 ui.label("Program");
                 ui.text_edit_singleline(&mut p.program);
+                if ui.button("Browse…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Executable", &["exe", "bat", "cmd", "com"])
+                        .pick_file()
+                {
+                    super::launcher_action_picker::apply_chosen_program_path(p, path);
+                }
+                if ui.button("Choose From Launcher…").clicked() {
+                    launcher_pick = Some(super::launcher_action_picker::PickerPurpose::Process);
+                }
             });
             let mut args = p.arguments.join(" ");
             ui.horizontal(|ui| {
@@ -961,8 +973,13 @@ fn action_ui(
             ui.horizontal(|ui| {
                 ui.label("Working directory");
                 ui.text_edit_singleline(wd);
+                if ui.button("Browse…").clicked()
+                    && let Some(path) = rfd::FileDialog::new().pick_folder()
+                {
+                    *wd = path.to_string_lossy().into_owned();
+                }
             });
-            if wd.is_empty() {
+            if wd.trim().is_empty() {
                 p.working_directory = None;
             }
             ui.checkbox(&mut p.wait, "Wait for completion");
@@ -1040,6 +1057,9 @@ fn action_ui(
             ui.small(
                 "Search uses canonical launcher action values; display labels are not persisted.",
             );
+            if ui.button("Choose Launcher Action…").clicked() {
+                launcher_pick = Some(super::launcher_action_picker::PickerPurpose::LauncherCommand);
+            }
         }
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
             ui.heading("Reference Image");
@@ -1174,7 +1194,7 @@ fn action_ui(
             );
         }
     }
-    (pick, window_pick)
+    (pick, window_pick, launcher_pick)
 }
 
 fn condition_at_path<'a>(
@@ -1271,12 +1291,21 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
-            let (position, window)=action_ui(ui, step, &mut state.capture_keys);
+            let (position, window, launcher)=action_ui(ui, step, &mut state.capture_keys);
             pick_request = position;
             if let Some(path)=window {
                 let original=matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone();
                 let macro_id=d.selected_macro_id.unwrap_or(0);
                 d.window_picker.open(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, path }, original });
+            }
+            if let Some(purpose) = launcher {
+                let request = super::launcher_action_picker::LauncherActionRequest {
+                    purpose,
+                    macro_id: d.selected_macro_id.unwrap_or(0),
+                    step_id: state.editing_id,
+                    draft_generation: state.draft_generation,
+                };
+                d.launcher_action_picker.open(request);
             }
             if state.position_capture.is_some() {
                 ui.colored_label(egui::Color32::YELLOW, "Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels.");
@@ -1367,10 +1396,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor = state;
         d.window_picker
             .cancel("Window picker closed because the action editor was applied");
+        d.launcher_action_picker.cancel();
     } else if cancel || !open {
         d.action_editor.cancel();
         d.window_picker
             .cancel("Window picker closed because the action editor was cancelled");
+        d.launcher_action_picker.cancel();
     }
 }
 

@@ -1,13 +1,104 @@
 use multi_launcher::{
+    actions::Action,
     gui::mkmacro_dialog::{
-        MkMacroDialog, action_catalog,
+        MkMacroAuthoringContext, MkMacroDialog, action_catalog,
         action_editor::ActionEditorState,
+        launcher_action_picker::PickerPurpose,
         recorder_controller::{
             RecorderController, RecorderControllerView, RecorderState, RecorderStatusSnapshot,
         },
     },
     mkmacro::{executor::fake::FakeBackend, *},
 };
+
+#[test]
+fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let actions = Arc::new(vec![
+        Action {
+            label: "Terminal".into(),
+            desc: "display only".into(),
+            action: "wt.exe".into(),
+            args: Some("--title \"Two Words\"".into()),
+        },
+        Action {
+            label: "Notes".into(),
+            desc: "internal".into(),
+            action: "notes:dialog".into(),
+            args: None,
+        },
+    ]);
+    let mut dialog = MkMacroDialog::new_with_authoring_context(
+        Arc::new(store),
+        MkMacroAuthoringContext {
+            launcher_actions: actions.clone(),
+        },
+    );
+    assert!(Arc::ptr_eq(
+        &dialog.authoring_context.launcher_actions,
+        &actions
+    ));
+    dialog.create_macro();
+    let macro_id = dialog.selected_macro_id.unwrap();
+    dialog
+        .action_editor
+        .begin_new(MkAction::Process(MkProcessPayload {
+            program: String::new(),
+            arguments: vec![],
+            working_directory: None,
+            wait: false,
+        }));
+    let request = dialog
+        .action_editor
+        .launcher_picker_request(PickerPurpose::Process, macro_id);
+    assert!(dialog.action_editor.apply_launcher_picker_action(
+        &request,
+        &actions[0],
+        Some(macro_id),
+        false
+    ));
+    assert!(
+        dialog.selected_macro().unwrap().steps.is_empty(),
+        "picker edits only the modal draft"
+    );
+    dialog.action_editor.cancel();
+    assert!(dialog.selected_macro().unwrap().steps.is_empty());
+
+    dialog
+        .action_editor
+        .begin_new(MkAction::Process(MkProcessPayload {
+            program: String::new(),
+            arguments: vec![],
+            working_directory: None,
+            wait: false,
+        }));
+    let conversion = dialog
+        .action_editor
+        .launcher_picker_request(PickerPurpose::Process, macro_id);
+    assert!(dialog.action_editor.apply_launcher_picker_action(
+        &conversion,
+        &actions[1],
+        Some(macro_id),
+        true
+    ));
+    assert!(
+        matches!(dialog.action_editor.draft.as_ref().unwrap().action, MkAction::LauncherCommand { ref command, .. } if command == "notes:dialog")
+    );
+    dialog.action_editor.cancel();
+    dialog
+        .action_editor
+        .begin_new(MkAction::Delay { milliseconds: 1 });
+    assert!(
+        !dialog.action_editor.apply_launcher_picker_action(
+            &conversion,
+            &actions[0],
+            Some(macro_id),
+            false
+        ),
+        "an earlier draft request is stale"
+    );
+}
 use std::{
     sync::Arc,
     thread,
