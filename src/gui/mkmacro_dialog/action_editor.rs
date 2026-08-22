@@ -1077,6 +1077,22 @@ fn action_ui(
                 ui.text_edit_singleline(name);
             });
         }
+        MkAction::PromptInput(p) => {
+            ui.label("Dialog title");
+            ui.text_edit_singleline(&mut p.title)
+                .on_hover_text("Title of the independent input dialog");
+            ui.label("Prompt text");
+            ui.text_edit_multiline(&mut p.prompt);
+            ui.label("Default value");
+            ui.text_edit_singleline(&mut p.default_value);
+            ui.label("Destination variable");
+            ui.text_edit_singleline(&mut p.variable);
+            ui.checkbox(&mut p.copy_to_clipboard, "Copy result to clipboard");
+            if let Err(reason) = crate::mkmacro::variables::validate_variable_name(&p.variable) {
+                ui.colored_label(ui.visuals().error_fg_color, reason);
+            }
+            ui.small("During playback, Cancel or closing the prompt stops the macro.");
+        }
         MkAction::RepeatStart { count } => {
             ui.horizontal(|ui| {
                 ui.label("Repeat count");
@@ -1427,8 +1443,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 });
             ui.separator();
             ui.horizontal(|ui| {
-                apply = ui.button("Apply").clicked();
-                cancel = ui.button("Cancel").clicked();
+                let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err());
+                apply = ui.add_enabled(valid, egui::Button::new("Apply")).clicked();
+                cancel = ui.button("Cancel").on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
         });
     if let Some(slot) = pick_request {

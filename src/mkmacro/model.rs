@@ -390,6 +390,37 @@ pub struct MkUiPayload {
     #[serde(default)]
     pub wait: Option<MkWaitOptions>,
 }
+fn prompt_title() -> String {
+    "Input Required".into()
+}
+fn prompt_variable() -> String {
+    "input".into()
+}
+/// Persisted configuration for an interactive macro input step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkPromptInputPayload {
+    #[serde(default = "prompt_title")]
+    pub title: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub default_value: String,
+    #[serde(default = "prompt_variable")]
+    pub variable: String,
+    #[serde(default)]
+    pub copy_to_clipboard: bool,
+}
+impl Default for MkPromptInputPayload {
+    fn default() -> Self {
+        Self {
+            title: prompt_title(),
+            prompt: String::new(),
+            default_value: String::new(),
+            variable: prompt_variable(),
+            copy_to_clipboard: false,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MkVirtualDesktopAction {
@@ -444,6 +475,7 @@ pub enum MkAction {
     UnsetVariable {
         name: String,
     },
+    PromptInput(MkPromptInputPayload),
     If(MkCondition),
     Else,
     EndIf,
@@ -625,5 +657,39 @@ mod image_payload_tests {
         // A representative pre-feature action document remains compatible.
         let old = r#"{"schema_version":4,"macros":[],"settings":{"record_toggle_hotkey":{"key":{"function":9},"modifiers":[]}}}"#;
         assert!(serde_json::from_str::<MkMacroDocument>(old).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod prompt_payload_tests {
+    use super::*;
+    #[test]
+    fn omitted_prompt_fields_use_compatible_defaults() {
+        let action: MkAction =
+            serde_json::from_str(r#"{"type":"prompt_input","data":{}}"#).unwrap();
+        assert_eq!(
+            action,
+            MkAction::PromptInput(MkPromptInputPayload::default())
+        );
+    }
+    #[test]
+    fn prompt_action_round_trips_all_fields() {
+        let action = MkAction::PromptInput(MkPromptInputPayload {
+            title: "T".into(),
+            prompt: "P".into(),
+            default_value: "D".into(),
+            variable: "_project2".into(),
+            copy_to_clipboard: true,
+        });
+        assert_eq!(
+            serde_json::from_str::<MkAction>(&serde_json::to_string(&action).unwrap()).unwrap(),
+            action
+        );
+    }
+    #[test]
+    fn document_from_before_prompt_variant_still_loads() {
+        let json = r#"{"schema_version":4,"macros":[{"id":1,"name":"old","steps":[{"id":1,"action":{"type":"delay","data":{"milliseconds":1}}}]}]}"#;
+        let doc: MkMacroDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.macros[0].steps.len(), 1);
     }
 }

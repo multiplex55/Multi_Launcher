@@ -1,9 +1,10 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
-    MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload,
-    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
-    MkWindowPayload, MkWindowState, RuntimeVariables,
+    MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload,
+    MkPromptInputPayload, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher,
+    MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend, PromptRequest,
+    PromptResponse, RuntimeVariables,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -125,6 +126,9 @@ pub trait LauncherBackend: Send + Sync {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult;
     fn command(&self, command: &str, args: Option<&str>) -> ExecResult;
 }
+pub trait ClipboardBackend: Send + Sync {
+    fn set_text(&self, text: &str) -> ExecResult;
+}
 #[derive(Clone)]
 pub struct Backends {
     pub input: Arc<dyn InputBackend>,
@@ -132,6 +136,8 @@ pub struct Backends {
     pub screen: Arc<dyn ScreenBackend>,
     pub uia: Arc<dyn UiAutomationBackend>,
     pub launcher: Arc<dyn LauncherBackend>,
+    pub prompt: Arc<dyn PromptBackend>,
+    pub clipboard: Arc<dyn ClipboardBackend>,
 }
 impl Backends {
     pub fn unsupported() -> Self {
@@ -144,12 +150,18 @@ impl Backends {
         let launcher = Arc::new(Unsupported {
             backend: "launcher",
         });
+        let prompt = Arc::new(Unsupported { backend: "prompt" });
+        let clipboard = Arc::new(Unsupported {
+            backend: "clipboard",
+        });
         Self {
             input,
             window,
             screen,
             uia,
             launcher,
+            prompt,
+            clipboard,
         }
     }
 
@@ -315,11 +327,17 @@ pub fn production_backends() -> Backends {
             screen: Arc::new(super::screen::WindowsScreenBackend::system()),
             uia: unsupported.uia,
             launcher: Arc::new(ProductionLauncher),
+            prompt: super::prompt::production_prompt_broker(),
+            clipboard: Arc::new(ProductionClipboard),
         }
     }
     #[cfg(not(windows))]
     {
-        unsupported
+        Backends {
+            prompt: super::prompt::production_prompt_broker(),
+            clipboard: Arc::new(ProductionClipboard),
+            ..unsupported
+        }
     }
 }
 
@@ -341,6 +359,30 @@ impl LauncherBackend for Unsupported {
     }
     fn command(&self, _: &str, _: Option<&str>) -> ExecResult {
         unsupported()
+    }
+}
+impl PromptBackend for Unsupported {
+    fn prompt(&self, _: PromptRequest, _: &RunControl) -> ExecResult<PromptResponse> {
+        unsupported_context(self.backend, "prompt")
+    }
+}
+impl ClipboardBackend for Unsupported {
+    fn set_text(&self, _: &str) -> ExecResult {
+        unsupported_context(self.backend, "set text")
+    }
+}
+struct ProductionClipboard;
+impl ClipboardBackend for ProductionClipboard {
+    fn set_text(&self, text: &str) -> ExecResult {
+        arboard::Clipboard::new()
+            .and_then(|mut c| c.set_text(text.to_owned()))
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("failed to copy prompt result: {e}"),
+                )
+                .context("backend", "clipboard")
+            })
     }
 }
 #[derive(Default)]
@@ -377,6 +419,9 @@ impl RunControl {
     }
     pub fn is_active(&self) -> bool {
         self.state.lock().unwrap().active
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.state.lock().unwrap().stopped
     }
     pub fn checkpoint(&self) -> ExecResult {
         let mut s = self.state.lock().unwrap();
@@ -944,6 +989,35 @@ impl Executor {
     pub fn new(backends: Backends, control: Arc<RunControl>) -> Self {
         Self { backends, control }
     }
+    fn prompt_input(
+        &self,
+        p: &MkPromptInputPayload,
+        variables: &mut RuntimeVariables,
+    ) -> ExecResult {
+        let expand = |text: &str| interpolate(text, variables);
+        let response = self.backends.prompt.prompt(
+            PromptRequest {
+                id: super::prompt::next_request_id(),
+                title: expand(&p.title),
+                prompt: expand(&p.prompt),
+                default_value: expand(&p.default_value),
+            },
+            &self.control,
+        )?;
+        match response {
+            PromptResponse::Cancelled => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Cancelled,
+                "input prompt was cancelled",
+            )),
+            PromptResponse::Submitted(text) => {
+                variables.insert(p.variable.clone(), MkValue::String(text.clone()));
+                if p.copy_to_clipboard {
+                    self.backends.clipboard.set_text(&text)?;
+                }
+                Ok(())
+            }
+        }
+    }
     fn wait(&self, duration: Duration) -> ExecResult {
         let mut remaining = duration;
         while !remaining.is_zero() {
@@ -1047,7 +1121,9 @@ impl Executor {
             }
             if let Some(e) = final_error {
                 observe(ExecutionEvent::StepFailed(step.id, e.clone()));
-                if !matches!(step.on_error, super::MkErrorPolicy::Continue) {
+                if e.kind == DiagnosticKind::Cancelled
+                    || !matches!(step.on_error, super::MkErrorPolicy::Continue)
+                {
                     return Err(e);
                 }
             } else {
@@ -1186,6 +1262,7 @@ impl Executor {
                 v.remove(name);
                 Ok(())
             }
+            MkAction::PromptInput(p) => self.prompt_input(p, v),
             MkAction::ImageFind(p) => self.wait_image(macro_id, p, v).map(|_| ()),
             MkAction::ImageClick(p) => {
                 let pt = self.wait_image(macro_id, p, v)?;
@@ -1535,6 +1612,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WaitUntil { .. }
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
+        | MkAction::PromptInput(_)
         | MkAction::If(_)
         | MkAction::Else
         | MkAction::EndIf
@@ -1581,8 +1659,36 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::UiWait(_) => "UIAutomation",
         MkAction::Process(_) | MkAction::LauncherCommand { .. } => "launcher",
         MkAction::WaitUntil { .. } => "condition_evaluator",
+        MkAction::PromptInput(_) => "prompt",
         _ => "runtime",
     }
+}
+fn interpolate(text: &str, variables: &RuntimeVariables) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let Some(end) = tail.find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let name = &tail[..end];
+        if let Some(value) = variables.get(name) {
+            out.push_str(&match value {
+                MkValue::String(v) => v.clone(),
+                MkValue::Number(v) => v.to_string(),
+                MkValue::Boolean(v) => v.to_string(),
+                MkValue::Point(p) => format!("{},{}", p.x, p.y),
+                MkValue::Null => String::new(),
+            });
+        } else {
+            out.push_str(&rest[start..start + 2 + end + 1]);
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 fn set_point(v: &mut RuntimeVariables, prefix: &str, p: MkPoint) {
     v.insert(format!("{prefix}.x"), MkValue::Number(p.x as f64));
@@ -1655,6 +1761,7 @@ pub mod fake {
         pub failures: Mutex<HashMap<String, ExecutionDiagnostic>>,
         pub conditions: Mutex<HashMap<String, bool>>,
         pub cursor: Mutex<MkPoint>,
+        pub prompt_responses: Mutex<Vec<PromptResponse>>,
     }
     impl Default for FakeBackend {
         fn default() -> Self {
@@ -1663,6 +1770,7 @@ pub mod fake {
                 failures: Mutex::new(HashMap::new()),
                 conditions: Mutex::new(HashMap::new()),
                 cursor: Mutex::new(MkPoint { x: 0, y: 0 }),
+                prompt_responses: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1688,7 +1796,12 @@ pub mod fake {
                 screen: self.clone(),
                 uia: self.clone(),
                 launcher: self.clone(),
+                prompt: self.clone(),
+                clipboard: self.clone(),
             }
+        }
+        pub fn script_prompt(&self, response: PromptResponse) {
+            self.prompt_responses.lock().unwrap().push(response);
         }
     }
     impl InputBackend for FakeBackend {
@@ -1821,6 +1934,24 @@ pub mod fake {
         }
         fn command(&self, c: &str, _: Option<&str>) -> ExecResult {
             self.event(format!("command:{c}"))
+        }
+    }
+    impl PromptBackend for FakeBackend {
+        fn prompt(&self, request: PromptRequest, _: &RunControl) -> ExecResult<PromptResponse> {
+            self.event(format!("prompt:{}", request.id))?;
+            if self.prompt_responses.lock().unwrap().is_empty() {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "no scripted prompt response",
+                )
+                .context("backend", "prompt"));
+            }
+            Ok(self.prompt_responses.lock().unwrap().remove(0))
+        }
+    }
+    impl ClipboardBackend for FakeBackend {
+        fn set_text(&self, text: &str) -> ExecResult {
+            self.event(format!("clipboard:{text}"))
         }
     }
 }
