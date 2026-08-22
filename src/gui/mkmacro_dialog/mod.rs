@@ -990,6 +990,30 @@ mod tests {
     }
 
     #[test]
+    fn virtual_desktops_are_direct_windows_actions() {
+        let rows: Vec<_> = action_catalog::descriptors()
+            .iter()
+            .filter(|descriptor| matches!((descriptor.make_default)(), MkAction::VirtualDesktop(_)))
+            .collect();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|descriptor| {
+            descriptor.category == action_catalog::ActionCategory::Windows
+                && descriptor.editor == action_catalog::EditorKind::DirectInsert
+        }));
+        assert_eq!(
+            rows.iter()
+                .map(|descriptor| descriptor.name)
+                .collect::<Vec<_>>(),
+            [
+                "Create Virtual Desktop",
+                "Switch Virtual Desktop Left",
+                "Switch Virtual Desktop Right",
+                "Close Current Virtual Desktop",
+            ]
+        );
+    }
+
+    #[test]
     fn completed_actions_keep_real_editor_routes() {
         for (name, expected) in [
             ("Close Window", action_catalog::EditorKind::Window),

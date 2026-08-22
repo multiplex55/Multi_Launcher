@@ -9,7 +9,6 @@ pub enum ActionCategory {
     Mouse,
     Timing,
     Windows,
-    VirtualDesktops,
     ProgramsLauncher,
     Logic,
     Variables,
@@ -23,7 +22,6 @@ impl ActionCategory {
             Self::Mouse => "Mouse",
             Self::Timing => "Timing",
             Self::Windows => "Windows",
-            Self::VirtualDesktops => "Virtual Desktops",
             Self::ProgramsLauncher => "Programs & Launcher",
             Self::Logic => "Logic",
             Self::Variables => "Variables",
@@ -386,7 +384,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             direct,
-            VirtualDesktops,
+            Windows,
             "Create Virtual Desktop",
             "Create a new Windows virtual desktop",
             &["desktop", "workspace", "create", "new"],
@@ -394,23 +392,23 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             direct,
-            VirtualDesktops,
-            "Switch to Desktop on Left",
+            Windows,
+            "Switch Virtual Desktop Left",
             "Switch to the virtual desktop on the left",
             &["desktop", "workspace", "left", "previous"],
             MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft)
         ),
         d!(
             direct,
-            VirtualDesktops,
-            "Switch to Desktop on Right",
+            Windows,
+            "Switch Virtual Desktop Right",
             "Switch to the virtual desktop on the right",
             &["desktop", "workspace", "right", "next"],
             MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchRight)
         ),
         d!(
             direct,
-            VirtualDesktops,
+            Windows,
             "Close Current Virtual Desktop",
             "Close the current virtual desktop using native Windows behavior",
             &["desktop", "workspace", "close"],
@@ -835,9 +833,11 @@ pub fn action_name(a: &MkAction) -> &'static str {
             ..
         } => "Restore Window",
         MkAction::VirtualDesktop(MkVirtualDesktopAction::Create) => "Create Virtual Desktop",
-        MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft) => "Switch to Desktop on Left",
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft) => {
+            "Switch Virtual Desktop Left"
+        }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchRight) => {
-            "Switch to Desktop on Right"
+            "Switch Virtual Desktop Right"
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
             "Close Current Virtual Desktop"
@@ -963,10 +963,10 @@ pub fn action_details(a: &MkAction) -> String {
             "Create a new virtual desktop".into()
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft) => {
-            "Switch to the previous virtual desktop (native boundary no-op)".into()
+            "Switch virtual desktop left".into()
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchRight) => {
-            "Switch to the next virtual desktop (native boundary no-op)".into()
+            "Switch virtual desktop right".into()
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
             "Close the current virtual desktop using native Windows behavior".into()

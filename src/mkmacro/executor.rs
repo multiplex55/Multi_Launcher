@@ -2,8 +2,8 @@
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
     MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload,
-    MkUiPayload, MkValue, MkVirtualDesktopAction, MkWaitOptions, MkWindowMatcher,
-    MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, RuntimeVariables,
+    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
+    MkWindowPayload, MkWindowState, RuntimeVariables,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -125,10 +125,6 @@ pub trait LauncherBackend: Send + Sync {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult;
     fn command(&self, command: &str, args: Option<&str>) -> ExecResult;
 }
-pub trait VirtualDesktopBackend: Send + Sync {
-    fn execute(&self, action: MkVirtualDesktopAction) -> ExecResult;
-}
-
 #[derive(Clone)]
 pub struct Backends {
     pub input: Arc<dyn InputBackend>,
@@ -136,7 +132,6 @@ pub struct Backends {
     pub screen: Arc<dyn ScreenBackend>,
     pub uia: Arc<dyn UiAutomationBackend>,
     pub launcher: Arc<dyn LauncherBackend>,
-    pub virtual_desktop: Arc<dyn VirtualDesktopBackend>,
 }
 impl Backends {
     pub fn unsupported() -> Self {
@@ -149,16 +144,12 @@ impl Backends {
         let launcher = Arc::new(Unsupported {
             backend: "launcher",
         });
-        let virtual_desktop = Arc::new(Unsupported {
-            backend: "virtual desktop",
-        });
         Self {
             input,
             window,
             screen,
             uia,
             launcher,
-            virtual_desktop,
         }
     }
 
@@ -319,9 +310,6 @@ pub fn production_backends() -> Backends {
             super::input::LiveInputOptIn::production(),
         ));
         Backends {
-            virtual_desktop: Arc::new(super::virtual_desktops::ShortcutVirtualDesktopBackend::new(
-                input.clone(),
-            )),
             input,
             window: Arc::new(super::windows::Win32WindowBackend),
             screen: Arc::new(super::screen::WindowsScreenBackend::system()),
@@ -355,20 +343,6 @@ impl LauncherBackend for Unsupported {
         unsupported()
     }
 }
-impl VirtualDesktopBackend for Unsupported {
-    fn execute(&self, action: MkVirtualDesktopAction) -> ExecResult {
-        unsupported_context(
-            self.backend,
-            match action {
-                MkVirtualDesktopAction::Create => "create",
-                MkVirtualDesktopAction::SwitchLeft => "switch left",
-                MkVirtualDesktopAction::SwitchRight => "switch right",
-                MkVirtualDesktopAction::CloseCurrent => "close current",
-            },
-        )
-    }
-}
-
 #[derive(Default)]
 struct ControlState {
     paused: bool,
@@ -491,6 +465,27 @@ impl InputCleanupGuard {
         }
         Ok(())
     }
+    fn hotkey(&mut self, keys: &[MkKey]) -> ExecResult {
+        let mut pressed = 0;
+        let mut result = Ok(());
+        for key in keys {
+            match self.down_key(key) {
+                Ok(()) => pressed += 1,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        for key in keys[..pressed].iter().rev() {
+            if let Err(error) = self.up_key(key)
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
+        }
+        result
+    }
     fn down_button(&mut self, b: MkMouseButton) -> ExecResult {
         self.backend.button_down(b.clone())?;
         self.buttons.push(b);
@@ -580,6 +575,89 @@ mod tests {
             let _guard = InputCleanupGuard::new(fake.clone());
         }
         assert!(fake.events().is_empty());
+    }
+
+    #[test]
+    fn hotkey_cleanup_handles_every_down_failure_and_continues_after_up_failure() {
+        let keys = [MkKey::Meta, MkKey::Control, MkKey::Left];
+        for (position, failed_event) in ["key_down:Meta", "key_down:Control", "key_down:Left"]
+            .into_iter()
+            .enumerate()
+        {
+            let fake = Arc::new(FakeBackend::default());
+            fake.fail(
+                failed_event,
+                ExecutionDiagnostic::new(DiagnosticKind::InputRejected, "injected"),
+            );
+            let mut guard = InputCleanupGuard::new(fake.clone());
+            assert!(guard.hotkey(&keys).is_err());
+            let expected_releases: Vec<_> = keys[..position]
+                .iter()
+                .rev()
+                .map(|key| format!("key_up:{key:?}"))
+                .collect();
+            assert!(fake.events().ends_with(&expected_releases));
+        }
+
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "key_up:Left",
+            ExecutionDiagnostic::new(DiagnosticKind::InputRejected, "injected"),
+        );
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        assert!(guard.hotkey(&keys).is_err());
+        assert!(fake.events().ends_with(&[
+            "key_up:Left".into(),
+            "key_up:Control".into(),
+            "key_up:Meta".into(),
+        ]));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn executor_rejects_virtual_desktop_without_injecting_input() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let error = Executor::new(fake.clone().backends(), control)
+            .execute(
+                &plan(vec![step(
+                    1,
+                    MkAction::VirtualDesktop(super::super::MkVirtualDesktopAction::Create),
+                )]),
+                &|_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
+        assert!(fake.events().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn executor_virtual_desktop_uses_guarded_shortcut() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        Executor::new(fake.clone().backends(), control)
+            .execute(
+                &plan(vec![step(
+                    1,
+                    MkAction::VirtualDesktop(super::super::MkVirtualDesktopAction::Create),
+                )]),
+                &|_| {},
+            )
+            .unwrap();
+        assert_eq!(
+            fake.events(),
+            [
+                "key_down:Meta",
+                "key_down:Control",
+                "key_down:Character(\"D\")",
+                "key_up:Character(\"D\")",
+                "key_up:Control",
+                "key_up:Meta",
+            ]
+        );
     }
 
     #[test]
@@ -1023,15 +1101,7 @@ impl Executor {
                 g.down_key(k)?;
                 g.up_key(k)
             }
-            MkAction::Hotkey(keys) => {
-                for k in keys {
-                    g.down_key(k)?
-                }
-                for k in keys.iter().rev() {
-                    g.up_key(k)?
-                }
-                Ok(())
-            }
+            MkAction::Hotkey(keys) => g.hotkey(keys),
             MkAction::Text(p) => self.backends.input.text(p),
             MkAction::MouseMove(p) => self.move_to(p, playback, v),
             MkAction::MouseDrag(p) => {
@@ -1079,7 +1149,21 @@ impl Executor {
             MkAction::WindowState { matcher, state } => {
                 self.backends.window.set_state(matcher, *state)
             }
-            MkAction::VirtualDesktop(action) => self.backends.virtual_desktop.execute(*action),
+            MkAction::VirtualDesktop(action) => {
+                #[cfg(windows)]
+                {
+                    g.hotkey(&super::virtual_desktops::shortcut(*action))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::UnsupportedOperation,
+                        "Virtual desktop automation is available only on Windows",
+                    )
+                    .context("backend", "virtual desktop")
+                    .context("action", format!("{action:?}")))
+                }
+            }
             MkAction::WindowWait(p) => self.wait_condition(
                 macro_id,
                 &MkCondition::WindowExists {
@@ -1448,7 +1532,6 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WindowWait(_)
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. }
-        | MkAction::VirtualDesktop(_)
         | MkAction::WaitUntil { .. }
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
@@ -1462,6 +1545,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::Break
         | MkAction::Continue
         | MkAction::PixelCheck { .. } => true,
+        MkAction::VirtualDesktop(_) => cfg!(windows),
         // `SystemVisualSearch::find_image` currently returns
         // UnsupportedOperation unconditionally.  A dispatch arm alone is not
         // production support.
@@ -1604,7 +1688,6 @@ pub mod fake {
                 screen: self.clone(),
                 uia: self.clone(),
                 launcher: self.clone(),
-                virtual_desktop: self,
             }
         }
     }
@@ -1738,11 +1821,6 @@ pub mod fake {
         }
         fn command(&self, c: &str, _: Option<&str>) -> ExecResult {
             self.event(format!("command:{c}"))
-        }
-    }
-    impl VirtualDesktopBackend for FakeBackend {
-        fn execute(&self, action: MkVirtualDesktopAction) -> ExecResult {
-            self.event(format!("virtual_desktop:{action:?}"))
         }
     }
 }
