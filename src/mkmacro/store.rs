@@ -35,6 +35,50 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
+    /// Enumerates the canonical PNG assets owned by one macro.
+    pub fn asset_ids(&self, macro_id: u64) -> Result<Vec<u64>> {
+        if macro_id == 0 {
+            anyhow::bail!("macro ID must be non-zero")
+        }
+        let directory = self
+            .inner
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(ASSET_DIRECTORY)
+            .join(macro_id.to_string());
+        let mut ids = Vec::new();
+        match fs::read_dir(&directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if entry.file_type()?.is_file()
+                        && path.extension().and_then(|x| x.to_str()) == Some("png")
+                    {
+                        if let Some(id) = path
+                            .file_stem()
+                            .and_then(|x| x.to_str())
+                            .and_then(|x| x.parse::<u64>().ok())
+                        {
+                            if id > 0
+                                && path.file_stem().and_then(|x| x.to_str())
+                                    == Some(&id.to_string())
+                            {
+                                ids.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("inspect assets for macro {macro_id}"));
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
     /// Returns the lowest unused canonical positive numeric PNG stem.
     pub fn next_asset_id(&self, macro_id: u64) -> Result<u64> {
         if macro_id == 0 {

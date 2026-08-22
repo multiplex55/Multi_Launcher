@@ -563,23 +563,19 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::Continue
         ),
         d!(
-            hidden,
             Visual,
             "Find Image",
             "Find an image",
             &["image"],
             Image,
-            "Image search requires a production visual-search backend before it can be inserted",
             MkAction::ImageFind(ip())
         ),
         d!(
-            hidden,
             Visual,
             "Click Image",
             "Find and click an image",
             &["image", "click"],
             Image,
-            "Image search requires a production visual-search backend before it can be inserted",
             MkAction::ImageClick(ip())
         ),
         d!(

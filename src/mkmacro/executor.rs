@@ -1674,10 +1674,9 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::Continue
         | MkAction::PixelCheck { .. } => true,
         MkAction::VirtualDesktop(_) => cfg!(windows),
-        // `SystemVisualSearch::find_image` currently returns
-        // UnsupportedOperation unconditionally.  A dispatch arm alone is not
-        // production support.
-        MkAction::ImageFind(_) | MkAction::ImageClick(_) => false,
+        // Production installs `ProductionVisualSearch`, backed by the same
+        // screen capture and matcher used by all visual-search execution.
+        MkAction::ImageFind(_) | MkAction::ImageClick(_) => true,
     }
 }
 fn action_name(a: &MkAction) -> &'static str {

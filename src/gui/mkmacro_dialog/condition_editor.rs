@@ -93,6 +93,17 @@ pub fn remove_child(c: &mut MkCondition, index: usize) -> bool {
 }
 
 pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Vec<usize>> {
+    condition_ui_with_assets(ui, condition, &[])
+}
+
+/// Edits a condition tree using only assets from the active macro.  The same
+/// catalog is threaded through every recursive child, so nested conditions do
+/// not lose their authoring context.
+pub fn condition_ui_with_assets(
+    ui: &mut egui::Ui,
+    condition: &mut MkCondition,
+    assets: &[u64],
+) -> Option<Vec<usize>> {
     let mut requested = None;
     ui.group(|ui| {
         let kind = condition_kind(condition);
@@ -149,10 +160,13 @@ pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Ve
                 }
             }
             MkCondition::ImageResult { asset_id, found } => {
-                ui.horizontal(|ui| {
-                    ui.label("Image asset ID");
-                    ui.add(egui::DragValue::new(asset_id));
-                });
+                if assets.is_empty() {
+                    ui.colored_label(egui::Color32::YELLOW, "No reference images. Create or import one through Find Image or Click Image.");
+                } else {
+                    egui::ComboBox::from_label("Reference image")
+                        .selected_text(if assets.contains(asset_id) { format!("{}.png", asset_id) } else { format!("Missing asset (ID {})", asset_id) })
+                        .show_ui(ui, |ui| for id in assets { ui.selectable_value(asset_id, *id, format!("{}.png  ·  ID {}", id, id)); });
+                }
                 egui::ComboBox::from_label("Result")
                     .selected_text(if *found { "Found" } else { "Not found" })
                     .show_ui(ui, |ui| {
@@ -174,11 +188,11 @@ pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Ve
                 });
             }
             MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-                requested = group_ui(ui, conditions)
+                requested = group_ui(ui, conditions, assets)
             }
             MkCondition::Not { condition } => {
                 ui.indent("not-child", |ui| {
-                    if let Some(mut p) = condition_ui(ui, condition) {
+                    if let Some(mut p) = condition_ui_with_assets(ui, condition, assets) {
                         p.insert(0, 0);
                         requested = Some(p)
                     }
@@ -188,12 +202,16 @@ pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Ve
     });
     requested
 }
-fn group_ui(ui: &mut egui::Ui, conditions: &mut Vec<MkCondition>) -> Option<Vec<usize>> {
+fn group_ui(
+    ui: &mut egui::Ui,
+    conditions: &mut Vec<MkCondition>,
+    assets: &[u64],
+) -> Option<Vec<usize>> {
     let mut remove = None;
     let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
-            if let Some(mut p) = condition_ui(ui, child) {
+            if let Some(mut p) = condition_ui_with_assets(ui, child, assets) {
                 p.insert(0, index);
                 requested = Some(p);
             }
