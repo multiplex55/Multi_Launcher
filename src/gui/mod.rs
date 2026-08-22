@@ -1314,8 +1314,12 @@ impl LauncherApp {
             .collect::<HashMap<_, _>>();
         let dashboard_data_cache = DashboardDataCache::new();
         dashboard_data_cache.refresh_all(&plugins);
-        let mkmacro_dialog =
-            MkMacroDialog::new(Arc::clone(&plugins.internal_services().mkmacro_store));
+        let mkmacro_dialog = MkMacroDialog::new_with_authoring_context(
+            Arc::clone(&plugins.internal_services().mkmacro_store),
+            mkmacro_dialog::MkMacroAuthoringContext {
+                launcher_actions: Arc::clone(&actions),
+            },
+        );
         let mut app = Self {
             actions: Arc::clone(&actions),
             query: String::new(),

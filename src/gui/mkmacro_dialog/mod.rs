@@ -3,6 +3,7 @@ pub mod action_editor;
 pub mod condition_editor;
 pub mod image_search_editor;
 mod key_capture;
+pub mod launcher_action_picker;
 mod macro_list;
 mod macro_properties;
 pub mod recorder_controller;
@@ -25,9 +26,17 @@ pub enum DirtyDecision {
     Discard,
 }
 
+/// Immutable launcher data made available to macro authoring.  This is a
+/// snapshot: authoring a macro can never edit the launcher's action list.
+#[derive(Clone, Default)]
+pub struct MkMacroAuthoringContext {
+    pub launcher_actions: Arc<Vec<crate::actions::Action>>,
+}
+
 pub struct MkMacroDialog {
     pub open: bool,
     pub store: Arc<MkMacroStore>,
+    pub authoring_context: MkMacroAuthoringContext,
     pub draft: MkMacroDocument,
     baseline: Arc<MkMacroDocument>,
     pub dirty: bool,
@@ -44,6 +53,7 @@ pub struct MkMacroDialog {
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
     pub window_picker: window_picker::WindowPickerState,
+    pub launcher_action_picker: launcher_action_picker::LauncherActionPickerState,
     pub command_error: Option<String>,
     /// Editable options are copied into the runtime at Start and never mutate an active session.
     pub recorder_options: NormalizationConfig,
@@ -1088,12 +1098,19 @@ mod tests {
 }
 impl MkMacroDialog {
     pub fn new(store: Arc<MkMacroStore>) -> Self {
+        Self::new_with_authoring_context(store, MkMacroAuthoringContext::default())
+    }
+    pub fn new_with_authoring_context(
+        store: Arc<MkMacroStore>,
+        authoring_context: MkMacroAuthoringContext,
+    ) -> Self {
         let baseline = store.snapshot();
         Self {
             open: false,
             draft: (*baseline).clone(),
             baseline,
             store,
+            authoring_context,
             dirty: false,
             conflict: false,
             selected_macro_id: None,
@@ -1108,6 +1125,7 @@ impl MkMacroDialog {
             uia_editor: Default::default(),
             action_editor: Default::default(),
             window_picker: Default::default(),
+            launcher_action_picker: Default::default(),
             command_error: None,
             recorder_options: Default::default(),
             pending_recording: None,
@@ -1390,6 +1408,7 @@ impl MkMacroDialog {
         self.structural_insertion = None;
         self.window_picker
             .cancel("Window picker closed because the macro dialog closed");
+        self.launcher_action_picker.cancel();
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         for result in crate::mkmacro::runtime::take_pending_recordings() {
@@ -1427,6 +1446,7 @@ impl MkMacroDialog {
         }
         action_catalog::show_modal(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
+        launcher_action_picker::show(ui.ctx(), self);
         window_picker::show(ui.ctx(), &mut self.window_picker);
         if self.window_picker.confirm_ready {
             self.window_picker.confirm_ready = false;
