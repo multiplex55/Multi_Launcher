@@ -991,7 +991,8 @@ mod tests {
 
     #[test]
     fn virtual_desktops_are_direct_windows_actions() {
-        let rows: Vec<_> = action_catalog::descriptors()
+        let descriptors = action_catalog::descriptors();
+        let rows: Vec<_> = descriptors
             .iter()
             .filter(|descriptor| matches!((descriptor.make_default)(), MkAction::VirtualDesktop(_)))
             .collect();
