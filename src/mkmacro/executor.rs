@@ -2,8 +2,8 @@
 use super::{
     Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
     MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload, MkTextPayload,
-    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
-    MkWindowPayload, MkWindowState, RuntimeVariables,
+    MkUiPayload, MkValue, MkVirtualDesktopAction, MkWaitOptions, MkWindowMatcher,
+    MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, RuntimeVariables,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -125,6 +125,9 @@ pub trait LauncherBackend: Send + Sync {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult;
     fn command(&self, command: &str, args: Option<&str>) -> ExecResult;
 }
+pub trait VirtualDesktopBackend: Send + Sync {
+    fn execute(&self, action: MkVirtualDesktopAction) -> ExecResult;
+}
 
 #[derive(Clone)]
 pub struct Backends {
@@ -133,6 +136,7 @@ pub struct Backends {
     pub screen: Arc<dyn ScreenBackend>,
     pub uia: Arc<dyn UiAutomationBackend>,
     pub launcher: Arc<dyn LauncherBackend>,
+    pub virtual_desktop: Arc<dyn VirtualDesktopBackend>,
 }
 impl Backends {
     pub fn unsupported() -> Self {
@@ -145,12 +149,16 @@ impl Backends {
         let launcher = Arc::new(Unsupported {
             backend: "launcher",
         });
+        let virtual_desktop = Arc::new(Unsupported {
+            backend: "virtual desktop",
+        });
         Self {
             input,
             window,
             screen,
             uia,
             launcher,
+            virtual_desktop,
         }
     }
 
@@ -307,10 +315,14 @@ pub fn production_backends() -> Backends {
     let unsupported = Backends::unsupported();
     #[cfg(windows)]
     {
+        let input: Arc<dyn InputBackend> = Arc::new(super::input::Win32InputBackend::system(
+            super::input::LiveInputOptIn::production(),
+        ));
         Backends {
-            input: Arc::new(super::input::Win32InputBackend::system(
-                super::input::LiveInputOptIn::production(),
+            virtual_desktop: Arc::new(super::virtual_desktops::ShortcutVirtualDesktopBackend::new(
+                input.clone(),
             )),
+            input,
             window: Arc::new(super::windows::Win32WindowBackend),
             screen: Arc::new(super::screen::WindowsScreenBackend::system()),
             uia: unsupported.uia,
@@ -341,6 +353,19 @@ impl LauncherBackend for Unsupported {
     }
     fn command(&self, _: &str, _: Option<&str>) -> ExecResult {
         unsupported()
+    }
+}
+impl VirtualDesktopBackend for Unsupported {
+    fn execute(&self, action: MkVirtualDesktopAction) -> ExecResult {
+        unsupported_context(
+            self.backend,
+            match action {
+                MkVirtualDesktopAction::Create => "create",
+                MkVirtualDesktopAction::SwitchLeft => "switch left",
+                MkVirtualDesktopAction::SwitchRight => "switch right",
+                MkVirtualDesktopAction::CloseCurrent => "close current",
+            },
+        )
     }
 }
 
@@ -1054,6 +1079,7 @@ impl Executor {
             MkAction::WindowState { matcher, state } => {
                 self.backends.window.set_state(matcher, *state)
             }
+            MkAction::VirtualDesktop(action) => self.backends.virtual_desktop.execute(*action),
             MkAction::WindowWait(p) => self.wait_condition(
                 macro_id,
                 &MkCondition::WindowExists {
@@ -1422,6 +1448,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WindowWait(_)
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. }
+        | MkAction::VirtualDesktop(_)
         | MkAction::WaitUntil { .. }
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
@@ -1459,6 +1486,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::WindowWait(_)
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. } => "window",
+        MkAction::VirtualDesktop(_) => "virtual desktop",
         MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::PixelCheck { .. } => "screen",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
@@ -1575,7 +1603,8 @@ pub mod fake {
                 window: self.clone(),
                 screen: self.clone(),
                 uia: self.clone(),
-                launcher: self,
+                launcher: self.clone(),
+                virtual_desktop: self,
             }
         }
     }
@@ -1709,6 +1738,11 @@ pub mod fake {
         }
         fn command(&self, c: &str, _: Option<&str>) -> ExecResult {
             self.event(format!("command:{c}"))
+        }
+    }
+    impl VirtualDesktopBackend for FakeBackend {
+        fn execute(&self, action: MkVirtualDesktopAction) -> ExecResult {
+            self.event(format!("virtual_desktop:{action:?}"))
         }
     }
 }

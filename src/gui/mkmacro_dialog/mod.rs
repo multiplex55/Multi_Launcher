@@ -373,6 +373,7 @@ mod tests {
                     | MkAction::WhileEnd
                     | MkAction::Break
                     | MkAction::Continue
+                    | MkAction::VirtualDesktop(_)
             ));
         }
     }
@@ -831,14 +832,17 @@ mod tests {
                 "{}",
                 context("serialization", &action)
             );
-            // Window state operations intentionally share one serialized action
-            // variant while remaining three separately discoverable catalog rows.
-            // Include the state in the catalog identity so this invariant still
-            // catches accidental duplicate descriptors for every other action.
+            // Some typed action families intentionally share one serialized action
+            // variant while remaining separately discoverable catalog rows. Include
+            // the typed operation in their catalog identity so this invariant still
+            // catches genuinely duplicated descriptors.
             let variant = (
                 std::mem::discriminant(&action),
                 match &action {
-                    MkAction::WindowState { state, .. } => Some(*state),
+                    MkAction::WindowState { state, .. } => Some(format!("window:{state:?}")),
+                    MkAction::VirtualDesktop(operation) => {
+                        Some(format!("virtual_desktop:{operation:?}"))
+                    }
                     _ => None,
                 },
             );
