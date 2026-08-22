@@ -67,11 +67,11 @@ impl WindowsVirtualDesktopBackend {
                 }
                 return Err(error);
             }
-            pressed.push(key);
+            pressed.push(key.clone());
         }
         let mut result = Ok(());
         for key in pressed.into_iter().rev() {
-            if let Err(error) = self.0.key_up(key) {
+            if let Err(error) = self.0.key_up(&key) {
                 if result.is_ok() {
                     result = Err(error);
                 }
