@@ -141,6 +141,7 @@ pub struct Backends {
     pub launcher: Arc<dyn LauncherBackend>,
     pub prompt: Arc<dyn PromptBackend>,
     pub clipboard: Arc<dyn ClipboardBackend>,
+    pub virtual_desktop: Arc<dyn super::virtual_desktops::VirtualDesktopBackend>,
 }
 impl Backends {
     pub fn unsupported() -> Self {
@@ -165,6 +166,7 @@ impl Backends {
             launcher,
             prompt,
             clipboard,
+            virtual_desktop: Arc::new(super::virtual_desktops::UnsupportedVirtualDesktopBackend),
         }
     }
 
@@ -333,6 +335,9 @@ pub fn production_backends() -> Backends {
             super::input::LiveInputOptIn::production(),
         ));
         Backends {
+            virtual_desktop: Arc::new(super::virtual_desktops::WindowsVirtualDesktopBackend(
+                input.clone(),
+            )),
             input,
             window: Arc::new(super::windows::Win32WindowBackend),
             screen: Arc::new(super::screen::WindowsScreenBackend::system()),
@@ -724,51 +729,50 @@ mod tests {
         ]));
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn executor_rejects_virtual_desktop_without_injecting_input() {
+    fn executor_dispatches_every_virtual_desktop_operation_to_injected_backend() {
         let fake = Arc::new(FakeBackend::default());
+        let actions = [
+            super::super::MkVirtualDesktopAction::Create,
+            super::super::MkVirtualDesktopAction::SwitchLeft,
+            super::super::MkVirtualDesktopAction::SwitchRight,
+            super::super::MkVirtualDesktopAction::CloseCurrent,
+        ];
+        for (index, action) in actions.into_iter().enumerate() {
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            Executor::new(fake.clone().backends(), control)
+                .execute(
+                    &plan(vec![step(
+                        index as u64 + 1,
+                        MkAction::VirtualDesktop(action),
+                    )]),
+                    &|_| {},
+                )
+                .unwrap();
+        }
+        assert_eq!(*fake.virtual_desktop_calls.lock().unwrap(), actions);
+        assert!(
+            fake.events()
+                .iter()
+                .all(|event| event.starts_with("virtual_desktop:"))
+        );
+
+        let diagnostic = ExecutionDiagnostic::new(DiagnosticKind::Backend, "desktop refused")
+            .context("operation", "create");
+        fake.fail("virtual_desktop:Create", diagnostic.clone());
         let control = Arc::new(RunControl::default());
         control.reset();
         let error = Executor::new(fake.clone().backends(), control)
             .execute(
                 &plan(vec![step(
-                    1,
+                    9,
                     MkAction::VirtualDesktop(super::super::MkVirtualDesktopAction::Create),
                 )]),
                 &|_| {},
             )
             .unwrap_err();
-        assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
-        assert!(fake.events().is_empty());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn executor_virtual_desktop_uses_guarded_shortcut() {
-        let fake = Arc::new(FakeBackend::default());
-        let control = Arc::new(RunControl::default());
-        control.reset();
-        Executor::new(fake.clone().backends(), control)
-            .execute(
-                &plan(vec![step(
-                    1,
-                    MkAction::VirtualDesktop(super::super::MkVirtualDesktopAction::Create),
-                )]),
-                &|_| {},
-            )
-            .unwrap();
-        assert_eq!(
-            fake.events(),
-            [
-                "key_down:Meta",
-                "key_down:Control",
-                "key_down:Character(\"D\")",
-                "key_up:Character(\"D\")",
-                "key_up:Control",
-                "key_up:Meta",
-            ]
-        );
+        assert_eq!(error, diagnostic);
     }
 
     #[test]
@@ -1352,21 +1356,18 @@ impl Executor {
             MkAction::WindowState { matcher, state } => {
                 self.backends.window.set_state(matcher, *state)
             }
-            MkAction::VirtualDesktop(action) => {
-                #[cfg(windows)]
-                {
-                    g.hotkey(&super::virtual_desktops::shortcut(*action))
+            MkAction::VirtualDesktop(action) => match action {
+                super::MkVirtualDesktopAction::Create => self.backends.virtual_desktop.create(),
+                super::MkVirtualDesktopAction::SwitchLeft => {
+                    self.backends.virtual_desktop.switch_left()
                 }
-                #[cfg(not(windows))]
-                {
-                    Err(ExecutionDiagnostic::new(
-                        DiagnosticKind::UnsupportedOperation,
-                        "Virtual desktop automation is available only on Windows",
-                    )
-                    .context("backend", "virtual desktop")
-                    .context("action", format!("{action:?}")))
+                super::MkVirtualDesktopAction::SwitchRight => {
+                    self.backends.virtual_desktop.switch_right()
                 }
-            }
+                super::MkVirtualDesktopAction::CloseCurrent => {
+                    self.backends.virtual_desktop.close_current()
+                }
+            },
             MkAction::WindowWait(p) => self.wait_condition(
                 macro_id,
                 &MkCondition::WindowExists {
@@ -1855,6 +1856,15 @@ pub fn compare(a: &MkValue, op: &MkCompareOp, b: &MkValue) -> ExecResult<bool> {
 /// Configurable synchronized fake implementing every effect boundary.
 pub mod fake {
     use super::*;
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum WindowCall {
+        Exists(MkWindowMatcher),
+        IsActive(MkWindowMatcher),
+        Activate(MkWindowPayload),
+        Close(MkWindowMatcher),
+        MoveResize(MkWindowMoveResizePayload),
+        SetState(MkWindowMatcher, MkWindowState),
+    }
     pub struct FakeBackend {
         pub events: Mutex<Vec<String>>,
         pub failures: Mutex<HashMap<String, ExecutionDiagnostic>>,
@@ -1864,6 +1874,8 @@ pub mod fake {
         pub processes: Mutex<Vec<MkProcessPayload>>,
         pub commands: Mutex<Vec<(String, Option<String>)>>,
         pub prompts: Mutex<Vec<PromptRequest>>,
+        pub window_calls: Mutex<Vec<WindowCall>>,
+        pub virtual_desktop_calls: Mutex<Vec<super::super::MkVirtualDesktopAction>>,
     }
     impl Default for FakeBackend {
         fn default() -> Self {
@@ -1876,6 +1888,8 @@ pub mod fake {
                 processes: Mutex::new(Vec::new()),
                 commands: Mutex::new(Vec::new()),
                 prompts: Mutex::new(Vec::new()),
+                window_calls: Mutex::new(Vec::new()),
+                virtual_desktop_calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1903,6 +1917,7 @@ pub mod fake {
                 launcher: self.clone(),
                 prompt: self.clone(),
                 clipboard: self.clone(),
+                virtual_desktop: self.clone(),
             }
         }
         pub fn script_prompt(&self, response: PromptResponse) {
@@ -1936,8 +1951,32 @@ pub mod fake {
             self.event(format!("text:{}", p.text))
         }
     }
+    impl super::super::virtual_desktops::VirtualDesktopBackend for FakeBackend {
+        fn create(&self) -> ExecResult {
+            self.virtual_desktop(super::super::MkVirtualDesktopAction::Create)
+        }
+        fn switch_left(&self) -> ExecResult {
+            self.virtual_desktop(super::super::MkVirtualDesktopAction::SwitchLeft)
+        }
+        fn switch_right(&self) -> ExecResult {
+            self.virtual_desktop(super::super::MkVirtualDesktopAction::SwitchRight)
+        }
+        fn close_current(&self) -> ExecResult {
+            self.virtual_desktop(super::super::MkVirtualDesktopAction::CloseCurrent)
+        }
+    }
+    impl FakeBackend {
+        fn virtual_desktop(&self, action: super::super::MkVirtualDesktopAction) -> ExecResult {
+            self.virtual_desktop_calls.lock().unwrap().push(action);
+            self.event(format!("virtual_desktop:{action:?}"))
+        }
+    }
     impl WindowBackend for FakeBackend {
-        fn exists(&self, _: &MkWindowMatcher) -> ExecResult<bool> {
+        fn exists(&self, matcher: &MkWindowMatcher) -> ExecResult<bool> {
+            self.window_calls
+                .lock()
+                .unwrap()
+                .push(WindowCall::Exists(matcher.clone()));
             Ok(*self
                 .conditions
                 .lock()
@@ -1945,7 +1984,11 @@ pub mod fake {
                 .get("window_exists")
                 .unwrap_or(&false))
         }
-        fn is_active(&self, _: &MkWindowMatcher) -> ExecResult<bool> {
+        fn is_active(&self, matcher: &MkWindowMatcher) -> ExecResult<bool> {
+            self.window_calls
+                .lock()
+                .unwrap()
+                .push(WindowCall::IsActive(matcher.clone()));
             Ok(*self
                 .conditions
                 .lock()
@@ -1953,16 +1996,32 @@ pub mod fake {
                 .get("window_active")
                 .unwrap_or(&false))
         }
-        fn activate(&self, _: &MkWindowPayload) -> ExecResult {
+        fn activate(&self, payload: &MkWindowPayload) -> ExecResult {
+            self.window_calls
+                .lock()
+                .unwrap()
+                .push(WindowCall::Activate(payload.clone()));
             self.event("window_activate".into())
         }
-        fn close(&self, _: &MkWindowMatcher) -> ExecResult {
+        fn close(&self, matcher: &MkWindowMatcher) -> ExecResult {
+            self.window_calls
+                .lock()
+                .unwrap()
+                .push(WindowCall::Close(matcher.clone()));
             self.event("window_close".into())
         }
-        fn move_resize(&self, _: &MkWindowMoveResizePayload) -> ExecResult {
+        fn move_resize(&self, payload: &MkWindowMoveResizePayload) -> ExecResult {
+            self.window_calls
+                .lock()
+                .unwrap()
+                .push(WindowCall::MoveResize(payload.clone()));
             self.event("window_move_resize".into())
         }
-        fn set_state(&self, _: &MkWindowMatcher, state: MkWindowState) -> ExecResult {
+        fn set_state(&self, matcher: &MkWindowMatcher, state: MkWindowState) -> ExecResult {
+            self.window_calls
+                .lock()
+                .unwrap()
+                .push(WindowCall::SetState(matcher.clone(), state));
             self.event(format!("window_state:{state:?}"))
         }
     }
