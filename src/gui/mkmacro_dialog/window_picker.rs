@@ -736,7 +736,9 @@ mod tests {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 id: 1,
-                name: "handles stay transient".into(),
+                // Keep document metadata neutral so forbidden-field checks below only inspect
+                // serialized schema/values rather than matching prose in this fixture.
+                name: "window matcher serialization".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
@@ -770,7 +772,10 @@ mod tests {
             assert!(json.contains(stable));
         }
         for transient in ["handle", "hwnd", "native_root_id", "305419896", "12345678"] {
-            assert!(!json.to_lowercase().contains(transient));
+            assert!(
+                !json.to_lowercase().contains(transient),
+                "serialized document unexpectedly contained transient marker {transient:?}: {json}"
+            );
         }
     }
     #[test]
