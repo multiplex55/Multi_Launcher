@@ -96,6 +96,29 @@ pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Ve
     condition_ui_with_assets(ui, condition, &[])
 }
 
+/// Resolves the same recursive path shape returned by `condition_ui` when the
+/// picker button for the first window condition is requested. Kept private to
+/// the dialog module so routing tests do not expose editor internals publicly.
+#[cfg(test)]
+pub(super) fn first_window_picker_path(condition: &MkCondition) -> Option<Vec<usize>> {
+    match condition {
+        MkCondition::WindowExists { .. } | MkCondition::WindowActive { .. } => Some(vec![]),
+        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+            conditions.iter().enumerate().find_map(|(index, child)| {
+                first_window_picker_path(child).map(|mut path| {
+                    path.insert(0, index);
+                    path
+                })
+            })
+        }
+        MkCondition::Not { condition } => first_window_picker_path(condition).map(|mut path| {
+            path.insert(0, 0);
+            path
+        }),
+        _ => None,
+    }
+}
+
 /// Edits a condition tree using only assets from the active macro.  The same
 /// catalog is threaded through every recursive child, so nested conditions do
 /// not lose their authoring context.
