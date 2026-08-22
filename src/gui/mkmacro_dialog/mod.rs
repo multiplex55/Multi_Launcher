@@ -831,7 +831,17 @@ mod tests {
                 "{}",
                 context("serialization", &action)
             );
-            let variant = std::mem::discriminant(&action);
+            // Window state operations intentionally share one serialized action
+            // variant while remaining three separately discoverable catalog rows.
+            // Include the state in the catalog identity so this invariant still
+            // catches accidental duplicate descriptors for every other action.
+            let variant = (
+                std::mem::discriminant(&action),
+                match &action {
+                    MkAction::WindowState { state, .. } => Some(*state),
+                    _ => None,
+                },
+            );
             assert!(
                 variants.insert(variant),
                 "duplicate action variant for {}",
