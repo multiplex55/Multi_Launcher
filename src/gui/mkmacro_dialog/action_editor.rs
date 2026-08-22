@@ -1004,6 +1004,66 @@ fn action_ui(
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
         }
+        MkAction::WindowMoveResize(p) => {
+            if matcher_ui(ui, &mut p.matcher) {
+                window_pick = Some(super::window_picker::MatcherPath::Action);
+            }
+            let mut moving = p.x.is_some() && p.y.is_some();
+            if ui.checkbox(&mut moving, "Move").changed() {
+                if moving {
+                    p.x = Some(0);
+                    p.y = Some(0);
+                } else {
+                    p.x = None;
+                    p.y = None;
+                }
+            }
+            if moving {
+                ui.horizontal(|ui| {
+                    ui.label("X");
+                    ui.add(egui::DragValue::new(p.x.as_mut().unwrap()));
+                    ui.label("Y");
+                    ui.add(egui::DragValue::new(p.y.as_mut().unwrap()));
+                });
+            }
+            let mut resizing = p.width.is_some() && p.height.is_some();
+            if ui.checkbox(&mut resizing, "Resize").changed() {
+                if resizing {
+                    p.width = Some(1200);
+                    p.height = Some(800);
+                } else {
+                    p.width = None;
+                    p.height = None;
+                }
+            }
+            if resizing {
+                ui.horizontal(|ui| {
+                    ui.label("Width");
+                    ui.add(
+                        egui::DragValue::new(p.width.as_mut().unwrap()).clamp_range(1..=u32::MAX),
+                    );
+                    ui.label("Height");
+                    ui.add(
+                        egui::DragValue::new(p.height.as_mut().unwrap()).clamp_range(1..=u32::MAX),
+                    );
+                });
+            }
+            if !moving && !resizing {
+                ui.colored_label(ui.visuals().error_fg_color, "Enable Move or Resize");
+            }
+        }
+        MkAction::WindowState { matcher, state } => {
+            if matcher_ui(ui, matcher) {
+                window_pick = Some(super::window_picker::MatcherPath::Action);
+            }
+            egui::ComboBox::from_label("Window state")
+                .selected_text(format!("{state:?}"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(state, MkWindowState::Minimize, "Minimize");
+                    ui.selectable_value(state, MkWindowState::Maximize, "Maximize");
+                    ui.selectable_value(state, MkWindowState::Restore, "Restore");
+                });
+        }
         MkAction::SetVariable { name, value } => {
             ui.horizontal(|ui| {
                 ui.label("Name");
@@ -1227,6 +1287,8 @@ fn matcher_at_path<'a>(
         MatcherPath::Action => match action {
             MkAction::WindowActivate(p) | MkAction::WindowWait(p) => Some(&mut p.matcher),
             MkAction::WindowClose(m) => Some(m),
+            MkAction::WindowMoveResize(p) => Some(&mut p.matcher),
+            MkAction::WindowState { matcher, .. } => Some(matcher),
             _ => None,
         },
         MatcherPath::Condition(path) => match action {

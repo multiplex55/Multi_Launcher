@@ -351,6 +351,25 @@ pub struct MkWindowPayload {
     #[serde(default)]
     pub wait: Option<MkWaitOptions>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkWindowState {
+    Minimize,
+    Maximize,
+    Restore,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkWindowMoveResizePayload {
+    pub matcher: MkWindowMatcher,
+    #[serde(default)]
+    pub x: Option<i32>,
+    #[serde(default)]
+    pub y: Option<i32>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkImagePayload {
     pub asset_id: u64,
@@ -398,6 +417,11 @@ pub enum MkAction {
     WindowActivate(MkWindowPayload),
     WindowClose(MkWindowMatcher),
     WindowWait(MkWindowPayload),
+    WindowMoveResize(MkWindowMoveResizePayload),
+    WindowState {
+        matcher: MkWindowMatcher,
+        state: MkWindowState,
+    },
     /// The single polling action. Window/image/pixel wait rows are editor conveniences
     /// and are normalized to this behavior by the executor.
     WaitUntil {
@@ -504,6 +528,71 @@ mod image_payload_tests {
             MkCoordinateTarget::ActiveWindow {
                 point: MkPoint { x: 1, y: 2 }
             }
+        );
+    }
+    #[test]
+    fn new_window_actions_have_stable_tags_and_round_trip() {
+        let matcher = MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        };
+        let actions = [
+            MkAction::WindowMoveResize(MkWindowMoveResizePayload {
+                matcher: matcher.clone(),
+                x: Some(-1920),
+                y: Some(-20),
+                width: None,
+                height: None,
+            }),
+            MkAction::WindowMoveResize(MkWindowMoveResizePayload {
+                matcher: matcher.clone(),
+                x: None,
+                y: None,
+                width: Some(1200),
+                height: Some(800),
+            }),
+            MkAction::WindowMoveResize(MkWindowMoveResizePayload {
+                matcher: matcher.clone(),
+                x: Some(-1),
+                y: Some(2),
+                width: Some(3),
+                height: Some(4),
+            }),
+            MkAction::WindowState {
+                matcher: matcher.clone(),
+                state: MkWindowState::Minimize,
+            },
+            MkAction::WindowState {
+                matcher: matcher.clone(),
+                state: MkWindowState::Maximize,
+            },
+            MkAction::WindowState {
+                matcher,
+                state: MkWindowState::Restore,
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert!(
+                json.contains(if matches!(action, MkAction::WindowMoveResize(_)) {
+                    r#""type":"window_move_resize""#
+                } else {
+                    r#""type":"window_state""#
+                })
+            );
+            assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+        }
+        assert_eq!(
+            serde_json::to_string(&MkWindowState::Minimize).unwrap(),
+            r#""minimize""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MkWindowState::Maximize).unwrap(),
+            r#""maximize""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MkWindowState::Restore).unwrap(),
+            r#""restore""#
         );
     }
 }

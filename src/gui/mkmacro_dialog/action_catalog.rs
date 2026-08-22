@@ -358,6 +358,53 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             MkAction::WindowWait(wp())
         ),
         d!(
+            Windows,
+            "Move / Resize Window",
+            "Move or resize a matching window",
+            &["window", "move", "position", "resize", "size"],
+            Window,
+            MkAction::WindowMoveResize(MkWindowMoveResizePayload {
+                matcher: matcher(),
+                x: Some(0),
+                y: Some(0),
+                width: None,
+                height: None
+            })
+        ),
+        d!(
+            Windows,
+            "Minimize Window",
+            "Minimize a matching window",
+            &["window", "minimize"],
+            Window,
+            MkAction::WindowState {
+                matcher: matcher(),
+                state: MkWindowState::Minimize
+            }
+        ),
+        d!(
+            Windows,
+            "Maximize Window",
+            "Maximize a matching window",
+            &["window", "maximize"],
+            Window,
+            MkAction::WindowState {
+                matcher: matcher(),
+                state: MkWindowState::Maximize
+            }
+        ),
+        d!(
+            Windows,
+            "Restore Window",
+            "Restore a matching window",
+            &["window", "restore"],
+            Window,
+            MkAction::WindowState {
+                matcher: matcher(),
+                state: MkWindowState::Restore
+            }
+        ),
+        d!(
             ProgramsLauncher,
             "Run Program",
             "Start a program",
@@ -601,9 +648,11 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         MkAction::Delay { .. } => EditorKind::Timing,
         MkAction::Process(_) => EditorKind::Process,
         MkAction::LauncherCommand { .. } => EditorKind::Launcher,
-        MkAction::WindowActivate(_) | MkAction::WindowClose(_) | MkAction::WindowWait(_) => {
-            EditorKind::Window
-        }
+        MkAction::WindowActivate(_)
+        | MkAction::WindowClose(_)
+        | MkAction::WindowWait(_)
+        | MkAction::WindowMoveResize(_)
+        | MkAction::WindowState { .. } => EditorKind::Window,
         MkAction::If(_) | MkAction::WhileStart { .. } | MkAction::WaitUntil { .. } => {
             EditorKind::Condition
         }
@@ -736,6 +785,19 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::WindowActivate(_) => "Activate Window",
         MkAction::WindowClose(_) => "Close Window",
         MkAction::WindowWait(_) => "Wait for Window",
+        MkAction::WindowMoveResize(_) => "Move / Resize Window",
+        MkAction::WindowState {
+            state: MkWindowState::Minimize,
+            ..
+        } => "Minimize Window",
+        MkAction::WindowState {
+            state: MkWindowState::Maximize,
+            ..
+        } => "Maximize Window",
+        MkAction::WindowState {
+            state: MkWindowState::Restore,
+            ..
+        } => "Restore Window",
         MkAction::WaitUntil { .. } => "Wait Until",
         MkAction::SetVariable { .. } => "Set Variable",
         MkAction::UnsetVariable { .. } => "Unset Variable",
@@ -834,6 +896,25 @@ pub fn action_details(a: &MkAction) -> String {
             format!("Window {}", p.matcher.title.as_deref().unwrap_or("match"))
         }
         MkAction::WindowClose(p) => format!("Window {}", p.title.as_deref().unwrap_or("match")),
+        MkAction::WindowMoveResize(p) => {
+            let mut operations = Vec::new();
+            if let (Some(x), Some(y)) = (p.x, p.y) {
+                operations.push(format!("Move to ({x}, {y})"));
+            }
+            if let (Some(w), Some(h)) = (p.width, p.height) {
+                operations.push(format!("Resize to {w} × {h}"));
+            }
+            format!(
+                "{} · Window {}",
+                operations.join(" + "),
+                p.matcher.title.as_deref().unwrap_or("match")
+            )
+        }
+        MkAction::WindowState { matcher, state } => format!(
+            "{:?} · Window {}",
+            state,
+            matcher.title.as_deref().unwrap_or("match")
+        ),
         MkAction::WaitUntil { wait, .. } => format!("Timeout {} ms", wait.timeout_ms),
         MkAction::If(_) | MkAction::WhileStart { .. } => "Condition".into(),
         MkAction::Else

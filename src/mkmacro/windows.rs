@@ -1,8 +1,66 @@
 //! Window discovery and matching. Persist matchers, never native handles.
 use super::{
-    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkWindowMatcher, MkWindowPayload,
-    WindowBackend,
+    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkWindowMatcher, MkWindowMoveResizePayload,
+    MkWindowPayload, MkWindowState, WindowBackend,
 };
+use crate::multi_manager::model::MmRect;
+
+/// Combines optional operations with the current rectangle. The platform mover
+/// restores minimized windows before applying this rectangle; it does not
+/// explicitly restore maximized windows.
+pub(crate) fn merge_window_geometry(
+    current: MmRect,
+    p: &MkWindowMoveResizePayload,
+) -> ExecResult<MmRect> {
+    let (x, y): (i32, i32) = match (p.x, p.y) {
+        (Some(x), Some(y)) => (x, y),
+        (None, None) => (current.x, current.y),
+        _ => {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Move requires both X and Y",
+            ));
+        }
+    };
+    let (w, h): (i32, i32) = match (p.width, p.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (
+            i32::try_from(w).map_err(|_| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "window width exceeds the platform range",
+                )
+            })?,
+            i32::try_from(h).map_err(|_| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "window height exceeds the platform range",
+                )
+            })?,
+        ),
+        (None, None) => (current.w, current.h),
+        (Some(0), _) | (_, Some(0)) => {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "window dimensions must be positive",
+            ));
+        }
+        _ => {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Resize requires both Width and Height",
+            ));
+        }
+    };
+    x.checked_add(w)
+        .and_then(|_| y.checked_add(h))
+        .ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "window rectangle arithmetic overflow",
+            )
+        })?;
+    Ok(MmRect { x, y, w, h })
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowCandidate {
     pub handle: usize,
@@ -149,6 +207,54 @@ impl WindowBackend for Win32WindowBackend {
     fn close(&self, m: &MkWindowMatcher) -> ExecResult {
         close_handle(self.one(m)?.handle)
     }
+    fn move_resize(&self, p: &MkWindowMoveResizePayload) -> ExecResult {
+        let handle = self.one(&p.matcher)?.handle;
+        let current = crate::multi_manager::win::window_rect(handle).ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "failed to read the resolved window rectangle",
+            )
+        })?;
+        let rect = merge_window_geometry(current, p)?;
+        crate::multi_manager::win::move_window_to_rect(handle, rect).map_err(|e| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!("failed to move/resize window: {e}"),
+            )
+        })
+    }
+    fn set_state(&self, m: &MkWindowMatcher, state: MkWindowState) -> ExecResult {
+        set_state_handle(self.one(m)?.handle, state)
+    }
+}
+#[cfg(not(windows))]
+fn set_state_handle(_: usize, _: MkWindowState) -> ExecResult {
+    Err(ExecutionDiagnostic::new(
+        DiagnosticKind::UnsupportedOperation,
+        "window state changes are available only on Windows",
+    ))
+}
+#[cfg(windows)]
+fn set_state_handle(h: usize, state: MkWindowState) -> ExecResult {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindow, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, ShowWindow,
+    };
+    let hwnd = HWND(h as *mut _);
+    if !unsafe { IsWindow(hwnd) }.as_bool() {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            "resolved window handle is no longer valid",
+        ));
+    }
+    let command = match state {
+        MkWindowState::Minimize => SW_MINIMIZE,
+        MkWindowState::Maximize => SW_MAXIMIZE,
+        MkWindowState::Restore => SW_RESTORE,
+    };
+    // ShowWindow returns the previous visibility state, not operation success.
+    let _previously_visible = unsafe { ShowWindow(hwnd, command) };
+    Ok(())
 }
 #[cfg(not(windows))]
 fn activate_handle(_: usize) -> ExecResult {
@@ -199,6 +305,63 @@ mod tests {
             process_path: format!("C:\\bin\\{e}"),
             class_name: "Class".into(),
         }
+    }
+    fn geometry(
+        x: Option<i32>,
+        y: Option<i32>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> MkWindowMoveResizePayload {
+        MkWindowMoveResizePayload {
+            matcher: MkWindowMatcher::default(),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+    #[test]
+    fn geometry_merge_operations_and_overflow() {
+        let old = MmRect {
+            x: 10,
+            y: 20,
+            w: 300,
+            h: 200,
+        };
+        assert_eq!(
+            merge_window_geometry(old, &geometry(Some(-5), Some(-6), None, None)).unwrap(),
+            MmRect {
+                x: -5,
+                y: -6,
+                w: 300,
+                h: 200
+            }
+        );
+        assert_eq!(
+            merge_window_geometry(old, &geometry(None, None, Some(40), Some(50))).unwrap(),
+            MmRect {
+                x: 10,
+                y: 20,
+                w: 40,
+                h: 50
+            }
+        );
+        assert_eq!(
+            merge_window_geometry(old, &geometry(Some(1), Some(2), Some(3), Some(4))).unwrap(),
+            MmRect {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4
+            }
+        );
+        assert!(
+            merge_window_geometry(old, &geometry(Some(i32::MAX), Some(0), Some(1), Some(1)))
+                .is_err()
+        );
+        assert!(
+            merge_window_geometry(old, &geometry(None, None, Some(u32::MAX), Some(1))).is_err()
+        );
     }
     #[test]
     fn matching_and_ambiguity() {
