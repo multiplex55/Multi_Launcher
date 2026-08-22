@@ -66,6 +66,21 @@ pub struct WindowPickerState {
     native: NativeScreenPicker,
 }
 
+/// Injectable boundary between picker state and native desktop enumeration.
+pub trait WindowEnumerationBackend {
+    fn enumerate(&self) -> Result<Vec<WindowCandidate>, String>;
+}
+
+struct NativeWindowEnumerationBackend;
+
+impl WindowEnumerationBackend for NativeWindowEnumerationBackend {
+    fn enumerate(&self) -> Result<Vec<WindowCandidate>, String> {
+        crate::multi_manager::win::enumerate_top_level_windows()
+            .map(|windows| windows.into_iter().map(WindowCandidate::from).collect())
+            .map_err(|error| error.to_string())
+    }
+}
+
 impl Default for WindowPickerState {
     fn default() -> Self {
         Self {
@@ -151,11 +166,15 @@ impl WindowPickerState {
         self.message = Some(message.into());
     }
     pub fn refresh(&mut self) {
+        self.refresh_with_backend(&NativeWindowEnumerationBackend);
+    }
+    pub fn refresh_with_backend<B: WindowEnumerationBackend + ?Sized>(&mut self, backend: &B) {
         self.error = None;
-        match crate::multi_manager::win::enumerate_top_level_windows() {
+        self.selected = None;
+        self.confirm_ready = false;
+        match backend.enumerate() {
             Ok(v) => {
-                self.candidates = v.into_iter().map(WindowCandidate::from).collect();
-                self.selected = None;
+                self.candidates = v;
             }
             Err(e) => {
                 self.candidates.clear();
@@ -164,12 +183,19 @@ impl WindowPickerState {
         }
     }
     fn preview(&mut self, candidate: WindowCandidate) {
-        self.executable = candidate
-            .executable
+        let executable = candidate.executable.trim();
+        self.executable = executable
             .rsplit(['/', '\\'])
             .next()
             .filter(|v| !v.is_empty())
-            .or_else(|| candidate.process_path.rsplit(['/', '\\']).next())
+            .or_else(|| {
+                candidate
+                    .process_path
+                    .trim()
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .filter(|v| !v.is_empty())
+            })
             .unwrap_or_default()
             .to_owned();
         self.title = candidate.title;
@@ -434,6 +460,7 @@ pub fn show(ctx: &egui::Context, state: &mut WindowPickerState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::RefCell, collections::VecDeque};
     fn c(h: usize, t: &str, e: &str, k: &str, p: &str) -> WindowCandidate {
         WindowCandidate {
             handle: h,
@@ -515,6 +542,157 @@ mod tests {
         assert_eq!(m.title_regex.as_deref(), Some("^Editor"));
     }
     #[test]
+    fn requested_default_candidate_conversion() {
+        let mut s = WindowPickerState::default();
+        s.candidates.push(c(
+            0x1234,
+            "Rust Workspace",
+            "explorer.exe",
+            "CabinetWClass",
+            r"C:\Windows\explorer.exe",
+        ));
+        s.choose_index(0);
+        let m = matcher_from_preview(&s).unwrap();
+        assert_eq!(m.process.as_deref(), Some("explorer.exe"));
+        assert_eq!(m.title.as_deref(), Some("Rust Workspace"));
+        assert_eq!(m.class, None);
+        assert_eq!(m.title_regex, None);
+    }
+
+    #[test]
+    fn matcher_fields_are_independently_constructed() {
+        let mut s = preview();
+        s.title = "  ".into();
+        assert_eq!(matcher_from_preview(&s).unwrap().title, None);
+
+        s.title_enabled = false;
+        s.class_enabled = false;
+        let m = matcher_from_preview(&s).unwrap();
+        assert_eq!(m.process.as_deref(), Some("edit.exe"));
+        assert_eq!((m.title, m.class, m.title_regex), (None, None, None));
+
+        let mut s = preview();
+        s.class_enabled = true;
+        let m = matcher_from_preview(&s).unwrap();
+        assert_eq!(m.class.as_deref(), Some("Main"));
+        assert_eq!(m.process.as_deref(), Some("edit.exe"));
+        assert_eq!(m.title.as_deref(), Some("Editor - file"));
+
+        s.regex_enabled = true;
+        s.regex = r"^Editor\s+\-\s+file$".into();
+        let m = matcher_from_preview(&s).unwrap();
+        assert_eq!(m.title_regex.as_deref(), Some(r"^Editor\s+\-\s+file$"));
+        assert_eq!(m.title, None);
+    }
+
+    #[test]
+    fn validation_errors_are_actionable() {
+        let mut s = preview();
+        s.regex_enabled = true;
+        s.regex = "[".into();
+        let error = matcher_from_preview(&s).unwrap_err();
+        assert!(error.starts_with("Invalid title regex:"));
+
+        s.regex_enabled = false;
+        s.executable_enabled = false;
+        s.title_enabled = true;
+        s.title = " \t ".into();
+        s.class_enabled = true;
+        s.class_name = "".into();
+        assert_eq!(
+            matcher_from_preview(&s).unwrap_err(),
+            "Enable and enter at least one matching criterion"
+        );
+    }
+
+    #[test]
+    fn executable_defaults_are_basenames_for_both_path_styles() {
+        for (executable, path, expected) in [
+            (
+                r"C:\Tools\preferred.exe",
+                r"D:\Other\fallback.exe",
+                "preferred.exe",
+            ),
+            ("/opt/tools/preferred", "/other/fallback", "preferred"),
+            (
+                "",
+                r"C:\Program Files\Fallback\fallback.exe",
+                "fallback.exe",
+            ),
+            ("   ", "/usr/local/bin/fallback", "fallback"),
+        ] {
+            let mut s = WindowPickerState::default();
+            s.candidates.push(c(1, "Title", executable, "Class", path));
+            s.choose_index(0);
+            assert_eq!(s.executable, expected);
+            assert!(!s.executable.contains(['/', '\\']));
+        }
+    }
+
+    struct FakeEnumeration {
+        snapshots: RefCell<VecDeque<Result<Vec<WindowCandidate>, String>>>,
+    }
+    impl WindowEnumerationBackend for FakeEnumeration {
+        fn enumerate(&self) -> Result<Vec<WindowCandidate>, String> {
+            self.snapshots.borrow_mut().pop_front().unwrap()
+        }
+    }
+
+    #[test]
+    fn refresh_replaces_snapshot_and_invalidates_selection() {
+        let first = vec![
+            c(11, "Same", "same.exe", "Class", "C:/same.exe"),
+            c(12, "Same", "same.exe", "Class", "C:/same.exe"),
+        ];
+        let second = vec![c(21, "New", "new.exe", "NewClass", "C:/new.exe")];
+        let backend = FakeEnumeration {
+            snapshots: RefCell::new(VecDeque::from([Ok(first), Ok(second)])),
+        };
+        let mut s = WindowPickerState::default();
+        s.refresh_with_backend(&backend);
+        assert_eq!(s.candidates.len(), 2); // Native-window duplicates are intentionally retained.
+        s.choose_index(0);
+        let first_matcher = matcher_from_preview(&s).unwrap();
+        s.choose_index(1);
+        assert_eq!(matcher_from_preview(&s).unwrap(), first_matcher);
+        s.selected = Some(1);
+        s.confirm_ready = true;
+        s.refresh_with_backend(&backend);
+        assert_eq!(s.candidates.len(), 1);
+        assert_eq!(s.candidates[0].handle, 21);
+        assert_eq!(s.selected, None);
+        assert!(!s.confirm_ready);
+        s.choose_index(1);
+        assert_eq!(s.executable, "same.exe"); // A stale index cannot preview the new snapshot.
+        assert!(
+            !serde_json::to_string(&first_matcher)
+                .unwrap()
+                .contains("11")
+        );
+        assert!(
+            !serde_json::to_string(&first_matcher)
+                .unwrap()
+                .contains("12")
+        );
+    }
+
+    #[test]
+    fn refresh_error_clears_candidates_and_surfaces_error() {
+        let backend = FakeEnumeration {
+            snapshots: RefCell::new(VecDeque::from([Err("desktop unavailable".into())])),
+        };
+        let mut s = WindowPickerState::default();
+        s.candidates.push(c(1, "Old", "old.exe", "Old", "old.exe"));
+        s.selected = Some(0);
+        s.refresh_with_backend(&backend);
+        assert!(s.candidates.is_empty());
+        assert_eq!(s.selected, None);
+        assert_eq!(
+            s.error.as_deref(),
+            Some("Could not enumerate windows: desktop unavailable")
+        );
+    }
+    #[test]
     fn validation_and_handle_never_persist() {
         let mut s = preview();
         s.regex_enabled = true;
@@ -527,6 +705,78 @@ mod tests {
         let matcher = matcher_from_preview(&preview()).unwrap();
         let json = serde_json::to_string(&matcher).unwrap();
         assert!(!json.contains("99"));
+    }
+    #[test]
+    fn document_serialization_contains_only_stable_matcher_criteria() {
+        use crate::mkmacro::{
+            MkAction, MkCoordinateTarget, MkErrorPolicy, MkMacro, MkMacroDocument,
+            MkMouseMovePayload, MkPlayback, MkPoint, MkStep, MkWindowPayload,
+        };
+        let mut s = WindowPickerState::default();
+        s.candidates.push(c(
+            0x12345678,
+            "Rust Workspace",
+            "explorer.exe",
+            "CabinetWClass",
+            r"C:\Windows\explorer.exe",
+        ));
+        s.choose_index(0);
+        s.class_enabled = true;
+        s.regex_enabled = true;
+        s.regex = r"^Rust\sWorkspace$".into();
+        let matcher = matcher_from_preview(&s).unwrap();
+        let step = |id, action| MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        };
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                id: 1,
+                // Keep document metadata neutral so forbidden-field checks below only inspect
+                // serialized schema/values rather than matching prose in this fixture.
+                name: "window matcher serialization".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: MkPlayback::default(),
+                steps: vec![
+                    step(
+                        1,
+                        MkAction::WindowActivate(MkWindowPayload {
+                            matcher: matcher.clone(),
+                            wait: None,
+                        }),
+                    ),
+                    step(
+                        2,
+                        MkAction::MouseMove(MkMouseMovePayload {
+                            target: MkCoordinateTarget::WindowClient {
+                                matcher: matcher.clone(),
+                                point: MkPoint { x: 4, y: 8 },
+                            },
+                            duration_ms: 0,
+                        }),
+                    ),
+                ],
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&document).unwrap();
+        let decoded: MkMacroDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, document);
+        for stable in ["explorer.exe", "CabinetWClass", r"^Rust\\sWorkspace$"] {
+            assert!(json.contains(stable));
+        }
+        for transient in ["handle", "hwnd", "native_root_id", "305419896", "12345678"] {
+            assert!(
+                !json.to_lowercase().contains(transient),
+                "serialized document unexpectedly contained transient marker {transient:?}: {json}"
+            );
+        }
     }
     #[test]
     fn cancellation_preserves_original_matcher() {
