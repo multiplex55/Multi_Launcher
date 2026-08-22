@@ -907,38 +907,48 @@ fn action_ui(
                     }
                 });
         }
-        MkAction::MouseScroll { i32_delta } => {
+        MkAction::MouseScroll { axis, i32_delta } => {
             const WHEEL: i32 = 120;
+            let mut direction = match (*axis, i32_delta.is_negative()) {
+                (MkMouseScrollAxis::Vertical, false) => 0,
+                (MkMouseScrollAxis::Vertical, true) => 1,
+                (MkMouseScrollAxis::Horizontal, true) => 2,
+                (MkMouseScrollAxis::Horizontal, false) => 3,
+            };
+            let before_direction = direction;
+            ui.label("Direction");
+            ui.horizontal_wrapped(|ui| {
+                ui.radio_value(&mut direction, 0, "Vertical Up");
+                ui.radio_value(&mut direction, 1, "Vertical Down");
+                ui.radio_value(&mut direction, 2, "Horizontal Left");
+                ui.radio_value(&mut direction, 3, "Horizontal Right");
+            });
+            let (selected_axis, positive) = match direction {
+                0 => (MkMouseScrollAxis::Vertical, true),
+                1 => (MkMouseScrollAxis::Vertical, false),
+                // WM_MOUSEHWHEEL and MOUSEEVENTF_HWHEEL define positive as right.
+                2 => (MkMouseScrollAxis::Horizontal, false),
+                _ => (MkMouseScrollAxis::Horizontal, true),
+            };
+            if direction != before_direction {
+                apply_scroll_direction(axis, i32_delta, selected_axis, positive);
+            }
             if *i32_delta % WHEEL != 0 {
                 ui.label(format!("Legacy raw wheel delta: {i32_delta}"));
-                ui.small("Choose a direction to normalize this legacy value to whole notches.");
-                ui.horizontal(|ui| {
-                    if ui.button("Normalize Up").clicked() {
-                        *i32_delta = WHEEL;
-                    }
-                    if ui.button("Normalize Down").clicked() {
-                        *i32_delta = -WHEEL;
-                    }
-                });
+                ui.small("The raw delta is preserved. Select a direction above to normalize it to one whole notch.");
             } else {
-                let mut up = *i32_delta >= 0;
                 let mut notches = (*i32_delta / WHEEL).unsigned_abs().max(1);
-                let before = (up, notches);
-                ui.horizontal(|ui| {
-                    ui.label("Direction");
-                    ui.radio_value(&mut up, true, "Vertical Up");
-                    ui.radio_value(&mut up, false, "Vertical Down");
-                });
+                let before = notches;
                 ui.add(
                     egui::DragValue::new(&mut notches)
                         .clamp_range(1..=(i32::MAX as u32 / WHEEL as u32))
                         .prefix("Notches "),
                 );
-                if before != (up, notches) || *i32_delta == 0 {
+                if before != notches || *i32_delta == 0 {
                     let magnitude = (notches as i32)
                         .checked_mul(WHEEL)
                         .unwrap_or(i32::MAX / WHEEL * WHEEL);
-                    *i32_delta = if up { magnitude } else { -magnitude };
+                    *i32_delta = if positive { magnitude } else { -magnitude };
                 }
             }
         }
@@ -1298,6 +1308,50 @@ fn action_ui(
         }
     }
     (pick, window_pick, launcher_pick, image_request)
+}
+
+fn apply_scroll_direction(
+    axis: &mut MkMouseScrollAxis,
+    delta: &mut i32,
+    selected_axis: MkMouseScrollAxis,
+    positive: bool,
+) {
+    const WHEEL: i32 = 120;
+    *axis = selected_axis;
+    let magnitude = if *delta % WHEEL == 0 {
+        delta.unsigned_abs().max(WHEEL as u32) as i32
+    } else {
+        WHEEL
+    };
+    *delta = if positive { magnitude } else { -magnitude };
+}
+
+#[cfg(test)]
+mod scroll_editor_tests {
+    use super::*;
+
+    #[test]
+    fn all_directions_normalize_legacy_raw_deltas() {
+        for (selected_axis, positive, expected) in [
+            (MkMouseScrollAxis::Vertical, true, 120),
+            (MkMouseScrollAxis::Vertical, false, -120),
+            (MkMouseScrollAxis::Horizontal, false, -120),
+            (MkMouseScrollAxis::Horizontal, true, 120),
+        ] {
+            let mut axis = MkMouseScrollAxis::Vertical;
+            let mut delta = 37;
+            apply_scroll_direction(&mut axis, &mut delta, selected_axis, positive);
+            assert_eq!((axis, delta), (selected_axis, expected));
+        }
+    }
+
+    #[test]
+    fn whole_notch_magnitude_is_retained_when_direction_changes() {
+        let mut axis = MkMouseScrollAxis::Vertical;
+        let mut delta = -360;
+        apply_scroll_direction(&mut axis, &mut delta, MkMouseScrollAxis::Horizontal, true);
+        assert_eq!((axis, delta), (MkMouseScrollAxis::Horizontal, 360));
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

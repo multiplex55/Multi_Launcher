@@ -1,8 +1,8 @@
 //! Worker-side, pure recording normalization. No OS, UI automation, or persistence is used here.
 use super::{
     HookEvent, KeyTransition, MkAction, MkCoordinateTarget, MkErrorPolicy, MkKey, MkMouseButton,
-    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkPoint, MkStep, MkWindowMatcher,
-    MkWindowPayload, MouseButton, MouseMessage, should_record,
+    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkPoint, MkStep,
+    MkWindowMatcher, MkWindowPayload, MouseButton, MouseMessage, should_record,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -645,7 +645,16 @@ pub fn to_macro_steps(
                 button: button(b),
                 duration_ms: up_timestamp_us.saturating_sub(down_timestamp_us) / 1000,
             }),
-            RecordedAction::Wheel { delta, .. } => MkAction::MouseScroll { i32_delta: delta },
+            RecordedAction::Wheel {
+                delta, horizontal, ..
+            } => MkAction::MouseScroll {
+                axis: if horizontal {
+                    MkMouseScrollAxis::Horizontal
+                } else {
+                    MkMouseScrollAxis::Vertical
+                },
+                i32_delta: delta,
+            },
         });
         let count = actions.len();
         for (i, action) in actions.into_iter().enumerate() {
@@ -909,6 +918,47 @@ mod tests {
         )));
         assert!(v[0].delay_after_ms > 0);
     }
+    #[test]
+    fn wheel_axes_and_signed_deltas_survive_conversion_without_coalescing() {
+        let events = [
+            mouse(0, MouseMessage::Wheel(120), 1, 2),
+            mouse(1, MouseMessage::Wheel(-73), 1, 2),
+            mouse(2, MouseMessage::HorizontalWheel(240), 1, 2),
+            mouse(3, MouseMessage::HorizontalWheel(-41), 1, 2),
+        ];
+        let normalized = normalize(&events, &NormalizationConfig::default(), None);
+        assert_eq!(
+            normalized.len(),
+            4,
+            "adjacent wheel axes/deltas stay distinct"
+        );
+        let actions: Vec<_> = to_macro_steps(&normalized, 0, false)
+            .into_iter()
+            .map(|step| step.action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                MkAction::MouseScroll {
+                    axis: MkMouseScrollAxis::Vertical,
+                    i32_delta: 120
+                },
+                MkAction::MouseScroll {
+                    axis: MkMouseScrollAxis::Vertical,
+                    i32_delta: -73
+                },
+                MkAction::MouseScroll {
+                    axis: MkMouseScrollAxis::Horizontal,
+                    i32_delta: 240
+                },
+                MkAction::MouseScroll {
+                    axis: MkMouseScrollAxis::Horizontal,
+                    i32_delta: -41
+                },
+            ]
+        );
+    }
+
     #[test]
     fn sampling_pause_and_key_fidelity() {
         let mut c = NormalizationConfig::default();

@@ -67,8 +67,8 @@ mod tests {
     use super::*;
     use crate::mkmacro::{
         AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCoordinateTarget, MkHotkey,
-        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload, MkStep,
-        MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
+        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
+        MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
     };
     use std::{
         fs, thread,
@@ -1119,7 +1119,10 @@ mod tests {
         );
         assert!(matches!(
             action("Mouse Scroll"),
-            MkAction::MouseScroll { i32_delta: -120 }
+            MkAction::MouseScroll {
+                axis: MkMouseScrollAxis::Vertical,
+                i32_delta: -120
+            }
         ));
         for name in [
             "Mouse Move",
