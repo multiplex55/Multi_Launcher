@@ -190,4 +190,36 @@ mod tests {
         tick(&store, &state, &fake, &callback);
         assert_eq!(*count.lock().unwrap(), 1);
     }
+
+    #[test]
+    fn modifier_chord_requires_every_modifier_and_has_one_rising_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let mut doc = MkMacroDocument::default();
+        doc.settings.record_toggle_hotkey = MkHotkey {
+            key: MkKey::Character("K".into()),
+            modifiers: vec![MkKey::Control, MkKey::Shift],
+        };
+        store.save(doc).unwrap();
+        let snapshot = store.snapshot();
+        let (modifiers, primary) = compile_hotkey(&snapshot.settings.record_toggle_hotkey).unwrap();
+        let state = Mutex::new(State {
+            snapshot,
+            modifiers,
+            primary: Some(primary),
+            triggered: false,
+        });
+        let fake = Fake(RwLock::new(vec![
+            MkKey::Control,
+            MkKey::Character("K".into()),
+        ]));
+        let count = Mutex::new(0);
+        let callback = || *count.lock().unwrap() += 1;
+        tick(&store, &state, &fake, &callback);
+        assert_eq!(*count.lock().unwrap(), 0);
+        fake.0.write().unwrap().push(MkKey::Shift);
+        tick(&store, &state, &fake, &callback);
+        tick(&store, &state, &fake, &callback);
+        assert_eq!(*count.lock().unwrap(), 1);
+    }
 }

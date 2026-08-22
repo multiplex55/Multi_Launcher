@@ -150,6 +150,7 @@ fn usable_primary(key: &MkKey) -> bool {
 }
 
 pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec<HotkeyDiagnostic> {
+    let recorder = canonical_hotkey(&doc.settings.record_toggle_hotkey);
     let mut frequencies = HashMap::new();
     for h in doc
         .macros
@@ -167,6 +168,12 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
     for m in doc.macros.iter().filter(|m| m.enabled) {
         let Some(h) = &m.hotkey else { continue };
         let c = canonical_hotkey(h);
+        if c == recorder {
+            out.push(HotkeyDiagnostic {
+                macro_id: m.id,
+                message: "hotkey conflicts with the recording toggle".into(),
+            });
+        }
         if frequencies[&c] > 1 {
             out.push(HotkeyDiagnostic {
                 macro_id: m.id,
@@ -482,6 +489,27 @@ mod tests {
             .len(),
             1
         );
+    }
+    #[test]
+    fn recorder_toggle_conflict_is_diagnosed_and_not_registrable() {
+        let mut m = mac(7, true);
+        m.hotkey = Some(MkHotkey {
+            key: MkKey::Function(9),
+            modifiers: vec![],
+        });
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            macros: vec![m],
+        };
+        assert_eq!(
+            validate_hotkeys(&d, &[]),
+            vec![HotkeyDiagnostic {
+                macro_id: 7,
+                message: "hotkey conflicts with the recording toggle".into(),
+            }]
+        );
+        assert!(compile_bindings(&d).is_empty());
     }
     #[test]
     fn primary_virtual_keys_accept_only_supported_ascii_characters() {
