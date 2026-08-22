@@ -17,6 +17,7 @@ pub mod store;
 pub mod uia;
 pub mod validation;
 pub mod variables;
+pub mod virtual_desktops;
 pub mod windows;
 
 pub use compiler::*;
@@ -37,4 +38,5 @@ pub use store::*;
 pub use uia::*;
 pub use validation::*;
 pub use variables::*;
+pub use virtual_desktops::*;
 pub use windows::*;

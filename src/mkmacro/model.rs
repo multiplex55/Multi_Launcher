@@ -390,6 +390,14 @@ pub struct MkUiPayload {
     #[serde(default)]
     pub wait: Option<MkWaitOptions>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkVirtualDesktopAction {
+    Create,
+    SwitchLeft,
+    SwitchRight,
+    CloseCurrent,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MkAction {
@@ -422,6 +430,7 @@ pub enum MkAction {
         matcher: MkWindowMatcher,
         state: MkWindowState,
     },
+    VirtualDesktop(MkVirtualDesktopAction),
     /// The single polling action. Window/image/pixel wait rows are editor conveniences
     /// and are normalized to this behavior by the executor.
     WaitUntil {
@@ -594,5 +603,27 @@ mod image_payload_tests {
             serde_json::to_string(&MkWindowState::Restore).unwrap(),
             r#""restore""#
         );
+    }
+
+    #[test]
+    fn virtual_desktop_actions_have_stable_tags_and_round_trip() {
+        let cases = [
+            (MkVirtualDesktopAction::Create, "create"),
+            (MkVirtualDesktopAction::SwitchLeft, "switch_left"),
+            (MkVirtualDesktopAction::SwitchRight, "switch_right"),
+            (MkVirtualDesktopAction::CloseCurrent, "close_current"),
+        ];
+        for (operation, serialized) in cases {
+            let action = MkAction::VirtualDesktop(operation);
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(
+                json,
+                format!(r#"{{"type":"virtual_desktop","data":"{serialized}"}}"#)
+            );
+            assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+        }
+        // A representative pre-feature action document remains compatible.
+        let old = r#"{"schema_version":4,"macros":[],"settings":{"record_toggle_hotkey":{"key":{"function":9},"modifiers":[]}}}"#;
+        assert!(serde_json::from_str::<MkMacroDocument>(old).is_ok());
     }
 }

@@ -12,6 +12,46 @@ use multi_launcher::{
 };
 
 #[test]
+fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
+    let expected = [
+        (
+            "Create Virtual Desktop",
+            MkVirtualDesktopAction::Create,
+            "create",
+            "Create a new virtual desktop",
+        ),
+        (
+            "Switch to Desktop on Left",
+            MkVirtualDesktopAction::SwitchLeft,
+            "previous",
+            "Switch to the previous virtual desktop (native boundary no-op)",
+        ),
+        (
+            "Switch to Desktop on Right",
+            MkVirtualDesktopAction::SwitchRight,
+            "next",
+            "Switch to the next virtual desktop (native boundary no-op)",
+        ),
+        (
+            "Close Current Virtual Desktop",
+            MkVirtualDesktopAction::CloseCurrent,
+            "close",
+            "Close the current virtual desktop using native Windows behavior",
+        ),
+    ];
+    let visible: Vec<_> = action_catalog::visible_descriptors().collect();
+    for (name, operation, query, summary) in expected {
+        let descriptor = visible.iter().find(|entry| entry.name == name).expect(name);
+        assert!(action_catalog::matches(descriptor, query));
+        let action = (descriptor.make_default)();
+        assert_eq!(action, MkAction::VirtualDesktop(operation));
+        assert_eq!(action_catalog::action_name(&action), name);
+        assert_eq!(action_catalog::action_details(&action), summary);
+        assert_eq!(descriptor.editor, action_catalog::EditorKind::DirectInsert);
+    }
+}
+
+#[test]
 fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = MkMacroStore::open(dir.path()).unwrap();

@@ -9,6 +9,7 @@ pub enum ActionCategory {
     Mouse,
     Timing,
     Windows,
+    VirtualDesktops,
     ProgramsLauncher,
     Logic,
     Variables,
@@ -22,6 +23,7 @@ impl ActionCategory {
             Self::Mouse => "Mouse",
             Self::Timing => "Timing",
             Self::Windows => "Windows",
+            Self::VirtualDesktops => "Virtual Desktops",
             Self::ProgramsLauncher => "Programs & Launcher",
             Self::Logic => "Logic",
             Self::Variables => "Variables",
@@ -383,6 +385,38 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             }
         ),
         d!(
+            direct,
+            VirtualDesktops,
+            "Create Virtual Desktop",
+            "Create a new Windows virtual desktop",
+            &["desktop", "workspace", "create", "new"],
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::Create)
+        ),
+        d!(
+            direct,
+            VirtualDesktops,
+            "Switch to Desktop on Left",
+            "Switch to the virtual desktop on the left",
+            &["desktop", "workspace", "left", "previous"],
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft)
+        ),
+        d!(
+            direct,
+            VirtualDesktops,
+            "Switch to Desktop on Right",
+            "Switch to the virtual desktop on the right",
+            &["desktop", "workspace", "right", "next"],
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchRight)
+        ),
+        d!(
+            direct,
+            VirtualDesktops,
+            "Close Current Virtual Desktop",
+            "Close the current virtual desktop using native Windows behavior",
+            &["desktop", "workspace", "close"],
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent)
+        ),
+        d!(
             Windows,
             "Maximize Window",
             "Maximize a matching window",
@@ -653,6 +687,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::WindowWait(_)
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. } => EditorKind::Window,
+        MkAction::VirtualDesktop(_) => EditorKind::DirectInsert,
         MkAction::If(_) | MkAction::WhileStart { .. } | MkAction::WaitUntil { .. } => {
             EditorKind::Condition
         }
@@ -698,6 +733,7 @@ pub fn requires_no_configuration(action: &MkAction) -> bool {
             | MkAction::WhileEnd
             | MkAction::Break
             | MkAction::Continue
+            | MkAction::VirtualDesktop(_)
     )
 }
 
@@ -798,6 +834,14 @@ pub fn action_name(a: &MkAction) -> &'static str {
             state: MkWindowState::Restore,
             ..
         } => "Restore Window",
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::Create) => "Create Virtual Desktop",
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft) => "Switch to Desktop on Left",
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchRight) => {
+            "Switch to Desktop on Right"
+        }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
+            "Close Current Virtual Desktop"
+        }
         MkAction::WaitUntil { .. } => "Wait Until",
         MkAction::SetVariable { .. } => "Set Variable",
         MkAction::UnsetVariable { .. } => "Unset Variable",
@@ -915,6 +959,18 @@ pub fn action_details(a: &MkAction) -> String {
             state,
             matcher.title.as_deref().unwrap_or("match")
         ),
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::Create) => {
+            "Create a new virtual desktop".into()
+        }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchLeft) => {
+            "Switch to the previous virtual desktop (native boundary no-op)".into()
+        }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::SwitchRight) => {
+            "Switch to the next virtual desktop (native boundary no-op)".into()
+        }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
+            "Close the current virtual desktop using native Windows behavior".into()
+        }
         MkAction::WaitUntil { wait, .. } => format!("Timeout {} ms", wait.timeout_ms),
         MkAction::If(_) | MkAction::WhileStart { .. } => "Condition".into(),
         MkAction::Else
