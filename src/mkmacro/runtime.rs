@@ -637,3 +637,60 @@ pub(crate) fn toggle_recording() {
     };
     *RECORDING_STATUS.write().unwrap() = result.err().map(|e| e.to_string());
 }
+
+#[cfg(test)]
+mod recording_controller_tests {
+    use super::*;
+    use crate::mkmacro::{
+        MkMacro, MkMacroDocument, MkPlayback, SCHEMA_VERSION, executor::fake::FakeBackend,
+    };
+
+    #[test]
+    fn toggle_requires_a_target_and_assigns_the_stopped_session_only_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                schema_version: SCHEMA_VERSION,
+                settings: Default::default(),
+                macros: [1, 2]
+                    .into_iter()
+                    .map(|id| MkMacro {
+                        id,
+                        name: format!("macro {id}"),
+                        description: String::new(),
+                        enabled: true,
+                        hotkey: None,
+                        playback: MkPlayback::default(),
+                        steps: vec![],
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let fake = Arc::new(FakeBackend::default());
+        set_shared_store_with_backends(store, fake.backends());
+        take_pending_recordings();
+
+        set_recording_target(None);
+        toggle_recording();
+        assert_eq!(
+            recorder_snapshot().unwrap().state,
+            super::super::RecorderRuntimeState::Idle
+        );
+        assert_eq!(
+            recording_status().as_deref(),
+            Some("Select a macro before starting recording")
+        );
+
+        set_recording_target(Some(2));
+        assert_eq!(recording_status(), None);
+        toggle_recording();
+        assert_eq!(recorder_snapshot().unwrap().macro_id, Some(2));
+        toggle_recording();
+        let results = take_pending_recordings();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].macro_id, 2);
+        assert!(results[0].generated_steps.is_empty());
+    }
+}

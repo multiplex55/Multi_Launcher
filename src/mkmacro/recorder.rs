@@ -581,7 +581,7 @@ pub fn to_macro_steps(
                 _ => s
                     .context
                     .as_ref()
-                    .and_then(|c| c.window_under_point.as_ref()),
+                    .and_then(|c| c.window_under_point.as_ref().or(Some(&c.foreground))),
             }
         } else {
             None
