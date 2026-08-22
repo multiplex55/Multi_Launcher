@@ -140,6 +140,46 @@ fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
         "an earlier draft request is stale"
     );
 }
+
+#[test]
+fn deleting_last_macro_clears_editor_requests_and_persists_empty_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let store = Arc::new(store);
+    let mut dialog = MkMacroDialog::new(Arc::clone(&store));
+    dialog.create_macro();
+    assert!(dialog.rename_selected("Delete this final macro"));
+    insert(&mut dialog, MkAction::Delay { milliseconds: 9 });
+    dialog.save().unwrap();
+    let deleted_id = dialog.selected_macro_id.unwrap();
+
+    dialog
+        .action_editor
+        .begin_new(MkAction::Delay { milliseconds: 10 });
+    let request = dialog
+        .action_editor
+        .launcher_picker_request(PickerPurpose::LauncherCommand, deleted_id);
+    dialog.launcher_action_picker.open(request);
+    assert!(dialog.action_editor.draft.is_some());
+    assert!(dialog.launcher_action_picker.request.is_some());
+
+    dialog.delete_selected_macro();
+    assert!(dialog.draft.macros.is_empty());
+    assert_eq!(dialog.selected_macro_id, None);
+    assert!(dialog.selection.ids.is_empty());
+    assert!(dialog.action_editor.draft.is_none());
+    assert!(dialog.action_editor.insertion.is_none());
+    assert!(dialog.launcher_action_picker.request.is_none());
+    assert!(!dialog.launcher_action_picker.open);
+
+    dialog.save().unwrap();
+    assert!(store.snapshot().macros.is_empty());
+    drop(dialog);
+    drop(store);
+
+    let (reopened, _) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(reopened.snapshot().macros.is_empty());
+}
 use std::{
     sync::Arc,
     thread,

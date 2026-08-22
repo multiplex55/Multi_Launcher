@@ -1445,6 +1445,11 @@ impl MkMacroDialog {
         let Some(index) = self.draft.macros.iter().position(|m| m.id == id) else {
             return;
         };
+        // Child editor requests capture the selected macro ID. Discard them
+        // before that target disappears so they cannot later apply to a stale
+        // draft (especially when the final macro is removed).
+        self.action_editor.cancel();
+        self.launcher_action_picker.cancel();
         self.draft.macros.remove(index);
         let selected = self
             .draft
