@@ -1,5 +1,5 @@
 use super::MkMacroDialog;
-use super::key_capture::{apply_captured_hotkey, captured_chord, hotkey_name};
+use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, hotkey_name};
 use eframe::egui;
 
 fn clear_hotkey(hotkey: &mut Option<crate::mkmacro::MkHotkey>) -> bool {
@@ -7,6 +7,43 @@ fn clear_hotkey(hotkey: &mut Option<crate::mkmacro::MkHotkey>) -> bool {
 }
 
 pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+    ui.horizontal(|ui| {
+        ui.label("Record Toggle:");
+        let label = hotkey_name(&d.draft.settings.record_toggle_hotkey);
+        if ui
+            .button(if d.record_hotkey_capture {
+                "Press a key…"
+            } else {
+                &label
+            })
+            .clicked()
+        {
+            d.record_hotkey_capture = true;
+        }
+    });
+    if d.record_hotkey_capture {
+        if let Some(chord) = ui.input(captured_chord) {
+            d.record_hotkey_capture = false;
+            if let Some(hotkey) = chord_hotkey(chord) {
+                if crate::mkmacro::hotkeys::compile_hotkey(&hotkey).is_some()
+                    && d.draft.settings.record_toggle_hotkey != hotkey
+                {
+                    d.draft.settings.record_toggle_hotkey = hotkey;
+                    d.mark_dirty();
+                }
+            }
+        }
+    }
+    let control = crate::mkmacro::hotkeys::canonical_hotkey(&d.draft.settings.record_toggle_hotkey);
+    let conflicts =
+        crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[("mkmacro record toggle", &control)]);
+    if !conflicts.is_empty() {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "hotkey conflicts with an enabled macro",
+        );
+    }
+    ui.separator();
     let capturing = d.hotkey_capture;
     let mut changed = false;
     let mut capture = None;
@@ -76,9 +113,10 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             }
         }
     }
-    if let Some(w) = crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[])
-        .into_iter()
-        .find(|x| Some(x.macro_id) == d.selected_macro_id)
+    if let Some(w) =
+        crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[("mkmacro record toggle", &control)])
+            .into_iter()
+            .find(|x| Some(x.macro_id) == d.selected_macro_id)
     {
         ui.colored_label(egui::Color32::YELLOW, w.message);
     }

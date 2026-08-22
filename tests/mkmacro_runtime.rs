@@ -38,6 +38,7 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
     let store = Arc::new(store);
     store
         .save(MkMacroDocument {
+            settings: Default::default(),
             schema_version: SCHEMA_VERSION,
             macros: vec![MkMacro {
                 id: 1,
@@ -133,6 +134,7 @@ fn stop_during_held_key_wakes_and_cleans_up() {
     let store = Arc::new(store);
     store
         .save(MkMacroDocument {
+            settings: Default::default(),
             schema_version: SCHEMA_VERSION,
             macros: vec![MkMacro {
                 id: 2,

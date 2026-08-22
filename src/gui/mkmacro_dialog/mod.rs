@@ -37,6 +37,7 @@ pub struct MkMacroDialog {
     pub search: String,
     pub delete_confirmation: ConfirmationModal,
     pub hotkey_capture: bool,
+    pub record_hotkey_capture: bool,
     pub action_catalog_visible: bool,
     pub action_search: String,
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
@@ -65,6 +66,7 @@ mod tests {
 
     fn five_macros() -> MkMacroDocument {
         MkMacroDocument {
+            settings: Default::default(),
             schema_version: SCHEMA_VERSION,
             macros: (1..=5)
                 .map(|id| MkMacro {
@@ -1099,6 +1101,7 @@ impl MkMacroDialog {
             search: String::new(),
             delete_confirmation: Default::default(),
             hotkey_capture: false,
+            record_hotkey_capture: false,
             action_catalog_visible: false,
             action_search: String::new(),
             structural_insertion: None,
@@ -1113,6 +1116,8 @@ impl MkMacroDialog {
     pub fn open(&mut self) {
         self.sync_external();
         self.open = true;
+        crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
+        crate::mkmacro::runtime::set_recording_options(self.recorder_options.clone());
     }
     pub fn sync_external(&mut self) {
         let current = self.store.snapshot();
@@ -1122,6 +1127,9 @@ impl MkMacroDialog {
             } else {
                 self.draft = (*current).clone();
                 self.baseline = current;
+                if self.selected_macro().is_none() {
+                    self.set_selected_macro(None);
+                }
             }
         }
     }
@@ -1161,6 +1169,7 @@ impl MkMacroDialog {
             self.conflict = false;
         }
         self.open = false;
+        self.set_selected_macro(None);
         true
     }
     pub fn reload_with_decision(&mut self, decision: DirtyDecision) -> bool {
@@ -1206,6 +1215,10 @@ impl MkMacroDialog {
         let id = self.selected_macro_id?;
         self.draft.macros.iter().find(|m| m.id == id)
     }
+    pub fn set_selected_macro(&mut self, id: Option<u64>) {
+        self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
+        crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
+    }
     pub fn selected_macro_mut(&mut self) -> Option<&mut MkMacro> {
         let id = self.selected_macro_id?;
         self.draft.macros.iter_mut().find(|m| m.id == id)
@@ -1221,7 +1234,7 @@ impl MkMacroDialog {
             steps: vec![],
         });
         repair_ids(&mut self.draft);
-        self.selected_macro_id = self.draft.macros.last().map(|m| m.id);
+        self.set_selected_macro(self.draft.macros.last().map(|m| m.id));
         self.selection.clear();
         self.mark_dirty();
     }
@@ -1237,7 +1250,7 @@ impl MkMacroDialog {
         }
         self.draft.macros.push(copy);
         repair_ids(&mut self.draft);
-        self.selected_macro_id = self.draft.macros.last().map(|m| m.id);
+        self.set_selected_macro(self.draft.macros.last().map(|m| m.id));
         self.selection.clear();
         self.mark_dirty();
     }
@@ -1255,12 +1268,13 @@ impl MkMacroDialog {
             return;
         };
         self.draft.macros.remove(index);
-        self.selected_macro_id = self
+        let selected = self
             .draft
             .macros
             .get(index)
             .or_else(|| index.checked_sub(1).and_then(|i| self.draft.macros.get(i)))
             .map(|m| m.id);
+        self.set_selected_macro(selected);
         self.selection.clear();
         self.mark_dirty();
     }
@@ -1349,6 +1363,7 @@ impl MkMacroDialog {
         self.sync_external();
         if !self.open {
             self.close_children();
+            self.set_selected_macro(None);
             return;
         }
         let mut open = self.open;
@@ -1366,6 +1381,7 @@ impl MkMacroDialog {
         self.open = open;
         if !self.open {
             self.close_children();
+            self.set_selected_macro(None);
         }
     }
     fn close_children(&mut self) {
@@ -1376,6 +1392,18 @@ impl MkMacroDialog {
             .cancel("Window picker closed because the macro dialog closed");
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
+        for result in crate::mkmacro::runtime::take_pending_recordings() {
+            if self
+                .apply_recording(result.macro_id, &result.generated_steps)
+                .is_err()
+            {
+                self.pending_recording = Some((result.macro_id, result.generated_steps));
+                self.command_error = Some(
+                    "Recording target was deleted; captured actions were preserved for recovery"
+                        .into(),
+                );
+            }
+        }
         toolbar::show(ui, self);
         if self.draft.macros.is_empty() {
             let body_size = ui.available_size();

@@ -453,6 +453,13 @@ static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::n
 static RECORDER: Lazy<RwLock<Option<Arc<RecorderRuntime>>>> = Lazy::new(|| RwLock::new(None));
 static HOTKEYS: Lazy<RwLock<Option<Arc<super::hotkeys::MkMacroHotkeyService>>>> =
     Lazy::new(|| RwLock::new(None));
+static RECORDER_HOTKEYS: Lazy<RwLock<Option<Arc<super::recorder_hotkeys::RecorderHotkeyService>>>> =
+    Lazy::new(|| RwLock::new(None));
+static RECORDING_TARGET: Lazy<RwLock<Option<u64>>> = Lazy::new(|| RwLock::new(None));
+static RECORDING_OPTIONS: Lazy<RwLock<NormalizationConfig>> =
+    Lazy::new(|| RwLock::new(NormalizationConfig::default()));
+static RECORDING_STATUS: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+static PENDING_RECORDINGS: Lazy<Mutex<Vec<RecordingResult>>> = Lazy::new(|| Mutex::new(Vec::new()));
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
     set_shared_store_with_backends(store.clone(), production_backends_with_store(store))
 }
@@ -460,6 +467,9 @@ pub fn set_shared_store(store: Arc<MkMacroStore>) {
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {
     // Stop the old poller before replacing the runtime it dispatches into.
     if let Some(old) = HOTKEYS.write().unwrap().take() {
+        old.shutdown()
+    }
+    if let Some(old) = RECORDER_HOTKEYS.write().unwrap().take() {
         old.shutdown()
     }
     if let Some(old) = RUNTIME.write().unwrap().take() {
@@ -480,7 +490,12 @@ pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backen
         Arc::new(SystemRecorderClock::default()),
         guard,
     )));
-    *HOTKEYS.write().unwrap() = Some(Arc::new(super::hotkeys::MkMacroHotkeyService::new(store)));
+    *HOTKEYS.write().unwrap() = Some(Arc::new(super::hotkeys::MkMacroHotkeyService::new(
+        store.clone(),
+    )));
+    *RECORDER_HOTKEYS.write().unwrap() = Some(Arc::new(
+        super::recorder_hotkeys::RecorderHotkeyService::system(store),
+    ));
 }
 fn global() -> Result<Arc<MacroRuntime>> {
     RUNTIME
@@ -517,7 +532,22 @@ pub fn stop() -> Result<()> {
 pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
 }
-pub fn record(macro_id: u64, config: NormalizationConfig) -> Result<()> {
+pub fn record(macro_id: u64, mut config: NormalizationConfig) -> Result<()> {
+    if let Some(doc) = RECORDER
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|r| r.document_snapshot())
+        .flatten()
+    {
+        if let Some(vk) =
+            super::hotkeys::primary_virtual_key(&doc.settings.record_toggle_hotkey.key)
+        {
+            if !config.control_hotkeys.contains(&vk) {
+                config.control_hotkeys.push(vk);
+            }
+        }
+    }
     RECORDER
         .read()
         .unwrap()
@@ -551,4 +581,59 @@ pub fn record_stop() -> Result<RecordingResult> {
 }
 pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
     RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
+}
+pub fn set_recording_target(target: Option<u64>) {
+    *RECORDING_TARGET.write().unwrap() = target;
+    if target.is_some()
+        && RECORDING_STATUS.read().unwrap().as_deref()
+            == Some("Select a macro before starting recording")
+    {
+        *RECORDING_STATUS.write().unwrap() = None;
+    }
+}
+pub fn set_recording_options(options: NormalizationConfig) {
+    *RECORDING_OPTIONS.write().unwrap() = options;
+}
+pub fn recording_status() -> Option<String> {
+    RECORDING_STATUS.read().unwrap().clone()
+}
+pub fn take_pending_recordings() -> Vec<RecordingResult> {
+    std::mem::take(&mut *PENDING_RECORDINGS.lock().unwrap())
+}
+
+/// Callback used by the global recorder control. It exchanges only thread-safe runtime state;
+/// GUI drafts are updated later when they drain `take_pending_recordings`.
+pub(crate) fn toggle_recording() {
+    let Some(recorder) = RECORDER.read().unwrap().clone() else {
+        return;
+    };
+    let result: Result<()> = match recorder.snapshot().state {
+        super::RecorderRuntimeState::Idle => {
+            let target = *RECORDING_TARGET.read().unwrap();
+            let Some(id) = target.filter(|id| recorder.store_contains(*id)) else {
+                *RECORDING_STATUS.write().unwrap() =
+                    Some("Select a macro before starting recording".into());
+                return;
+            };
+            let mut config = RECORDING_OPTIONS.read().unwrap().clone();
+            // Snapshot the persisted chord for the complete session.
+            if let Some(store) = recorder.document_snapshot() {
+                if let Some(vk) =
+                    super::hotkeys::primary_virtual_key(&store.settings.record_toggle_hotkey.key)
+                {
+                    if !config.control_hotkeys.contains(&vk) {
+                        config.control_hotkeys.push(vk);
+                    }
+                }
+            }
+            recorder.start(id, config)
+        }
+        super::RecorderRuntimeState::Recording | super::RecorderRuntimeState::Paused => {
+            recorder.stop().map(|result| {
+                PENDING_RECORDINGS.lock().unwrap().push(result);
+            })
+        }
+        super::RecorderRuntimeState::Stopping => return,
+    };
+    *RECORDING_STATUS.write().unwrap() = result.err().map(|e| e.to_string());
 }

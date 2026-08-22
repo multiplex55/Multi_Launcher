@@ -47,6 +47,7 @@ fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>) {
     }
 }
 pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
+    crate::mkmacro::runtime::set_recording_options(dialog.recorder_options.clone());
     let state = state(dialog);
     ui.horizontal(|ui| {
         if ui.button("Save").clicked() {
@@ -226,6 +227,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
     }
     if let Some(error) = &dialog.command_error {
         ui.colored_label(eframe::egui::Color32::RED, error);
+    }
+    if let Some(status) = crate::mkmacro::runtime::recording_status() {
+        ui.colored_label(eframe::egui::Color32::YELLOW, status);
     }
     if let Some(run) = crate::mkmacro::runtime::snapshot().filter(|s| {
         matches!(

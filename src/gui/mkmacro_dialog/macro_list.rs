@@ -57,7 +57,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             }
         });
     if let Some(id) = clicked {
-        d.selected_macro_id = Some(id);
+        d.set_selected_macro(Some(id));
         d.selection.clear();
     }
 }

@@ -11,6 +11,7 @@ fn legacy_and_mkmacro_routes_coexist_and_disable_independently() {
     let (store, _) = MkMacroStore::open(dir.path()).unwrap();
     store
         .save(MkMacroDocument {
+            settings: Default::default(),
             schema_version: SCHEMA_VERSION,
             macros: vec![MkMacro {
                 id: 55,
@@ -40,6 +41,7 @@ fn rename_keeps_id_based_launcher_action() {
     fn action_for(name: &str) -> String {
         let dir = tempdir().unwrap();
         let doc = MkMacroDocument {
+            settings: Default::default(),
             schema_version: SCHEMA_VERSION,
             macros: vec![MkMacro {
                 id: 99,

@@ -49,6 +49,7 @@ pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) ->
         .map_or(steps.len(), |i| i + 1);
     steps.splice(insert_at..insert_at, copies);
     let mut d = crate::mkmacro::MkMacroDocument {
+        settings: Default::default(),
         schema_version: crate::mkmacro::SCHEMA_VERSION,
         macros: vec![crate::mkmacro::MkMacro {
             id: 1,
