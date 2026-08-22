@@ -171,6 +171,17 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                         )
                     }
                 }
+                MkAction::PromptInput(payload) => {
+                    if let Err(e) = validate_variable_name(&payload.variable) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_variable",
+                            format!("Variable name is invalid: {e}"),
+                        )
+                    }
+                }
                 MkAction::WaitUntil {
                     condition: c,
                     wait: w,

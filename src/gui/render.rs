@@ -693,9 +693,87 @@ impl LauncherApp {
     }
 }
 
+impl LauncherApp {
+    fn poll_macro_prompt(&mut self, ctx: &egui::Context) {
+        let broker = crate::mkmacro::production_prompt_broker();
+        broker.set_repaint(std::sync::Arc::new({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        }));
+        if self.macro_prompt.pending.is_none()
+            && let Some(pending) = broker.take_pending()
+        {
+            self.macro_prompt.text = pending.request.default_value.clone();
+            self.macro_prompt.first_frame = true;
+            self.macro_prompt.pending = Some(pending);
+        }
+        let Some(pending) = self.macro_prompt.pending.as_ref() else {
+            return;
+        };
+        let title = pending.request.title.clone();
+        let prompt = pending.request.prompt.clone();
+        let mut answer = None;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("mkmacro_prompt"),
+            egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([420.0, 150.0])
+                .with_always_on_top(),
+            |child, _| {
+                egui::CentralPanel::default().show(child, |ui| {
+                    ui.label(prompt);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.macro_prompt.text)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Enter a value"),
+                    );
+                    if self.macro_prompt.first_frame {
+                        response.request_focus();
+                        self.macro_prompt.first_frame = false;
+                    }
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        answer = Some(crate::mkmacro::PromptResponse::Submitted(
+                            self.macro_prompt.text.clone(),
+                        ));
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        answer = Some(crate::mkmacro::PromptResponse::Cancelled);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            answer = Some(crate::mkmacro::PromptResponse::Submitted(
+                                self.macro_prompt.text.clone(),
+                            ));
+                        }
+                        if ui
+                            .button("Cancel")
+                            .on_hover_text("Cancel stops the running macro")
+                            .clicked()
+                        {
+                            answer = Some(crate::mkmacro::PromptResponse::Cancelled);
+                        }
+                    });
+                });
+                if child.input(|i| i.viewport().close_requested()) {
+                    answer.get_or_insert(crate::mkmacro::PromptResponse::Cancelled);
+                }
+            },
+        );
+        if let Some(answer) = answer {
+            if let Some(pending) = self.macro_prompt.pending.take() {
+                pending.respond(answer);
+            }
+            self.macro_prompt.text.clear();
+            self.macro_prompt.first_frame = false;
+        }
+    }
+}
+
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
+
+        self.poll_macro_prompt(ctx);
 
         // tracing::debug!("LauncherApp::update called");
         if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {

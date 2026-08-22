@@ -345,6 +345,13 @@ struct PanelStates {
 /// them in an [`Arc<Vec<Action>>`]. Cloning the `Arc` only replicates the
 /// pointer, allowing cheap, thread-safe sharing without duplicating the vector
 /// itself.
+#[derive(Default)]
+pub(crate) struct MacroPromptUi {
+    pub pending: Option<crate::mkmacro::PendingPrompt>,
+    pub text: String,
+    pub first_frame: bool,
+}
+
 pub struct LauncherApp {
     /// Shared list of all actions available to the launcher.
     ///
@@ -436,6 +443,7 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
+    pub(crate) macro_prompt: MacroPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
     theme_settings_dialog_open: bool,
@@ -1395,6 +1403,7 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
+            macro_prompt: MacroPromptUi::default(),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
             theme_settings_dialog_open: false,

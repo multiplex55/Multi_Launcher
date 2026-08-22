@@ -66,6 +66,7 @@ pub enum EditorKind {
     Condition,
     Repeat,
     Variable,
+    PromptInput,
     General,
     DirectInsert,
 }
@@ -482,6 +483,14 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             }
         ),
         d!(
+            Variables,
+            "Prompt for Input",
+            "Ask for text and store it in a variable",
+            &["prompt", "input", "ask", "variable", "clipboard"],
+            PromptInput,
+            MkAction::PromptInput(MkPromptInputPayload::default())
+        ),
+        d!(
             Logic,
             "If",
             "Condition block",
@@ -691,6 +700,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         }
         MkAction::RepeatStart { .. } => EditorKind::Repeat,
         MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => EditorKind::Variable,
+        MkAction::PromptInput(_) => EditorKind::PromptInput,
         MkAction::Else
         | MkAction::EndIf
         | MkAction::RepeatEnd
@@ -773,6 +783,7 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         | EditorKind::Condition
         | EditorKind::Repeat
         | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
+        EditorKind::PromptInput => Some(EditorContract::Configurable { field_count: 5 }),
         EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => {
             Some(EditorContract::Configurable { field_count: 2 })
         }
@@ -845,6 +856,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::WaitUntil { .. } => "Wait Until",
         MkAction::SetVariable { .. } => "Set Variable",
         MkAction::UnsetVariable { .. } => "Unset Variable",
+        MkAction::PromptInput(_) => "Prompt for Input",
         MkAction::If(_) => "If",
         MkAction::Else => "Else",
         MkAction::EndIf => "End If",
@@ -901,6 +913,16 @@ pub fn action_details(a: &MkAction) -> String {
         }
         MkAction::SetVariable { name, .. } => format!("Set {name}"),
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
+        MkAction::PromptInput(p) => format!(
+            "Ask ‘{}’ → {}{}",
+            p.prompt,
+            p.variable,
+            if p.copy_to_clipboard {
+                " · copy to clipboard"
+            } else {
+                ""
+            }
+        ),
         MkAction::RepeatStart { count } => format!("{count} times"),
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => format!(
             "Reference image · {:?} · tolerance {} · {} ms timeout",
