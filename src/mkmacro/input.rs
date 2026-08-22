@@ -268,8 +268,8 @@ impl<S: InputSink> InputBackend for Win32InputBackend<S> {
         match p.mode {
             MkTextMode::Type => self.unicode_text(&p.text),
             MkTextMode::Paste => Err(ExecutionDiagnostic::new(
-                DiagnosticKind::UnsupportedOperation,
-                "clipboard paste mode is not enabled; use Unicode text",
+                DiagnosticKind::InvalidPlan,
+                "paste must be coordinated by the executor",
             )),
         }
     }
