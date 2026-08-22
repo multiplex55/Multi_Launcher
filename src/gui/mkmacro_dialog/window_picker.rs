@@ -77,6 +77,7 @@ impl WindowEnumerationBackend for NativeWindowEnumerationBackend {
     fn enumerate(&self) -> Result<Vec<WindowCandidate>, String> {
         crate::multi_manager::win::enumerate_top_level_windows()
             .map(|windows| windows.into_iter().map(WindowCandidate::from).collect())
+            .map_err(|error| error.to_string())
     }
 }
 
