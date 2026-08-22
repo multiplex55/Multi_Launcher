@@ -4,7 +4,7 @@ use super::{
     MkKey, MkMacroStore, MkMouseButton, MkPlayback, MkPoint, MkProcessPayload,
     MkPromptInputPayload, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher,
     MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend, PromptRequest,
-    PromptResponse, RuntimeVariables,
+    PromptResponse, RuntimeVariables, interpolate,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -285,13 +285,21 @@ struct ProductionLauncher;
 #[cfg(windows)]
 impl LauncherBackend for ProductionLauncher {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult {
-        let action = crate::actions::Action {
-            label: p.program.clone(),
-            desc: "Macro".into(),
-            action: p.program.clone(),
-            args: (!p.arguments.is_empty()).then(|| p.arguments.join(" ")),
+        let mut command = std::process::Command::new(&p.program);
+        command.args(&p.arguments);
+        if let Some(directory) = p
+            .working_directory
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            command.current_dir(directory);
+        }
+        let result = if p.wait {
+            command.status().map(|_| ())
+        } else {
+            command.spawn().map(|_| ())
         };
-        crate::gui::execute_action(&action).map_err(|e| {
+        result.map_err(|e| {
             ExecutionDiagnostic::new(DiagnosticKind::Backend, e.to_string())
                 .context("backend", "launcher")
                 .context("action", p.program.clone())
@@ -994,13 +1002,19 @@ impl Executor {
         p: &MkPromptInputPayload,
         variables: &mut RuntimeVariables,
     ) -> ExecResult {
-        let expand = |text: &str| interpolate(text, variables);
+        let expand = |field: &'static str, text: &str| {
+            interpolate(text, variables).map_err(|error| error.context("field", field))
+        };
+        // Expand every prompt field before crossing the prompt effect boundary.
+        let title = expand("prompt.title", &p.title)?;
+        let prompt = expand("prompt.prompt", &p.prompt)?;
+        let default_value = expand("prompt.default_value", &p.default_value)?;
         let response = self.backends.prompt.prompt(
             PromptRequest {
                 id: super::prompt::next_request_id(),
-                title: expand(&p.title),
-                prompt: expand(&p.prompt),
-                default_value: expand(&p.default_value),
+                title,
+                prompt,
+                default_value,
             },
             &self.control,
         )?;
@@ -1178,7 +1192,12 @@ impl Executor {
                 g.up_key(k)
             }
             MkAction::Hotkey(keys) => g.hotkey(keys),
-            MkAction::Text(p) => self.backends.input.text(p),
+            MkAction::Text(p) => {
+                let mut expanded = p.clone();
+                expanded.text =
+                    interpolate(&p.text, v).map_err(|error| error.context("field", "text.text"))?;
+                self.backends.input.text(&expanded)
+            }
             MkAction::MouseMove(p) => self.move_to(p, playback, v),
             MkAction::MouseDrag(p) => {
                 let from = self.finalize_target(&p.from, playback, v, "Mouse Drag")?;
@@ -1215,9 +1234,40 @@ impl Executor {
             MkAction::Delay { milliseconds } => self.wait(Duration::from_millis(
                 scale_playback_duration(*milliseconds, playback.speed_percent),
             )),
-            MkAction::Process(p) => self.backends.launcher.launch_process(p),
+            MkAction::Process(p) => {
+                let mut expanded = p.clone();
+                expanded.arguments = p
+                    .arguments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        interpolate(argument, v).map_err(|error| {
+                            error.context("field", format!("process.arguments[{index}]"))
+                        })
+                    })
+                    .collect::<ExecResult<_>>()?;
+                expanded.working_directory = p
+                    .working_directory
+                    .as_deref()
+                    .filter(|directory| !directory.is_empty())
+                    .map(|directory| {
+                        interpolate(directory, v)
+                            .map_err(|error| error.context("field", "process.working_directory"))
+                    })
+                    .transpose()?;
+                self.backends.launcher.launch_process(&expanded)
+            }
             MkAction::LauncherCommand { command, args } => {
-                self.backends.launcher.command(command, args.as_deref())
+                let expanded_args = args
+                    .as_deref()
+                    .map(|args| {
+                        interpolate(args, v)
+                            .map_err(|error| error.context("field", "launcher_command.args"))
+                    })
+                    .transpose()?;
+                self.backends
+                    .launcher
+                    .command(command, expanded_args.as_deref())
             }
             MkAction::WindowActivate(p) => self.backends.window.activate(p),
             MkAction::WindowClose(m) => self.backends.window.close(m),
@@ -1663,33 +1713,6 @@ fn action_name(a: &MkAction) -> &'static str {
         _ => "runtime",
     }
 }
-fn interpolate(text: &str, variables: &RuntimeVariables) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let tail = &rest[start + 2..];
-        let Some(end) = tail.find('}') else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let name = &tail[..end];
-        if let Some(value) = variables.get(name) {
-            out.push_str(&match value {
-                MkValue::String(v) => v.clone(),
-                MkValue::Number(v) => v.to_string(),
-                MkValue::Boolean(v) => v.to_string(),
-                MkValue::Point(p) => format!("{},{}", p.x, p.y),
-                MkValue::Null => String::new(),
-            });
-        } else {
-            out.push_str(&rest[start..start + 2 + end + 1]);
-        }
-        rest = &tail[end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
 fn set_point(v: &mut RuntimeVariables, prefix: &str, p: MkPoint) {
     v.insert(format!("{prefix}.x"), MkValue::Number(p.x as f64));
     v.insert(format!("{prefix}.y"), MkValue::Number(p.y as f64));
@@ -1762,6 +1785,9 @@ pub mod fake {
         pub conditions: Mutex<HashMap<String, bool>>,
         pub cursor: Mutex<MkPoint>,
         pub prompt_responses: Mutex<Vec<PromptResponse>>,
+        pub processes: Mutex<Vec<MkProcessPayload>>,
+        pub commands: Mutex<Vec<(String, Option<String>)>>,
+        pub prompts: Mutex<Vec<PromptRequest>>,
     }
     impl Default for FakeBackend {
         fn default() -> Self {
@@ -1771,6 +1797,9 @@ pub mod fake {
                 conditions: Mutex::new(HashMap::new()),
                 cursor: Mutex::new(MkPoint { x: 0, y: 0 }),
                 prompt_responses: Mutex::new(Vec::new()),
+                processes: Mutex::new(Vec::new()),
+                commands: Mutex::new(Vec::new()),
+                prompts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1930,14 +1959,20 @@ pub mod fake {
     }
     impl LauncherBackend for FakeBackend {
         fn launch_process(&self, p: &MkProcessPayload) -> ExecResult {
+            self.processes.lock().unwrap().push(p.clone());
             self.event(format!("process:{}", p.program))
         }
-        fn command(&self, c: &str, _: Option<&str>) -> ExecResult {
+        fn command(&self, c: &str, args: Option<&str>) -> ExecResult {
+            self.commands
+                .lock()
+                .unwrap()
+                .push((c.into(), args.map(str::to_owned)));
             self.event(format!("command:{c}"))
         }
     }
     impl PromptBackend for FakeBackend {
         fn prompt(&self, request: PromptRequest, _: &RunControl) -> ExecResult<PromptResponse> {
+            self.prompts.lock().unwrap().push(request.clone());
             self.event(format!("prompt:{}", request.id))?;
             if self.prompt_responses.lock().unwrap().is_empty() {
                 return Err(ExecutionDiagnostic::new(
@@ -2219,5 +2254,127 @@ mod phase_d_tests {
             Some("true")
         );
         assert!(e.context.contains_key("poll_interval_ms"));
+    }
+
+    #[test]
+    fn interpolation_uses_current_variables_and_prompt_answers() {
+        let f = Arc::new(FakeBackend::default());
+        f.script_prompt(PromptResponse::Submitted("my_project".into()));
+        run(
+            vec![
+                s(
+                    1,
+                    MkAction::SetVariable {
+                        name: "project_name".into(),
+                        value: MkValue::String("initial".into()),
+                    },
+                ),
+                s(2, text("Creating project ${project_name}")),
+                s(
+                    3,
+                    MkAction::PromptInput(MkPromptInputPayload {
+                        title: "Rename ${project_name}".into(),
+                        prompt: "Current: ${project_name}".into(),
+                        default_value: "${project_name}".into(),
+                        variable: "project_name".into(),
+                        copy_to_clipboard: false,
+                    }),
+                ),
+                s(4, text("Creating project ${project_name}")),
+            ],
+            f.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            f.events()
+                .into_iter()
+                .filter(|event| event.starts_with("text:"))
+                .collect::<Vec<_>>(),
+            [
+                "text:Creating project initial",
+                "text:Creating project my_project"
+            ]
+        );
+        let prompts = f.prompts.lock().unwrap();
+        assert_eq!(prompts[0].title, "Rename initial");
+        assert_eq!(prompts[0].prompt, "Current: initial");
+        assert_eq!(prompts[0].default_value, "initial");
+    }
+
+    #[test]
+    fn process_and_launcher_fields_expand_without_changing_boundaries() {
+        let f = Arc::new(FakeBackend::default());
+        let original_process = MkProcessPayload {
+            program: "tool-${value}".into(),
+            arguments: vec!["--name".into(), "${value}".into()],
+            working_directory: Some("/work/${folder}".into()),
+            wait: true,
+        };
+        let original_action = MkAction::Process(original_process.clone());
+        run(
+            vec![
+                s(
+                    1,
+                    MkAction::SetVariable {
+                        name: "value".into(),
+                        value: MkValue::String("two words".into()),
+                    },
+                ),
+                s(
+                    2,
+                    MkAction::SetVariable {
+                        name: "folder".into(),
+                        value: MkValue::String("project".into()),
+                    },
+                ),
+                s(3, original_action.clone()),
+                s(
+                    4,
+                    MkAction::LauncherCommand {
+                        command: "canonical-${value}".into(),
+                        args: Some("open ${value}".into()),
+                    },
+                ),
+            ],
+            f.clone(),
+        )
+        .unwrap();
+        let processes = f.processes.lock().unwrap();
+        assert_eq!(processes[0].program, "tool-${value}");
+        assert_eq!(processes[0].arguments, ["--name", "two words"]);
+        assert_eq!(
+            processes[0].working_directory.as_deref(),
+            Some("/work/project")
+        );
+        assert_eq!(original_action, MkAction::Process(original_process));
+        assert_eq!(
+            f.commands.lock().unwrap()[0],
+            ("canonical-${value}".into(), Some("open two words".into()))
+        );
+    }
+
+    #[test]
+    fn failed_interpolation_has_no_effect_and_stops_later_steps() {
+        let f = Arc::new(FakeBackend::default());
+        let error = run(
+            vec![s(1, text("secret ${missing}")), s(2, text("later"))],
+            f.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(
+            error.context.get("variable").map(String::as_str),
+            Some("missing")
+        );
+        assert!(f.events().is_empty());
+    }
+
+    #[test]
+    fn repeated_steps_interpolate_each_iteration_at_execution_time() {
+        let f = Arc::new(FakeBackend::default());
+        let mut repeated = s(1, text("iteration ${iteration}"));
+        repeated.repeat = 2;
+        run(vec![repeated], f.clone()).unwrap();
+        assert_eq!(f.events(), ["text:iteration 0", "text:iteration 1"]);
     }
 }
