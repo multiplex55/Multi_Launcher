@@ -26,6 +26,9 @@ pub struct ActionEditorState {
     pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
     /// Sole owner of native visual-overlay resources for this editor draft.
     pub visual_overlay: super::visual_overlay::VisualOverlayController,
+    /// Installed by the owning launcher integration because it alone owns the
+    /// launcher and dialog native-window visibility boundary.
+    pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
     picker: NativePositionPicker,
 }
 
@@ -175,6 +178,14 @@ impl ActionEditorState {
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
     pub fn cancel(&mut self) {
+        if let Some(workflow) = &mut self.visual_capture {
+            workflow.cancel();
+            // Cancellation is synchronous only as far as requesting cleanup;
+            // drive the restoration stage before discarding the editor draft.
+            while workflow.active() {
+                workflow.tick();
+            }
+        }
         self.visual_overlay.cancel();
         self.stop_position_capture();
         self.draft = None;
@@ -183,6 +194,40 @@ impl ActionEditorState {
         self.capture_keys = false;
         self.editor = None;
         self.image_search = None;
+    }
+
+    pub fn tick_visual_capture(&mut self, current_macro_id: Option<u64>) {
+        let Some(workflow) = &mut self.visual_capture else {
+            return;
+        };
+        workflow.tick();
+        let Some(outcome) = workflow.take_completed() else {
+            return;
+        };
+        use super::visual_capture_workflow::WorkflowOutcome;
+        match outcome {
+            WorkflowOutcome::Region { token, rect } => {
+                if current_macro_id == Some(token.macro_id)
+                    && self.draft_generation == token.draft_generation
+                    && let Some(image) = self.image_search.as_mut()
+                {
+                    image.rectangle = rect;
+                    image.kind = super::image_search_editor::SearchRegionKind::Rectangle;
+                }
+            }
+            WorkflowOutcome::Asset { token, asset_id } => {
+                if current_macro_id == Some(token.macro_id)
+                    && self.draft_generation == token.draft_generation
+                    && let Some(payload) = self.draft.as_mut().and_then(image_payload_mut)
+                {
+                    payload.asset_id = asset_id;
+                }
+            }
+            WorkflowOutcome::Failed(message) => self.capture_message = Some(message),
+            WorkflowOutcome::Cancelled => {
+                self.capture_message = Some("Visual capture cancelled".into())
+            }
+        }
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
         self.visual_overlay.cancel();
@@ -1292,6 +1337,28 @@ mod scroll_editor_tests {
 enum ImageAuthoringRequest {
     Import,
     CaptureRectangle,
+    PickRectangle,
+}
+
+fn start_visual_capture(
+    state: &mut ActionEditorState,
+    macro_id: u64,
+    purpose: super::visual_overlay::RectanglePurpose,
+) -> anyhow::Result<()> {
+    let generation = state.draft_generation;
+    let workflow = state
+        .visual_capture
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("desktop visibility integration is unavailable"))?;
+    workflow
+        .begin(
+            super::visual_capture_workflow::DraftToken {
+                macro_id,
+                draft_generation: generation,
+            },
+            purpose,
+        )
+        .map_err(anyhow::Error::msg)
 }
 
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
@@ -1397,6 +1464,15 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         return;
     }
     let mut open = true;
+    d.action_editor.tick_visual_capture(d.selected_macro_id);
+    let workflow_active = d
+        .action_editor
+        .visual_capture
+        .as_ref()
+        .is_some_and(|w| w.active());
+    if workflow_active {
+        ctx.request_repaint();
+    }
     let mut apply = false;
     let mut cancel = false;
     let mut captured = None;
@@ -1437,6 +1513,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
+                    Some(PickRectangle) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::ImageRegion),
                     Some(other) => state.capture_message = Some(format!("{other:?} requested; desktop overlay is not available on this platform")),
                     None => {}
@@ -1522,12 +1599,15 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         super::action_catalog::draft_validation_contract(&step.action),
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
                     );
-                apply = ui.add_enabled(valid, egui::Button::new("Apply")).clicked();
-                cancel = ui.button("Cancel").on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
+                apply = ui.add_enabled(valid && !workflow_active, egui::Button::new("Apply")).clicked();
+                cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
           });
         });
-    if let Some(request) = image_request {
+    if workflow_active && image_request.is_some() {
+        d.action_editor.capture_message =
+            Some("Finish or cancel the active visual capture first".into());
+    } else if let Some(request) = image_request {
         let macro_id = d.selected_macro_id.unwrap_or(0);
         let result = match request {
             ImageAuthoringRequest::Import => rfd::FileDialog::new()
@@ -1542,9 +1622,16 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     )
                 })
                 .transpose(),
-            ImageAuthoringRequest::CaptureRectangle => Err(anyhow::anyhow!(
-                "Choose a capture rectangle in the desktop overlay (overlay unavailable on this platform)"
-            )),
+            ImageAuthoringRequest::CaptureRectangle => start_visual_capture(
+                &mut d.action_editor,
+                macro_id,
+                super::visual_overlay::RectanglePurpose::ReferenceImageCapture,
+            ),
+            ImageAuthoringRequest::PickRectangle => start_visual_capture(
+                &mut d.action_editor,
+                macro_id,
+                super::visual_overlay::RectanglePurpose::SearchRegion,
+            ),
         };
         if let Err(error) = result {
             d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
