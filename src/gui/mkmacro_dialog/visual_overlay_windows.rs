@@ -8,8 +8,8 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            CreatePen, DeleteObject, EnumDisplayMonitors, GetDC, HDC, HGDIOBJ, HMONITOR,
-            MONITORINFO, MonitorFromRect, PS_SOLID, Rectangle, ReleaseDC, SelectObject, SetBkMode,
+            CreatePen, DeleteObject, EnumDisplayMonitors, GetDC, GetMonitorInfoW, HDC, HGDIOBJ,
+            HMONITOR, MONITORINFO, PS_SOLID, Rectangle, ReleaseDC, SelectObject, SetBkMode,
             SetTextColor, TRANSPARENT, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -17,10 +17,10 @@ use windows::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON},
             WindowsAndMessaging::{
                 CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetCursorPos, GetMonitorInfoW, HWND_TOPMOST, MSG, PM_REMOVE,
-                PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-                SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WNDCLASSW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                DispatchMessageW, GetCursorPos, HWND_TOPMOST, MSG, PM_REMOVE, PeekMessageW,
+                RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
+                ShowWindow, TranslateMessage, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -91,7 +91,7 @@ fn displays() -> Vec<ScreenRect> {
     }
     let mut result = vec![];
     unsafe {
-        EnumDisplayMonitors(
+        let _ = EnumDisplayMonitors(
             None,
             None,
             Some(collect),
@@ -119,7 +119,7 @@ impl NativeOverlayRenderer {
                 }
                 let pen = CreatePen(PS_SOLID, 5, COLORREF(0x0000ffff));
                 let old = SelectObject(dc, HGDIOBJ(pen.0));
-                let mut outline = |r: ScreenRect| {
+                let outline = |r: ScreenRect| {
                     let x = i64::from(r.x) - i64::from(window.bounds.x);
                     let y = i64::from(r.y) - i64::from(window.bounds.y);
                     let _ = Rectangle(
@@ -151,7 +151,7 @@ impl NativeOverlayRenderer {
                     }
                 }
                 SelectObject(dc, old);
-                DeleteObject(HGDIOBJ(pen.0));
+                let _ = DeleteObject(HGDIOBJ(pen.0));
                 ReleaseDC(window.hwnd, dc);
             }
         }
@@ -160,11 +160,13 @@ impl NativeOverlayRenderer {
 
 unsafe fn draw_label(dc: HDC, origin: ScreenRect, descriptor: &MonitorDescriptor) {
     let text: Vec<u16> = descriptor.index.to_string().encode_utf16().collect();
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, COLORREF(0x0000ffff));
+    unsafe {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, COLORREF(0x0000ffff));
+    }
     let x = i64::from(descriptor.bounds.x) - i64::from(origin.x) + 30;
     let y = i64::from(descriptor.bounds.y) - i64::from(origin.y) + 30;
-    let _ = TextOutW(dc, x as i32, y as i32, &text);
+    let _ = unsafe { TextOutW(dc, x as i32, y as i32, &text) };
 }
 
 impl OverlayRenderer for NativeOverlayRenderer {
@@ -238,8 +240,9 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     bounds.width as i32,
                     bounds.height as i32,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                )?;
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                )
+                .map_err(|e| platform(format!("overlay positioning failed: {e}")))?;
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             self.windows.push(OverlayWindow { hwnd, bounds });
         }
@@ -266,7 +269,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             unsafe {
-                TranslateMessage(&msg);
+                let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
