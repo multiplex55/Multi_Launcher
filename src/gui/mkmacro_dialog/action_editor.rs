@@ -1374,9 +1374,8 @@ fn apply_import(
     payload: &mut MkImagePayload,
     source: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let id = store.next_asset_id(macro_id)?;
-    store.import_png_asset(macro_id, id, source)?;
-    payload.asset_id = id;
+    let staged = ImageAssetAuthoringService::new(store).import_png(macro_id, source)?;
+    payload.asset_id = staged.asset_id;
     Ok(())
 }
 
@@ -1386,9 +1385,8 @@ fn apply_capture(
     payload: &mut MkImagePayload,
     image: &image::RgbaImage,
 ) -> anyhow::Result<()> {
-    let id = store.next_asset_id(macro_id)?;
-    store.write_png_asset(macro_id, id, image)?;
-    payload.asset_id = id;
+    let staged = ImageAssetAuthoringService::new(store).stage_rgba(macro_id, image)?;
+    payload.asset_id = staged.asset_id;
     Ok(())
 }
 

@@ -7,7 +7,7 @@
 
 use super::visual_overlay::{OperationId, RectanglePurpose};
 use crate::mkmacro::ScreenRect;
-use crate::mkmacro::{MkMacroStore, ScreenCaptureBackend};
+use crate::mkmacro::{ImageAssetAuthoringService, MkMacroStore, ScreenCaptureBackend};
 use image::RgbaImage;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,11 +71,10 @@ impl CaptureAdapter for ScreenCaptureAdapter {
 pub struct MkMacroAssetStoreAdapter(pub Arc<MkMacroStore>);
 impl AssetStoreAdapter for MkMacroAssetStoreAdapter {
     fn write_png_asset(&mut self, macro_id: u64, image: &RgbaImage) -> Result<u64, String> {
-        let id = self.0.next_asset_id(macro_id).map_err(|e| e.to_string())?;
-        self.0
-            .write_png_asset(macro_id, id, image)
-            .map_err(|e| e.to_string())?;
-        Ok(id)
+        ImageAssetAuthoringService::new(&self.0)
+            .stage_rgba(macro_id, image)
+            .map(|staged| staged.asset_id)
+            .map_err(|e| e.to_string())
     }
 }
 

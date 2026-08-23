@@ -328,14 +328,33 @@ fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic
 fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDiagnostic>) {
     if id == 0 {
         push(o, m, s, "missing_asset", "Select a reference image")
-    } else if root.is_some_and(|r| !r.join(m.to_string()).join(format!("{id}.png")).is_file()) {
-        push(
-            o,
-            m,
-            s,
-            "missing_asset",
-            format!("Image asset {id} is missing"),
-        )
+    } else if let Some(root) = root {
+        let path = root.join(m.to_string()).join(format!("{id}.png"));
+        if !path.is_file() {
+            push(
+                o,
+                m,
+                s,
+                "missing_asset",
+                format!("Image asset {id} is missing"),
+            );
+            return;
+        }
+        let valid = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| {
+                image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok()
+            })
+            .is_some_and(|image| image.width() > 0 && image.height() > 0);
+        if !valid {
+            push(
+                o,
+                m,
+                s,
+                "invalid_image_asset",
+                format!("Image asset {id} is not a usable PNG"),
+            );
+        }
     }
 }
 
@@ -463,5 +482,38 @@ mod coordinate_target_tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn managed_image_assets_are_validated_as_png_content() {
+        use image::{Rgba, RgbaImage};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut out = Vec::new();
+        asset(0, 7, Some(8), Some(root), &mut out);
+        assert!(out.iter().any(|d| d.code == "missing_asset"));
+        out.clear();
+        asset(1, 7, Some(8), Some(root), &mut out);
+        assert!(out.iter().any(|d| d.code == "missing_asset"));
+
+        let macro_dir = root.join("7");
+        std::fs::create_dir_all(&macro_dir).unwrap();
+        RgbaImage::from_pixel(2, 3, Rgba([1, 2, 3, 255]))
+            .save_with_format(macro_dir.join("1.png"), image::ImageFormat::Png)
+            .unwrap();
+        out.clear();
+        asset(1, 7, Some(8), Some(root), &mut out);
+        assert!(out.is_empty());
+
+        for bytes in [
+            b"corrupt".as_slice(),
+            b"\xff\xd8\xff\xe0renamed jpeg".as_slice(),
+        ] {
+            std::fs::write(macro_dir.join("1.png"), bytes).unwrap();
+            out.clear();
+            asset(1, 7, Some(8), Some(root), &mut out);
+            assert!(out.iter().any(|d| d.code == "invalid_image_asset"));
+            assert!(!can_run(&out));
+        }
     }
 }
