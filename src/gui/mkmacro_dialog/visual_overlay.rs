@@ -506,6 +506,13 @@ pub fn normalized_rect(a: MkPoint, b: MkPoint) -> Result<ScreenRect, VisualOverl
     ))
 }
 
+#[cfg(windows)]
+#[path = "visual_overlay_windows.rs"]
+mod native;
+#[cfg(windows)]
+use native::NativeOverlayRenderer;
+
+#[cfg(not(windows))]
 #[derive(Default)]
 struct NativeOverlayRenderer;
 #[cfg(not(windows))]
@@ -609,6 +616,19 @@ mod tests {
     }
 
     #[test]
+    fn half_open_drag_geometry_is_identical_in_all_four_directions() {
+        let expected = ScreenRect::new(500, 300, 700, 600);
+        for (a, b) in [
+            (point(500, 300), point(1200, 900)),
+            (point(1200, 300), point(500, 900)),
+            (point(500, 900), point(1200, 300)),
+            (point(1200, 900), point(500, 300)),
+        ] {
+            assert_eq!(normalized_rect(a, b).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn pick_confirms_purpose_and_ignores_stale_input() {
         let (mut c, fake, _) = controller();
         let id = c.begin_rectangle_pick(
@@ -676,29 +696,4 @@ mod tests {
         c.shutdown();
         assert_eq!(fake.lock().unwrap().closes, closes);
     }
-}
-
-// The Windows native-window implementation is kept behind this boundary.  It
-// is intentionally conservative until invoked by the editor: all geometry it
-// receives has already been resolved by the shared screen backend.
-#[cfg(windows)]
-impl OverlayRenderer for NativeOverlayRenderer {
-    fn show(
-        &mut self,
-        _: OperationId,
-        _: &OverlayVisual,
-        _: bool,
-    ) -> Result<(), VisualOverlayError> {
-        Err(VisualOverlayError {
-            kind: OverlayErrorKind::Platform,
-            message: "native visual overlay window could not be created".into(),
-        })
-    }
-    fn repaint(&mut self, _: OperationId, _: &OverlayVisual) -> Result<(), VisualOverlayError> {
-        Ok(())
-    }
-    fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
-        Ok(vec![])
-    }
-    fn close(&mut self) {}
 }

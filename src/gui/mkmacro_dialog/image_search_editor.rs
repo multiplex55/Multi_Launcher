@@ -75,6 +75,28 @@ impl ImageSearchEditorState {
     pub fn select(&mut self, kind: SearchRegionKind) {
         self.kind = kind;
     }
+    /// Refreshes display metadata without changing the persisted playback
+    /// index.  In particular, disconnecting a display must not silently point
+    /// an existing action at a different monitor.
+    pub fn refresh_monitors(&mut self) {
+        self.monitors = crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string());
+    }
+
+    pub fn validation_error(&self) -> Option<String> {
+        match self.kind {
+            SearchRegionKind::Rectangle if self.rectangle.is_empty() => {
+                Some("Rectangle width and height must be positive".into())
+            }
+            SearchRegionKind::Monitor => match &self.monitors {
+                Ok(monitors) if !monitors.iter().any(|m| m.index == self.monitor_index) => Some(
+                    format!("Monitor {} is currently unavailable", self.monitor_index),
+                ),
+                Err(error) => Some(format!("Monitor information unavailable: {error}")),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     pub fn selected_region(&self) -> SearchRegion {
         match self.kind {
             SearchRegionKind::Desktop => SearchRegion::Desktop,
@@ -198,6 +220,9 @@ pub(super) fn show(
             ui.label("Searches the complete virtual desktop across all connected monitors.");
         }
         SearchRegionKind::Monitor => {
+            if ui.button("Refresh").clicked() {
+                state.refresh_monitors();
+            }
             match &state.monitors {
                 Ok(monitors) => {
                     let selected = monitors
@@ -249,10 +274,13 @@ pub(super) fn show(
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Width");
-                ui.add(egui::DragValue::new(&mut state.rectangle.width).clamp_range(1..=u32::MAX));
+                ui.add(egui::DragValue::new(&mut state.rectangle.width));
                 ui.label("Height");
-                ui.add(egui::DragValue::new(&mut state.rectangle.height).clamp_range(1..=u32::MAX));
+                ui.add(egui::DragValue::new(&mut state.rectangle.height));
             });
+            if state.rectangle.is_empty() {
+                ui.colored_label(egui::Color32::RED, "Width and height must be positive.");
+            }
             ui.horizontal_wrapped(|ui| {
                 request(
                     ui,
@@ -379,5 +407,24 @@ mod tests {
                 && !json.contains("monitors")
                 && !json.contains("preview_error")
         );
+    }
+
+    #[test]
+    fn validation_preserves_invalid_rectangle_and_missing_monitor_index() {
+        let mut s = ImageSearchEditorState::from_payload(&payload(SearchRegion::Rectangle {
+            rect: ScreenRect::new(-10, -20, 0, 30),
+        }));
+        assert!(s.validation_error().unwrap().contains("positive"));
+        assert_eq!(s.rectangle, ScreenRect::new(-10, -20, 0, 30));
+
+        s.kind = SearchRegionKind::Monitor;
+        s.monitor_index = 19;
+        s.monitors = Ok(vec![MonitorDescriptor {
+            index: 2,
+            bounds: ScreenRect::new(-1920, 0, 1920, 1080),
+            primary: false,
+        }]);
+        assert!(s.validation_error().unwrap().contains("19"));
+        assert_eq!(s.monitor_index, 19);
     }
 }

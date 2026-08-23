@@ -140,7 +140,7 @@ pub fn resolve_window(
     match found.len() {
         0 => Err(ExecutionDiagnostic::new(
             DiagnosticKind::TargetNotFound,
-            "matching window is missing",
+            "Window target not found",
         )),
         1 => Ok(found.remove(0)),
         _ if policy == AmbiguityPolicy::First => Ok(found.remove(0)),
