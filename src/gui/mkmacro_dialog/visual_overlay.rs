@@ -141,6 +141,91 @@ impl OverlayVisual {
     }
 }
 
+/// Platform-neutral description of the pixels a native overlay must produce.
+/// The clear is deliberately first so repainting cannot leave an old drag
+/// rectangle behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OverlayFramePrimitive {
+    Clear,
+    Outline(ScreenRect),
+    MonitorLabel { bounds: ScreenRect, index: usize },
+}
+
+pub(crate) fn overlay_frame(visual: &OverlayVisual) -> Vec<OverlayFramePrimitive> {
+    let mut frame = vec![OverlayFramePrimitive::Clear];
+    match visual {
+        OverlayVisual::RectanglePicker { selection, .. } => {
+            if let Some(rect) = selection {
+                frame.push(OverlayFramePrimitive::Outline(*rect));
+            }
+        }
+        OverlayVisual::RectanglePreview(rect) | OverlayVisual::Window { rect, .. } => {
+            frame.push(OverlayFramePrimitive::Outline(*rect))
+        }
+        OverlayVisual::Monitor(monitor) => {
+            frame.push(OverlayFramePrimitive::Outline(monitor.bounds));
+            frame.push(OverlayFramePrimitive::MonitorLabel {
+                bounds: monitor.bounds,
+                index: monitor.index,
+            });
+        }
+        OverlayVisual::Monitors(monitors) => {
+            for monitor in monitors {
+                frame.push(OverlayFramePrimitive::Outline(monitor.bounds));
+                frame.push(OverlayFramePrimitive::MonitorLabel {
+                    bounds: monitor.bounds,
+                    index: monitor.index,
+                });
+            }
+        }
+    }
+    frame
+}
+
+pub(crate) fn intersecting_monitor_bounds(
+    monitors: &[ScreenRect],
+    target: ScreenRect,
+) -> Vec<ScreenRect> {
+    monitors
+        .iter()
+        .copied()
+        .filter(|m| {
+            i64::from(m.x) < target.right()
+                && i64::from(target.x) < m.right()
+                && i64::from(m.y) < target.bottom()
+                && i64::from(target.y) < m.bottom()
+        })
+        .collect()
+}
+
+pub(crate) fn desktop_to_overlay(rect: ScreenRect, origin: ScreenRect) -> (i64, i64, i64, i64) {
+    let left = i64::from(rect.x) - i64::from(origin.x);
+    let top = i64::from(rect.y) - i64::from(origin.y);
+    (
+        left,
+        top,
+        left + i64::from(rect.width),
+        top + i64::from(rect.height),
+    )
+}
+
+pub(crate) fn monitor_union(monitors: &[MonitorDescriptor]) -> Option<ScreenRect> {
+    monitors.iter().map(|m| m.bounds).reduce(|a, b| {
+        let left = a.x.min(b.x);
+        let top = a.y.min(b.y);
+        ScreenRect::new(
+            left,
+            top,
+            (a.right().max(b.right()) - i64::from(left)) as u32,
+            (a.bottom().max(b.bottom()) - i64::from(top)) as u32,
+        )
+    })
+}
+
+pub(crate) fn overlay_is_mouse_transparent(visual: &OverlayVisual) -> bool {
+    visual.passive()
+}
+
 /// Isolates native windows, input, painting and resource ownership from the
 /// deterministic state machine.
 pub trait OverlayRenderer: Send {
@@ -418,6 +503,9 @@ impl VisualOverlayController {
                     return;
                 };
                 *current = Some(point);
+                // Publish the final pointer position through the same repaint
+                // path as press/move before confirmation tears the windows down.
+                self.repaint_picker();
                 self.confirm_picker();
             }
             OverlayInputKind::Enter => self.confirm_picker(),
@@ -544,6 +632,7 @@ mod tests {
         inputs: Vec<OverlayInput>,
         closes: usize,
         transparent: Vec<bool>,
+        repaints: Vec<OverlayVisual>,
     }
     struct FakeRenderer(Arc<Mutex<FakeData>>);
     impl OverlayRenderer for FakeRenderer {
@@ -556,7 +645,12 @@ mod tests {
             self.0.lock().unwrap().transparent.push(transparent);
             Ok(())
         }
-        fn repaint(&mut self, _: OperationId, _: &OverlayVisual) -> Result<(), VisualOverlayError> {
+        fn repaint(
+            &mut self,
+            _: OperationId,
+            visual: &OverlayVisual,
+        ) -> Result<(), VisualOverlayError> {
+            self.0.lock().unwrap().repaints.push(visual.clone());
             Ok(())
         }
         fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
@@ -625,6 +719,79 @@ mod tests {
             (point(1200, 900), point(500, 300)),
         ] {
             assert_eq!(normalized_rect(a, b).unwrap(), expected);
+        }
+    }
+
+    fn monitor(index: usize, bounds: ScreenRect) -> MonitorDescriptor {
+        MonitorDescriptor {
+            index,
+            bounds,
+            primary: index == 1,
+        }
+    }
+
+    #[test]
+    fn monitor_selection_handles_negative_origins_spans_and_irregular_gaps() {
+        let monitors = [
+            ScreenRect::new(-1920, -200, 1920, 1080),
+            ScreenRect::new(0, 0, 1920, 1080),
+            ScreenRect::new(2500, -1200, 1200, 900),
+        ];
+        assert_eq!(
+            intersecting_monitor_bounds(&monitors, ScreenRect::new(-100, -100, 300, 300)),
+            vec![monitors[0], monitors[1]]
+        );
+        assert!(
+            intersecting_monitor_bounds(&monitors, ScreenRect::new(2100, 100, 200, 200)).is_empty()
+        );
+        assert_eq!(
+            desktop_to_overlay(ScreenRect::new(-1800, -100, 20, 30), monitors[0]),
+            (120, 100, 140, 130)
+        );
+    }
+
+    #[test]
+    fn monitor_identification_union_preserves_signed_extents_and_gaps() {
+        let monitors = vec![
+            monitor(1, ScreenRect::new(-1600, 100, 1600, 900)),
+            monitor(2, ScreenRect::new(400, -800, 1000, 700)),
+        ];
+        assert_eq!(
+            monitor_union(&monitors),
+            Some(ScreenRect::new(-1600, -800, 3000, 1800))
+        );
+        assert_eq!(monitor_union(&[]), None);
+    }
+
+    #[test]
+    fn picker_style_is_interactive_and_passive_styles_are_mouse_transparent() {
+        let picker = OverlayVisual::RectanglePicker {
+            virtual_desktop: ScreenRect::new(0, 0, 1, 1),
+            selection: None,
+        };
+        assert!(!overlay_is_mouse_transparent(&picker));
+        assert!(overlay_is_mouse_transparent(
+            &OverlayVisual::RectanglePreview(ScreenRect::new(0, 0, 1, 1))
+        ));
+        assert!(overlay_is_mouse_transparent(&OverlayVisual::Monitor(
+            monitor(1, ScreenRect::new(0, 0, 1, 1))
+        )));
+    }
+
+    #[test]
+    fn every_repaint_frame_clears_before_drawing_the_new_selection() {
+        let old = ScreenRect::new(-20, -20, 10, 10);
+        let new = ScreenRect::new(20, 20, 30, 30);
+        for selection in [Some(old), Some(new), None] {
+            let frame = overlay_frame(&OverlayVisual::RectanglePicker {
+                virtual_desktop: ScreenRect::new(-100, -100, 200, 200),
+                selection,
+            });
+            assert_eq!(frame.first(), Some(&OverlayFramePrimitive::Clear));
+            assert_eq!(
+                frame.get(1),
+                selection.map(OverlayFramePrimitive::Outline).as_ref()
+            );
         }
     }
 
