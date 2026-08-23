@@ -42,8 +42,8 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
         let i = ins.len();
         map.insert(s.id, i);
         let closing = matches!(
-            s.action,
-            MkAction::Else | MkAction::EndIf | MkAction::RepeatEnd | MkAction::WhileEnd
+            s.action.block_marker(),
+            Some(MkBlockMarker::Else | MkBlockMarker::Close(_))
         );
         let depth = stack.len().saturating_sub(closing as usize);
         ins.push(MkInstruction {
@@ -175,5 +175,21 @@ mod tests {
             random_offset_px: 9,
         };
         assert_eq!(compile(&m).unwrap().playback, m.playback);
+    }
+    #[test]
+    fn compiler_marker_variants_match_editor_classification() {
+        let condition = MkCondition::All { conditions: vec![] };
+        let markers = [
+            MkAction::If(condition.clone()),
+            MkAction::Else,
+            MkAction::EndIf,
+            MkAction::RepeatStart { count: 1 },
+            MkAction::RepeatEnd,
+            MkAction::WhileStart { condition },
+            MkAction::WhileEnd,
+        ];
+        assert!(markers.iter().all(MkAction::is_block_marker));
+        assert!(!MkAction::Break.is_block_marker());
+        assert!(!MkAction::Continue.is_block_marker());
     }
 }

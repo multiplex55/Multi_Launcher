@@ -50,6 +50,9 @@ pub struct MkMacroDialog {
     pub selection: Selection,
     pub search: String,
     pub delete_confirmation: ConfirmationModal,
+    pub unwrap_confirmation: ConfirmationModal,
+    pub pending_unwrap_block: Option<u64>,
+    pub pending_unwrap_selection: Option<Selection>,
     pub hotkey_capture: bool,
     pub record_hotkey_capture: bool,
     pub action_catalog_visible: bool,
@@ -1281,6 +1284,9 @@ impl MkMacroDialog {
             selection: Default::default(),
             search: String::new(),
             delete_confirmation: Default::default(),
+            unwrap_confirmation: Default::default(),
+            pending_unwrap_block: None,
+            pending_unwrap_selection: None,
             hotkey_capture: false,
             record_hotkey_capture: false,
             action_catalog_visible: false,
@@ -1633,6 +1639,21 @@ impl MkMacroDialog {
         }
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();
+        }
+        match self.unwrap_confirmation.ui(ui.ctx()) {
+            ConfirmationResult::Confirmed => {
+                if let Some(id) = self.pending_unwrap_block.take() {
+                    self.pending_unwrap_selection = None;
+                    step_table::apply_confirmed_unwrap(self, id);
+                }
+            }
+            ConfirmationResult::Cancelled => {
+                self.pending_unwrap_block = None;
+                if let Some(selection) = self.pending_unwrap_selection.take() {
+                    self.selection = selection;
+                }
+            }
+            ConfirmationResult::None => {}
         }
     }
 }
