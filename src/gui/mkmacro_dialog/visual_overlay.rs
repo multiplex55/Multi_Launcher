@@ -309,6 +309,10 @@ impl VisualOverlayController {
     fn replace(&mut self) -> OperationId {
         if let Some(id) = self.operation_id.take() {
             self.renderer.close();
+            // Nothing produced by the replaced operation may be observed after
+            // its replacement.  Keep one useful cancellation notification,
+            // but quarantine an earlier error/expiry (and duplicate cancel).
+            self.events.retain(|event| event_operation_id(event) != id);
             self.events
                 .push_back(VisualOverlayEvent::Cancelled { operation_id: id });
         }
@@ -324,10 +328,19 @@ impl VisualOverlayController {
                 self.operation_id = Some(id);
                 self.state = state;
             }
-            Err(error) => self.events.push_back(VisualOverlayEvent::Error {
-                operation_id: id,
-                error,
-            }),
+            Err(error) => {
+                // show() is permitted to fail after creating some native
+                // resources, so close is mandatory even though the operation
+                // was never published as active.
+                self.renderer.close();
+                self.state = VisualOverlayState::Idle;
+                self.operation_id = None;
+                self.virtual_desktop = None;
+                self.events.push_back(VisualOverlayEvent::Error {
+                    operation_id: id,
+                    error,
+                });
+            }
         }
         id
     }
@@ -426,8 +439,11 @@ impl VisualOverlayController {
         if self.shut_down {
             return;
         }
-        self.cancel();
         self.renderer.close();
+        self.operation_id = None;
+        self.state = VisualOverlayState::Idle;
+        self.virtual_desktop = None;
+        self.events.clear();
         self.shut_down = true;
     }
     pub fn poll(&mut self) -> Vec<VisualOverlayEvent> {
@@ -441,6 +457,7 @@ impl VisualOverlayController {
             if let Some(id) = self.operation_id.take() {
                 self.renderer.close();
                 self.state = VisualOverlayState::Idle;
+                self.virtual_desktop = None;
                 self.events.push_back(VisualOverlayEvent::Error {
                     operation_id: id,
                     error,
@@ -564,6 +581,15 @@ impl VisualOverlayController {
         }
     }
 }
+
+fn event_operation_id(event: &VisualOverlayEvent) -> OperationId {
+    match event {
+        VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+        | VisualOverlayEvent::Cancelled { operation_id }
+        | VisualOverlayEvent::Expired { operation_id }
+        | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
+    }
+}
 impl Drop for VisualOverlayController {
     fn drop(&mut self) {
         self.shutdown();
@@ -633,6 +659,8 @@ mod tests {
         closes: usize,
         transparent: Vec<bool>,
         repaints: Vec<OverlayVisual>,
+        show_error: Option<VisualOverlayError>,
+        poll_error: Option<VisualOverlayError>,
     }
     struct FakeRenderer(Arc<Mutex<FakeData>>);
     impl OverlayRenderer for FakeRenderer {
@@ -643,7 +671,10 @@ mod tests {
             transparent: bool,
         ) -> Result<(), VisualOverlayError> {
             self.0.lock().unwrap().transparent.push(transparent);
-            Ok(())
+            match self.0.lock().unwrap().show_error.take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         }
         fn repaint(
             &mut self,
@@ -654,7 +685,12 @@ mod tests {
             Ok(())
         }
         fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
-            Ok(std::mem::take(&mut self.0.lock().unwrap().inputs))
+            let mut data = self.0.lock().unwrap();
+            if let Some(error) = data.poll_error.take() {
+                Err(error)
+            } else {
+                Ok(std::mem::take(&mut data.inputs))
+            }
         }
         fn close(&mut self) {
             self.0.lock().unwrap().closes += 1;
@@ -862,5 +898,71 @@ mod tests {
         let closes = fake.lock().unwrap().closes;
         c.shutdown();
         assert_eq!(fake.lock().unwrap().closes, closes);
+    }
+
+    fn platform_error(message: &str) -> VisualOverlayError {
+        VisualOverlayError {
+            kind: OverlayErrorKind::Platform,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn replacement_quarantines_old_errors_and_keeps_only_new_operation_active() {
+        let (mut c, fake, _) = controller();
+        let first = c.identify_monitors(vec![monitor(1, ScreenRect::new(0, 0, 10, 10))]);
+        c.events.push_back(VisualOverlayEvent::Error {
+            operation_id: first,
+            error: platform_error("stale"),
+        });
+        let second = c.highlight_window(ScreenRect::new(1, 2, 3, 4), WindowAreaKind::WholeWindow);
+        assert_eq!(c.operation_id(), Some(second));
+        assert_eq!(
+            c.poll(),
+            vec![VisualOverlayEvent::Cancelled {
+                operation_id: first
+            }]
+        );
+        assert_eq!(fake.lock().unwrap().closes, 1);
+    }
+
+    #[test]
+    fn startup_and_poll_failures_close_and_return_to_idle_once() {
+        let (mut c, fake, _) = controller();
+        fake.lock().unwrap().show_error = Some(platform_error("partial startup"));
+        let failed = c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
+        assert_eq!(c.state(), &VisualOverlayState::Idle);
+        assert_eq!(c.operation_id(), None);
+        assert!(
+            matches!(c.poll().as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == failed)
+        );
+
+        let active = c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
+        fake.lock().unwrap().poll_error = Some(platform_error("poll failed"));
+        assert!(
+            matches!(c.poll().as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == active)
+        );
+        assert!(c.poll().is_empty());
+        assert_eq!(c.state(), &VisualOverlayState::Idle);
+    }
+
+    #[test]
+    fn cancel_shutdown_and_drop_close_without_late_events() {
+        let (mut c, fake, _) = controller();
+        c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
+        c.cancel();
+        c.cancel();
+        c.shutdown();
+        c.shutdown();
+        assert!(c.poll().is_empty());
+        let closes = fake.lock().unwrap().closes;
+        drop(c);
+        assert_eq!(fake.lock().unwrap().closes, closes);
+
+        let (mut c, fake, _) = controller();
+        c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
+        let before = fake.lock().unwrap().closes;
+        drop(c);
+        assert!(fake.lock().unwrap().closes > before);
     }
 }

@@ -72,31 +72,43 @@ impl SharedVisualOverlayController {
     pub fn cancel(&self) {
         self.0.lock().unwrap().controller.cancel();
     }
+    pub fn shutdown(&self) {
+        let mut shared = self.0.lock().unwrap();
+        shared.controller.shutdown();
+        shared.editor_events.clear();
+    }
     pub fn poll(&self) -> Vec<VisualOverlayEvent> {
         let mut shared = self.0.lock().unwrap();
         let mut events = std::mem::take(&mut shared.editor_events);
         events.extend(shared.controller.poll());
         events
     }
-    pub fn preview_rectangle(&self, rect: ScreenRect) {
-        self.0.lock().unwrap().controller.preview_rectangle(rect);
+    pub fn preview_rectangle(&self, rect: ScreenRect) -> OperationId {
+        self.0.lock().unwrap().controller.preview_rectangle(rect)
     }
-    pub fn highlight_monitor(&self, monitor: crate::mkmacro::MonitorDescriptor) {
-        self.0.lock().unwrap().controller.highlight_monitor(monitor);
+    pub fn highlight_monitor(&self, monitor: crate::mkmacro::MonitorDescriptor) -> OperationId {
+        self.0.lock().unwrap().controller.highlight_monitor(monitor)
     }
-    pub fn identify_monitors(&self, monitors: Vec<crate::mkmacro::MonitorDescriptor>) {
+    pub fn identify_monitors(
+        &self,
+        monitors: Vec<crate::mkmacro::MonitorDescriptor>,
+    ) -> OperationId {
         self.0
             .lock()
             .unwrap()
             .controller
-            .identify_monitors(monitors);
+            .identify_monitors(monitors)
     }
-    pub fn highlight_window(&self, rect: ScreenRect, kind: super::visual_overlay::WindowAreaKind) {
+    pub fn highlight_window(
+        &self,
+        rect: ScreenRect,
+        kind: super::visual_overlay::WindowAreaKind,
+    ) -> OperationId {
         self.0
             .lock()
             .unwrap()
             .controller
-            .highlight_window(rect, kind);
+            .highlight_window(rect, kind)
     }
 }
 
