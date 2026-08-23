@@ -7,7 +7,8 @@
 
 use super::MkMacroStore;
 use anyhow::{Context, Result};
-use image::{ImageFormat, RgbaImage};
+use image::{ImageDecoder, ImageFormat, RgbaImage};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +22,31 @@ pub struct ImageAssetAuthoringService<'a> {
     store: &'a MkMacroStore,
 }
 
+/// Upper bound shared by import and preview. This keeps hostile PNG headers
+/// from turning a reference-image operation into an unbounded allocation.
+pub const MAX_REFERENCE_PIXELS: u64 = 25_000_000;
+
+pub fn decode_reference_png(bytes: &[u8]) -> Result<RgbaImage> {
+    let decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes))
+        .context("reference image is not a valid PNG image")?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 {
+        anyhow::bail!("reference image is empty")
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| anyhow::anyhow!("Reference image is too large to import"))?;
+    let rgba_bytes = pixels
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("Reference image is too large to import"))?;
+    if pixels > MAX_REFERENCE_PIXELS || rgba_bytes > usize::MAX as u64 {
+        anyhow::bail!("Reference image is too large to import")
+    }
+    image::DynamicImage::from_decoder(decoder)
+        .context("reference image is not a valid PNG image")
+        .map(|image| image.to_rgba8())
+}
+
 impl<'a> ImageAssetAuthoringService<'a> {
     pub fn new(store: &'a MkMacroStore) -> Self {
         Self { store }
@@ -31,9 +57,8 @@ impl<'a> ImageAssetAuthoringService<'a> {
         // the format explicitly prevents a renamed JPEG from being accepted.
         let bytes = std::fs::read(source)
             .with_context(|| format!("read reference image {}", source.display()))?;
-        let image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-            .with_context(|| format!("{} is not a valid PNG image", source.display()))?
-            .to_rgba8();
+        let image = decode_reference_png(&bytes)
+            .with_context(|| format!("{} is not a valid PNG image", source.display()))?;
         self.stage_rgba(macro_id, &image)
     }
 

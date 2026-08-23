@@ -9,6 +9,19 @@ use super::{
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
+use std::sync::mpsc;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageAuthoringJobState {
+    #[default]
+    Idle,
+    Importing,
+}
+
+struct ImageImportCompletion {
+    token: super::visual_capture_workflow::DraftToken,
+    result: Result<u64, String>,
+}
 
 #[derive(Default)]
 pub struct ActionEditorState {
@@ -30,6 +43,8 @@ pub struct ActionEditorState {
     /// launcher and dialog native-window visibility boundary.
     pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
     overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
+    image_job: ImageAuthoringJobState,
+    image_import_rx: Option<mpsc::Receiver<ImageImportCompletion>>,
     picker: NativePositionPicker,
 }
 
@@ -195,6 +210,60 @@ impl ActionEditorState {
         self.capture_keys = false;
         self.editor = None;
         self.image_search = None;
+        self.image_job = ImageAuthoringJobState::Idle;
+        self.image_import_rx = None;
+    }
+
+    fn start_image_import(
+        &mut self,
+        ctx: egui::Context,
+        store: std::sync::Arc<MkMacroStore>,
+        macro_id: u64,
+        source: std::path::PathBuf,
+    ) -> Result<(), String> {
+        if self.image_job != ImageAuthoringJobState::Idle {
+            return Err("A reference image is already being authored".into());
+        }
+        let token = super::visual_capture_workflow::DraftToken {
+            macro_id,
+            draft_generation: self.draft_generation,
+        };
+        let (tx, rx) = mpsc::channel();
+        self.image_job = ImageAuthoringJobState::Importing;
+        self.image_import_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = ImageAssetAuthoringService::new(&store)
+                .import_png(macro_id, &source)
+                .map(|asset| asset.asset_id)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(ImageImportCompletion { token, result });
+            ctx.request_repaint();
+        });
+        Ok(())
+    }
+
+    fn poll_image_import(&mut self, current_macro_id: Option<u64>) {
+        let result = self
+            .image_import_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        let Some(completion) = result else { return };
+        self.image_import_rx = None;
+        self.image_job = ImageAuthoringJobState::Idle;
+        if current_macro_id != Some(completion.token.macro_id)
+            || self.draft_generation != completion.token.draft_generation
+        {
+            return;
+        }
+        match completion.result {
+            Ok(asset_id) => {
+                if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
+                    payload.asset_id = asset_id;
+                    self.capture_message = None;
+                }
+            }
+            Err(error) => self.capture_message = Some(format!("Reference image: {error}")),
+        }
     }
 
     pub fn tick_visual_capture(&mut self, current_macro_id: Option<u64>) {
@@ -1495,6 +1564,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     }
     let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
+    d.action_editor.poll_image_import(d.selected_macro_id);
     let overlay_was_active = d.action_editor.visual_overlay.operation_id().is_some();
     d.action_editor.poll_visual_overlay();
     if overlay_was_active || d.action_editor.visual_overlay.operation_id().is_some() {
@@ -1505,6 +1575,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .visual_capture
         .as_ref()
         .is_some_and(|w| w.active());
+    let image_job_active = d.action_editor.image_job != ImageAuthoringJobState::Idle;
+    if image_job_active {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
     if workflow_active {
         ctx.request_repaint();
     }
@@ -1543,7 +1617,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             pick_request = position;
             image_request = image;
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0));
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), image_job_active);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -1705,12 +1779,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
                     )
                     && state.image_search.as_ref().and_then(|image| image.validation_error()).is_none();
-                apply = ui.add_enabled(valid && !workflow_active, egui::Button::new("Apply")).clicked();
+                apply = ui.add_enabled(valid && !workflow_active && !image_job_active, egui::Button::new("Apply")).clicked();
                 cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
           });
         });
-    if workflow_active && image_request.is_some() {
+    if (workflow_active || image_job_active) && image_request.is_some() {
         d.action_editor.capture_message =
             Some("Finish or cancel the active visual capture first".into());
     } else if let Some(request) = image_request {
@@ -1720,12 +1794,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .add_filter("PNG image", &["png"])
                 .pick_file()
                 .map(|path| {
-                    apply_import(
-                        &d.store,
-                        macro_id,
-                        image_payload_mut(d.action_editor.draft.as_mut().unwrap()).unwrap(),
-                        &path,
-                    )
+                    d.action_editor
+                        .start_image_import(ctx.clone(), d.store.clone(), macro_id, path)
+                        .map_err(anyhow::Error::msg)
                 })
                 .transpose()
                 .map(|_| ()),
@@ -1823,6 +1894,62 @@ mod tests {
                 .unwrap()
                 .width(),
             3
+        );
+    }
+
+    #[test]
+    fn image_import_completion_only_updates_its_original_draft() {
+        let payload = MkImagePayload {
+            asset_id: 3,
+            wait: MkWaitOptions {
+                timeout_ms: 5_000,
+                poll_interval_ms: 100,
+            },
+            region: SearchRegion::Desktop,
+            tolerance: 0,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+        };
+        let mut editor = ActionEditorState::default();
+        editor.draft_generation = 7;
+        editor.draft = Some(step(MkAction::ImageFind(payload.clone())));
+        let (tx, rx) = mpsc::channel();
+        editor.image_job = ImageAuthoringJobState::Importing;
+        editor.image_import_rx = Some(rx);
+        tx.send(ImageImportCompletion {
+            token: super::super::visual_capture_workflow::DraftToken {
+                macro_id: 4,
+                draft_generation: 6,
+            },
+            result: Ok(9),
+        })
+        .unwrap();
+        editor.poll_image_import(Some(4));
+        assert_eq!(
+            image_payload_mut(editor.draft.as_mut().unwrap())
+                .unwrap()
+                .asset_id,
+            3
+        );
+        assert_eq!(editor.image_job, ImageAuthoringJobState::Idle);
+
+        let (tx, rx) = mpsc::channel();
+        editor.image_job = ImageAuthoringJobState::Importing;
+        editor.image_import_rx = Some(rx);
+        tx.send(ImageImportCompletion {
+            token: super::super::visual_capture_workflow::DraftToken {
+                macro_id: 4,
+                draft_generation: 7,
+            },
+            result: Ok(10),
+        })
+        .unwrap();
+        editor.poll_image_import(Some(4));
+        assert_eq!(
+            image_payload_mut(editor.draft.as_mut().unwrap())
+                .unwrap()
+                .asset_id,
+            10
         );
     }
     fn capture(slot: PositionCaptureSlot) -> PositionCaptureState {

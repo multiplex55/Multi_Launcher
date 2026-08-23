@@ -135,18 +135,24 @@ pub(super) fn show(
     state: &mut ImageSearchEditorState,
     store: &crate::mkmacro::MkMacroStore,
     macro_id: u64,
+    authoring_busy: bool,
 ) -> Option<ImageEditorRequest> {
     let mut out = None;
     ui.heading("Reference Image");
-    ui.horizontal_wrapped(|ui| {
-        request(ui, "Select PNG…", ImageEditorRequest::ImportPng, &mut out);
-        request(
-            ui,
-            "Capture…",
-            ImageEditorRequest::CaptureRectangle,
-            &mut out,
-        );
+    ui.add_enabled_ui(!authoring_busy, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            request(ui, "Select PNG…", ImageEditorRequest::ImportPng, &mut out);
+            request(
+                ui,
+                "Capture…",
+                ImageEditorRequest::CaptureRectangle,
+                &mut out,
+            );
+        });
     });
+    if authoring_busy {
+        ui.label("Importing reference image...");
+    }
     if payload.asset_id == 0 {
         ui.label("No reference image selected.");
     } else {
