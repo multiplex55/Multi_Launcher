@@ -653,21 +653,27 @@ fn compose_monitors(
     if target.is_empty() {
         return Err(invalid("capture region is empty"));
     }
+    if target.right() > i64::from(i32::MAX) + 1 || target.bottom() > i64::from(i32::MAX) + 1 {
+        return Err(invalid("capture region endpoint overflow"));
+    }
     let pixels = usize::try_from(u64::from(target.width) * u64::from(target.height))
         .map_err(|_| invalid("capture allocation size overflow"))?;
     let _rgba_bytes = pixels
         .checked_mul(4)
         .filter(|bytes| *bytes <= isize::MAX as usize)
         .ok_or_else(|| invalid("RGBA capture allocation size overflow"))?;
-    let mut covered = vec![false; pixels];
-    let mut destination = RgbaImage::new(target.width, target.height);
+    // Pixels in gaps between physical monitors have a deterministic, opaque
+    // background. Do not use `RgbaImage::new`: its transparent default would
+    // make those pixels unsuitable for normal screen-color comparisons.
+    let mut destination =
+        RgbaImage::from_pixel(target.width, target.height, image::Rgba([0, 0, 0, 255]));
     for monitor in monitors {
-        if cancelled() {
-            return Err(cancelled_error());
-        }
         let Some(overlap) = intersection(target, monitor.bounds) else {
             continue;
         };
+        if cancelled() {
+            return Err(cancelled_error());
+        }
         let source = monitor.source.capture().map_err(|e| {
             e.context("operation", "capture monitor").context(
                 "monitor",
@@ -720,21 +726,11 @@ fn compose_monitors(
         for y in 0..overlap.height {
             for x in 0..overlap.width {
                 destination.put_pixel(dx + x, dy + y, *source.get_pixel(sx + x, sy + y));
-                covered
-                    [(u64::from(dy + y) * u64::from(target.width) + u64::from(dx + x)) as usize] =
-                    true;
             }
         }
     }
     if cancelled() {
         return Err(cancelled_error());
-    }
-    if covered.iter().any(|covered| !covered) {
-        return Err(ExecutionDiagnostic::new(
-            DiagnosticKind::Backend,
-            "monitors do not cover every requested pixel",
-        )
-        .context("operation", "compose monitor captures"));
     }
     Ok(destination)
 }
@@ -1321,6 +1317,15 @@ mod windows_backend_tests {
             Ok(self.0.clone())
         }
     }
+    struct FailingSource;
+    impl MonitorCapture for FailingSource {
+        fn capture(&self) -> ExecResult<RgbaImage> {
+            Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "fixture monitor capture failed",
+            ))
+        }
+    }
     struct CaptureFixture {
         desktop: (i32, i32, i32, i32),
         monitors: Vec<CaptureMonitor>,
@@ -1424,7 +1429,80 @@ mod windows_backend_tests {
     }
 
     #[test]
-    fn validation_rejects_empty_overflow_outside_and_uncovered_rectangles() {
+    fn compositor_fills_diagonally_offset_desktop_gaps_with_opaque_black() {
+        let monitors = vec![
+            monitor(1, ScreenRect::new(0, 0, 2, 2), [200, 1, 2, 255]),
+            monitor(2, ScreenRect::new(2, 2, 2, 2), [3, 200, 4, 255]),
+        ];
+        let image = compose_monitors(ScreenRect::new(0, 0, 4, 4), &monitors, &|| false).unwrap();
+
+        assert_eq!(image.get_pixel(1, 1).0, [200, 1, 2, 255]);
+        assert_eq!(image.get_pixel(2, 2).0, [3, 200, 4, 255]);
+        assert_eq!(image.get_pixel(3, 0).0, [0, 0, 0, 255]);
+        assert_eq!(image.get_pixel(0, 3).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rectangle_spanning_two_monitors_preserves_offsets_and_black_gap() {
+        let monitors = vec![
+            monitor(1, ScreenRect::new(0, 0, 2, 2), [10, 0, 0, 255]),
+            monitor(2, ScreenRect::new(4, 1, 2, 2), [20, 0, 0, 255]),
+        ];
+        let image = compose_monitors(ScreenRect::new(1, 0, 4, 3), &monitors, &|| false).unwrap();
+
+        assert_eq!(image.dimensions(), (4, 3));
+        assert_eq!(image.get_pixel(0, 0).0, [10, 0, 0, 255]);
+        assert_eq!(image.get_pixel(3, 1).0, [20, 0, 0, 255]);
+        assert_eq!(image.get_pixel(1, 1).0, [0, 0, 0, 255]);
+        assert_eq!(image.get_pixel(3, 0).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn negative_desktop_capture_maps_pixels_and_signed_origin() {
+        let backend = WindowsScreenCaptureBackend::new(Arc::new(CaptureFixture {
+            desktop: (-3, -2, 4, 3),
+            monitors: vec![monitor(1, ScreenRect::new(-3, -2, 2, 2), [9, 8, 7, 255])],
+        }));
+        let capture = backend.capture(&SearchRegion::Desktop, &|| false).unwrap();
+
+        assert_eq!(capture.origin, (-3, -2));
+        assert_eq!(capture.image.get_pixel(0, 0).0, [9, 8, 7, 255]);
+        assert_eq!(capture.image.get_pixel(3, 2).0, [0, 0, 0, 255]);
+        assert_eq!(capture.desktop_point((0, 0)), Some((-3, -2)));
+        assert_eq!(capture.desktop_point((3, 2)), Some((0, 0)));
+        assert_eq!(capture.local_point((-3, -2)), Some((0, 0)));
+        assert_eq!(capture.local_point((0, 0)), Some((3, 2)));
+    }
+
+    #[test]
+    fn rectangle_wholly_in_virtual_desktop_gap_is_opaque_black() {
+        let backend = WindowsScreenCaptureBackend::new(Arc::new(CaptureFixture {
+            desktop: (0, 0, 5, 2),
+            monitors: vec![
+                monitor(1, ScreenRect::new(0, 0, 1, 2), [1, 2, 3, 255]),
+                monitor(2, ScreenRect::new(4, 0, 1, 2), [4, 5, 6, 255]),
+            ],
+        }));
+        let capture = backend
+            .capture(
+                &SearchRegion::Rectangle {
+                    rect: ScreenRect::new(1, 0, 3, 2),
+                },
+                &|| false,
+            )
+            .unwrap();
+
+        assert_eq!(capture.image.dimensions(), (3, 2));
+        assert!(
+            capture
+                .image
+                .pixels()
+                .all(|pixel| pixel.0 == [0, 0, 0, 255])
+        );
+    }
+
+    #[test]
+    fn validation_rejects_empty_overflow_and_outside_rectangles_but_fills_gaps() {
         for metrics in [(0, 0, 0, 1), (0, 0, -1, 1), (i32::MAX, 0, 2, 1)] {
             assert_eq!(
                 rect_from_signed_metrics(metrics.0, metrics.1, metrics.2, metrics.3)
@@ -1461,13 +1539,53 @@ mod windows_backend_tests {
                 .kind,
             DiagnosticKind::InvalidTarget
         );
-        assert_eq!(
-            backend
-                .capture_rect(ScreenRect::new(0, 0, 2, 2), &|| false)
-                .unwrap_err()
-                .kind,
-            DiagnosticKind::Backend
+        let image = backend
+            .capture_rect(ScreenRect::new(0, 0, 2, 2), &|| false)
+            .unwrap();
+        assert_eq!(image.get_pixel(1, 1).0, [0, 0, 0, 255]);
+        for rect in [
+            ScreenRect::new(i32::MAX, 0, 2, 1),
+            ScreenRect::new(0, i32::MAX, 1, 2),
+        ] {
+            let error = compose_monitors(rect, &[], &|| false).unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+            assert!(error.message.contains("overflow"));
+        }
+        let allocation_error = compose_monitors(
+            ScreenRect::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX),
+            &[],
+            &|| false,
+        )
+        .unwrap_err();
+        assert_eq!(allocation_error.kind, DiagnosticKind::InvalidTarget);
+        assert!(
+            allocation_error
+                .message
+                .contains("allocation size overflow")
         );
+    }
+
+    #[test]
+    fn compositor_rejects_bad_dimensions_and_capture_errors() {
+        let bad_dimensions = CaptureMonitor {
+            bounds: ScreenRect::new(0, 0, 2, 1),
+            stable_id: 1,
+            source: Arc::new(ImageSource(RgbaImage::new(1, 1))),
+        };
+        let error = compose_monitors(ScreenRect::new(0, 0, 2, 1), &[bad_dimensions], &|| false)
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert!(error.message.contains("returned 1x1"));
+
+        let failing = CaptureMonitor {
+            bounds: ScreenRect::new(0, 0, 1, 1),
+            stable_id: 2,
+            source: Arc::new(FailingSource),
+        };
+        let error =
+            compose_monitors(ScreenRect::new(0, 0, 1, 1), &[failing], &|| false).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert!(error.message.contains("fixture monitor capture failed"));
     }
 
     #[test]
