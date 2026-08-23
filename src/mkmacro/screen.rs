@@ -420,6 +420,18 @@ pub enum CaptureGeometryError {
     AllocationOverflow,
 }
 
+impl std::fmt::Display for CaptureGeometryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ZeroWidth => "capture region width is zero",
+            Self::ZeroHeight => "capture region height is zero",
+            Self::RightOverflow => "capture region right endpoint overflow",
+            Self::BottomOverflow => "capture region bottom endpoint overflow",
+            Self::AllocationOverflow => "RGBA capture allocation size overflow",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchRegion {
@@ -486,6 +498,16 @@ mod capture_geometry_tests {
             ScreenRect::new(-850, 100, 600, 400)
                 .validate_capture()
                 .is_ok()
+        );
+        assert!(
+            CaptureGeometryError::RightOverflow
+                .to_string()
+                .contains("overflow")
+        );
+        assert!(
+            CaptureGeometryError::AllocationOverflow
+                .to_string()
+                .contains("allocation size overflow")
         );
     }
 }
@@ -738,7 +760,7 @@ fn compose_monitors(
 ) -> ExecResult<RgbaImage> {
     target
         .validate_capture()
-        .map_err(|error| invalid(format!("invalid capture rectangle: {error:?}")))?;
+        .map_err(|error| invalid(format!("invalid capture rectangle: {error}")))?;
     // Pixels in gaps between physical monitors have a deterministic, opaque
     // background. Do not use `RgbaImage::new`: its transparent default would
     // make those pixels unsuitable for normal screen-color comparisons.
