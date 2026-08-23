@@ -134,8 +134,6 @@ impl VisualSearch for ProductionVisualSearch {
                 tolerance: payload.tolerance,
                 alpha: payload.alpha,
                 return_point: payload.return_point,
-                not_found_policy: MkImageNotFoundPolicy::Fail,
-                outputs: MkImageOutputs::default(),
                 first_result: true,
             },
             &|| false,
@@ -183,8 +181,6 @@ impl Default for MatchOptions {
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
-            not_found_policy: MkImageNotFoundPolicy::Fail,
-            outputs: MkImageOutputs::default(),
             first_result: true,
         }
     }
@@ -511,8 +507,6 @@ mod tests {
                 &n,
                 MatchOptions {
                     return_point: ReturnPoint::TopLeft,
-                    not_found_policy: MkImageNotFoundPolicy::Fail,
-                    outputs: MkImageOutputs::default(),
                     ..Default::default()
                 },
                 &|| false
