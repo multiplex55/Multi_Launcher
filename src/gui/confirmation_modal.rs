@@ -107,6 +107,15 @@ impl Default for ConfirmationModal {
 }
 
 impl ConfirmationModal {
+    pub fn open_custom(&mut self, description: impl Into<String>, warning: impl Into<String>) {
+        self.title = "Confirm destructive action".into();
+        self.description = description.into();
+        self.warning = warning.into();
+        self.confirm_label = "Confirm".into();
+        self.cancel_label = "Cancel".into();
+        self.source_label = None;
+        self.open = true;
+    }
     pub fn open_for(&mut self, kind: DestructiveAction) {
         self.open_for_source(kind, None);
     }

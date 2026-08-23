@@ -98,24 +98,14 @@ enum Command {
     Up,
     Down,
     Delete,
+    DeleteRow(u64),
+    DeleteBlock(u64),
+    UnwrapBlock(u64),
     InsertAbove(u64),
     InsertBelow(u64),
     RunOne,
     RunFrom,
 }
-fn structural(a: &crate::mkmacro::MkAction) -> bool {
-    matches!(
-        a,
-        crate::mkmacro::MkAction::If(_)
-            | crate::mkmacro::MkAction::Else
-            | crate::mkmacro::MkAction::EndIf
-            | crate::mkmacro::MkAction::RepeatStart { .. }
-            | crate::mkmacro::MkAction::RepeatEnd
-            | crate::mkmacro::MkAction::WhileStart { .. }
-            | crate::mkmacro::MkAction::WhileEnd
-    )
-}
-
 const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
 
 /// Uses all height assigned to the step area; the number of rows is deliberately
@@ -219,7 +209,8 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         let label = format!("{}{}", "  ".repeat(depths[i]), super::action_catalog::action_name(&s.action));
                         let response=if structural { ui.strong(label) } else { ui.label(label) };
                         if response.double_clicked(){command=Some(Command::Edit(s.id));}
-                        response.context_menu(|ui| context_menu(ui,s.id,&mut command));
+                        let block = crate::mkmacro::analyze_structure(&m.steps).block_for_marker(s.id).is_some();
+                        response.context_menu(|ui| context_menu(ui,s.id,block,&mut command));
                         if let Some(items) = row_diagnostics.get(&s.id) {
                             let first = items[0];
                             let color = match first.severity {
@@ -237,7 +228,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                     .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())),
                             _ => None,
                         };
-                        let full=super::action_catalog::action_details_with_asset_name(&s.action, asset_name.as_deref()); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}response.context_menu(|ui|context_menu(ui,s.id,&mut command));
+                        let full=super::action_catalog::action_details_with_asset_name(&s.action, asset_name.as_deref()); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}let block=crate::mkmacro::analyze_structure(&m.steps).block_for_marker(s.id).is_some();response.context_menu(|ui|context_menu(ui,s.id,block,&mut command));
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
@@ -314,7 +305,17 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     }
 }
 
-fn context_menu(ui: &mut eframe::egui::Ui, id: u64, out: &mut Option<Command>) {
+fn context_menu(
+    ui: &mut eframe::egui::Ui,
+    id: u64,
+    complete_block: bool,
+    out: &mut Option<Command>,
+) {
+    let delete = if complete_block {
+        Command::DeleteBlock(id)
+    } else {
+        Command::DeleteRow(id)
+    };
     for (label, c) in [
         ("Edit", Command::Edit(id)),
         ("Run This Step", Command::RunOne),
@@ -325,15 +326,33 @@ fn context_menu(ui: &mut eframe::egui::Ui, id: u64, out: &mut Option<Command>) {
         ("Enable/Disable", Command::Toggle),
         ("Move Up", Command::Up),
         ("Move Down", Command::Down),
-        ("Delete", Command::Delete),
+        (
+            if complete_block {
+                "Delete Block"
+            } else {
+                "Delete"
+            },
+            delete,
+        ),
     ] {
         if ui.button(label).clicked() {
             *out = Some(c);
             ui.close_menu();
         }
     }
+    if complete_block && ui.button("Unwrap Block").clicked() {
+        *out = Some(Command::UnwrapBlock(id));
+        ui.close_menu();
+    }
 }
 fn apply_command(d: &mut MkMacroDialog, c: Command) {
+    let selection_before_command = d.selection.clone();
+    if let Command::DeleteBlock(id) | Command::DeleteRow(id) | Command::UnwrapBlock(id) = c {
+        if !d.selection.ids.contains(&id) {
+            d.selection.ids = BTreeSet::from([id]);
+            d.selection.anchor = None;
+        }
+    }
     if let Command::Edit(id) = c {
         if let Some(s) = d
             .selected_macro()
@@ -371,16 +390,27 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
         }
         return;
     }
-    let ids = d.selection.ids.clone();
-    let unsafe_structure = d.selected_macro().is_some_and(|m| {
-        m.steps
-            .iter()
-            .any(|s| ids.contains(&s.id) && structural(&s.action))
-    });
-    if unsafe_structure && matches!(c, Command::Delete | Command::Up | Command::Down) {
+    if let Command::UnwrapBlock(id) = c {
+        let Some(block) = d.selected_macro().and_then(|m| {
+            crate::mkmacro::analyze_structure(&m.steps)
+                .block_for_marker(id)
+                .cloned()
+        }) else {
+            d.command_error = Some("The selected marker is not part of a complete block".into());
+            return;
+        };
+        if block.else_marker.is_some() {
+            d.pending_unwrap_block = Some(id);
+            d.pending_unwrap_selection = Some(selection_before_command);
+            d.unwrap_confirmation.open_custom("Unwrap If block", "Unwrapping this If will preserve both branches and make them execute sequentially.");
+        } else {
+            apply_confirmed_unwrap(d, id);
+        }
         return;
     }
+    let ids = d.selection.ids.clone();
     let mut new_selection = None;
+    let mut mutation_error = None;
     if let Some(m) = d.selected_macro_mut() {
         match c {
             Command::Duplicate => {
@@ -393,22 +423,17 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
                     }
                 }
             }
-            Command::Up => move_steps(&mut m.steps, &ids, false),
-            Command::Down => move_steps(&mut m.steps, &ids, true),
-            Command::Delete => {
-                let first = m
-                    .steps
-                    .iter()
-                    .position(|s| ids.contains(&s.id))
-                    .unwrap_or(0);
-                m.steps.retain(|s| !ids.contains(&s.id));
-                new_selection = Some(
-                    m.steps
-                        .get(first)
-                        .or_else(|| first.checked_sub(1).and_then(|i| m.steps.get(i)))
-                        .map(|s| BTreeSet::from([s.id]))
-                        .unwrap_or_default(),
-                );
+            Command::Up | Command::Down => {
+                match move_selection_structurally(&mut m.steps, &ids, matches!(c, Command::Down)) {
+                    Ok(s) => new_selection = Some(s),
+                    Err(e) => mutation_error = Some(e),
+                }
+            }
+            Command::Delete | Command::DeleteRow(_) | Command::DeleteBlock(_) => {
+                match delete_selection(&mut m.steps, &ids) {
+                    Ok(s) => new_selection = Some(s),
+                    Err(e) => mutation_error = Some(e),
+                }
             }
             Command::InsertAbove(id) | Command::InsertBelow(id) => {
                 let mut i = m
@@ -434,15 +459,133 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
             _ => {}
         }
     }
+    if let Some(error) = mutation_error {
+        d.command_error = Some(error);
+        return;
+    }
     crate::mkmacro::repair_ids(&mut d.draft);
     if let Some(s) = new_selection {
         d.selection.ids = s;
+        d.selection.anchor = None;
     }
     d.mark_dirty();
+}
+
+fn delete_selection(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
+    if ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let analysis = crate::mkmacro::analyze_structure(steps);
+    let mut remove = BTreeSet::new();
+    for id in ids {
+        let Some((i, s)) = steps.iter().enumerate().find(|(_, s)| s.id == *id) else {
+            continue;
+        };
+        if s.action.is_block_marker() {
+            let b = analysis
+                .block_for_marker(*id)
+                .ok_or_else(|| format!("Step {id} is not part of a complete block"))?;
+            remove.extend(b.range.clone());
+        } else {
+            remove.insert(i);
+        }
+    }
+    if remove.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let first = *remove.first().unwrap();
+    let last = *remove.last().unwrap();
+    let next = (last + 1..steps.len())
+        .find(|i| !remove.contains(i))
+        .map(|i| steps[i].id);
+    let prev = (0..first)
+        .rev()
+        .find(|i| !remove.contains(i))
+        .map(|i| steps[i].id);
+    let mut i = 0;
+    steps.retain(|_| {
+        let keep = !remove.contains(&i);
+        i += 1;
+        keep
+    });
+    Ok(next
+        .or(prev)
+        .map(|id| BTreeSet::from([id]))
+        .unwrap_or_default())
+}
+
+fn expanded_move_ids(steps: &[MkStep], ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
+    let a = crate::mkmacro::analyze_structure(steps);
+    let mut out = ids.clone();
+    for id in ids {
+        if let Some(s) = steps.iter().find(|s| s.id == *id)
+            && s.action.is_block_marker()
+        {
+            let b = a
+                .block_for_marker(*id)
+                .ok_or_else(|| format!("Step {id} is not part of a complete block"))?;
+            out.extend(steps[b.range.clone()].iter().map(|s| s.id));
+        }
+    }
+    Ok(out)
+}
+fn move_selection_structurally(
+    steps: &mut [MkStep],
+    ids: &BTreeSet<u64>,
+    down: bool,
+) -> Result<BTreeSet<u64>, String> {
+    let expanded = expanded_move_ids(steps, ids)?;
+    let before = crate::mkmacro::analyze_structure(steps).diagnostics.len();
+    let mut candidate = steps.to_vec();
+    move_steps(&mut candidate, &expanded, down);
+    if crate::mkmacro::analyze_structure(&candidate)
+        .diagnostics
+        .len()
+        > before
+    {
+        return Err("The move would invalidate block nesting".into());
+    }
+    steps.clone_from_slice(&candidate);
+    Ok(expanded)
+}
+
+pub(super) fn apply_confirmed_unwrap(d: &mut MkMacroDialog, id: u64) {
+    let result = if let Some(m) = d.selected_macro_mut() {
+        crate::mkmacro::unwrap_block(&mut m.steps, id)
+    } else {
+        return;
+    };
+    match result {
+        Ok(r) => {
+            let selected = r
+                .first_preserved_body_id
+                .or(r.following_id)
+                .or(r.preceding_id);
+            d.selection.ids = selected.map(|x| BTreeSet::from([x])).unwrap_or_default();
+            d.selection.anchor = None;
+            d.mark_dirty();
+        }
+        Err(e) => d.command_error = Some(e),
+    }
 }
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+    use crate::mkmacro::{MkAction, MkCondition, MkErrorPolicy};
+
+    fn step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        }
+    }
+    fn delay(id: u64) -> MkStep {
+        step(id, MkAction::Delay { milliseconds: 1 })
+    }
 
     #[test]
     fn table_uses_all_remaining_height() {
@@ -455,5 +598,71 @@ mod layout_tests {
     fn row_count_cannot_affect_table_height() {
         let allocations = [0_usize, 10, 500].map(|_row_count| table_viewport_height(500.0));
         assert_eq!(allocations, [500.0; 3]);
+    }
+
+    #[test]
+    fn deletion_resolves_every_if_marker_and_deduplicates_nested_selections() {
+        for selected in [1, 3, 7] {
+            let mut rows = vec![
+                delay(9),
+                step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+                step(2, MkAction::RepeatStart { count: 2 }),
+                step(4, MkAction::Break),
+                step(5, MkAction::RepeatEnd),
+                step(3, MkAction::Else),
+                delay(6),
+                step(7, MkAction::EndIf),
+                delay(10),
+            ];
+            let ids = BTreeSet::from([selected, 2, 4]);
+            let selection = delete_selection(&mut rows, &ids).unwrap();
+            assert_eq!(rows.iter().map(|s| s.id).collect::<Vec<_>>(), vec![9, 10]);
+            assert_eq!(selection, BTreeSet::from([10]));
+        }
+    }
+
+    #[test]
+    fn controls_delete_ordinary_and_selection_falls_back() {
+        let mut rows = vec![
+            delay(1),
+            step(2, MkAction::Break),
+            step(3, MkAction::Continue),
+        ];
+        assert_eq!(
+            delete_selection(&mut rows, &BTreeSet::from([2])).unwrap(),
+            BTreeSet::from([3])
+        );
+        assert_eq!(
+            delete_selection(&mut rows, &BTreeSet::from([3])).unwrap(),
+            BTreeSet::from([1])
+        );
+        assert_eq!(
+            delete_selection(&mut rows, &BTreeSet::from([1])).unwrap(),
+            BTreeSet::new()
+        );
+    }
+
+    #[test]
+    fn moving_marker_moves_complete_block_as_one_unit() {
+        let mut rows = vec![
+            delay(9),
+            step(
+                1,
+                MkAction::WhileStart {
+                    condition: MkCondition::All { conditions: vec![] },
+                },
+            ),
+            delay(2),
+            step(3, MkAction::WhileEnd),
+            delay(10),
+        ];
+        let selected = move_selection_structurally(&mut rows, &BTreeSet::from([3]), false).unwrap();
+        assert_eq!(selected, BTreeSet::from([1, 2, 3]));
+        assert_eq!(
+            rows.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 9, 10]
+        );
+        let mut malformed = vec![step(1, MkAction::RepeatStart { count: 1 }), delay(2)];
+        assert!(move_selection_structurally(&mut malformed, &BTreeSet::from([1]), true).is_err());
     }
 }

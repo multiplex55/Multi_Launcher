@@ -521,7 +521,36 @@ pub enum MkAction {
     UiFocus(MkUiPayload),
     UiWait(MkUiPayload),
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MkBlockKind {
+    If,
+    Repeat,
+    While,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MkBlockMarker {
+    Open(MkBlockKind),
+    Else,
+    Close(MkBlockKind),
+}
 impl MkAction {
+    pub fn block_marker(&self) -> Option<MkBlockMarker> {
+        match self {
+            Self::If(_) => Some(MkBlockMarker::Open(MkBlockKind::If)),
+            Self::Else => Some(MkBlockMarker::Else),
+            Self::EndIf => Some(MkBlockMarker::Close(MkBlockKind::If)),
+            Self::RepeatStart { .. } => Some(MkBlockMarker::Open(MkBlockKind::Repeat)),
+            Self::RepeatEnd => Some(MkBlockMarker::Close(MkBlockKind::Repeat)),
+            Self::WhileStart { .. } => Some(MkBlockMarker::Open(MkBlockKind::While)),
+            Self::WhileEnd => Some(MkBlockMarker::Close(MkBlockKind::While)),
+            _ => None,
+        }
+    }
+    /// Returns whether this action is a block boundary used by the editor.
+    /// Loop-control instructions are structural at runtime, but are not block markers.
+    pub fn is_block_marker(&self) -> bool {
+        self.block_marker().is_some()
+    }
     pub fn is_structural(&self) -> bool {
         matches!(
             self,
