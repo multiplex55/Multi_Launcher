@@ -26,6 +26,56 @@ fn plan(action: MkAction) -> MkExecutionPlan {
     })
     .unwrap()
 }
+
+#[test]
+fn image_catalog_defaults_require_assets_and_configured_payload_round_trips() {
+    use multi_launcher::gui::mkmacro_dialog::action_catalog::{self, DraftValidationContract};
+    let image_entries: Vec<_> = action_catalog::visible_descriptors()
+        .filter(|descriptor| matches!(descriptor.name, "Find Image" | "Click Image"))
+        .collect();
+    assert_eq!(
+        image_entries.len(),
+        2,
+        "both production image paths are intentionally visible"
+    );
+    for descriptor in image_entries {
+        let action = (descriptor.make_default)();
+        assert_eq!(
+            action_catalog::draft_validation_contract(&action),
+            DraftValidationContract::AwaitingRequiredAsset,
+            "{} must not apply the asset_id == 0 draft sentinel",
+            descriptor.name
+        );
+        assert!(multi_launcher::mkmacro::executor::has_runtime_support(
+            &action
+        ));
+        assert!(descriptor.editor.contract().is_some());
+    }
+
+    let payload = MkImagePayload {
+        asset_id: 42,
+        wait: MkWaitOptions {
+            timeout_ms: 12_345,
+            poll_interval_ms: 77,
+        },
+        region: SearchRegion::Rectangle {
+            rect: ScreenRect::new(-10, 20, 640, 480),
+        },
+        tolerance: 9,
+        alpha: AlphaPolicy::Ignore,
+        return_point: ReturnPoint::TopLeft,
+    };
+    let action = MkAction::ImageClick(payload.clone());
+    assert_eq!(
+        action_catalog::draft_validation_contract(&action),
+        DraftValidationContract::CommitReady
+    );
+    let json = serde_json::to_string(&action).unwrap();
+    assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+    assert!(
+        matches!(serde_json::from_str::<MkAction>(&json).unwrap(), MkAction::ImageClick(saved) if saved == payload)
+    );
+}
 #[test]
 fn image_wait_cancels_promptly_without_real_screen_access() {
     let f = Arc::new(FakeBackend::default());
