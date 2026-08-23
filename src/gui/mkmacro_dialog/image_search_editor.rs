@@ -38,7 +38,7 @@ pub enum ImageEditorRequest {
     HighlightWindow { client_area: bool },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageSearchEditorState {
     pub kind: SearchRegionKind,
     pub monitor_index: usize,
