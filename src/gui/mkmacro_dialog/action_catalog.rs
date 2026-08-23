@@ -953,6 +953,9 @@ fn mouse(b: &MkMouseButton) -> &'static str {
     }
 }
 pub fn action_details(a: &MkAction) -> String {
+    action_details_with_asset_name(a, None)
+}
+pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) -> String {
     match a {
         MkAction::KeyDown(k) | MkAction::KeyUp(k) | MkAction::KeyPress(k) => {
             super::key_capture::key_name(k)
@@ -1014,10 +1017,8 @@ pub fn action_details(a: &MkAction) -> String {
             }
         ),
         MkAction::RepeatStart { count } => format!("{count} times"),
-        MkAction::ImageFind(p) | MkAction::ImageClick(p) => format!(
-            "Reference image · {:?} · tolerance {} · {} ms timeout",
-            p.region, p.tolerance, p.wait.timeout_ms
-        ),
+        MkAction::ImageFind(p) => format_image_details(p, asset_name, false),
+        MkAction::ImageClick(p) => format_image_details(p, asset_name, true),
         MkAction::PixelCheck {
             target,
             color,
@@ -1097,6 +1098,59 @@ pub fn action_details(a: &MkAction) -> String {
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => "Unavailable UI Automation action (saved target preserved)".into(),
     }
+}
+
+fn matcher_summary(m: &MkWindowMatcher) -> String {
+    [
+        m.process.as_deref(),
+        m.title.as_deref(),
+        m.title_regex.as_deref(),
+        m.class.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" / ")
+}
+fn region_summary(region: &SearchRegion) -> String {
+    match region {
+        SearchRegion::Desktop => "Entire Desktop".into(),
+        SearchRegion::Monitor { index } => format!("Monitor {index}"),
+        SearchRegion::Rectangle { rect } => format!(
+            "Rectangle ({},{}) {}×{}",
+            rect.x, rect.y, rect.width, rect.height
+        ),
+        SearchRegion::Window { matcher } => format!("Window: {}", matcher_summary(matcher)),
+        SearchRegion::ClientArea { matcher } => format!("Client: {}", matcher_summary(matcher)),
+    }
+}
+fn format_image_details(p: &MkImagePayload, asset_name: Option<&str>, click: bool) -> String {
+    let image = asset_name
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            std::path::Path::new(s)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(s)
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Asset {}", p.asset_id));
+    let mut parts = vec![image, region_summary(&p.region)];
+    if !click {
+        parts.push(format!("tolerance {}", p.tolerance));
+    }
+    if click {
+        parts.push(match p.return_point {
+            ReturnPoint::Center => "center".into(),
+            ReturnPoint::TopLeft => "top-left".into(),
+        });
+    }
+    if click {
+        parts.push(format!("{} ms", p.wait.timeout_ms));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]

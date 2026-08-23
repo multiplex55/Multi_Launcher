@@ -1,8 +1,21 @@
 use super::SearchRegion;
 use super::model::*;
 use super::variables::*;
+use super::{CaptureGeometryError, MonitorDescriptor};
 use regex::Regex;
 use std::{collections::HashSet, path::Path};
+
+#[derive(Debug, Clone, Copy)]
+pub enum MonitorValidation<'a> {
+    NotRequested,
+    Available(&'a [MonitorDescriptor]),
+    EnumerationFailed,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct ValidationContext<'a> {
+    pub asset_root: Option<&'a Path>,
+    pub monitors: MonitorValidation<'a>,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
     Warning,
@@ -35,6 +48,19 @@ pub fn can_run(ds: &[MkDiagnostic]) -> bool {
     !ds.iter().any(|d| d.severity == DiagnosticSeverity::Fatal)
 }
 pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Vec<MkDiagnostic> {
+    validate_document_with_context(
+        doc,
+        ValidationContext {
+            asset_root,
+            monitors: MonitorValidation::NotRequested,
+        },
+    )
+}
+pub fn validate_document_with_context(
+    doc: &MkMacroDocument,
+    context: ValidationContext<'_>,
+) -> Vec<MkDiagnostic> {
+    let asset_root = context.asset_root;
     let mut out = vec![];
     let mut mids = HashSet::new();
     for m in &doc.macros {
@@ -243,18 +269,50 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                     wait(&p.wait, m.id, sid, &mut out);
                     asset(p.asset_id, m.id, sid, asset_root, &mut out);
-                    if let SearchRegion::Rectangle { rect } = &p.region
-                        && (rect.width == 0 || rect.height == 0)
-                    {
-                        push(
-                            &mut out,
-                            m.id,
-                            sid,
-                            "invalid_image_region",
-                            "Image search rectangle must have positive width and height",
-                        )
-                    }
                     match &p.region {
+                        SearchRegion::Rectangle { rect } => {
+                            if let Err(error) = rect.validate_capture() {
+                                let message = match error {
+                                    CaptureGeometryError::ZeroWidth => {
+                                        "Image search rectangle width must be positive"
+                                    }
+                                    CaptureGeometryError::ZeroHeight => {
+                                        "Image search rectangle height must be positive"
+                                    }
+                                    CaptureGeometryError::RightOverflow => {
+                                        "Image search rectangle right endpoint is out of range"
+                                    }
+                                    CaptureGeometryError::BottomOverflow => {
+                                        "Image search rectangle bottom endpoint is out of range"
+                                    }
+                                    CaptureGeometryError::AllocationOverflow => {
+                                        "Image search rectangle is too large to capture"
+                                    }
+                                };
+                                push(&mut out, m.id, sid, "invalid_image_region", message)
+                            }
+                        }
+                        SearchRegion::Monitor { index } => match context.monitors {
+                            MonitorValidation::Available(monitors)
+                                if !monitors.iter().any(|d| d.index == *index) =>
+                            {
+                                push(
+                                    &mut out,
+                                    m.id,
+                                    sid,
+                                    "unavailable_monitor",
+                                    format!("Selected monitor {index} is no longer available"),
+                                )
+                            }
+                            MonitorValidation::EnumerationFailed => push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "monitor_enumeration_failed",
+                                "Monitor enumeration is unavailable",
+                            ),
+                            _ => {}
+                        },
                         SearchRegion::Window { matcher: window }
                         | SearchRegion::ClientArea { matcher: window } => {
                             matcher(window, m.id, sid, &mut out)
@@ -327,35 +385,73 @@ fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic
 }
 fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDiagnostic>) {
     if id == 0 {
-        push(o, m, s, "missing_asset", "Select a reference image")
+        push(
+            o,
+            m,
+            s,
+            "reference_image_missing",
+            "Reference image is missing",
+        )
     } else if let Some(root) = root {
-        let path = root.join(m.to_string()).join(format!("{id}.png"));
-        if !path.is_file() {
+        let Ok(path) = super::store::managed_asset_path(root, m, id) else {
             push(
                 o,
                 m,
                 s,
-                "missing_asset",
-                format!("Image asset {id} is missing"),
+                "reference_image_missing",
+                "Reference image is missing",
+            );
+            return;
+        };
+        if !path.exists() {
+            push(
+                o,
+                m,
+                s,
+                "reference_image_missing",
+                "Reference image is missing",
             );
             return;
         }
-        let valid = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| {
-                image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok()
-            })
-            .is_some_and(|image| image.width() > 0 && image.height() > 0);
-        if !valid {
+        let bytes = match std::fs::read(path) {
+            Ok(v) => v,
+            Err(_) => {
+                push(
+                    o,
+                    m,
+                    s,
+                    "reference_image_unreadable",
+                    "Reference image could not be read",
+                );
+                return;
+            }
+        };
+        let decoded = match image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
+            Ok(v) => v,
+            Err(_) => {
+                push(
+                    o,
+                    m,
+                    s,
+                    "reference_image_undecodable",
+                    "Reference image could not be decoded",
+                );
+                return;
+            }
+        };
+        if !usable_image_dimensions(decoded.width(), decoded.height()) {
             push(
                 o,
                 m,
                 s,
-                "invalid_image_asset",
-                format!("Image asset {id} is not a usable PNG"),
+                "reference_image_invalid_dimensions",
+                "Reference image has invalid dimensions",
             );
         }
     }
+}
+fn usable_image_dimensions(width: u32, height: u32) -> bool {
+    width > 0 && height > 0
 }
 
 fn target(
@@ -488,13 +584,14 @@ mod coordinate_target_tests {
     fn managed_image_assets_are_validated_as_png_content() {
         use image::{Rgba, RgbaImage};
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let root = &dir.path().join(crate::mkmacro::store::ASSET_DIRECTORY);
+        std::fs::create_dir(root).unwrap();
         let mut out = Vec::new();
         asset(0, 7, Some(8), Some(root), &mut out);
-        assert!(out.iter().any(|d| d.code == "missing_asset"));
+        assert!(out.iter().any(|d| d.code == "reference_image_missing"));
         out.clear();
         asset(1, 7, Some(8), Some(root), &mut out);
-        assert!(out.iter().any(|d| d.code == "missing_asset"));
+        assert!(out.iter().any(|d| d.code == "reference_image_missing"));
 
         let macro_dir = root.join("7");
         std::fs::create_dir_all(&macro_dir).unwrap();
@@ -512,8 +609,43 @@ mod coordinate_target_tests {
             std::fs::write(macro_dir.join("1.png"), bytes).unwrap();
             out.clear();
             asset(1, 7, Some(8), Some(root), &mut out);
-            assert!(out.iter().any(|d| d.code == "invalid_image_asset"));
+            assert!(out.iter().any(|d| d.code == "reference_image_undecodable"));
             assert!(!can_run(&out));
         }
+    }
+}
+
+#[cfg(test)]
+mod reference_image_tests {
+    use super::*;
+    use image::{DynamicImage, ImageFormat, RgbaImage};
+    use std::io::Cursor;
+
+    fn validate(id: u64, root: Option<&Path>) -> Vec<MkDiagnostic> {
+        let mut out = Vec::new();
+        asset(id, 7, Some(11), root, &mut out);
+        out
+    }
+
+    #[test]
+    fn unset_absent_corrupt_and_valid_assets_have_distinct_results() {
+        assert_eq!(validate(0, None)[0].code, "reference_image_missing");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(crate::mkmacro::store::ASSET_DIRECTORY);
+        std::fs::create_dir_all(root.join("7")).unwrap();
+        assert_eq!(validate(4, Some(&root))[0].code, "reference_image_missing");
+        std::fs::write(root.join("7/4.png"), b"not png").unwrap();
+        assert_eq!(
+            validate(4, Some(&root))[0].code,
+            "reference_image_undecodable"
+        );
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        std::fs::write(root.join("7/4.png"), bytes.into_inner()).unwrap();
+        assert!(validate(4, Some(&root)).is_empty());
+        assert!(!usable_image_dimensions(0, 1));
+        assert!(!usable_image_dimensions(1, 0));
     }
 }

@@ -386,6 +386,50 @@ impl ScreenRect {
             && other.right() <= self.right()
             && other.bottom() <= self.bottom()
     }
+
+    /// Checks every invariant required before allocating an RGBA capture.
+    pub fn validate_capture(self) -> Result<(), CaptureGeometryError> {
+        if self.width == 0 {
+            return Err(CaptureGeometryError::ZeroWidth);
+        }
+        if self.height == 0 {
+            return Err(CaptureGeometryError::ZeroHeight);
+        }
+        if self.right() > i64::from(i32::MAX) + 1 {
+            return Err(CaptureGeometryError::RightOverflow);
+        }
+        if self.bottom() > i64::from(i32::MAX) + 1 {
+            return Err(CaptureGeometryError::BottomOverflow);
+        }
+        let pixels = usize::try_from(u64::from(self.width) * u64::from(self.height))
+            .map_err(|_| CaptureGeometryError::AllocationOverflow)?;
+        pixels
+            .checked_mul(4)
+            .filter(|n| *n <= isize::MAX as usize)
+            .ok_or(CaptureGeometryError::AllocationOverflow)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureGeometryError {
+    ZeroWidth,
+    ZeroHeight,
+    RightOverflow,
+    BottomOverflow,
+    AllocationOverflow,
+}
+
+impl std::fmt::Display for CaptureGeometryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ZeroWidth => "capture region width is zero",
+            Self::ZeroHeight => "capture region height is zero",
+            Self::RightOverflow => "capture region right endpoint overflow",
+            Self::BottomOverflow => "capture region bottom endpoint overflow",
+            Self::AllocationOverflow => "RGBA capture allocation size overflow",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -422,6 +466,49 @@ impl MonitorDescriptor {
 impl Default for SearchRegion {
     fn default() -> Self {
         Self::Desktop
+    }
+}
+
+#[cfg(test)]
+mod capture_geometry_tests {
+    use super::*;
+    #[test]
+    fn checked_capture_geometry_covers_dimensions_endpoints_and_allocations() {
+        assert_eq!(
+            ScreenRect::new(0, 0, 0, 1).validate_capture(),
+            Err(CaptureGeometryError::ZeroWidth)
+        );
+        assert_eq!(
+            ScreenRect::new(0, 0, 1, 0).validate_capture(),
+            Err(CaptureGeometryError::ZeroHeight)
+        );
+        assert_eq!(
+            ScreenRect::new(i32::MAX, 0, 2, 1).validate_capture(),
+            Err(CaptureGeometryError::RightOverflow)
+        );
+        assert_eq!(
+            ScreenRect::new(0, i32::MAX, 1, 2).validate_capture(),
+            Err(CaptureGeometryError::BottomOverflow)
+        );
+        assert_eq!(
+            ScreenRect::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX).validate_capture(),
+            Err(CaptureGeometryError::AllocationOverflow)
+        );
+        assert!(
+            ScreenRect::new(-850, 100, 600, 400)
+                .validate_capture()
+                .is_ok()
+        );
+        assert!(
+            CaptureGeometryError::RightOverflow
+                .to_string()
+                .contains("overflow")
+        );
+        assert!(
+            CaptureGeometryError::AllocationOverflow
+                .to_string()
+                .contains("allocation size overflow")
+        );
     }
 }
 
@@ -671,18 +758,9 @@ fn compose_monitors(
     monitors: &[CaptureMonitor],
     cancelled: &dyn Fn() -> bool,
 ) -> ExecResult<RgbaImage> {
-    if target.is_empty() {
-        return Err(invalid("capture region is empty"));
-    }
-    if target.right() > i64::from(i32::MAX) + 1 || target.bottom() > i64::from(i32::MAX) + 1 {
-        return Err(invalid("capture region endpoint overflow"));
-    }
-    let pixels = usize::try_from(u64::from(target.width) * u64::from(target.height))
-        .map_err(|_| invalid("capture allocation size overflow"))?;
-    let _rgba_bytes = pixels
-        .checked_mul(4)
-        .filter(|bytes| *bytes <= isize::MAX as usize)
-        .ok_or_else(|| invalid("RGBA capture allocation size overflow"))?;
+    target
+        .validate_capture()
+        .map_err(|error| invalid(format!("invalid capture rectangle: {error}")))?;
     // Pixels in gaps between physical monitors have a deterministic, opaque
     // background. Do not use `RgbaImage::new`: its transparent default would
     // make those pixels unsuitable for normal screen-color comparisons.
