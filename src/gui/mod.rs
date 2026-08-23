@@ -443,6 +443,7 @@ pub struct LauncherApp {
     snippet_dialog: SnippetDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
+    visual_capture_visibility: mkmacro_dialog::visual_capture_visibility::LauncherVisibilityBridge,
     pub(crate) macro_prompt: MacroPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
@@ -1322,11 +1323,42 @@ impl LauncherApp {
             .collect::<HashMap<_, _>>();
         let dashboard_data_cache = DashboardDataCache::new();
         dashboard_data_cache.refresh_all(&plugins);
-        let mkmacro_dialog = MkMacroDialog::new_with_authoring_context(
+        let mut mkmacro_dialog = MkMacroDialog::new_with_authoring_context(
             Arc::clone(&plugins.internal_services().mkmacro_store),
             mkmacro_dialog::MkMacroAuthoringContext {
                 launcher_actions: Arc::clone(&actions),
             },
+        );
+        // These dependencies deliberately share the Launcher's visibility and
+        // the Action Editor's one native overlay controller.
+        let screen_backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend> =
+            Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system());
+        let shared_overlay = mkmacro_dialog.action_editor.visual_overlay.clone();
+        let visual_capture_visibility =
+            mkmacro_dialog::visual_capture_visibility::LauncherVisibilityBridge::default();
+        mkmacro_dialog.action_editor.visual_capture = Some(
+            mkmacro_dialog::visual_capture_workflow::VisualCaptureWorkflow::new(
+                Box::new(
+                    mkmacro_dialog::visual_capture_visibility::LauncherVisualCaptureVisibility(
+                        visual_capture_visibility.clone(),
+                    ),
+                ),
+                Box::new(mkmacro_dialog::visual_capture_workflow::SystemWorkflowClock::default()),
+                Box::new(
+                    mkmacro_dialog::visual_capture_workflow::VisualOverlayRectangleAdapter::new(
+                        shared_overlay,
+                        Arc::clone(&screen_backend),
+                    ),
+                ),
+                Box::new(
+                    mkmacro_dialog::visual_capture_workflow::ScreenCaptureAdapter(screen_backend),
+                ),
+                Box::new(
+                    mkmacro_dialog::visual_capture_workflow::MkMacroAssetStoreAdapter(Arc::clone(
+                        &plugins.internal_services().mkmacro_store,
+                    )),
+                ),
+            ),
         );
         let mut app = Self {
             actions: Arc::clone(&actions),
@@ -1403,6 +1435,7 @@ impl LauncherApp {
             snippet_dialog: SnippetDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
+            visual_capture_visibility,
             macro_prompt: MacroPromptUi::default(),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),

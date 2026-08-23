@@ -5,12 +5,14 @@
 //! once per frame.  Consequently hiding a window never leads to a sleep on the
 //! UI thread and every terminal path passes through the same restoration step.
 
-use super::visual_overlay::{OperationId, RectanglePurpose};
+use super::visual_overlay::{
+    OperationId, RectanglePurpose, VisualOverlayController, VisualOverlayEvent,
+};
 use crate::mkmacro::ScreenRect;
 use crate::mkmacro::{ImageAssetAuthoringService, MkMacroStore, ScreenCaptureBackend};
 use image::RgbaImage;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Exact visibility to put back after an authoring operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +29,140 @@ pub trait VisibilityAdapter: Send {
 }
 pub trait WorkflowClock: Send {
     fn now(&self) -> Duration;
+}
+
+/// Monotonic production clock.  The private epoch also makes its values small
+/// and immune to wall-clock adjustments.
+pub struct SystemWorkflowClock(Instant);
+impl Default for SystemWorkflowClock {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+impl WorkflowClock for SystemWorkflowClock {
+    fn now(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
+/// Cloneable, single-queue facade for the overlay controller.  Workflow events
+/// are routed to its adapter while passive/editor events remain available to
+/// the Action Editor, so two consumers never race the native queue.
+#[derive(Clone)]
+pub struct SharedVisualOverlayController(Arc<Mutex<SharedOverlay>>);
+struct SharedOverlay {
+    controller: VisualOverlayController,
+    editor_events: Vec<VisualOverlayEvent>,
+}
+impl Default for SharedVisualOverlayController {
+    fn default() -> Self {
+        Self::new(VisualOverlayController::default())
+    }
+}
+impl SharedVisualOverlayController {
+    pub fn new(controller: VisualOverlayController) -> Self {
+        Self(Arc::new(Mutex::new(SharedOverlay {
+            controller,
+            editor_events: vec![],
+        })))
+    }
+    pub fn operation_id(&self) -> Option<OperationId> {
+        self.0.lock().unwrap().controller.operation_id()
+    }
+    pub fn cancel(&self) {
+        self.0.lock().unwrap().controller.cancel();
+    }
+    pub fn poll(&self) -> Vec<VisualOverlayEvent> {
+        let mut shared = self.0.lock().unwrap();
+        let mut events = std::mem::take(&mut shared.editor_events);
+        events.extend(shared.controller.poll());
+        events
+    }
+    pub fn preview_rectangle(&self, rect: ScreenRect) {
+        self.0.lock().unwrap().controller.preview_rectangle(rect);
+    }
+    pub fn highlight_monitor(&self, monitor: crate::mkmacro::MonitorDescriptor) {
+        self.0.lock().unwrap().controller.highlight_monitor(monitor);
+    }
+    pub fn identify_monitors(&self, monitors: Vec<crate::mkmacro::MonitorDescriptor>) {
+        self.0
+            .lock()
+            .unwrap()
+            .controller
+            .identify_monitors(monitors);
+    }
+    pub fn highlight_window(&self, rect: ScreenRect, kind: super::visual_overlay::WindowAreaKind) {
+        self.0
+            .lock()
+            .unwrap()
+            .controller
+            .highlight_window(rect, kind);
+    }
+}
+
+pub struct VisualOverlayRectangleAdapter {
+    overlay: SharedVisualOverlayController,
+    backend: Arc<dyn ScreenCaptureBackend>,
+    operation_id: Option<OperationId>,
+}
+impl VisualOverlayRectangleAdapter {
+    pub fn new(
+        overlay: SharedVisualOverlayController,
+        backend: Arc<dyn ScreenCaptureBackend>,
+    ) -> Self {
+        Self {
+            overlay,
+            backend,
+            operation_id: None,
+        }
+    }
+}
+impl RectangleOverlay for VisualOverlayRectangleAdapter {
+    fn begin(&mut self, purpose: RectanglePurpose) -> Result<OperationId, String> {
+        let desktop = self.backend.virtual_desktop().map_err(|e| e.to_string())?;
+        let id = self
+            .overlay
+            .0
+            .lock()
+            .unwrap()
+            .controller
+            .begin_rectangle_pick(purpose, desktop);
+        self.operation_id = Some(id);
+        Ok(id)
+    }
+    fn poll(&mut self) -> SelectionEvent {
+        let Some(expected) = self.operation_id else {
+            return SelectionEvent::Pending;
+        };
+        let mut shared = self.overlay.0.lock().unwrap();
+        for event in shared.controller.poll() {
+            match event {
+                VisualOverlayEvent::RectangleConfirmed {
+                    operation_id, rect, ..
+                } if operation_id == expected => {
+                    return SelectionEvent::Confirmed { operation_id, rect };
+                }
+                VisualOverlayEvent::Cancelled { operation_id } if operation_id == expected => {
+                    return SelectionEvent::Cancelled { operation_id };
+                }
+                VisualOverlayEvent::Error {
+                    operation_id,
+                    error,
+                } if operation_id == expected => {
+                    return SelectionEvent::Failed {
+                        operation_id,
+                        message: error.to_string(),
+                    };
+                }
+                other => shared.editor_events.push(other),
+            }
+        }
+        SelectionEvent::Pending
+    }
+    fn cancel(&mut self) {
+        self.overlay.cancel();
+        self.operation_id = None;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
