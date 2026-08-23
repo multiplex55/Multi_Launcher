@@ -188,6 +188,27 @@ These checks are intentionally manual and destructive. They require a real inter
 
 - [ ] From a normal, non-elevated Multi Launcher, target an elevated disposable application (for example, an administrator-launched Notepad) where policy permits. **Expected:** UIPI-blocked activation/input/UIA fails visibly as a rejected operation; it never reports success, every owned key/button is released, later rows do not run under Stop policy, and normal input still works. Do not weaken UAC/UIPI policy merely to make this pass.
 
+### Native visual overlay renderer
+
+This checklist requires a **real, interactive Windows desktop**. The native layered-window renderer cannot be visually validated in headless CI, so these checks must not be automated there. For every item, record pass/fail evidence (screenshots or video where useful) plus:
+
+- Windows version and build;
+- Multi Launcher commit;
+- GPU and graphics configuration;
+- each monitor's resolution, scale/DPI, orientation, and virtual-desktop placement;
+- whether any monitor has a negative virtual-desktop origin;
+- tester name and date.
+
+| Check | Setup | Action | Expected result | Cleanup |
+|---|---|---|---|---|
+| **Highlight Selected** | Open the monitor editor and select Monitor 0. | Click **Highlight Selected**. | A bright, clearly visible outline and the number `0` appear on the correct physical monitor for approximately 2.5 seconds. The overlay remains click-through and disappears without residue. | Wait for expiry and verify no overlay window or marking remains. |
+| **Identify All** | Configure at least three displays, preferably with mixed DPI and one negative-origin display, and compare the editor's ordered descriptors with the physical layout. | Click **Identify All Monitors**. | Every physical monitor receives exactly one visible mkmacro index; indices agree with the editor descriptors, labels remain legible under mixed DPI, and all overlays disappear together. | Wait for expiry and verify every display is clear. |
+| **Highlight Window** | Open a disposable File Explorer window and place it on a secondary or negative-origin monitor. | Select the Explorer target and click **Highlight Window**. | The outline matches the entire visible Explorer bounds, including its placement on the non-primary monitor. | Wait for expiry, then close the disposable Explorer window. |
+| **Highlight Client Area** | Reopen or retain the same disposable Explorer window in the same position. | Highlight that window's client area. | The outline matches only the client area; the title bar, resize borders, and non-client frame are excluded. | Wait for expiry and verify no residue; close Explorer if still open. |
+| **Pick Region** | Arrange windows across two monitors, including a negative-origin monitor when available. | Begin **Pick Region**; drag in multiple directions and across monitor boundaries; also exercise release/Enter confirmation and Escape cancellation. | The live layered-window outline follows the pointer continuously, crosses monitor boundaries correctly, normalizes the final rectangle, confirms on release/Enter as designed, and disappears on Escape. | Press Escape, close the picker, and verify no overlay windows remain on any display. |
+
+**Release-blocking failures:** invisible or black overlays, wrong z-order, DPI-offset bounds, incorrect numbering, captured mouse clicks, stale overlay windows, overlays left after Escape, or a duration materially different from `PASSIVE_OVERLAY_DURATION` block release.
+
 ### Completion and release gate
 
 - [ ] Restore/compare `macros.json`, remove disposable `mkmacros.json` entries/assets, close targets, verify no hooks/hotkeys remain registered, restart, and confirm ordinary keyboard/mouse and the legacy macro plugin still work.

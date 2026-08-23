@@ -653,12 +653,25 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RecordedCall {
+        Show {
+            operation_id: OperationId,
+            visual: OverlayVisual,
+            mouse_transparent: bool,
+        },
+        Repaint {
+            operation_id: OperationId,
+            visual: OverlayVisual,
+        },
+        Poll,
+        Close,
+    }
+
     #[derive(Default)]
     struct FakeData {
         inputs: Vec<OverlayInput>,
-        closes: usize,
-        transparent: Vec<bool>,
-        repaints: Vec<OverlayVisual>,
+        calls: Vec<RecordedCall>,
         show_error: Option<VisualOverlayError>,
         poll_error: Option<VisualOverlayError>,
     }
@@ -666,26 +679,35 @@ mod tests {
     impl OverlayRenderer for FakeRenderer {
         fn show(
             &mut self,
-            _: OperationId,
-            _: &OverlayVisual,
+            operation_id: OperationId,
+            visual: &OverlayVisual,
             transparent: bool,
         ) -> Result<(), VisualOverlayError> {
-            self.0.lock().unwrap().transparent.push(transparent);
-            match self.0.lock().unwrap().show_error.take() {
+            let mut data = self.0.lock().unwrap();
+            data.calls.push(RecordedCall::Show {
+                operation_id,
+                visual: visual.clone(),
+                mouse_transparent: transparent,
+            });
+            match data.show_error.take() {
                 Some(error) => Err(error),
                 None => Ok(()),
             }
         }
         fn repaint(
             &mut self,
-            _: OperationId,
+            operation_id: OperationId,
             visual: &OverlayVisual,
         ) -> Result<(), VisualOverlayError> {
-            self.0.lock().unwrap().repaints.push(visual.clone());
+            self.0.lock().unwrap().calls.push(RecordedCall::Repaint {
+                operation_id,
+                visual: visual.clone(),
+            });
             Ok(())
         }
         fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
             let mut data = self.0.lock().unwrap();
+            data.calls.push(RecordedCall::Poll);
             if let Some(error) = data.poll_error.take() {
                 Err(error)
             } else {
@@ -693,7 +715,7 @@ mod tests {
             }
         }
         fn close(&mut self) {
-            self.0.lock().unwrap().closes += 1;
+            self.0.lock().unwrap().calls.push(RecordedCall::Close);
         }
     }
     struct FakeClock(Arc<Mutex<Duration>>);
@@ -720,6 +742,15 @@ mod tests {
     }
     fn point(x: i32, y: i32) -> MkPoint {
         MkPoint { x, y }
+    }
+
+    fn close_count(fake: &Arc<Mutex<FakeData>>) -> usize {
+        fake.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| matches!(call, RecordedCall::Close))
+            .count()
     }
 
     #[test]
@@ -867,6 +898,211 @@ mod tests {
         assert_eq!(c.state(), &VisualOverlayState::Idle);
     }
 
+    fn queue_drag(fake: &Arc<Mutex<FakeData>>, id: OperationId, start: MkPoint, end: MkPoint) {
+        fake.lock().unwrap().inputs = vec![
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(start),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftReleased(end),
+            },
+        ];
+    }
+
+    #[test]
+    fn dragging_from_bottom_right_to_top_left_emits_a_normalized_screen_rect() {
+        let (mut c, fake, _) = controller();
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(0, 0, 1920, 1080),
+        );
+        queue_drag(&fake, id, point(900, 700), point(100, 200));
+        assert_eq!(
+            c.poll(),
+            vec![VisualOverlayEvent::RectangleConfirmed {
+                operation_id: id,
+                purpose: RectanglePurpose::SearchRegion,
+                rect: ScreenRect::new(100, 200, 800, 500),
+            }]
+        );
+    }
+
+    #[test]
+    fn dragging_across_negative_virtual_desktop_coordinates_normalizes_correctly() {
+        let (mut c, fake, _) = controller();
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::ReferenceImageCapture,
+            ScreenRect::new(-2560, -1200, 4480, 2280),
+        );
+        queue_drag(&fake, id, point(400, 300), point(-2100, -900));
+        assert_eq!(
+            c.poll(),
+            vec![VisualOverlayEvent::RectangleConfirmed {
+                operation_id: id,
+                purpose: RectanglePurpose::ReferenceImageCapture,
+                rect: ScreenRect::new(-2100, -900, 2500, 1200),
+            }]
+        );
+    }
+
+    #[test]
+    fn zero_width_or_zero_height_drags_cannot_be_confirmed() {
+        for (start, end) in [
+            (point(10, 20), point(10, 80)),
+            (point(10, 20), point(80, 20)),
+        ] {
+            let (mut c, fake, _) = controller();
+            let id = c.begin_rectangle_pick(
+                RectanglePurpose::SearchRegion,
+                ScreenRect::new(0, 0, 100, 100),
+            );
+            queue_drag(&fake, id, start, end);
+            assert!(
+                c.poll().is_empty(),
+                "degenerate drag {start:?} -> {end:?} emitted an event"
+            );
+            assert_eq!(c.operation_id(), Some(id));
+            assert!(matches!(
+                c.state(),
+                VisualOverlayState::PickingRectangle { .. }
+            ));
+            assert_eq!(close_count(&fake), 0);
+        }
+    }
+
+    #[test]
+    fn highlight_window_forwards_signed_bounds_area_kind_and_active_operation_id() {
+        let (mut c, fake, _) = controller();
+        let whole = ScreenRect::new(-1800, 25, 700, 500);
+        let whole_id = c.highlight_window(whole, WindowAreaKind::WholeWindow);
+        let client = ScreenRect::new(-1750, 70, 620, 410);
+        let client_id = c.highlight_window(client, WindowAreaKind::ClientArea);
+        let calls = fake.lock().unwrap().calls.clone();
+        assert!(calls.contains(&RecordedCall::Show {
+            operation_id: whole_id,
+            visual: OverlayVisual::Window {
+                rect: whole,
+                area_kind: WindowAreaKind::WholeWindow
+            },
+            mouse_transparent: true,
+        }));
+        assert!(calls.contains(&RecordedCall::Show {
+            operation_id: client_id,
+            visual: OverlayVisual::Window {
+                rect: client,
+                area_kind: WindowAreaKind::ClientArea
+            },
+            mouse_transparent: true,
+        }));
+        assert_eq!(c.operation_id(), Some(client_id));
+    }
+
+    #[test]
+    fn identify_monitors_forwards_every_descriptor_once_in_defined_order() {
+        let descriptors = vec![
+            MonitorDescriptor {
+                index: 0,
+                bounds: ScreenRect::new(0, 0, 1920, 1080),
+                primary: true,
+            },
+            monitor(7, ScreenRect::new(-1600, 120, 1600, 900)),
+            monitor(12, ScreenRect::new(200, -1200, 1200, 1200)),
+        ];
+        let (mut c, fake, _) = controller();
+        let id = c.identify_monitors(descriptors.clone());
+        assert_eq!(
+            fake.lock().unwrap().calls.first(),
+            Some(&RecordedCall::Show {
+                operation_id: id,
+                visual: OverlayVisual::Monitors(descriptors),
+                mouse_transparent: true,
+            })
+        );
+    }
+
+    #[test]
+    fn highlight_monitor_forwards_index_bounds_and_applies_passive_timeout() {
+        let descriptor = monitor(42, ScreenRect::new(-2560, -200, 2560, 1440));
+        let (mut c, fake, now) = controller();
+        *now.lock().unwrap() = Duration::from_secs(3);
+        let id = c.highlight_monitor(descriptor.clone());
+        assert_eq!(
+            fake.lock().unwrap().calls.first(),
+            Some(&RecordedCall::Show {
+                operation_id: id,
+                visual: OverlayVisual::Monitor(descriptor.clone()),
+                mouse_transparent: true,
+            })
+        );
+        assert_eq!(
+            c.state(),
+            &VisualOverlayState::HighlightingMonitor {
+                descriptor,
+                expires_at: Duration::from_secs(3) + PASSIVE_OVERLAY_DURATION,
+            }
+        );
+    }
+
+    #[test]
+    fn passive_overlay_remains_active_before_duration_and_expires_at_deadline_once() {
+        let (mut c, fake, now) = controller();
+        let id = c.preview_rectangle(ScreenRect::new(-10, -20, 30, 40));
+        *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION - Duration::from_nanos(1);
+        assert!(c.poll().is_empty());
+        assert_eq!(c.operation_id(), Some(id));
+        *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION;
+        assert_eq!(
+            c.poll(),
+            vec![VisualOverlayEvent::Expired { operation_id: id }]
+        );
+        assert_eq!(close_count(&fake), 1);
+        assert!(c.poll().is_empty());
+        assert_eq!(close_count(&fake), 1);
+    }
+
+    #[test]
+    fn replacing_passive_or_interactive_operation_cleans_up_before_showing_replacement() {
+        let (mut c, fake, _) = controller();
+        let first = c.preview_rectangle(ScreenRect::new(0, 0, 10, 10));
+        let second = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(0, 0, 20, 20),
+        );
+        let third = c.highlight_monitor(monitor(3, ScreenRect::new(-20, 0, 20, 20)));
+        let calls = fake.lock().unwrap().calls.clone();
+        let significant: Vec<_> = calls
+            .iter()
+            .filter(|call| !matches!(call, RecordedCall::Poll))
+            .collect();
+        assert!(matches!(significant.as_slice(), [
+            RecordedCall::Show { operation_id: a, .. }, RecordedCall::Close,
+            RecordedCall::Show { operation_id: b, .. }, RecordedCall::Close,
+            RecordedCall::Show { operation_id: d, .. }
+        ] if *a == first && *b == second && *d == third));
+    }
+
+    #[test]
+    fn escape_emits_one_cancellation_for_active_rectangle_and_returns_to_idle() {
+        let (mut c, fake, _) = controller();
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(0, 0, 20, 20),
+        );
+        fake.lock().unwrap().inputs = vec![OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::Escape,
+        }];
+        assert_eq!(
+            c.poll(),
+            vec![VisualOverlayEvent::Cancelled { operation_id: id }]
+        );
+        assert_eq!(c.state(), &VisualOverlayState::Idle);
+        assert_eq!(c.operation_id(), None);
+        assert_eq!(close_count(&fake), 1);
+    }
+
     #[test]
     fn escape_empty_retry_replacement_expiration_and_shutdown_are_deterministic() {
         let (mut c, fake, now) = controller();
@@ -886,7 +1122,20 @@ mod tests {
                 operation_id: first
             }]
         );
-        assert_eq!(fake.lock().unwrap().transparent, vec![false, true]);
+        assert_eq!(
+            fake.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter_map(|call| match call {
+                    RecordedCall::Show {
+                        mouse_transparent, ..
+                    } => Some(*mouse_transparent),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
         *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION;
         assert_eq!(
             c.poll(),
@@ -895,9 +1144,9 @@ mod tests {
             }]
         );
         c.shutdown();
-        let closes = fake.lock().unwrap().closes;
+        let closes = close_count(&fake);
         c.shutdown();
-        assert_eq!(fake.lock().unwrap().closes, closes);
+        assert_eq!(close_count(&fake), closes);
     }
 
     fn platform_error(message: &str) -> VisualOverlayError {
@@ -908,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_quarantines_old_errors_and_keeps_only_new_operation_active() {
+    fn stale_input_and_queued_error_are_ignored_after_operation_replacement() {
         let (mut c, fake, _) = controller();
         let first = c.identify_monitors(vec![monitor(1, ScreenRect::new(0, 0, 10, 10))]);
         c.events.push_back(VisualOverlayEvent::Error {
@@ -916,6 +1165,10 @@ mod tests {
             error: platform_error("stale"),
         });
         let second = c.highlight_window(ScreenRect::new(1, 2, 3, 4), WindowAreaKind::WholeWindow);
+        fake.lock().unwrap().inputs = vec![OverlayInput {
+            operation_id: first,
+            kind: OverlayInputKind::Escape,
+        }];
         assert_eq!(c.operation_id(), Some(second));
         assert_eq!(
             c.poll(),
@@ -923,7 +1176,7 @@ mod tests {
                 operation_id: first
             }]
         );
-        assert_eq!(fake.lock().unwrap().closes, 1);
+        assert_eq!(close_count(&fake), 1);
     }
 
     #[test]
@@ -947,22 +1200,37 @@ mod tests {
     }
 
     #[test]
-    fn cancel_shutdown_and_drop_close_without_late_events() {
+    fn repeated_escape_cancel_shutdown_poll_and_drop_do_not_duplicate_cleanup_or_late_events() {
         let (mut c, fake, _) = controller();
-        c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
+        let id =
+            c.begin_rectangle_pick(RectanglePurpose::SearchRegion, ScreenRect::new(0, 0, 2, 2));
+        fake.lock().unwrap().inputs = vec![
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Escape,
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Escape,
+            },
+        ];
+        assert_eq!(
+            c.poll(),
+            vec![VisualOverlayEvent::Cancelled { operation_id: id }]
+        );
         c.cancel();
         c.cancel();
         c.shutdown();
         c.shutdown();
         assert!(c.poll().is_empty());
-        let closes = fake.lock().unwrap().closes;
+        let closes = close_count(&fake);
         drop(c);
-        assert_eq!(fake.lock().unwrap().closes, closes);
+        assert_eq!(close_count(&fake), closes);
 
         let (mut c, fake, _) = controller();
         c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
-        let before = fake.lock().unwrap().closes;
+        let before = close_count(&fake);
         drop(c);
-        assert!(fake.lock().unwrap().closes > before);
+        assert!(close_count(&fake) > before);
     }
 }
