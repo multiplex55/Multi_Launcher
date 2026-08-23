@@ -29,6 +29,7 @@ pub struct ActionEditorState {
     /// Installed by the owning launcher integration because it alone owns the
     /// launcher and dialog native-window visibility boundary.
     pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
+    overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
     picker: NativePositionPicker,
 }
 
@@ -186,7 +187,7 @@ impl ActionEditorState {
                 workflow.tick();
             }
         }
-        self.visual_overlay.cancel();
+        self.visual_overlay.shutdown();
         self.stop_position_capture();
         self.draft = None;
         self.editing_id = None;
@@ -229,6 +230,26 @@ impl ActionEditorState {
             }
         }
     }
+    fn track_overlay(&mut self, id: super::visual_overlay::OperationId, context: String) {
+        self.overlay_diagnostic = Some((id, context));
+        if self.visual_overlay.operation_id() == Some(id) {
+            self.capture_message = None;
+        }
+    }
+
+    fn poll_visual_overlay(&mut self) {
+        for event in self.visual_overlay.poll() {
+            if let super::visual_overlay::VisualOverlayEvent::Error {
+                operation_id,
+                error,
+            } = event
+                && self.overlay_diagnostic.as_ref().map(|v| v.0) == Some(operation_id)
+            {
+                let context = &self.overlay_diagnostic.as_ref().unwrap().1;
+                self.capture_message = Some(format!("{context}: {error}"));
+            }
+        }
+    }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
@@ -236,7 +257,7 @@ impl ActionEditorState {
                 workflow.tick();
             }
         }
-        self.visual_overlay.cancel();
+        self.visual_overlay.shutdown();
         self.stop_position_capture();
         if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)
             && let Some(payload) = image_payload_mut(step)
@@ -431,6 +452,18 @@ impl ActionEditorState {
         };
         self.capture_keys = false;
         true
+    }
+}
+
+impl Drop for ActionEditorState {
+    fn drop(&mut self) {
+        if let Some(workflow) = &mut self.visual_capture {
+            workflow.cancel();
+            while workflow.active() {
+                workflow.tick();
+            }
+        }
+        self.visual_overlay.shutdown();
     }
 }
 
@@ -1470,12 +1503,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
     let overlay_was_active = d.action_editor.visual_overlay.operation_id().is_some();
-    for event in d.action_editor.visual_overlay.poll() {
-        use super::visual_overlay::VisualOverlayEvent;
-        if let VisualOverlayEvent::Error { error, .. } = event {
-            d.action_editor.capture_message = Some(error.to_string());
-        }
-    }
+    d.action_editor.poll_visual_overlay();
     if overlay_was_active || d.action_editor.visual_overlay.operation_id().is_some() {
         ctx.request_repaint();
     }
@@ -1534,7 +1562,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         if image.rectangle.is_empty() {
                             state.capture_message = Some("Rectangle width and height must be positive".into());
                         } else {
-                            state.visual_overlay.preview_rectangle(image.rectangle);
+                            let rect = image.rectangle;
+                            let id = state.visual_overlay.preview_rectangle(rect);
+                            state.track_overlay(id, format!("Unable to preview region {rect:?}"));
                         }
                     }
                     Some(HighlightMonitor) => {
@@ -1542,7 +1572,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         image.refresh_monitors();
                         match &image.monitors {
                             Ok(monitors) => match monitors.iter().find(|m| m.index == image.monitor_index) {
-                                Some(m) => { state.visual_overlay.highlight_monitor(m.clone()); }
+                                Some(m) => {
+                                    let index = m.index;
+                                    let id = state.visual_overlay.highlight_monitor(m.clone());
+                                    state.track_overlay(id, format!("Unable to highlight monitor {index}"));
+                                }
                                 None => state.capture_message = Some(format!("Monitor {} is currently unavailable", image.monitor_index)),
                             },
                             Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
@@ -1552,7 +1586,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         let image = state.image_search.as_mut().unwrap();
                         image.refresh_monitors();
                         match &image.monitors {
-                            Ok(monitors) if !monitors.is_empty() => { state.visual_overlay.identify_monitors(monitors.clone()); }
+                            Ok(monitors) if !monitors.is_empty() => {
+                                let id = state.visual_overlay.identify_monitors(monitors.clone());
+                                state.track_overlay(id, "Unable to identify monitors".into());
+                            }
                             Ok(_) => state.capture_message = Some("No monitors are currently available".into()),
                             Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
                         }
@@ -1561,8 +1598,16 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         let image = state.image_search.as_ref().unwrap();
                         let matcher = if client_area { &image.client_matcher } else { &image.window_matcher };
                         match crate::mkmacro::resolve_window_screen_rect(matcher, client_area) {
-                            Ok(rect) => { state.visual_overlay.highlight_window(rect, if client_area { super::visual_overlay::WindowAreaKind::ClientArea } else { super::visual_overlay::WindowAreaKind::WholeWindow }); }
-                            Err(error) => state.capture_message = Some(error.to_string()),
+                            Ok(rect) => {
+                                let kind = if client_area { super::visual_overlay::WindowAreaKind::ClientArea } else { super::visual_overlay::WindowAreaKind::WholeWindow };
+                                let id = state.visual_overlay.highlight_window(rect, kind);
+                                let area = if client_area { "client area" } else { "whole window" };
+                                state.track_overlay(id, format!("Unable to create {area} overlay"));
+                            }
+                            Err(error) => {
+                                let area = if client_area { "client-area" } else { "whole-window" };
+                                state.capture_message = Some(format!("Unable to resolve {area} target: {error}"));
+                            }
                         }
                     }
                     None => {}

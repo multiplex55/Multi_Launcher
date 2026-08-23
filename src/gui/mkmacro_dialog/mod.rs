@@ -1349,6 +1349,7 @@ impl MkMacroDialog {
             self.dirty = false;
             self.conflict = false;
         }
+        self.action_editor.cancel();
         self.open = false;
         self.set_selected_macro(None);
         true

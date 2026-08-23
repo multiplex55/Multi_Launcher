@@ -2227,6 +2227,7 @@ impl LauncherApp {
                 self.panel_states.macro_dialog = false;
             }
             Panel::MkMacroDialog => {
+                self.mkmacro_dialog.action_editor.cancel();
                 self.mkmacro_dialog.open = false;
                 self.panel_states.mkmacro_dialog = false;
             }
@@ -2407,6 +2408,7 @@ impl LauncherApp {
                 self.panel_states.macro_dialog = false;
             }
             Panel::MkMacroDialog => {
+                self.mkmacro_dialog.action_editor.cancel();
                 self.mkmacro_dialog.open = false;
                 self.panel_states.mkmacro_dialog = false;
             }
