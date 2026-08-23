@@ -334,7 +334,7 @@ mod tests {
         for (w, h) in [(800, 200), (200, 800), (800, 800), (20, 10)] {
             let (tw, th) = thumbnail_dimensions(w, h);
             assert!(tw <= 220 && th <= 220);
-            assert!((tw as f32/th as f32-w as f32/h as f32).abs() < .01);
+            assert!((tw as f32 / th as f32 - w as f32 / h as f32).abs() < 0.01);
         }
         assert_eq!(thumbnail_dimensions(20, 10), (20, 10));
     }
