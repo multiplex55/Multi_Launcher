@@ -233,10 +233,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                     r.col(|ui| {
                         let asset_name = match &s.action {
                             crate::mkmacro::MkAction::ImageFind(p) | crate::mkmacro::MkAction::ImageClick(p) =>
-                                m.assets.iter().find(|a| a.id == p.asset_id).map(|a| a.name.as_str()),
+                                d.store.asset_path(mid, p.asset_id).ok()
+                                    .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())),
                             _ => None,
                         };
-                        let full=super::action_catalog::action_details_with_asset_name(&s.action, asset_name); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}response.context_menu(|ui|context_menu(ui,s.id,&mut command));
+                        let full=super::action_catalog::action_details_with_asset_name(&s.action, asset_name.as_deref()); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}response.context_menu(|ui|context_menu(ui,s.id,&mut command));
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
