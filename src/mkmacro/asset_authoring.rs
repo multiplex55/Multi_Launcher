@@ -127,4 +127,19 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn staged_capture_png_round_trips_dimensions_and_rgba_pixels() {
+        let (_dir, store) = fixture();
+        let image = RgbaImage::from_fn(3, 2, |x, y| Rgba([x as u8, y as u8, 77, 128 + x as u8]));
+        let staged = ImageAssetAuthoringService::new(&store)
+            .stage_rgba(12, &image)
+            .unwrap();
+        let decoded = image::open(store.asset_path(12, staged.asset_id).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (3, 2));
+        assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 77, 128]);
+        assert_eq!(decoded.get_pixel(2, 1).0, [2, 1, 77, 130]);
+    }
 }

@@ -427,4 +427,34 @@ mod tests {
         assert!(s.validation_error().unwrap().contains("19"));
         assert_eq!(s.monitor_index, 19);
     }
+
+    #[test]
+    fn sparse_monitor_indices_survive_reorder_removal_and_reload() {
+        let descriptor = |index, x, primary| MonitorDescriptor {
+            index,
+            bounds: ScreenRect::new(x, -40, 800, 600),
+            primary,
+        };
+        let mut s =
+            ImageSearchEditorState::from_payload(&payload(SearchRegion::Monitor { index: 42 }));
+        s.monitors = Ok(vec![descriptor(7, -800, false), descriptor(42, 0, true)]);
+        assert_eq!(s.monitor_index, 42);
+        assert_eq!(
+            s.monitors.as_ref().unwrap()[1].label(),
+            "Monitor 42 — 800×600 @ (0, -40) — Primary"
+        );
+
+        s.monitors = Ok(vec![descriptor(42, 0, true), descriptor(7, -800, false)]);
+        assert_eq!(s.selected_region(), SearchRegion::Monitor { index: 42 });
+        assert!(s.validation_error().is_none());
+
+        s.monitors = Ok(vec![descriptor(7, -800, false)]);
+        assert_eq!(s.monitor_index, 42);
+        assert_eq!(
+            s.validation_error().as_deref(),
+            Some("Monitor 42 is currently unavailable")
+        );
+        s.monitors = Err("enumeration failed".into());
+        assert_eq!(s.monitor_index, 42); // A reload failure must never fall back to monitor zero.
+    }
 }
