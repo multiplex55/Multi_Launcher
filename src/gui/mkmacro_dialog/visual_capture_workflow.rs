@@ -4,6 +4,14 @@
 //! the window, overlay, clock, capture and store boundaries and calls [`tick`]
 //! once per frame.  Consequently hiding a window never leads to a sleep on the
 //! UI thread and every terminal path passes through the same restoration step.
+//!
+//! Rectangle purposes deliberately diverge immediately after confirmation:
+//! [`RectanglePurpose::SearchRegion`] publishes the overlay geometry directly,
+//! whereas [`RectanglePurpose::ReferenceImageCapture`] carries that exact
+//! geometry through capture and transactional asset staging. Neither path reads
+//! an image action's persisted search region. All terminal results (including
+//! cancellation and failure) are held in [`WorkflowState::Restoring`] until the
+//! launcher's previous visibility has been restored exactly once.
 
 use super::visual_overlay::{
     OperationId, RectanglePurpose, VisualOverlayController, VisualOverlayEvent,
@@ -385,19 +393,22 @@ impl VisualCaptureWorkflow {
                             saved_visibility,
                             WorkflowOutcome::Failed("selection must be nonempty".into()),
                         );
-                    } else if purpose == RectanglePurpose::SearchRegion {
-                        self.finish(
-                            saved_visibility,
-                            WorkflowOutcome::Region {
-                                token: self.token.unwrap(),
-                                rect,
-                            },
-                        );
                     } else {
-                        self.state = WorkflowState::Capturing {
-                            saved_visibility,
-                            rect,
-                        };
+                        match purpose {
+                            RectanglePurpose::SearchRegion => self.finish(
+                                saved_visibility,
+                                WorkflowOutcome::Region {
+                                    token: self.token.unwrap(),
+                                    rect,
+                                },
+                            ),
+                            RectanglePurpose::ReferenceImageCapture => {
+                                self.state = WorkflowState::Capturing {
+                                    saved_visibility,
+                                    rect,
+                                };
+                            }
+                        }
                     }
                 }
                 _ => {} // stale native events are deliberately ignored
@@ -657,6 +668,9 @@ mod tests {
         let g = l.lock().unwrap();
         assert_eq!(g.restores, 1);
         assert_eq!(g.entries[0..3], ["hide", "overlay", "overlay-close"]);
+        assert_eq!(g.entries.last().map(String::as_str), Some("restore"));
+        assert!(!g.entries.iter().any(|entry| entry.starts_with("capture:")));
+        assert!(!g.entries.iter().any(|entry| entry == "write"));
     }
     #[test]
     fn reference_capture_occurs_only_after_confirmation_and_preserves_exact_rect() {
@@ -697,6 +711,15 @@ mod tests {
                 .entries
                 .contains(&format!("capture:{rect:?}"))
         );
+        assert_eq!(
+            l.lock()
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|e| *e == "write")
+                .count(),
+            1
+        );
     }
     #[test]
     fn escape_before_or_during_drag_restores_exactly_once() {
@@ -709,13 +732,36 @@ mod tests {
                 mkmacro_dialog: true,
             };
             let (mut w, l) = fixture(saved);
-            reach_selecting(&mut w, &l, RectanglePurpose::SearchRegion);
+            reach_selecting(&mut w, &l, RectanglePurpose::ReferenceImageCapture);
             l.lock().unwrap().event = Some(event);
             complete_restoration(&mut w);
             let g = l.lock().unwrap();
             assert_eq!(g.restores, 1);
             assert_eq!(g.saved, Some(saved));
+            assert!(!g.entries.iter().any(|entry| entry.starts_with("capture:")));
+            assert!(!g.entries.iter().any(|entry| entry == "write"));
         }
+    }
+    #[test]
+    fn zero_sized_selection_restores_without_capture_or_write() {
+        let (mut w, l) = fixture(SavedVisibility {
+            launcher: true,
+            mkmacro_dialog: true,
+        });
+        reach_selecting(&mut w, &l, RectanglePurpose::ReferenceImageCapture);
+        l.lock().unwrap().event = Some(SelectionEvent::Confirmed {
+            operation_id: 7,
+            rect: ScreenRect::new(-10, -20, 0, 4),
+        });
+        complete_restoration(&mut w);
+        assert!(matches!(
+            w.take_completed(),
+            Some(WorkflowOutcome::Failed(_))
+        ));
+        let g = l.lock().unwrap();
+        assert_eq!(g.restores, 1);
+        assert!(!g.entries.iter().any(|entry| entry.starts_with("capture:")));
+        assert!(!g.entries.iter().any(|entry| entry == "write"));
     }
     #[test]
     fn failures_restore_and_never_publish_an_asset() {
@@ -740,6 +786,12 @@ mod tests {
                 Some(WorkflowOutcome::Failed(_))
             ));
             assert_eq!(l.lock().unwrap().restores, 1);
+            let entries = &l.lock().unwrap().entries;
+            if capture_failure {
+                assert!(!entries.iter().any(|entry| entry == "write"));
+            } else {
+                assert_eq!(entries.iter().filter(|entry| *entry == "write").count(), 1);
+            }
         }
     }
     #[test]

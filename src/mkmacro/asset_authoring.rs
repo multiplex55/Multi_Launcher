@@ -126,6 +126,14 @@ mod tests {
                 .stage_rgba(4, &RgbaImage::new(0, 1))
                 .is_err()
         );
+        assert_eq!(store.asset_ids(4).unwrap(), vec![1, 2]);
+        assert_eq!(
+            image::open(store.asset_path(4, 1).unwrap())
+                .unwrap()
+                .to_rgba8(),
+            first,
+            "a rejected replacement must neither remove nor overwrite the old PNG"
+        );
     }
 
     #[test]
