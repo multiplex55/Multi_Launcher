@@ -17,21 +17,31 @@ use std::{
 pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
 pub const MAX_DECODED_RGBA_BYTES: u64 = 64 * 1024 * 1024;
 
-pub fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
+pub fn validated_rgba_len(width: u32, height: u32) -> Result<usize> {
     if width == 0 || height == 0 {
-        anyhow::bail!("reference image is empty")
+        anyhow::bail!("Reference image is too large to import")
     }
-    let pixels = u64::from(width)
-        .checked_mul(u64::from(height))
+    let width_usize = usize::try_from(width)
+        .map_err(|_| anyhow::anyhow!("Reference image is too large to import"))?;
+    let height_usize = usize::try_from(height)
+        .map_err(|_| anyhow::anyhow!("Reference image is too large to import"))?;
+    let pixels = width_usize
+        .checked_mul(height_usize)
         .ok_or_else(|| anyhow::anyhow!("Reference image is too large to import"))?;
     let bytes = pixels
         .checked_mul(4)
         .ok_or_else(|| anyhow::anyhow!("Reference image is too large to import"))?;
-    if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION || bytes > MAX_DECODED_RGBA_BYTES
+    if width > MAX_IMAGE_DIMENSION
+        || height > MAX_IMAGE_DIMENSION
+        || bytes as u64 > MAX_DECODED_RGBA_BYTES
     {
         anyhow::bail!("Reference image is too large to import")
     }
-    Ok(())
+    Ok(bytes)
+}
+
+pub fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
+    validated_rgba_len(width, height).map(|_| ())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
