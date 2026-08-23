@@ -3293,6 +3293,12 @@ mod tests {
 
         fn assert_cancel(overlay_generated: bool) {
             let (mut dialog, h) = host();
+            let prior_rectangle = dialog
+                .action_editor
+                .image_search
+                .as_ref()
+                .unwrap()
+                .rectangle;
             reach_overlay(&mut dialog, &h, RectanglePurpose::SearchRegion);
             if overlay_generated {
                 h.lock().unwrap().selection = Some(SelectionEvent::Cancelled { operation_id: 17 });
@@ -3328,7 +3334,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .rectangle,
-                ScreenRect::new(0, 0, 0, 0)
+                prior_rectangle
             );
             assert_eq!(
                 dialog
@@ -3351,6 +3357,12 @@ mod tests {
         #[test]
         fn capture_failure_restores_before_publishing_and_preserves_draft() {
             let (mut dialog, h) = host();
+            let prior_rectangle = dialog
+                .action_editor
+                .image_search
+                .as_ref()
+                .unwrap()
+                .rectangle;
             h.lock().unwrap().capture_error = Some("camera exploded distinctively".into());
             reach_overlay(&mut dialog, &h, RectanglePurpose::ReferenceImageCapture);
             let rect = ScreenRect::new(1, 2, 3, 4);
@@ -3389,7 +3401,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .rectangle,
-                ScreenRect::new(0, 0, 0, 0)
+                prior_rectangle
             );
             let MkAction::ImageFind(payload) = &dialog.action_editor.draft.as_ref().unwrap().action
             else {
