@@ -230,13 +230,6 @@ impl ActionEditorState {
             }
         }
     }
-    fn track_overlay(&mut self, id: super::visual_overlay::OperationId, context: String) {
-        self.overlay_diagnostic = Some((id, context));
-        if self.visual_overlay.operation_id() == Some(id) {
-            self.capture_message = None;
-        }
-    }
-
     fn poll_visual_overlay(&mut self) {
         for event in self.visual_overlay.poll() {
             if let super::visual_overlay::VisualOverlayEvent::Error {
@@ -1564,7 +1557,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         } else {
                             let rect = image.rectangle;
                             let id = state.visual_overlay.preview_rectangle(rect);
-                            state.track_overlay(id, format!("Unable to preview region {rect:?}"));
+                            state.overlay_diagnostic =
+                                Some((id, format!("Unable to preview region {rect:?}")));
+                            if state.visual_overlay.operation_id() == Some(id) {
+                                state.capture_message = None;
+                            }
                         }
                     }
                     Some(HighlightMonitor) => {
@@ -1575,7 +1572,13 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                                 Some(m) => {
                                     let index = m.index;
                                     let id = state.visual_overlay.highlight_monitor(m.clone());
-                                    state.track_overlay(id, format!("Unable to highlight monitor {index}"));
+                                    state.overlay_diagnostic = Some((
+                                        id,
+                                        format!("Unable to highlight monitor {index}"),
+                                    ));
+                                    if state.visual_overlay.operation_id() == Some(id) {
+                                        state.capture_message = None;
+                                    }
                                 }
                                 None => state.capture_message = Some(format!("Monitor {} is currently unavailable", image.monitor_index)),
                             },
@@ -1588,7 +1591,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         match &image.monitors {
                             Ok(monitors) if !monitors.is_empty() => {
                                 let id = state.visual_overlay.identify_monitors(monitors.clone());
-                                state.track_overlay(id, "Unable to identify monitors".into());
+                                state.overlay_diagnostic =
+                                    Some((id, "Unable to identify monitors".into()));
+                                if state.visual_overlay.operation_id() == Some(id) {
+                                    state.capture_message = None;
+                                }
                             }
                             Ok(_) => state.capture_message = Some("No monitors are currently available".into()),
                             Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
@@ -1602,7 +1609,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                                 let kind = if client_area { super::visual_overlay::WindowAreaKind::ClientArea } else { super::visual_overlay::WindowAreaKind::WholeWindow };
                                 let id = state.visual_overlay.highlight_window(rect, kind);
                                 let area = if client_area { "client area" } else { "whole window" };
-                                state.track_overlay(id, format!("Unable to create {area} overlay"));
+                                state.overlay_diagnostic =
+                                    Some((id, format!("Unable to create {area} overlay")));
+                                if state.visual_overlay.operation_id() == Some(id) {
+                                    state.capture_message = None;
+                                }
                             }
                             Err(error) => {
                                 let area = if client_area { "client-area" } else { "whole-window" };
