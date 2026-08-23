@@ -2167,7 +2167,7 @@ mod tests {
         c.last_screen_position = Some(MkPoint { x: -5, y: -6 });
         e.position_capture = Some(c);
         e.process_position_event(PositionCaptureEvent::Enter);
-        let MkAction::MouseDrag(p) = &e.draft.unwrap().action else {
+        let MkAction::MouseDrag(p) = &e.draft.as_ref().unwrap().action else {
             panic!()
         };
         assert_eq!(
