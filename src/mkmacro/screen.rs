@@ -1434,6 +1434,44 @@ mod windows_backend_tests {
         desktop: (i32, i32, i32, i32),
         monitors: Vec<CaptureMonitor>,
     }
+    enum WindowFixtureResult {
+        Rect {
+            outer: ScreenRect,
+            client: ScreenRect,
+        },
+        Missing,
+        Multiple,
+        Backend,
+    }
+    struct WindowFixture(WindowFixtureResult);
+    impl CapturePlatform for WindowFixture {
+        fn virtual_desktop_metrics(&self) -> ExecResult<(i32, i32, i32, i32)> {
+            Ok((-2000, -1000, 4000, 2000))
+        }
+        fn monitors(&self) -> ExecResult<Vec<CaptureMonitor>> {
+            Ok(Vec::new())
+        }
+        fn window_rect(&self, _: &MkWindowMatcher, client: bool) -> ExecResult<ScreenRect> {
+            match self.0 {
+                WindowFixtureResult::Rect {
+                    outer,
+                    client: client_rect,
+                } => Ok(if client { client_rect } else { outer }),
+                WindowFixtureResult::Missing => Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::TargetNotFound,
+                    "Window search target was not found",
+                )),
+                WindowFixtureResult::Multiple => Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::AmbiguousTarget,
+                    "Window search target matched multiple windows",
+                )),
+                WindowFixtureResult::Backend => Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "fixture enumeration API failed",
+                )),
+            }
+        }
+    }
     impl CapturePlatform for CaptureFixture {
         fn virtual_desktop_metrics(&self) -> ExecResult<(i32, i32, i32, i32)> {
             Ok(self.desktop)
@@ -1457,6 +1495,16 @@ mod windows_backend_tests {
                 rect.height,
                 image::Rgba(color),
             ))),
+        }
+    }
+    fn coordinate_monitor(id: u64, rect: ScreenRect, tag: u8) -> CaptureMonitor {
+        let image = RgbaImage::from_fn(rect.width, rect.height, |x, y| {
+            image::Rgba([tag, x as u8, y as u8, 255])
+        });
+        CaptureMonitor {
+            bounds: rect,
+            stable_id: id,
+            source: Arc::new(ImageSource(image)),
         }
     }
 
@@ -1490,6 +1538,65 @@ mod windows_backend_tests {
     }
 
     #[test]
+    fn window_and_client_regions_use_injected_desktop_rectangles() {
+        let backend =
+            WindowsScreenCaptureBackend::new(Arc::new(WindowFixture(WindowFixtureResult::Rect {
+                outer: ScreenRect::new(-300, 40, 900, 700),
+                client: ScreenRect::new(-292, 72, 884, 660),
+            })));
+        let matcher = MkWindowMatcher::default();
+        assert_eq!(
+            backend
+                .region_bounds(&SearchRegion::Window {
+                    matcher: matcher.clone()
+                })
+                .unwrap(),
+            ScreenRect::new(-300, 40, 900, 700)
+        );
+        assert_eq!(
+            backend
+                .region_bounds(&SearchRegion::ClientArea { matcher })
+                .unwrap(),
+            ScreenRect::new(-292, 72, 884, 660)
+        );
+    }
+
+    #[test]
+    fn window_resolution_preserves_missing_ambiguous_and_backend_diagnostics() {
+        let matcher = MkWindowMatcher::default();
+        for (fixture, kind, message) in [
+            (
+                WindowFixtureResult::Missing,
+                DiagnosticKind::TargetNotFound,
+                "Window search target was not found",
+            ),
+            (
+                WindowFixtureResult::Multiple,
+                DiagnosticKind::AmbiguousTarget,
+                "Window search target matched multiple windows",
+            ),
+            (
+                WindowFixtureResult::Backend,
+                DiagnosticKind::Backend,
+                "fixture enumeration API failed",
+            ),
+        ] {
+            let backend = WindowsScreenCaptureBackend::new(Arc::new(WindowFixture(fixture)));
+            let error = backend
+                .region_bounds(&SearchRegion::Window {
+                    matcher: matcher.clone(),
+                })
+                .unwrap_err();
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.message, message);
+            assert_eq!(
+                error.context.get("backend").map(String::as_str),
+                Some("WindowsScreenCaptureBackend")
+            );
+        }
+    }
+
+    #[test]
     fn half_open_intersections_handle_primary_left_above_and_touching_edges() {
         let primary = ScreenRect::new(0, 0, 4, 3);
         assert_eq!(intersection(primary, ScreenRect::new(-3, 0, 3, 3)), None);
@@ -1511,6 +1618,36 @@ mod windows_backend_tests {
         assert_eq!(image.get_pixel(0, 1).0, [1, 2, 3, 4]);
         assert_eq!(image.get_pixel(1, 1).0, [10, 20, 30, 40]);
         assert_eq!(image.get_pixel(2, 0).0, [10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn side_by_side_union_and_boundary_crossing_preserve_monitor_local_pixels() {
+        let monitors = vec![
+            coordinate_monitor(1, ScreenRect::new(0, 0, 3, 2), 10),
+            coordinate_monitor(2, ScreenRect::new(3, 0, 2, 2), 20),
+        ];
+        let union = compose_monitors(ScreenRect::new(0, 0, 5, 2), &monitors, &|| false).unwrap();
+        assert_eq!(union.dimensions(), (5, 2));
+        assert_eq!(union.get_pixel(2, 1).0, [10, 2, 1, 255]);
+        assert_eq!(union.get_pixel(3, 1).0, [20, 0, 1, 255]);
+
+        let seam = compose_monitors(ScreenRect::new(2, 0, 2, 2), &monitors, &|| false).unwrap();
+        assert_eq!(seam.get_pixel(0, 0).0, [10, 2, 0, 255]);
+        assert_eq!(seam.get_pixel(1, 0).0, [20, 0, 0, 255]);
+    }
+
+    #[test]
+    fn l_shaped_layout_maps_three_intersections_and_leaves_uncovered_quadrant() {
+        let monitors = vec![
+            coordinate_monitor(1, ScreenRect::new(0, 0, 2, 2), 1),
+            coordinate_monitor(2, ScreenRect::new(2, 0, 2, 2), 2),
+            coordinate_monitor(3, ScreenRect::new(0, 2, 2, 2), 3),
+        ];
+        let image = compose_monitors(ScreenRect::new(0, 0, 4, 4), &monitors, &|| false).unwrap();
+        assert_eq!(image.get_pixel(1, 1).0, [1, 1, 1, 255]);
+        assert_eq!(image.get_pixel(3, 1).0, [2, 1, 1, 255]);
+        assert_eq!(image.get_pixel(1, 3).0, [3, 1, 1, 255]);
+        assert_eq!(image.get_pixel(3, 3).0, [0, 0, 0, 255]);
     }
 
     #[test]

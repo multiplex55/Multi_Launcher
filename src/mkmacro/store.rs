@@ -735,6 +735,40 @@ mod tests {
         assert_eq!(s.next_asset_id(8).unwrap(), 1);
         assert!(s.next_asset_id(0).is_err());
     }
+
+    #[test]
+    fn asset_replacement_requires_save_then_explicit_cleanup() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = MkMacroStore::open(d.path()).unwrap();
+        let old_ref = s
+            .write_png_asset(
+                7,
+                1,
+                &RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 4])),
+            )
+            .unwrap();
+        let new_ref = s
+            .write_png_asset(
+                7,
+                2,
+                &RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 8])),
+            )
+            .unwrap();
+        let old_path = s.resolve_asset_reference(7, &old_ref).unwrap();
+        let new_path = s.resolve_asset_reference(7, &new_ref).unwrap();
+        assert!(old_path.is_file() && new_path.is_file());
+
+        // Cancellation/failure is represented by not committing: staging alone is non-destructive.
+        assert!(s.cleanup_assets(false, &[old_path.clone()]).is_err());
+        assert!(old_path.is_file());
+        let (_saved, cleanup) = s
+            .commit_asset_update(document(), &new_ref, Some(&old_ref))
+            .unwrap();
+        assert!(old_path.is_file());
+        s.cleanup_assets(true, &[cleanup.unwrap()]).unwrap();
+        assert!(!old_path.exists());
+        assert!(new_path.is_file());
+    }
     #[test]
     fn version_two_images_migrate_once_and_drop_confidence() {
         let d = tempfile::tempdir().unwrap();
