@@ -46,5 +46,8 @@ jobs:
       - name: Build (debug, all targets)
         run: cargo build --locked --all-targets --verbose
 
+      - name: Focused visual overlay controller tests
+        run: cargo test --locked --lib visual_overlay::tests::
+
       - name: Test (cargo-nextest)
         run: cargo nextest run --locked --workspace --all-features --no-fail-fast --failure-output=immediate-final
