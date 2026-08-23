@@ -205,6 +205,13 @@ impl ActionEditorState {
         let Some(outcome) = workflow.take_completed() else {
             return;
         };
+        self.apply_visual_capture_outcome(current_macro_id, outcome);
+    }
+    fn apply_visual_capture_outcome(
+        &mut self,
+        current_macro_id: Option<u64>,
+        outcome: super::visual_capture_workflow::WorkflowOutcome,
+    ) {
         use super::visual_capture_workflow::WorkflowOutcome;
         match outcome {
             WorkflowOutcome::Region { token, rect } => {
@@ -230,6 +237,13 @@ impl ActionEditorState {
             }
         }
     }
+    fn sync_image_region_to_draft(&mut self) {
+        if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)
+            && let Some(payload) = image_payload_mut(step)
+        {
+            payload.region = image.selected_region();
+        }
+    }
     fn poll_visual_overlay(&mut self) {
         for event in self.visual_overlay.poll() {
             if let super::visual_overlay::VisualOverlayEvent::Error {
@@ -252,11 +266,7 @@ impl ActionEditorState {
         }
         self.visual_overlay.shutdown();
         self.stop_position_capture();
-        if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)
-            && let Some(payload) = image_payload_mut(step)
-        {
-            payload.region = image.selected_region();
-        }
+        self.sync_image_region_to_draft();
         let mut step = self.draft.take()?;
         let edit = self.editing_id.take();
         let intent = self.insertion.take().unwrap_or_else(|| match edit {
@@ -1824,6 +1834,119 @@ mod tests {
                 .width(),
             3
         );
+    }
+
+    fn image_payload(asset_id: u64, region: SearchRegion) -> MkImagePayload {
+        MkImagePayload {
+            asset_id,
+            wait: MkWaitOptions {
+                timeout_ms: 5_000,
+                poll_interval_ms: 100,
+            },
+            region,
+            tolerance: 0,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+        }
+    }
+
+    fn draft_image_payload(editor: &ActionEditorState) -> &MkImagePayload {
+        match &editor.draft.as_ref().unwrap().action {
+            MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => payload,
+            _ => panic!("expected image action"),
+        }
+    }
+
+    #[test]
+    fn visual_results_mutate_only_their_purpose_specific_draft_state() {
+        use super::super::image_search_editor::SearchRegionKind;
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+
+        let original_region = SearchRegion::Window {
+            matcher: MkWindowMatcher {
+                title: Some("unchanged".into()),
+                ..Default::default()
+            },
+        };
+        let mut editor = ActionEditorState::default();
+        editor.begin_edit(&step(MkAction::ImageFind(image_payload(
+            4,
+            original_region.clone(),
+        ))));
+        let token = DraftToken {
+            macro_id: 11,
+            draft_generation: editor.draft_generation,
+        };
+        let before_editor = format!("{:?}", editor.image_search.as_ref().unwrap());
+        editor
+            .apply_visual_capture_outcome(Some(11), WorkflowOutcome::Asset { token, asset_id: 5 });
+        assert_eq!(draft_image_payload(&editor).asset_id, 5);
+        assert_eq!(
+            format!("{:?}", editor.image_search.as_ref().unwrap()),
+            before_editor
+        );
+        assert_eq!(draft_image_payload(&editor).region, original_region);
+
+        let picked = ScreenRect::new(-123, 45, 67, 89);
+        editor.apply_visual_capture_outcome(
+            Some(11),
+            WorkflowOutcome::Region {
+                token,
+                rect: picked,
+            },
+        );
+        let image = editor.image_search.as_ref().unwrap();
+        assert_eq!(image.rectangle, picked);
+        assert_eq!(image.kind, SearchRegionKind::Rectangle);
+        assert_eq!(draft_image_payload(&editor).asset_id, 5);
+        assert_eq!(draft_image_payload(&editor).region, original_region);
+
+        editor.sync_image_region_to_draft();
+        assert_eq!(
+            draft_image_payload(&editor).region,
+            SearchRegion::Rectangle { rect: picked }
+        );
+    }
+
+    #[test]
+    fn stale_cancelled_and_failed_visual_results_preserve_the_draft() {
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+
+        let region = SearchRegion::Monitor { index: 2 };
+        let mut editor = ActionEditorState::default();
+        editor.begin_edit(&step(MkAction::ImageClick(image_payload(4, region))));
+        let generation = editor.draft_generation;
+        let before_draft = serde_json::to_vec(editor.draft.as_ref().unwrap()).unwrap();
+        let before_editor = format!("{:?}", editor.image_search.as_ref().unwrap());
+        for outcome in [
+            WorkflowOutcome::Asset {
+                token: DraftToken {
+                    macro_id: 12,
+                    draft_generation: generation,
+                },
+                asset_id: 5,
+            },
+            WorkflowOutcome::Region {
+                token: DraftToken {
+                    macro_id: 11,
+                    draft_generation: generation.wrapping_add(1),
+                },
+                rect: ScreenRect::new(1, 2, 3, 4),
+            },
+            WorkflowOutcome::Cancelled,
+            WorkflowOutcome::Failed("PNG staging failed".into()),
+        ] {
+            editor.apply_visual_capture_outcome(Some(11), outcome);
+            assert_eq!(
+                serde_json::to_vec(editor.draft.as_ref().unwrap()).unwrap(),
+                before_draft
+            );
+            assert_eq!(
+                format!("{:?}", editor.image_search.as_ref().unwrap()),
+                before_editor
+            );
+        }
+        assert_eq!(draft_image_payload(&editor).asset_id, 4);
     }
     fn capture(slot: PositionCaptureSlot) -> PositionCaptureState {
         PositionCaptureState {
