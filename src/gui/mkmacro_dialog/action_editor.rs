@@ -1688,13 +1688,71 @@ mod tests {
                 original: MkWindowMatcher::default(),
             };
             assert!(editor.apply_window_matcher(&request, replacement.clone(), Some(5)));
-            assert_eq!(
-                matcher_at_path(&mut editor.draft.as_mut().unwrap().action, &path),
-                Some(&mut replacement.clone())
-            );
+            if matches!(path, super::super::window_picker::MatcherPath::ImageRegion) {
+                // Image regions intentionally remain in the UI-only per-mode
+                // cache until Apply; picker results must not mutate the
+                // serialized action draft behind the editor's back.
+                assert_eq!(
+                    editor.image_search.as_ref().unwrap().window_matcher,
+                    replacement
+                );
+                assert!(matches!(
+                    &editor.draft.as_ref().unwrap().action,
+                    MkAction::ImageFind(p)
+                        if matches!(&p.region, SearchRegion::Window { matcher } if matcher == &MkWindowMatcher::default())
+                ));
+            } else {
+                assert_eq!(
+                    matcher_at_path(&mut editor.draft.as_mut().unwrap().action, &path),
+                    Some(&mut replacement.clone())
+                );
+            }
             assert!(
                 !editor.apply_window_matcher(&request, MkWindowMatcher::default(), Some(6)),
                 "another macro must not be modified"
+            );
+            let mut stale = request.clone();
+            let super::super::window_picker::MatcherDestination::Action {
+                draft_generation, ..
+            } = &mut stale.destination;
+            *draft_generation = draft_generation.wrapping_add(1);
+            assert!(
+                !editor.apply_window_matcher(&stale, MkWindowMatcher::default(), Some(5)),
+                "a stale editor generation must not be modified"
+            );
+        }
+    }
+
+    #[test]
+    fn both_image_actions_use_the_same_typed_image_editor_state() {
+        let payload = MkImagePayload {
+            asset_id: 4,
+            tolerance: 12,
+            alpha: AlphaPolicy::Ignore,
+            region: SearchRegion::Rectangle {
+                rect: ScreenRect::new(-10, 20, 30, 40),
+            },
+            return_point: ReturnPoint::TopLeft,
+            wait: MkWaitOptions {
+                timeout_ms: 2_000,
+                poll_interval_ms: 25,
+            },
+        };
+        for action in [
+            MkAction::ImageFind(payload.clone()),
+            MkAction::ImageClick(payload.clone()),
+        ] {
+            let mut editor = ActionEditorState::default();
+            editor.begin_edit(&step(action));
+            let image = editor.image_search.as_ref().expect("shared image editor");
+            assert_eq!(
+                image.kind,
+                super::super::image_search_editor::SearchRegionKind::Rectangle
+            );
+            assert_eq!(image.rectangle, ScreenRect::new(-10, 20, 30, 40));
+            assert_eq!(
+                image.pending_request, None,
+                "both actions expose the same typed request channel"
             );
         }
     }
