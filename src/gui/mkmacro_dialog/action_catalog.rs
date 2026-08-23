@@ -122,7 +122,7 @@ fn wp() -> MkWindowPayload {
         wait: Some(wait()),
     }
 }
-fn ip() -> MkImagePayload {
+fn ip(not_found_policy: MkImageNotFoundPolicy) -> MkImagePayload {
     MkImagePayload {
         // Zero is the documented editor-draft sentinel. The editor requires an
         // imported/captured asset before enabling Apply.
@@ -132,6 +132,8 @@ fn ip() -> MkImagePayload {
         tolerance: 0,
         alpha: AlphaPolicy::Compare,
         return_point: ReturnPoint::Center,
+        not_found_policy,
+        outputs: MkImageOutputs::default(),
     }
 }
 fn up() -> MkUiPayload {
@@ -573,7 +575,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Find an image",
             &["image"],
             Image,
-            MkAction::ImageFind(ip())
+            MkAction::ImageFind(ip(MkImageNotFoundPolicy::Continue))
         ),
         d!(
             Visual,
@@ -581,7 +583,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Find and click an image",
             &["image", "click"],
             Image,
-            MkAction::ImageClick(ip())
+            MkAction::ImageClick(ip(MkImageNotFoundPolicy::Fail))
         ),
         d!(
             Visual,
@@ -1149,6 +1151,24 @@ fn format_image_details(p: &MkImagePayload, asset_name: Option<&str>, click: boo
     }
     if click {
         parts.push(format!("{} ms", p.wait.timeout_ms));
+    }
+    if !click {
+        parts.push(match p.not_found_policy {
+            MkImageNotFoundPolicy::Continue => "continue if absent".into(),
+            MkImageNotFoundPolicy::Fail => "fail if absent".into(),
+        });
+        let outputs = [
+            ("found", &p.outputs.found),
+            ("point", &p.outputs.point),
+            ("x", &p.outputs.x),
+            ("y", &p.outputs.y),
+        ]
+        .into_iter()
+        .filter_map(|(slot, name)| name.as_deref().map(|name| format!("{slot}→{name}")))
+        .collect::<Vec<_>>();
+        if !outputs.is_empty() {
+            parts.push(outputs.join(", "));
+        }
     }
     parts.join(" · ")
 }

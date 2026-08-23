@@ -3203,6 +3203,8 @@ mod tests {
                 tolerance: 0,
                 alpha: AlphaPolicy::Compare,
                 return_point: ReturnPoint::Center,
+                not_found_policy: MkImageNotFoundPolicy::Fail,
+                outputs: MkImageOutputs::default(),
             }
         }
         fn host() -> (MkMacroDialog, Arc<Mutex<Harness>>) {
