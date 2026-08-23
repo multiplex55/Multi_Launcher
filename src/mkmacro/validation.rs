@@ -254,6 +254,13 @@ pub fn validate_document(doc: &MkMacroDocument, asset_root: Option<&Path>) -> Ve
                             "Image search rectangle must have positive width and height",
                         )
                     }
+                    match &p.region {
+                        SearchRegion::Window { matcher: window }
+                        | SearchRegion::ClientArea { matcher: window } => {
+                            matcher(window, m.id, sid, &mut out)
+                        }
+                        _ => {}
+                    }
                 }
                 MkAction::MouseMove(p) => target(&p.target, m.id, sid, asset_root, &mut out),
                 MkAction::MouseClick(p) => target(&p.target, m.id, sid, asset_root, &mut out),

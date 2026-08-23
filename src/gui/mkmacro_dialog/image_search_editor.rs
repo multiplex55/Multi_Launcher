@@ -1,48 +1,383 @@
-//! UI-neutral state for the regional Image Search editor widget.
-use crate::mkmacro::{AlphaPolicy, MkWindowMatcher, ReturnPoint, SearchRegion};
+//! Reusable image-search action editor and its UI-only authoring state.
+use crate::mkmacro::{
+    AlphaPolicy, MkImagePayload, MkWindowMatcher, MonitorDescriptor, ReturnPoint, ScreenRect,
+    SearchRegion,
+};
+use eframe::egui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotFoundPolicy {
-    Error,
-    Continue,
-    SetOutputs,
+pub enum SearchRegionKind {
+    Desktop,
+    Monitor,
+    Rectangle,
+    Window,
+    ClientArea,
 }
-#[derive(Debug, Clone)]
-pub struct ImageSearchEditorState {
-    pub asset_reference: String,
-    pub preview_error: Option<String>,
-    pub region: SearchRegion,
-    pub tolerance: u8,
-    pub alpha: AlphaPolicy,
-    pub return_point: ReturnPoint,
-    pub x_variable: String,
-    pub y_variable: String,
-    pub found_variable: String,
-    pub not_found: NotFoundPolicy,
-}
-impl Default for ImageSearchEditorState {
-    fn default() -> Self {
-        Self {
-            asset_reference: String::new(),
-            preview_error: None,
-            region: SearchRegion::Desktop,
-            tolerance: 0,
-            alpha: AlphaPolicy::Compare,
-            return_point: ReturnPoint::Center,
-            x_variable: String::new(),
-            y_variable: String::new(),
-            found_variable: String::new(),
-            not_found: NotFoundPolicy::Error,
+
+impl SearchRegionKind {
+    pub fn from_region(region: &SearchRegion) -> Self {
+        match region {
+            SearchRegion::Desktop => Self::Desktop,
+            SearchRegion::Monitor { .. } => Self::Monitor,
+            SearchRegion::Rectangle { .. } => Self::Rectangle,
+            SearchRegion::Window { .. } => Self::Window,
+            SearchRegion::ClientArea { .. } => Self::ClientArea,
         }
     }
 }
-pub fn default_window_region() -> SearchRegion {
-    SearchRegion::ClientArea {
-        matcher: MkWindowMatcher {
-            title: None,
-            title_regex: None,
-            process: None,
-            class: None,
-        },
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageEditorRequest {
+    ImportPng,
+    CaptureRectangle,
+    PickRectangle,
+    PreviewRectangle,
+    HighlightMonitor,
+    IdentifyMonitors,
+    PickWindow { client_area: bool },
+    HighlightWindow { client_area: bool },
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageSearchEditorState {
+    pub kind: SearchRegionKind,
+    pub monitor_index: usize,
+    pub rectangle: ScreenRect,
+    pub window_matcher: MkWindowMatcher,
+    pub client_matcher: MkWindowMatcher,
+    pub monitors: Result<Vec<MonitorDescriptor>, String>,
+    pub pending_request: Option<ImageEditorRequest>,
+    pub preview_error: Option<String>,
+}
+
+impl ImageSearchEditorState {
+    pub fn from_payload(payload: &MkImagePayload) -> Self {
+        let mut state = Self {
+            kind: SearchRegionKind::from_region(&payload.region),
+            monitor_index: 0,
+            rectangle: ScreenRect::new(0, 0, 640, 480),
+            window_matcher: MkWindowMatcher::default(),
+            client_matcher: MkWindowMatcher::default(),
+            monitors: crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string()),
+            pending_request: None,
+            preview_error: None,
+        };
+        match &payload.region {
+            SearchRegion::Monitor { index } => state.monitor_index = *index,
+            SearchRegion::Rectangle { rect } => state.rectangle = *rect,
+            SearchRegion::Window { matcher } => state.window_matcher = matcher.clone(),
+            SearchRegion::ClientArea { matcher } => state.client_matcher = matcher.clone(),
+            SearchRegion::Desktop => {}
+        }
+        state
+    }
+
+    pub fn select(&mut self, kind: SearchRegionKind) {
+        self.kind = kind;
+    }
+    pub fn selected_region(&self) -> SearchRegion {
+        match self.kind {
+            SearchRegionKind::Desktop => SearchRegion::Desktop,
+            SearchRegionKind::Monitor => SearchRegion::Monitor {
+                index: self.monitor_index,
+            },
+            SearchRegionKind::Rectangle => SearchRegion::Rectangle {
+                rect: self.rectangle,
+            },
+            SearchRegionKind::Window => SearchRegion::Window {
+                matcher: self.window_matcher.clone(),
+            },
+            SearchRegionKind::ClientArea => SearchRegion::ClientArea {
+                matcher: self.client_matcher.clone(),
+            },
+        }
+    }
+}
+
+fn request(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: ImageEditorRequest,
+    out: &mut Option<ImageEditorRequest>,
+) {
+    if ui.button(label).clicked() {
+        *out = Some(value);
+    }
+}
+
+/// Renders both `ImageFind` and `ImageClick`. The returned value describes work
+/// for the owner to perform after egui releases its widget borrows.
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    payload: &mut MkImagePayload,
+    state: &mut ImageSearchEditorState,
+    store: &crate::mkmacro::MkMacroStore,
+    macro_id: u64,
+) -> Option<ImageEditorRequest> {
+    let mut out = None;
+    ui.heading("Reference Image");
+    ui.horizontal_wrapped(|ui| {
+        request(ui, "Select PNG…", ImageEditorRequest::ImportPng, &mut out);
+        request(
+            ui,
+            "Capture…",
+            ImageEditorRequest::CaptureRectangle,
+            &mut out,
+        );
+    });
+    if payload.asset_id == 0 {
+        ui.label("No reference image selected.");
+    } else {
+        ui.label("Saved reference image");
+        ui.small(format!(
+            "mkmacro_assets/{macro_id}/{}.png",
+            payload.asset_id
+        ));
+        super::image_preview::show(ui, store, macro_id, payload.asset_id);
+    }
+
+    ui.separator();
+    ui.heading("Search Settings");
+    ui.horizontal(|ui| {
+        ui.label("Tolerance");
+        ui.add(egui::Slider::new(&mut payload.tolerance, 0..=255));
+    });
+    egui::ComboBox::from_label("Alpha handling")
+        .selected_text(format!("{:?}", payload.alpha))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut payload.alpha, AlphaPolicy::Compare, "Compare alpha");
+            ui.selectable_value(&mut payload.alpha, AlphaPolicy::Ignore, "Ignore alpha");
+        });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Return point");
+        ui.selectable_value(&mut payload.return_point, ReturnPoint::Center, "Center");
+        ui.selectable_value(&mut payload.return_point, ReturnPoint::TopLeft, "Top-left");
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Timeout");
+        ui.add(
+            egui::DragValue::new(&mut payload.wait.timeout_ms)
+                .clamp_range(1..=86_400_000)
+                .suffix(" ms"),
+        );
+        ui.label("Polling interval");
+        ui.add(
+            egui::DragValue::new(&mut payload.wait.poll_interval_ms)
+                .clamp_range(1..=86_400_000)
+                .suffix(" ms"),
+        );
+    });
+
+    ui.separator();
+    ui.heading("Search Area");
+    egui::ComboBox::from_label("Area")
+        .selected_text(match state.kind {
+            SearchRegionKind::Desktop => "Entire Desktop",
+            SearchRegionKind::Monitor => "Selected Monitor",
+            SearchRegionKind::Rectangle => "Rectangle",
+            SearchRegionKind::Window => "Window",
+            SearchRegionKind::ClientArea => "Window Client Area",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut state.kind, SearchRegionKind::Desktop, "Entire Desktop");
+            ui.selectable_value(
+                &mut state.kind,
+                SearchRegionKind::Monitor,
+                "Selected Monitor",
+            );
+            ui.selectable_value(&mut state.kind, SearchRegionKind::Rectangle, "Rectangle");
+            ui.selectable_value(&mut state.kind, SearchRegionKind::Window, "Window");
+            ui.selectable_value(
+                &mut state.kind,
+                SearchRegionKind::ClientArea,
+                "Window Client Area",
+            );
+        });
+    match state.kind {
+        SearchRegionKind::Desktop => {
+            ui.label("Searches the complete virtual desktop across all connected monitors.");
+        }
+        SearchRegionKind::Monitor => {
+            match &state.monitors {
+                Ok(monitors) => {
+                    let selected = monitors
+                        .iter()
+                        .find(|m| m.index == state.monitor_index)
+                        .map(|m| m.label())
+                        .unwrap_or_else(|| {
+                            format!("Monitor {} — unavailable", state.monitor_index)
+                        });
+                    egui::ComboBox::from_label("Monitor")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for m in monitors {
+                                ui.selectable_value(&mut state.monitor_index, m.index, m.label());
+                            }
+                        });
+                    if !monitors.iter().any(|m| m.index == state.monitor_index) {
+                        ui.colored_label(egui::Color32::YELLOW, format!("Stored monitor {} is currently unavailable; it has been preserved.", state.monitor_index));
+                    }
+                }
+                Err(error) => {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Monitor information unavailable: {error}"),
+                    );
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                request(
+                    ui,
+                    "Highlight Selected",
+                    ImageEditorRequest::HighlightMonitor,
+                    &mut out,
+                );
+                request(
+                    ui,
+                    "Identify All Monitors",
+                    ImageEditorRequest::IdentifyMonitors,
+                    &mut out,
+                );
+            });
+        }
+        SearchRegionKind::Rectangle => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut state.rectangle.x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut state.rectangle.y));
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Width");
+                ui.add(egui::DragValue::new(&mut state.rectangle.width).clamp_range(1..=u32::MAX));
+                ui.label("Height");
+                ui.add(egui::DragValue::new(&mut state.rectangle.height).clamp_range(1..=u32::MAX));
+            });
+            ui.horizontal_wrapped(|ui| {
+                request(
+                    ui,
+                    "Pick Region",
+                    ImageEditorRequest::PickRectangle,
+                    &mut out,
+                );
+                request(
+                    ui,
+                    "Preview Region",
+                    ImageEditorRequest::PreviewRectangle,
+                    &mut out,
+                );
+            });
+        }
+        SearchRegionKind::Window | SearchRegionKind::ClientArea => {
+            let client = state.kind == SearchRegionKind::ClientArea;
+            if client {
+                ui.label("Searches only the window client area; title bars, borders, and other non-client chrome are excluded.");
+            }
+            let matcher = if client {
+                &mut state.client_matcher
+            } else {
+                &mut state.window_matcher
+            };
+            if super::action_editor::matcher_ui(ui, matcher) {
+                out = Some(ImageEditorRequest::PickWindow {
+                    client_area: client,
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                request(
+                    ui,
+                    "Pick Window",
+                    ImageEditorRequest::PickWindow {
+                        client_area: client,
+                    },
+                    &mut out,
+                );
+                request(
+                    ui,
+                    if client {
+                        "Highlight Client Area"
+                    } else {
+                        "Highlight Window"
+                    },
+                    ImageEditorRequest::HighlightWindow {
+                        client_area: client,
+                    },
+                    &mut out,
+                );
+            });
+        }
+    }
+    state.pending_request = out;
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mkmacro::MkWaitOptions;
+    fn payload(region: SearchRegion) -> MkImagePayload {
+        MkImagePayload {
+            asset_id: 3,
+            wait: MkWaitOptions {
+                timeout_ms: 10,
+                poll_interval_ms: 1,
+            },
+            region,
+            tolerance: 2,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+        }
+    }
+    #[test]
+    fn every_kind_converts() {
+        for region in [
+            SearchRegion::Desktop,
+            SearchRegion::Monitor { index: 7 },
+            SearchRegion::Rectangle {
+                rect: ScreenRect::new(-4, 5, 6, 7),
+            },
+            SearchRegion::Window {
+                matcher: MkWindowMatcher::default(),
+            },
+            SearchRegion::ClientArea {
+                matcher: MkWindowMatcher::default(),
+            },
+        ] {
+            let s = ImageSearchEditorState::from_payload(&payload(region.clone()));
+            assert_eq!(
+                SearchRegionKind::from_region(&s.selected_region()),
+                SearchRegionKind::from_region(&region)
+            );
+        }
+    }
+    #[test]
+    fn drafts_survive_switches_and_matchers_are_independent() {
+        let mut s = ImageSearchEditorState::from_payload(&payload(SearchRegion::Desktop));
+        s.rectangle = ScreenRect::new(-9, 8, 7, 6);
+        s.window_matcher.title = Some("whole".into());
+        s.client_matcher.title = Some("client".into());
+        for k in [
+            SearchRegionKind::Rectangle,
+            SearchRegionKind::Desktop,
+            SearchRegionKind::Window,
+            SearchRegionKind::ClientArea,
+            SearchRegionKind::Rectangle,
+        ] {
+            s.select(k);
+        }
+        assert_eq!(s.rectangle, ScreenRect::new(-9, 8, 7, 6));
+        assert_ne!(s.window_matcher, s.client_matcher);
+    }
+    #[test]
+    fn transient_state_is_not_serialized_with_payload() {
+        let p = payload(SearchRegion::Desktop);
+        let mut s = ImageSearchEditorState::from_payload(&p);
+        s.pending_request = Some(ImageEditorRequest::CaptureRectangle);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("pending_request")
+                && !json.contains("monitors")
+                && !json.contains("preview_error")
+        );
     }
 }
