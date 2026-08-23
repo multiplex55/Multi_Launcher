@@ -89,6 +89,41 @@ struct NativePositionPicker {
 }
 
 impl ActionEditorState {
+    fn start_import_from_selected_path(
+        &mut self,
+        store: std::sync::Arc<MkMacroStore>,
+        macro_id: u64,
+        path: std::path::PathBuf,
+    ) -> anyhow::Result<()> {
+        self.start_import_from_selected_path_with_executor(
+            store,
+            macro_id,
+            path,
+            &super::image_authoring_job::ThreadExecutor,
+        )
+    }
+
+    fn start_import_from_selected_path_with_executor(
+        &mut self,
+        store: std::sync::Arc<MkMacroStore>,
+        macro_id: u64,
+        path: std::path::PathBuf,
+        executor: &dyn super::image_authoring_job::ImageAuthoringExecutor,
+    ) -> anyhow::Result<()> {
+        let token = super::image_authoring_job::DraftToken {
+            macro_id,
+            draft_generation: self.draft_generation,
+        };
+        let previous = self
+            .draft
+            .as_mut()
+            .and_then(image_payload_mut)
+            .ok_or_else(|| anyhow::anyhow!("no image-action draft is open"))?
+            .asset_id;
+        self.image_authoring
+            .start_with_executor(store, token, previous, path, executor)
+            .map_err(anyhow::Error::msg)
+    }
     pub(crate) fn request_visual_capture(
         &mut self,
         macro_id: u64,
@@ -355,6 +390,7 @@ impl ActionEditorState {
         // The receiver itself identifies the active job; this extra comparison makes
         // it impossible for a queued completion to retire a subsequently started job.
         if completion.token != active_token {
+            self.image_authoring = Default::default();
             return;
         }
         self.image_authoring = Default::default();
@@ -1786,21 +1822,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .add_filter("PNG image", &["png"])
                 .pick_file()
                 .map(|path| {
-                    let token = super::image_authoring_job::DraftToken {
-                        macro_id,
-                        draft_generation: d.action_editor.draft_generation,
-                    };
-                    let previous = d
-                        .action_editor
-                        .draft
-                        .as_mut()
-                        .and_then(image_payload_mut)
-                        .unwrap()
-                        .asset_id;
                     d.action_editor
-                        .image_authoring
-                        .start(d.store.clone(), token, previous, path)
-                        .map_err(anyhow::Error::msg)
+                        .start_import_from_selected_path(d.store.clone(), macro_id, path)
                 })
                 .transpose()
                 .map(|_| ()),
@@ -1858,8 +1881,21 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgba, RgbaImage};
+    use image::{GenericImageView, Rgba, RgbaImage};
     use std::sync::mpsc;
+
+    #[derive(Default)]
+    struct HeldExecutor(std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>);
+    impl super::super::image_authoring_job::ImageAuthoringExecutor for HeldExecutor {
+        fn execute(&self, work: Box<dyn FnOnce() + Send>) {
+            assert!(self.0.lock().unwrap().replace(work).is_none());
+        }
+    }
+    impl HeldExecutor {
+        fn release(&self) {
+            self.0.lock().unwrap().take().unwrap()();
+        }
+    }
     fn step(a: MkAction) -> MkStep {
         MkStep {
             id: 7,
@@ -1918,6 +1954,76 @@ mod tests {
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
         }
+    }
+
+    #[test]
+    fn selected_path_import_is_pending_then_atomically_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let store = std::sync::Arc::new(store);
+        store
+            .write_png_asset(4, 1, &RgbaImage::from_pixel(1, 1, Rgba([9, 9, 9, 255])))
+            .unwrap();
+        let source = dir.path().join("selected.png");
+        RgbaImage::from_pixel(2, 3, Rgba([1, 2, 3, 255]))
+            .save(&source)
+            .unwrap();
+        let region = SearchRegion::Rectangle {
+            rect: ScreenRect::new(3, 4, 5, 6),
+        };
+        let mut editor = ActionEditorState::default();
+        editor.draft_generation = 7;
+        editor.draft = Some(step(MkAction::ImageFind(image_payload(1, region.clone()))));
+        let executor = HeldExecutor::default();
+        editor
+            .start_import_from_selected_path_with_executor(store.clone(), 4, source, &executor)
+            .unwrap();
+        assert_eq!(draft_image_payload(&editor).asset_id, 1);
+        editor.poll_image_authoring(Some(4));
+        assert_eq!(draft_image_payload(&editor).asset_id, 1);
+        executor.release();
+        editor.poll_image_authoring(Some(4));
+        assert_eq!(draft_image_payload(&editor).asset_id, 2);
+        assert_eq!(draft_image_payload(&editor).region, region);
+        assert_eq!(
+            image::open(store.asset_path(4, 2).unwrap())
+                .unwrap()
+                .dimensions(),
+            (2, 3)
+        );
+        assert!(!editor.image_authoring.is_importing());
+    }
+
+    #[test]
+    fn corrupt_selected_path_preserves_payload_and_stages_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let store = std::sync::Arc::new(store);
+        let source = dir.path().join("corrupt.png");
+        std::fs::write(&source, b"not a png").unwrap();
+        let region = SearchRegion::Rectangle {
+            rect: ScreenRect::new(8, 9, 10, 11),
+        };
+        let mut editor = ActionEditorState::default();
+        editor.draft_generation = 1;
+        editor.draft = Some(step(MkAction::ImageFind(image_payload(41, region.clone()))));
+        let executor = HeldExecutor::default();
+        editor
+            .start_import_from_selected_path_with_executor(store.clone(), 4, source, &executor)
+            .unwrap();
+        executor.release();
+        editor.poll_image_authoring(Some(4));
+        assert_eq!(draft_image_payload(&editor).asset_id, 41);
+        assert_eq!(draft_image_payload(&editor).region, region);
+        assert!(
+            editor
+                .capture_message
+                .as_deref()
+                .unwrap()
+                .contains("Reference image")
+        );
+        assert!(store.asset_ids(4).unwrap().is_empty());
+        assert!(!editor.image_authoring.is_importing());
     }
 
     fn importing_editor(

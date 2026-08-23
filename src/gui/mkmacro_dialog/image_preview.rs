@@ -193,6 +193,11 @@ fn apply_result(cache: &mut PreviewCache, result: DecodeResult) {
         .assets
         .entry((key.macro_id, key.asset_id))
         .or_default();
+    // Results are useful only for the validation currently in flight. A late
+    // duplicate must not replace a newer identity/outcome.
+    if !state.pending {
+        return;
+    }
     state.pending = false;
     if matches!(result, DecodeResult::Unchanged(_)) {
         return;
@@ -331,10 +336,24 @@ mod tests {
 
     #[test]
     fn thumbnail_shapes_are_bounded_aspect_preserving_and_never_upscaled() {
-        for (w, h) in [(800, 200), (200, 800), (800, 800), (20, 10)] {
+        for (w, h) in [
+            (800, 200),
+            (200, 800),
+            (800, 800),
+            (20, 10),
+            (1_000_000, 1),
+            (1, 1_000_000),
+        ] {
             let (tw, th) = thumbnail_dimensions(w, h);
             assert!(tw <= 220 && th <= 220);
-            assert!((tw as f32 / th as f32 - w as f32 / h as f32).abs() < 0.01);
+            assert!(tw > 0 && th > 0);
+            // Each rounded side is within half a pixel of the ideal scale
+            // (except the deliberately clamped one-pixel minimum).
+            let scale = (PREVIEW_BOUND / w as f32)
+                .min(PREVIEW_BOUND / h as f32)
+                .min(1.0);
+            assert!((tw as f32 - w as f32 * scale).abs() <= 1.0);
+            assert!((th as f32 - h as f32 * scale).abs() <= 1.0);
         }
         assert_eq!(thumbnail_dimensions(20, 10), (20, 10));
     }
@@ -448,10 +467,85 @@ mod tests {
             ..old.clone()
         };
         let state = cache.assets.entry((1, 2)).or_default();
+        state.pending = false;
         state.key = Some(new.clone());
         state.outcome = Some(Outcome::Failed("new".into()));
         assert_ne!(state.key.as_ref(), Some(&old));
         assert!(matches!(state.outcome, Some(Outcome::Failed(_))));
+    }
+
+    #[test]
+    fn unchanged_validation_retains_ready_texture_without_upload() {
+        let mut cache = PreviewCache::default();
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "existing",
+            egui::ColorImage::new([1, 1], egui::Color32::WHITE),
+            Default::default(),
+        );
+        let key = PreviewKey {
+            macro_id: 1,
+            asset_id: 2,
+            len: 10,
+            modified: Some(SystemTime::UNIX_EPOCH),
+        };
+        let state = cache.assets.entry((1, 2)).or_default();
+        state.key = Some(key.clone());
+        state.outcome = Some(Outcome::Ready(CachedPreview {
+            texture: texture.clone(),
+            width: 1,
+            height: 1,
+            thumbnail_size: [1, 1],
+        }));
+        state.pending = true;
+        apply_result(&mut cache, DecodeResult::Unchanged(key));
+        let Outcome::Ready(ready) = cache.assets[&(1, 2)].outcome.as_ref().unwrap() else {
+            panic!()
+        };
+        assert_eq!(ready.texture.id(), texture.id());
+        assert!(!cache.assets[&(1, 2)].pending);
+    }
+
+    #[test]
+    fn identity_keys_isolate_assets_and_late_results_are_ignored() {
+        let base = PreviewKey {
+            macro_id: 1,
+            asset_id: 2,
+            len: 3,
+            modified: Some(SystemTime::UNIX_EPOCH),
+        };
+        for changed in [
+            PreviewKey {
+                len: 4,
+                ..base.clone()
+            },
+            PreviewKey {
+                modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+                ..base.clone()
+            },
+            PreviewKey {
+                asset_id: 3,
+                ..base.clone()
+            },
+            PreviewKey {
+                macro_id: 2,
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(base, changed);
+        }
+        let mut cache = PreviewCache::default();
+        let state = cache.assets.entry((1, 2)).or_default();
+        state.key = Some(base.clone());
+        state.outcome = Some(Outcome::Failed("newer identity".into()));
+        state.pending = false;
+        apply_result(
+            &mut cache,
+            DecodeResult::Failed(PreviewKey { len: 1, ..base }, "stale".into()),
+        );
+        assert!(
+            matches!(cache.assets[&(1, 2)].outcome, Some(Outcome::Failed(ref e)) if e == "newer identity")
+        );
     }
 
     #[test]

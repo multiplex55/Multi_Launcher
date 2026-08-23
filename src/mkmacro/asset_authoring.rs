@@ -19,23 +19,37 @@ pub const MAX_DECODED_RGBA_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn validated_rgba_len(width: u32, height: u32) -> Result<usize> {
     if width == 0 || height == 0 {
-        anyhow::bail!("Reference image is too large to import")
+        anyhow::bail!(
+            "Reference image is too large to import (dimension/pixel/decoded-size limit exceeded)"
+        )
     }
-    let width_usize = usize::try_from(width)
-        .map_err(|_| anyhow::anyhow!("Reference image is too large to import"))?;
-    let height_usize = usize::try_from(height)
-        .map_err(|_| anyhow::anyhow!("Reference image is too large to import"))?;
-    let pixels = width_usize
-        .checked_mul(height_usize)
-        .ok_or_else(|| anyhow::anyhow!("Reference image is too large to import"))?;
-    let bytes = pixels
-        .checked_mul(4)
-        .ok_or_else(|| anyhow::anyhow!("Reference image is too large to import"))?;
+    let width_usize = usize::try_from(width).map_err(|_| {
+        anyhow::anyhow!(
+            "Reference image is too large to import (dimension/pixel/decoded-size limit exceeded)"
+        )
+    })?;
+    let height_usize = usize::try_from(height).map_err(|_| {
+        anyhow::anyhow!(
+            "Reference image is too large to import (dimension/pixel/decoded-size limit exceeded)"
+        )
+    })?;
+    let pixels = width_usize.checked_mul(height_usize).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Reference image is too large to import (dimension/pixel/decoded-size limit exceeded)"
+        )
+    })?;
+    let bytes = pixels.checked_mul(4).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Reference image is too large to import (dimension/pixel/decoded-size limit exceeded)"
+        )
+    })?;
     if width > MAX_IMAGE_DIMENSION
         || height > MAX_IMAGE_DIMENSION
         || bytes as u64 > MAX_DECODED_RGBA_BYTES
     {
-        anyhow::bail!("Reference image is too large to import")
+        anyhow::bail!(
+            "Reference image is too large to import (dimension/pixel/decoded-size limit exceeded)"
+        )
     }
     Ok(bytes)
 }
@@ -156,6 +170,8 @@ mod tests {
                 .to_string()
                 .contains("too large")
         );
+        assert_eq!(validated_rgba_len(4096, 4096).unwrap(), 64 * 1024 * 1024);
+        assert!(validated_rgba_len(4096, 4097).is_err());
     }
 
     #[test]

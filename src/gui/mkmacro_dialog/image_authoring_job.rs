@@ -8,6 +8,22 @@ use std::{
     },
 };
 
+/// Boundary between the UI coordinator and execution of the blocking import.
+/// Production uses [`ThreadExecutor`]; tests can queue the closure and decide
+/// exactly when it runs.
+pub trait ImageAuthoringExecutor {
+    fn execute(&self, work: Box<dyn FnOnce() + Send>);
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThreadExecutor;
+
+impl ImageAuthoringExecutor for ThreadExecutor {
+    fn execute(&self, work: Box<dyn FnOnce() + Send>) {
+        std::thread::spawn(work);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DraftToken {
     pub macro_id: u64,
@@ -49,6 +65,17 @@ impl ImageAuthoringJob {
         previous_asset_id: u64,
         source: PathBuf,
     ) -> Result<(), &'static str> {
+        self.start_with_executor(store, token, previous_asset_id, source, &ThreadExecutor)
+    }
+
+    pub fn start_with_executor(
+        &mut self,
+        store: Arc<MkMacroStore>,
+        token: DraftToken,
+        previous_asset_id: u64,
+        source: PathBuf,
+        executor: &dyn ImageAuthoringExecutor,
+    ) -> Result<(), &'static str> {
         if self.is_importing() {
             return Err("A reference image import is already in progress");
         }
@@ -59,12 +86,12 @@ impl ImageAuthoringJob {
             source: source.clone(),
             completion,
         };
-        std::thread::spawn(move || {
+        executor.execute(Box::new(move || {
             let result = crate::mkmacro::ImageAssetAuthoringService::new(&store)
                 .import_png(token.macro_id, &source)
                 .map_err(|error| format!("Reference image: {error:#}"));
             let _ = sender.send(ImageAuthoringCompletion { token, result });
-        });
+        }));
         Ok(())
     }
 
