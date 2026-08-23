@@ -40,7 +40,7 @@ impl ImageDecodeCache {
             ExecutionDiagnostic::new(DiagnosticKind::InvalidTarget, message)
                 .context("asset_path", path.display().to_string())
         })?;
-        let image = image::load_from_memory(&bytes)
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
             .map_err(|e| {
                 ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidTarget,

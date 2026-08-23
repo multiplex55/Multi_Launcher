@@ -1,4 +1,5 @@
 //! Versioned model, validation, compilation, and persistence for the new macro system.
+pub mod asset_authoring;
 pub mod compiler;
 pub mod coordinates;
 pub mod executor;
@@ -22,6 +23,7 @@ pub mod variables;
 pub mod virtual_desktops;
 pub mod windows;
 
+pub use asset_authoring::*;
 pub use compiler::*;
 pub use coordinates::*;
 pub use executor::*;
