@@ -24,6 +24,8 @@ pub struct ActionEditorState {
     position_capture: Option<PositionCaptureState>,
     pub(crate) draft_generation: u64,
     pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
+    /// Sole owner of native visual-overlay resources for this editor draft.
+    pub visual_overlay: super::visual_overlay::VisualOverlayController,
     picker: NativePositionPicker,
 }
 
@@ -132,6 +134,7 @@ impl ActionEditorState {
         if self.draft.is_some() {
             return;
         }
+        self.visual_overlay.cancel();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
@@ -157,6 +160,7 @@ impl ActionEditorState {
         });
     }
     pub fn begin_edit(&mut self, step: &MkStep) {
+        self.visual_overlay.cancel();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
@@ -171,6 +175,7 @@ impl ActionEditorState {
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
     pub fn cancel(&mut self) {
+        self.visual_overlay.cancel();
         self.stop_position_capture();
         self.draft = None;
         self.editing_id = None;
@@ -180,6 +185,7 @@ impl ActionEditorState {
         self.image_search = None;
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
+        self.visual_overlay.cancel();
         self.stop_position_capture();
         if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)
             && let Some(payload) = image_payload_mut(step)
