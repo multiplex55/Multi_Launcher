@@ -421,7 +421,6 @@ impl VisualOverlayController {
                 self.confirm_picker();
             }
             OverlayInputKind::Enter => self.confirm_picker(),
-            _ => {}
         }
     }
     fn repaint_picker(&mut self) {
