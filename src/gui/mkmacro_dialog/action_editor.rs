@@ -23,6 +23,7 @@ pub struct ActionEditorState {
     pub editor: Option<super::action_catalog::EditorKind>,
     position_capture: Option<PositionCaptureState>,
     pub(crate) draft_generation: u64,
+    pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
     picker: NativePositionPicker,
 }
 
@@ -98,6 +99,19 @@ impl ActionEditorState {
         let Some(step) = self.draft.as_mut() else {
             return false;
         };
+        if matches!(path, super::window_picker::MatcherPath::ImageRegion) {
+            let Some(image) = self.image_search.as_mut() else {
+                return false;
+            };
+            if image.kind == super::image_search_editor::SearchRegionKind::ClientArea {
+                image.client_matcher = matcher;
+            } else if image.kind == super::image_search_editor::SearchRegionKind::Window {
+                image.window_matcher = matcher;
+            } else {
+                return false;
+            }
+            return true;
+        }
         let Some(target) = matcher_at_path(&mut step.action, path) else {
             return false;
         };
@@ -127,6 +141,12 @@ impl ActionEditorState {
             after_step_id: None,
         });
         self.editor = Some(editor);
+        self.image_search = match &action {
+            MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_payload(p))
+            }
+            _ => None,
+        };
         self.draft = Some(MkStep {
             id: 0,
             enabled: true,
@@ -142,6 +162,12 @@ impl ActionEditorState {
         self.editing_id = Some(step.id);
         self.insertion = Some(InsertionIntent::EditExisting { step_id: step.id });
         self.draft = Some(step.clone());
+        self.image_search = match &step.action {
+            MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_payload(p))
+            }
+            _ => None,
+        };
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
     pub fn cancel(&mut self) {
@@ -151,9 +177,15 @@ impl ActionEditorState {
         self.insertion = None;
         self.capture_keys = false;
         self.editor = None;
+        self.image_search = None;
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
         self.stop_position_capture();
+        if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)
+            && let Some(payload) = image_payload_mut(step)
+        {
+            payload.region = image.selected_region();
+        }
         let mut step = self.draft.take()?;
         let edit = self.editing_id.take();
         let intent = self.insertion.take().unwrap_or_else(|| match edit {
@@ -1151,111 +1183,7 @@ fn action_ui(
                 launcher_pick = Some(super::launcher_action_picker::PickerPurpose::LauncherCommand);
             }
         }
-        MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
-            ui.heading("Reference Image");
-            ui.horizontal(|ui| {
-                if ui.button("Select PNG...").clicked() {
-                    image_request = Some(ImageAuthoringRequest::Import);
-                }
-                if ui
-                    .button("Capture...")
-                    .on_hover_text(
-                        "Capture the currently configured search region as the reference image",
-                    )
-                    .clicked()
-                {
-                    image_request = Some(ImageAuthoringRequest::Capture);
-                }
-            });
-            ui.label(format!("mkmacro_assets/<macro>/{}.png", p.asset_id));
-            ui.horizontal(|ui| {
-                ui.label("Tolerance");
-                ui.add(egui::Slider::new(&mut p.tolerance, 0..=255));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Return point");
-                ui.selectable_value(&mut p.return_point, ReturnPoint::Center, "Center");
-                ui.selectable_value(&mut p.return_point, ReturnPoint::TopLeft, "Top-left");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Search region");
-                if ui
-                    .selectable_label(matches!(p.region, SearchRegion::Desktop), "Entire Desktop")
-                    .clicked()
-                {
-                    p.region = SearchRegion::Desktop;
-                }
-                if ui
-                    .selectable_label(matches!(p.region, SearchRegion::Monitor { .. }), "Monitor")
-                    .clicked()
-                {
-                    p.region = SearchRegion::Monitor { index: 0 };
-                }
-                if ui
-                    .selectable_label(
-                        matches!(p.region, SearchRegion::Rectangle { .. }),
-                        "Rectangle",
-                    )
-                    .clicked()
-                {
-                    p.region = SearchRegion::Rectangle {
-                        rect: ScreenRect::new(0, 0, 1, 1),
-                    };
-                }
-                if ui
-                    .selectable_label(matches!(p.region, SearchRegion::Window { .. }), "Window")
-                    .clicked()
-                {
-                    p.region = SearchRegion::Window {
-                        matcher: MkWindowMatcher::default(),
-                    };
-                }
-                if ui
-                    .selectable_label(
-                        matches!(p.region, SearchRegion::ClientArea { .. }),
-                        "Window Client Area",
-                    )
-                    .clicked()
-                {
-                    p.region = SearchRegion::ClientArea {
-                        matcher: MkWindowMatcher::default(),
-                    };
-                }
-            });
-            if let SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } =
-                &mut p.region
-                && matcher_ui(ui, matcher)
-            {
-                window_pick = Some(super::window_picker::MatcherPath::ImageRegion);
-            }
-            if let SearchRegion::Monitor { index } = &mut p.region {
-                ui.horizontal(|ui| {
-                    ui.label("Zero-based monitor index");
-                    ui.add(egui::DragValue::new(index));
-                });
-                ui.small("Monitor numbering is supplied by the production screen backend; an unavailable stored index is preserved.");
-            }
-            if let SearchRegion::Rectangle { rect } = &mut p.region {
-                ui.horizontal(|ui| {
-                    ui.label("X");
-                    ui.add(egui::DragValue::new(&mut rect.x));
-                    ui.label("Y");
-                    ui.add(egui::DragValue::new(&mut rect.y));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Width");
-                    ui.add(egui::DragValue::new(&mut rect.width).clamp_range(1..=u32::MAX));
-                    ui.label("Height");
-                    ui.add(egui::DragValue::new(&mut rect.height).clamp_range(1..=u32::MAX));
-                });
-            }
-            ui.horizontal(|ui| {
-                ui.label("Timeout (ms)");
-                ui.add(egui::DragValue::new(&mut p.wait.timeout_ms));
-                ui.label("Poll (ms)");
-                ui.add(egui::DragValue::new(&mut p.wait.poll_interval_ms));
-            });
-        }
+        MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
         MkAction::PixelCheck {
             target,
             color,
@@ -1357,7 +1285,7 @@ mod scroll_editor_tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageAuthoringRequest {
     Import,
-    Capture,
+    CaptureRectangle,
 }
 
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
@@ -1486,17 +1414,33 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     egui::Window::new("Action Editor")
         .open(&mut open)
         .collapsible(false)
-        .default_width(560.0)
+        .default_size(egui::vec2(640.0, 720.0))
+        .resizable(true)
         .show(ctx, |ui| {
+          egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let state = &mut d.action_editor;
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
-            let (position, window, launcher, image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
+            let (position, mut window, launcher, image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
             pick_request = position;
             image_request = image;
+            if let Some(payload) = image_payload_mut(step) {
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0));
+                use super::image_search_editor::ImageEditorRequest::*;
+                match request {
+                    Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
+                    Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
+                    Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::ImageRegion),
+                    Some(other) => state.capture_message = Some(format!("{other:?} requested; desktop overlay is not available on this platform")),
+                    None => {}
+                }
+            }
             if let Some(path)=window {
-                let original=matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone();
+                let original = if matches!(path, super::window_picker::MatcherPath::ImageRegion) {
+                    let image=state.image_search.as_ref().expect("image picker requires image state");
+                    if image.kind == super::image_search_editor::SearchRegionKind::ClientArea { image.client_matcher.clone() } else { image.window_matcher.clone() }
+                } else { matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone() };
                 let macro_id=d.selected_macro_id.unwrap_or(0);
                 d.window_picker.open(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, path }, original });
             }
@@ -1511,9 +1455,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
             if state.position_capture.is_some() {
                 ui.colored_label(egui::Color32::YELLOW, "Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels.");
-            }
-            if let Some(payload)=image_payload_mut(step) {
-                super::image_preview::show(ui, &d.store, d.selected_macro_id.unwrap_or(0), payload.asset_id);
             }
             if let Some(message) = &state.capture_message { ui.colored_label(egui::Color32::RED, message); }
             if state.capture_keys {
@@ -1578,6 +1519,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 apply = ui.add_enabled(valid, egui::Button::new("Apply")).clicked();
                 cancel = ui.button("Cancel").on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
+          });
         });
     if let Some(request) = image_request {
         let macro_id = d.selected_macro_id.unwrap_or(0);
@@ -1594,24 +1536,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     )
                 })
                 .transpose(),
-            ImageAuthoringRequest::Capture => {
-                let region = image_payload_mut(d.action_editor.draft.as_mut().unwrap())
-                    .unwrap()
-                    .region
-                    .clone();
-                crate::mkmacro::WindowsScreenCaptureBackend::system()
-                    .capture(&region, &|| false)
-                    .map_err(anyhow::Error::msg)
-                    .and_then(|captured| {
-                        apply_capture(
-                            &d.store,
-                            macro_id,
-                            image_payload_mut(d.action_editor.draft.as_mut().unwrap()).unwrap(),
-                            &captured.image,
-                        )
-                    })
-                    .map(Some)
-            }
+            ImageAuthoringRequest::CaptureRectangle => Err(anyhow::anyhow!(
+                "Choose a capture rectangle in the desktop overlay (overlay unavailable on this platform)"
+            )),
         };
         if let Err(error) = result {
             d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
@@ -1761,13 +1688,71 @@ mod tests {
                 original: MkWindowMatcher::default(),
             };
             assert!(editor.apply_window_matcher(&request, replacement.clone(), Some(5)));
-            assert_eq!(
-                matcher_at_path(&mut editor.draft.as_mut().unwrap().action, &path),
-                Some(&mut replacement.clone())
-            );
+            if matches!(path, super::super::window_picker::MatcherPath::ImageRegion) {
+                // Image regions intentionally remain in the UI-only per-mode
+                // cache until Apply; picker results must not mutate the
+                // serialized action draft behind the editor's back.
+                assert_eq!(
+                    editor.image_search.as_ref().unwrap().window_matcher,
+                    replacement
+                );
+                assert!(matches!(
+                    &editor.draft.as_ref().unwrap().action,
+                    MkAction::ImageFind(p)
+                        if matches!(&p.region, SearchRegion::Window { matcher } if matcher == &MkWindowMatcher::default())
+                ));
+            } else {
+                assert_eq!(
+                    matcher_at_path(&mut editor.draft.as_mut().unwrap().action, &path),
+                    Some(&mut replacement.clone())
+                );
+            }
             assert!(
                 !editor.apply_window_matcher(&request, MkWindowMatcher::default(), Some(6)),
                 "another macro must not be modified"
+            );
+            let mut stale = request.clone();
+            let super::super::window_picker::MatcherDestination::Action {
+                draft_generation, ..
+            } = &mut stale.destination;
+            *draft_generation = draft_generation.wrapping_add(1);
+            assert!(
+                !editor.apply_window_matcher(&stale, MkWindowMatcher::default(), Some(5)),
+                "a stale editor generation must not be modified"
+            );
+        }
+    }
+
+    #[test]
+    fn both_image_actions_use_the_same_typed_image_editor_state() {
+        let payload = MkImagePayload {
+            asset_id: 4,
+            tolerance: 12,
+            alpha: AlphaPolicy::Ignore,
+            region: SearchRegion::Rectangle {
+                rect: ScreenRect::new(-10, 20, 30, 40),
+            },
+            return_point: ReturnPoint::TopLeft,
+            wait: MkWaitOptions {
+                timeout_ms: 2_000,
+                poll_interval_ms: 25,
+            },
+        };
+        for action in [
+            MkAction::ImageFind(payload.clone()),
+            MkAction::ImageClick(payload.clone()),
+        ] {
+            let mut editor = ActionEditorState::default();
+            editor.begin_edit(&step(action));
+            let image = editor.image_search.as_ref().expect("shared image editor");
+            assert_eq!(
+                image.kind,
+                super::super::image_search_editor::SearchRegionKind::Rectangle
+            );
+            assert_eq!(image.rectangle, ScreenRect::new(-10, 20, 30, 40));
+            assert_eq!(
+                image.pending_request, None,
+                "both actions expose the same typed request channel"
             );
         }
     }

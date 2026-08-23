@@ -397,6 +397,28 @@ pub enum SearchRegion {
     ClientArea { matcher: MkWindowMatcher },
     Rectangle { rect: ScreenRect },
 }
+
+/// Live monitor metadata safe to expose to authoring UI. `index` is the exact
+/// persisted index consumed by [`ScreenCaptureBackend::region_bounds`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorDescriptor {
+    pub index: usize,
+    pub bounds: ScreenRect,
+    pub primary: bool,
+}
+impl MonitorDescriptor {
+    pub fn label(&self) -> String {
+        format!(
+            "Monitor {} — {}×{} @ ({}, {}){}",
+            self.index,
+            self.bounds.width,
+            self.bounds.height,
+            self.bounds.x,
+            self.bounds.y,
+            if self.primary { " — Primary" } else { "" }
+        )
+    }
+}
 impl Default for SearchRegion {
     fn default() -> Self {
         Self::Desktop
@@ -552,6 +574,20 @@ impl WindowsScreenCaptureBackend {
         Ok(monitors)
     }
 
+    fn descriptors(&self) -> ExecResult<Vec<MonitorDescriptor>> {
+        Ok(self
+            .monitors()?
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| MonitorDescriptor {
+                index,
+                bounds: monitor.bounds,
+                // Windows defines the primary display origin as (0, 0).
+                primary: monitor.bounds.x == 0 && monitor.bounds.y == 0,
+            })
+            .collect())
+    }
+
     /// Capture exactly one live desktop pixel at a signed desktop coordinate.
     pub fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]> {
         let rect = ScreenRect::new(point.x, point.y, 1, 1);
@@ -560,6 +596,22 @@ impl WindowsScreenCaptureBackend {
             .map_err(|e| e.context("coordinate", format!("{},{}", point.x, point.y)))?
             .image;
         Ok(image.get_pixel(0, 0).0)
+    }
+}
+
+/// Enumerates monitors through the very same backend and sorting routine used
+/// during playback, avoiding UI/runtime index drift.
+pub fn monitor_descriptors() -> ExecResult<Vec<MonitorDescriptor>> {
+    #[cfg(windows)]
+    {
+        WindowsScreenCaptureBackend::system().descriptors()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "Monitor enumeration is available only on Windows",
+        ))
     }
 }
 
@@ -1296,6 +1348,35 @@ mod windows_backend_tests {
                 rect.height,
                 image::Rgba(color),
             ))),
+        }
+    }
+
+    #[test]
+    fn monitor_descriptors_share_sorted_playback_indices() {
+        let platform = Arc::new(CaptureFixture {
+            desktop: (-1920, 0, 3840, 1080),
+            monitors: vec![
+                monitor(8, ScreenRect::new(0, 0, 1920, 1080), [0; 4]),
+                monitor(9, ScreenRect::new(-1920, 0, 1920, 1080), [0; 4]),
+            ],
+        });
+        let backend = WindowsScreenCaptureBackend::new(platform);
+        let descriptors = backend.descriptors().unwrap();
+        assert_eq!(descriptors[0].bounds, ScreenRect::new(-1920, 0, 1920, 1080));
+        assert_eq!(descriptors[0].label(), "Monitor 0 — 1920×1080 @ (-1920, 0)");
+        assert_eq!(
+            descriptors[1].label(),
+            "Monitor 1 — 1920×1080 @ (0, 0) — Primary"
+        );
+        for descriptor in descriptors {
+            assert_eq!(
+                backend
+                    .region_bounds(&SearchRegion::Monitor {
+                        index: descriptor.index
+                    })
+                    .unwrap(),
+                descriptor.bounds
+            );
         }
     }
 
