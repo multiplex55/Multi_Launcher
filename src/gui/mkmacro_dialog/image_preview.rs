@@ -63,12 +63,15 @@ pub fn show(ui: &mut egui::Ui, store: &MkMacroStore, macro_id: u64, asset_id: u6
             return Ok(value.clone());
         }
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        use image::ImageDecoder;
+        let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&bytes))
+            .map_err(|e| e.to_string())?;
+        let dimensions = decoder.dimensions();
+        crate::mkmacro::asset_authoring::validate_image_dimensions(dimensions.0, dimensions.1)
+            .map_err(|e| e.to_string())?;
+        let image = image::DynamicImage::from_decoder(decoder)
             .map_err(|e| e.to_string())?
             .to_rgba8();
-        if image.width() == 0 || image.height() == 0 {
-            return Err("image has zero dimensions".into());
-        }
         let size = [image.width() as usize, image.height() as usize];
         let value = CachedPreview {
             texture: ui.ctx().load_texture(

@@ -127,6 +127,18 @@ fn request(
     }
 }
 
+fn disabled_request(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    value: ImageEditorRequest,
+    out: &mut Option<ImageEditorRequest>,
+) {
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        *out = Some(value);
+    }
+}
+
 /// Renders both `ImageFind` and `ImageClick`. The returned value describes work
 /// for the owner to perform after egui releases its widget borrows.
 pub(super) fn show(
@@ -135,18 +147,29 @@ pub(super) fn show(
     state: &mut ImageSearchEditorState,
     store: &crate::mkmacro::MkMacroStore,
     macro_id: u64,
+    authoring_busy: bool,
 ) -> Option<ImageEditorRequest> {
     let mut out = None;
     ui.heading("Reference Image");
     ui.horizontal_wrapped(|ui| {
-        request(ui, "Select PNG…", ImageEditorRequest::ImportPng, &mut out);
-        request(
+        disabled_request(
+            ui,
+            "Select PNG…",
+            !authoring_busy,
+            ImageEditorRequest::ImportPng,
+            &mut out,
+        );
+        disabled_request(
             ui,
             "Capture…",
+            !authoring_busy,
             ImageEditorRequest::CaptureRectangle,
             &mut out,
         );
     });
+    if authoring_busy {
+        ui.label("Importing reference image...");
+    }
     if payload.asset_id == 0 {
         ui.label("No reference image selected.");
     } else {
