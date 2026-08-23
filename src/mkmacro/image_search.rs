@@ -30,25 +30,48 @@ impl ImageDecodeCache {
         }
         let path = store
             .resolve_asset_reference(macro_id, Path::new(reference))
-            .map_err(|e| ExecutionDiagnostic::new(DiagnosticKind::InvalidTarget, e.to_string()))?;
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "Reference image could not be resolved",
+                )
+                .context("reference", reference)
+                .context("macro_id", macro_id.to_string())
+                .context("detail", e.to_string())
+            })?;
         let bytes = std::fs::read(&path).map_err(|e| {
-            let message = if e.kind() == std::io::ErrorKind::NotFound {
-                format!("reference image is missing: {}", path.display())
+            let (kind, message) = if e.kind() == std::io::ErrorKind::NotFound {
+                (DiagnosticKind::TargetNotFound, "Reference image is missing")
             } else {
-                format!("reference image is unreadable: {}: {e}", path.display())
+                (DiagnosticKind::Backend, "Reference image could not be read")
             };
-            ExecutionDiagnostic::new(DiagnosticKind::InvalidTarget, message)
+            ExecutionDiagnostic::new(kind, message)
                 .context("asset_path", path.display().to_string())
+                .context("operation", "read reference image")
+                .context("detail", e.to_string())
         })?;
         let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
             .map_err(|e| {
                 ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidTarget,
-                    format!("reference image is undecodable: {}: {e}", path.display()),
+                    "Reference image could not be decoded",
                 )
                 .context("asset_path", path.display().to_string())
+                .context("operation", "decode reference image")
+                .context("detail", e.to_string())
             })?
             .to_rgba8();
+        if image.width() == 0 || image.height() == 0 {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Reference image has invalid dimensions",
+            )
+            .context("asset_path", path.display().to_string())
+            .context(
+                "dimensions",
+                format!("{}x{}", image.width(), image.height()),
+            ));
+        }
         let image = Arc::new(image);
         self.images.insert(reference.to_owned(), image.clone());
         Ok(image)
@@ -94,7 +117,11 @@ impl VisualSearch for ProductionVisualSearch {
             .cache
             .lock()
             .unwrap()
-            .get_or_decode(&self.store, macro_id, &reference)?;
+            .get_or_decode(&self.store, macro_id, &reference)
+            .map_err(|e| {
+                e.context("asset_id", payload.asset_id.to_string())
+                    .context("macro_id", macro_id.to_string())
+            })?;
         let frame = self.capture.capture(&payload.region, &|| false)?;
         find_template(
             &frame,
@@ -425,18 +452,42 @@ mod tests {
             )
         };
         let missing = make().find_image(7, &payload(3, 0)).unwrap_err();
-        assert!(missing.message.contains("missing"));
+        let expected_path = store.asset_path(7, 3).unwrap().display().to_string();
+        assert_eq!(missing.kind, DiagnosticKind::TargetNotFound);
+        assert_eq!(missing.message, "Reference image is missing");
+        assert_eq!(
+            missing.context.get("asset_id").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            missing.context.get("macro_id").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            missing.context.get("asset_path").map(String::as_str),
+            Some(expected_path.as_str())
+        );
 
         let path = store.asset_path(7, 3).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not a png").unwrap();
         let undecodable = make().find_image(7, &payload(3, 0)).unwrap_err();
-        assert!(undecodable.message.contains("undecodable"));
+        assert_eq!(undecodable.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(undecodable.message, "Reference image could not be decoded");
+        assert_eq!(
+            undecodable.context.get("asset_path").map(String::as_str),
+            Some(expected_path.as_str())
+        );
 
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         let unreadable = make().find_image(7, &payload(3, 0)).unwrap_err();
-        assert!(unreadable.message.contains("unreadable"));
+        assert_eq!(unreadable.kind, DiagnosticKind::Backend);
+        assert_eq!(unreadable.message, "Reference image could not be read");
+        assert_eq!(
+            unreadable.context.get("operation").map(String::as_str),
+            Some("read reference image")
+        );
     }
     #[test]
     fn too_large_and_deterministic() {

@@ -900,6 +900,12 @@ mod tests {
             .insert("image".into(), false);
         let error = executor.wait_image(1, &payload(7), &mut vars).unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::Timeout);
+        assert_eq!(error.message, "Image was not found within 0 ms");
+        assert_eq!(
+            error.context.get("timeout_ms").map(String::as_str),
+            Some("0")
+        );
+        assert!(error.context.contains_key("elapsed_ms"));
         assert!(!vars.contains_key("__image.7"));
         assert!(vars.contains_key("__image.8"));
     }
@@ -1534,10 +1540,40 @@ impl Executor {
             v.remove(key);
         }
         let mut found = None;
-        let result = self.wait_until(&p.wait, || {
-            found = self.backends.screen.find_image(macro_id, p)?;
-            Ok(found.is_some())
-        });
+        let started = Instant::now();
+        let result = loop {
+            if let Err(error) = self.control.checkpoint() {
+                break Err(error);
+            }
+            match self.backends.screen.find_image(macro_id, p) {
+                Err(error) => break Err(error),
+                Ok(Some(point)) => {
+                    found = Some(point);
+                    break Ok(());
+                }
+                Ok(None) => {}
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= Duration::from_millis(p.wait.timeout_ms) {
+                // Give a stop racing with the final unsuccessful poll priority
+                // over deadline reporting.
+                if let Err(error) = self.control.checkpoint() {
+                    break Err(error);
+                }
+                break Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Timeout,
+                    format!("Image was not found within {} ms", p.wait.timeout_ms),
+                )
+                .context("timeout_ms", p.wait.timeout_ms.to_string())
+                .context("elapsed_ms", elapsed.as_millis().to_string()));
+            }
+            if let Err(error) = self.wait(
+                Duration::from_millis(p.wait.poll_interval_ms.max(1))
+                    .min(Duration::from_millis(p.wait.timeout_ms).saturating_sub(elapsed)),
+            ) {
+                break Err(error);
+            }
+        };
         v.insert(
             "last_image_result".into(),
             MkValue::Boolean(found.is_some()),
@@ -1552,19 +1588,13 @@ impl Executor {
         }
         match (result, found) {
             (_, Some(point)) => Ok(point),
-            (Err(mut error), None) => {
-                if error.kind == DiagnosticKind::Timeout {
-                    error.message =
-                        format!("Target image was not found within {} ms", p.wait.timeout_ms);
-                    error
-                        .context
-                        .insert("timeout_ms".into(), p.wait.timeout_ms.to_string());
-                }
-                Err(error
-                    .context("macro_id", macro_id.to_string())
-                    .context("asset_id", p.asset_id.to_string())
-                    .context("region", format!("{:?}", p.region)))
-            }
+            (Err(error), None) => Err(error
+                .context("macro_id", macro_id.to_string())
+                .context("asset_id", p.asset_id.to_string())
+                .context("region", format!("{:?}", p.region))
+                .context("tolerance", p.tolerance.to_string())
+                .context("alpha", format!("{:?}", p.alpha))
+                .context("poll_interval_ms", p.wait.poll_interval_ms.to_string())),
             (Ok(()), None) => Err(ExecutionDiagnostic::new(
                 DiagnosticKind::TargetNotFound,
                 "Target image was not found",

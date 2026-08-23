@@ -140,8 +140,9 @@ pub fn resolve_window(
     match found.len() {
         0 => Err(ExecutionDiagnostic::new(
             DiagnosticKind::TargetNotFound,
-            "Window target not found",
-        )),
+            "Window search target was not found",
+        )
+        .context("match_count", "0")),
         1 => Ok(found.remove(0)),
         _ if policy == AmbiguityPolicy::First => Ok(found.remove(0)),
         _ => {
@@ -153,8 +154,10 @@ pub fn resolve_window(
                 .join(", ");
             Err(ExecutionDiagnostic::new(
                 DiagnosticKind::AmbiguousTarget,
-                format!("window matcher is ambiguous: {summary}"),
+                "Window search target matched multiple windows",
             )
+            .context("matches", summary)
+            .context("match_count", found.len().to_string())
             .context("candidate_count", found.len().to_string()))
         }
     }
@@ -372,16 +375,24 @@ mod tests {
             class: Some("class".into()),
         };
         assert!(candidate_matches(&m, &c("Document", "app.exe")).unwrap());
+        let ambiguous = resolve_window(
+            &m,
+            &[c("Document", "app.exe"), c("Doc 2", "app.exe")],
+            AmbiguityPolicy::Error,
+        )
+        .unwrap_err();
+        assert_eq!(ambiguous.kind, DiagnosticKind::AmbiguousTarget);
         assert_eq!(
-            resolve_window(
-                &m,
-                &[c("Document", "app.exe"), c("Doc 2", "app.exe")],
-                AmbiguityPolicy::Error
-            )
-            .unwrap_err()
-            .kind,
-            DiagnosticKind::AmbiguousTarget
+            ambiguous.message,
+            "Window search target matched multiple windows"
         );
+        assert_eq!(
+            ambiguous.context.get("match_count").map(String::as_str),
+            Some("2")
+        );
+        let missing = resolve_window(&m, &[], AmbiguityPolicy::Error).unwrap_err();
+        assert_eq!(missing.kind, DiagnosticKind::TargetNotFound);
+        assert_eq!(missing.message, "Window search target was not found");
         assert!(
             resolve_window(
                 &m,

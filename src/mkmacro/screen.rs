@@ -854,11 +854,16 @@ impl ScreenCaptureBackend for WindowsScreenCaptureBackend {
                 .ok_or_else(|| {
                     ExecutionDiagnostic::new(
                         DiagnosticKind::TargetNotFound,
-                        format!("monitor index {index} does not exist"),
+                        format!("Monitor {index} is not currently available"),
                     )
                     .context("monitor_index", index.to_string())
                 }),
-            SearchRegion::Rectangle { rect } => Ok(*rect),
+            SearchRegion::Rectangle { rect } => {
+                rect.validate_capture().map(|()| *rect).map_err(|error| {
+                    invalid(format!("Invalid capture rectangle: {error}"))
+                        .context("rectangle", format!("{rect:?}"))
+                })
+            }
             SearchRegion::Window { matcher } => self.platform.window_rect(matcher, false),
             SearchRegion::ClientArea { matcher } => self.platform.window_rect(matcher, true),
         };
@@ -1703,12 +1708,14 @@ mod windows_backend_tests {
                 .x,
             -2
         );
+        let error = backend
+            .region_bounds(&SearchRegion::Monitor { index: 2 })
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::TargetNotFound);
+        assert_eq!(error.message, "Monitor 2 is not currently available");
         assert_eq!(
-            backend
-                .region_bounds(&SearchRegion::Monitor { index: 2 })
-                .unwrap_err()
-                .kind,
-            DiagnosticKind::TargetNotFound
+            error.context.get("monitor_index").map(String::as_str),
+            Some("2")
         );
     }
 
