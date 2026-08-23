@@ -84,13 +84,20 @@ fn tick(
         let mut s = state.lock().unwrap();
         if !Arc::ptr_eq(&snapshot, &s.snapshot) {
             let compiled = compile_hotkey(&snapshot.settings.record_toggle_hotkey);
-            s.modifiers = compiled.as_ref().map(|x| x.0.clone()).unwrap_or_default();
-            s.primary = compiled.map(|x| x.1);
-            // A chord held while configuration changes must first be released.
-            s.triggered = s
-                .primary
-                .as_ref()
-                .is_some_and(|key| chord_down(key, &s.modifiers, backend));
+            let modifiers = compiled.as_ref().map(|x| x.0.clone()).unwrap_or_default();
+            let primary = compiled.map(|x| x.1);
+            // The file watcher may republish an equivalent document after a local
+            // save. Treat only an actual binding change as a reconfiguration;
+            // otherwise that publication can consume a legitimate rising edge.
+            if modifiers != s.modifiers || primary != s.primary {
+                s.modifiers = modifiers;
+                s.primary = primary;
+                // A chord held while configuration changes must first be released.
+                s.triggered = s
+                    .primary
+                    .as_ref()
+                    .is_some_and(|key| chord_down(key, &s.modifiers, backend));
+            }
             s.snapshot = snapshot;
         }
         let down = s
