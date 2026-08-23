@@ -790,10 +790,7 @@ mod tests {
             assert_eq!(frame.first(), Some(&OverlayFramePrimitive::Clear));
             assert_eq!(
                 frame.get(1),
-                selection
-                    .as_ref()
-                    .map(OverlayFramePrimitive::Outline)
-                    .as_ref()
+                selection.map(OverlayFramePrimitive::Outline).as_ref()
             );
         }
     }
