@@ -225,6 +225,66 @@ pub static OPEN_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[allow(dead_code)]
 pub static EXECUTE_ACTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Host-owned boundaries needed by visual rectangle authoring.  Keeping this
+/// bundle at the launcher seam lets tests replace native Windows services while
+/// exercising the exact same installation as production.
+pub(crate) struct VisualCaptureDependencies {
+    visibility: Box<dyn mkmacro_dialog::visual_capture_workflow::VisibilityAdapter>,
+    clock: Box<dyn mkmacro_dialog::visual_capture_workflow::WorkflowClock>,
+    overlay: Box<dyn mkmacro_dialog::visual_capture_workflow::RectangleOverlay>,
+    capture: Box<dyn mkmacro_dialog::visual_capture_workflow::CaptureAdapter>,
+    assets: Box<dyn mkmacro_dialog::visual_capture_workflow::AssetStoreAdapter>,
+}
+
+fn install_visual_capture(dialog: &mut MkMacroDialog, dependencies: VisualCaptureDependencies) {
+    dialog.action_editor.visual_capture = Some(
+        mkmacro_dialog::visual_capture_workflow::VisualCaptureWorkflow::new(
+            dependencies.visibility,
+            dependencies.clock,
+            dependencies.overlay,
+            dependencies.capture,
+            dependencies.assets,
+        ),
+    );
+}
+
+fn production_visual_capture_dependencies(
+    dialog: &MkMacroDialog,
+    store: Arc<crate::mkmacro::MkMacroStore>,
+) -> (
+    VisualCaptureDependencies,
+    mkmacro_dialog::visual_capture_visibility::LauncherVisibilityBridge,
+) {
+    let screen_backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend> =
+        Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system());
+    let visibility = mkmacro_dialog::visual_capture_visibility::LauncherVisibilityBridge::default();
+    (
+        VisualCaptureDependencies {
+            visibility: Box::new(
+                mkmacro_dialog::visual_capture_visibility::LauncherVisualCaptureVisibility(
+                    visibility.clone(),
+                ),
+            ),
+            clock: Box::new(
+                mkmacro_dialog::visual_capture_workflow::SystemWorkflowClock::default(),
+            ),
+            overlay: Box::new(
+                mkmacro_dialog::visual_capture_workflow::VisualOverlayRectangleAdapter::new(
+                    dialog.action_editor.visual_overlay.clone(),
+                    Arc::clone(&screen_backend),
+                ),
+            ),
+            capture: Box::new(
+                mkmacro_dialog::visual_capture_workflow::ScreenCaptureAdapter(screen_backend),
+            ),
+            assets: Box::new(
+                mkmacro_dialog::visual_capture_workflow::MkMacroAssetStoreAdapter(store),
+            ),
+        },
+        visibility,
+    )
+}
+
 static EXECUTE_ACTION_HOOK: Lazy<
     Mutex<Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>>,
 > = Lazy::new(|| Mutex::new(None));
@@ -1329,37 +1389,12 @@ impl LauncherApp {
                 launcher_actions: Arc::clone(&actions),
             },
         );
-        // These dependencies deliberately share the Launcher's visibility and
-        // the Action Editor's one native overlay controller.
-        let screen_backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend> =
-            Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system());
-        let shared_overlay = mkmacro_dialog.action_editor.visual_overlay.clone();
-        let visual_capture_visibility =
-            mkmacro_dialog::visual_capture_visibility::LauncherVisibilityBridge::default();
-        mkmacro_dialog.action_editor.visual_capture = Some(
-            mkmacro_dialog::visual_capture_workflow::VisualCaptureWorkflow::new(
-                Box::new(
-                    mkmacro_dialog::visual_capture_visibility::LauncherVisualCaptureVisibility(
-                        visual_capture_visibility.clone(),
-                    ),
-                ),
-                Box::new(mkmacro_dialog::visual_capture_workflow::SystemWorkflowClock::default()),
-                Box::new(
-                    mkmacro_dialog::visual_capture_workflow::VisualOverlayRectangleAdapter::new(
-                        shared_overlay,
-                        Arc::clone(&screen_backend),
-                    ),
-                ),
-                Box::new(
-                    mkmacro_dialog::visual_capture_workflow::ScreenCaptureAdapter(screen_backend),
-                ),
-                Box::new(
-                    mkmacro_dialog::visual_capture_workflow::MkMacroAssetStoreAdapter(Arc::clone(
-                        &plugins.internal_services().mkmacro_store,
-                    )),
-                ),
-            ),
-        );
+        let (visual_capture_dependencies, visual_capture_visibility) =
+            production_visual_capture_dependencies(
+                &mkmacro_dialog,
+                Arc::clone(&plugins.internal_services().mkmacro_store),
+            );
+        install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
         let mut app = Self {
             actions: Arc::clone(&actions),
             query: String::new(),
@@ -3054,6 +3089,353 @@ mod tests {
     use tempfile::tempdir;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[cfg(windows)]
+    mod visual_capture_host_wiring {
+        use super::*;
+        use crate::gui::mkmacro_dialog::{
+            action_catalog::EditorKind,
+            visual_capture_workflow::{
+                AssetStoreAdapter, CaptureAdapter, RectangleOverlay, SavedVisibility,
+                SelectionEvent, VisibilityAdapter, WorkflowClock,
+            },
+            visual_overlay::{OperationId, RectanglePurpose},
+        };
+        use crate::mkmacro::{
+            AlphaPolicy, MkAction, MkImagePayload, MkWaitOptions, ReturnPoint, ScreenRect,
+            SearchRegion,
+        };
+        use image::{Rgba, RgbaImage};
+
+        #[derive(Default)]
+        struct Harness {
+            events: Vec<&'static str>,
+            hidden: bool,
+            now_ms: u64,
+            selection: Option<SelectionEvent>,
+            overlay_error: Option<String>,
+            capture_error: Option<String>,
+            restores: usize,
+            captures: usize,
+            writes: usize,
+        }
+        struct FakeVisibility(Arc<Mutex<Harness>>);
+        impl VisibilityAdapter for FakeVisibility {
+            fn snapshot(&self) -> SavedVisibility {
+                SavedVisibility {
+                    launcher: true,
+                    mkmacro_dialog: true,
+                }
+            }
+            fn request_hidden(&mut self) {
+                self.0.lock().unwrap().events.push("hide");
+            }
+            fn hidden_observed(&self) -> bool {
+                self.0.lock().unwrap().hidden
+            }
+            fn restore(&mut self, _: SavedVisibility) {
+                let mut h = self.0.lock().unwrap();
+                h.restores += 1;
+                h.events.push("restore");
+            }
+        }
+        struct FakeClock(Arc<Mutex<Harness>>);
+        impl WorkflowClock for FakeClock {
+            fn now(&self) -> Duration {
+                Duration::from_millis(self.0.lock().unwrap().now_ms)
+            }
+        }
+        struct FakeOverlay(Arc<Mutex<Harness>>);
+        impl RectangleOverlay for FakeOverlay {
+            fn begin(&mut self, _: RectanglePurpose) -> Result<OperationId, String> {
+                let mut h = self.0.lock().unwrap();
+                h.events.push("overlay begin");
+                if let Some(error) = h.overlay_error.clone() {
+                    Err(error)
+                } else {
+                    Ok(17)
+                }
+            }
+            fn poll(&mut self) -> SelectionEvent {
+                let mut h = self.0.lock().unwrap();
+                let event = h.selection.take().unwrap_or(SelectionEvent::Pending);
+                match event {
+                    SelectionEvent::Confirmed { .. } => h.events.push("confirm"),
+                    SelectionEvent::Cancelled { .. } => h.events.push("cancel"),
+                    _ => {}
+                }
+                event
+            }
+            fn cancel(&mut self) {}
+        }
+        struct FakeCapture(Arc<Mutex<Harness>>);
+        impl CaptureAdapter for FakeCapture {
+            fn capture_rect(&mut self, rect: ScreenRect) -> Result<RgbaImage, String> {
+                let mut h = self.0.lock().unwrap();
+                h.captures += 1;
+                if let Some(error) = h.capture_error.clone() {
+                    h.events.push("capture failure");
+                    Err(error)
+                } else {
+                    Ok(RgbaImage::from_pixel(
+                        rect.width,
+                        rect.height,
+                        Rgba([1, 2, 3, 255]),
+                    ))
+                }
+            }
+        }
+        struct FakeAssets(Arc<Mutex<Harness>>);
+        impl AssetStoreAdapter for FakeAssets {
+            fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
+                self.0.lock().unwrap().writes += 1;
+                Ok(88)
+            }
+        }
+        fn payload() -> MkImagePayload {
+            MkImagePayload {
+                asset_id: 41,
+                wait: MkWaitOptions {
+                    timeout_ms: 5_000,
+                    poll_interval_ms: 100,
+                },
+                region: SearchRegion::Desktop,
+                tolerance: 0,
+                alpha: AlphaPolicy::Compare,
+                return_point: ReturnPoint::Center,
+            }
+        }
+        fn host() -> (MkMacroDialog, Arc<Mutex<Harness>>) {
+            let dir = tempfile::tempdir().unwrap().keep();
+            let store = Arc::new(crate::mkmacro::MkMacroStore::open(&dir).unwrap().0);
+            let mut dialog = MkMacroDialog::new(Arc::clone(&store));
+            // Traverse the real host factory first; construction is side-effect free.
+            // The fake bundle then replaces its native boundaries before any request.
+            let (production, _) = production_visual_capture_dependencies(&dialog, store);
+            install_visual_capture(&mut dialog, production);
+            let h = Arc::new(Mutex::new(Harness::default()));
+            install_visual_capture(
+                &mut dialog,
+                VisualCaptureDependencies {
+                    visibility: Box::new(FakeVisibility(h.clone())),
+                    clock: Box::new(FakeClock(h.clone())),
+                    overlay: Box::new(FakeOverlay(h.clone())),
+                    capture: Box::new(FakeCapture(h.clone())),
+                    assets: Box::new(FakeAssets(h.clone())),
+                },
+            );
+            dialog.selected_macro_id = Some(9);
+            dialog
+                .action_editor
+                .begin_new(MkAction::ImageFind(payload()));
+            (dialog, h)
+        }
+        fn reach_overlay(
+            dialog: &mut MkMacroDialog,
+            h: &Arc<Mutex<Harness>>,
+            purpose: RectanglePurpose,
+        ) {
+            assert_eq!(dialog.action_editor.editor, Some(EditorKind::Image));
+            assert!(dialog.action_editor.visual_capture.is_some());
+            assert!(
+                dialog
+                    .action_editor
+                    .request_visual_capture(9, purpose)
+                    .is_ok()
+            );
+            assert!(
+                !dialog
+                    .action_editor
+                    .capture_message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("desktop visibility integration is unavailable"))
+            );
+            dialog.action_editor.tick_visual_capture(Some(9));
+            assert_eq!(h.lock().unwrap().events, ["hide"]);
+            h.lock().unwrap().hidden = true;
+            dialog.action_editor.tick_visual_capture(Some(9));
+            h.lock().unwrap().now_ms = 34;
+            dialog.action_editor.tick_visual_capture(Some(9));
+        }
+        fn tick_twice(dialog: &mut MkMacroDialog) {
+            dialog.action_editor.tick_visual_capture(Some(9));
+            dialog.action_editor.tick_visual_capture(Some(9));
+        }
+
+        #[test]
+        fn pick_region_routes_through_installed_host_and_restores_after_confirmation() {
+            let (mut dialog, h) = host();
+            reach_overlay(&mut dialog, &h, RectanglePurpose::SearchRegion);
+            let rect = ScreenRect::new(-8, 3, 20, 11);
+            h.lock().unwrap().selection = Some(SelectionEvent::Confirmed {
+                operation_id: 17,
+                rect,
+            });
+            tick_twice(&mut dialog);
+            assert_eq!(
+                h.lock().unwrap().events,
+                ["hide", "overlay begin", "confirm", "restore"]
+            );
+            assert_eq!(
+                dialog
+                    .action_editor
+                    .image_search
+                    .as_ref()
+                    .unwrap()
+                    .rectangle,
+                rect
+            );
+            for _ in 0..3 {
+                dialog.action_editor.tick_visual_capture(Some(9));
+            }
+            assert_eq!(h.lock().unwrap().restores, 1);
+        }
+
+        fn assert_cancel(overlay_generated: bool) {
+            let (mut dialog, h) = host();
+            let prior_rectangle = dialog
+                .action_editor
+                .image_search
+                .as_ref()
+                .unwrap()
+                .rectangle;
+            reach_overlay(&mut dialog, &h, RectanglePurpose::SearchRegion);
+            if overlay_generated {
+                h.lock().unwrap().selection = Some(SelectionEvent::Cancelled { operation_id: 17 });
+                dialog.action_editor.tick_visual_capture(Some(9));
+            } else {
+                h.lock().unwrap().events.push("cancel");
+                dialog
+                    .action_editor
+                    .visual_capture
+                    .as_mut()
+                    .unwrap()
+                    .cancel();
+            }
+            dialog.action_editor.tick_visual_capture(Some(9));
+            dialog
+                .action_editor
+                .visual_capture
+                .as_mut()
+                .unwrap()
+                .cancel();
+            dialog.action_editor.tick_visual_capture(Some(9));
+            let state = h.lock().unwrap();
+            assert_eq!(state.events, ["hide", "overlay begin", "cancel", "restore"]);
+            assert_eq!((state.restores, state.captures, state.writes), (1, 0, 0));
+            assert_eq!(
+                dialog.action_editor.capture_message.as_deref(),
+                Some("Visual capture cancelled")
+            );
+            assert_eq!(
+                dialog
+                    .action_editor
+                    .image_search
+                    .as_ref()
+                    .unwrap()
+                    .rectangle,
+                prior_rectangle
+            );
+            assert_eq!(
+                dialog
+                    .action_editor
+                    .draft
+                    .as_ref()
+                    .and_then(|s| match &s.action {
+                        MkAction::ImageFind(p) => Some(p.asset_id),
+                        _ => None,
+                    }),
+                Some(41)
+            );
+        }
+        #[test]
+        fn overlay_and_host_cancellation_are_idempotent() {
+            assert_cancel(true);
+            assert_cancel(false);
+        }
+
+        #[test]
+        fn capture_failure_restores_before_publishing_and_preserves_draft() {
+            let (mut dialog, h) = host();
+            let prior_rectangle = dialog
+                .action_editor
+                .image_search
+                .as_ref()
+                .unwrap()
+                .rectangle;
+            h.lock().unwrap().capture_error = Some("camera exploded distinctively".into());
+            reach_overlay(&mut dialog, &h, RectanglePurpose::ReferenceImageCapture);
+            let rect = ScreenRect::new(1, 2, 3, 4);
+            h.lock().unwrap().selection = Some(SelectionEvent::Confirmed {
+                operation_id: 17,
+                rect,
+            });
+            dialog.action_editor.tick_visual_capture(Some(9));
+            dialog.action_editor.tick_visual_capture(Some(9));
+            assert!(dialog.action_editor.capture_message.is_none());
+            dialog.action_editor.tick_visual_capture(Some(9));
+            let state = h.lock().unwrap();
+            assert_eq!(
+                state.events,
+                [
+                    "hide",
+                    "overlay begin",
+                    "confirm",
+                    "capture failure",
+                    "restore"
+                ]
+            );
+            assert_eq!((state.restores, state.writes), (1, 0));
+            assert!(
+                dialog
+                    .action_editor
+                    .capture_message
+                    .as_deref()
+                    .unwrap()
+                    .contains("camera exploded distinctively")
+            );
+            assert_eq!(
+                dialog
+                    .action_editor
+                    .image_search
+                    .as_ref()
+                    .unwrap()
+                    .rectangle,
+                prior_rectangle
+            );
+            let MkAction::ImageFind(payload) = &dialog.action_editor.draft.as_ref().unwrap().action
+            else {
+                panic!("image editor draft changed action kind")
+            };
+            assert_eq!(payload.asset_id, 41);
+            assert_eq!(payload.region, SearchRegion::Desktop);
+        }
+
+        #[test]
+        fn synchronous_overlay_start_failure_restores_and_deactivates() {
+            let (mut dialog, h) = host();
+            h.lock().unwrap().overlay_error = Some("overlay refused startup".into());
+            reach_overlay(&mut dialog, &h, RectanglePurpose::SearchRegion);
+            dialog.action_editor.tick_visual_capture(Some(9));
+            assert_eq!(h.lock().unwrap().restores, 1);
+            assert!(
+                !dialog
+                    .action_editor
+                    .visual_capture
+                    .as_ref()
+                    .unwrap()
+                    .active()
+            );
+            assert!(
+                dialog
+                    .action_editor
+                    .capture_message
+                    .as_deref()
+                    .unwrap()
+                    .contains("overlay refused startup")
+            );
+        }
+    }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(

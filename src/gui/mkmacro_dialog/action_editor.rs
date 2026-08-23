@@ -89,6 +89,27 @@ struct NativePositionPicker {
 }
 
 impl ActionEditorState {
+    pub(crate) fn request_visual_capture(
+        &mut self,
+        macro_id: u64,
+        purpose: super::visual_overlay::RectanglePurpose,
+    ) -> anyhow::Result<()> {
+        let generation = self.draft_generation;
+        let workflow = self
+            .visual_capture
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("desktop visibility integration is unavailable"))?;
+        workflow
+            .begin(
+                super::visual_capture_workflow::DraftToken {
+                    macro_id,
+                    draft_generation: generation,
+                },
+                purpose,
+            )
+            .map_err(anyhow::Error::msg)
+    }
+
     pub fn apply_window_matcher(
         &mut self,
         request: &super::window_picker::MatcherEditRequest,
@@ -1435,20 +1456,7 @@ fn start_visual_capture(
     macro_id: u64,
     purpose: super::visual_overlay::RectanglePurpose,
 ) -> anyhow::Result<()> {
-    let generation = state.draft_generation;
-    let workflow = state
-        .visual_capture
-        .as_mut()
-        .ok_or_else(|| anyhow::anyhow!("desktop visibility integration is unavailable"))?;
-    workflow
-        .begin(
-            super::visual_capture_workflow::DraftToken {
-                macro_id,
-                draft_generation: generation,
-            },
-            purpose,
-        )
-        .map_err(anyhow::Error::msg)
+    state.request_visual_capture(macro_id, purpose)
 }
 
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
