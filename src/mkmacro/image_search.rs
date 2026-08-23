@@ -6,7 +6,7 @@ use crate::mkmacro::{
 use image::{Rgba, RgbaImage};
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -103,10 +103,11 @@ impl ProductionVisualSearch {
     }
 
     fn asset_reference(macro_id: u64, asset_id: u64) -> String {
-        format!(
-            "{}/{macro_id}/{asset_id}.png",
-            super::store::ASSET_DIRECTORY
-        )
+        PathBuf::from(super::store::ASSET_DIRECTORY)
+            .join(macro_id.to_string())
+            .join(format!("{asset_id}.png"))
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
