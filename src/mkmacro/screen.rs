@@ -615,6 +615,27 @@ pub fn monitor_descriptors() -> ExecResult<Vec<MonitorDescriptor>> {
     }
 }
 
+/// Resolves a matcher against a fresh top-level-window enumeration and returns
+/// the same geometry used by image-search playback.  No native handle escapes
+/// this call, so authoring previews cannot retain a stale HWND.
+pub fn resolve_window_screen_rect(
+    matcher: &MkWindowMatcher,
+    client_area: bool,
+) -> ExecResult<ScreenRect> {
+    #[cfg(windows)]
+    {
+        SystemCapturePlatform.window_rect(matcher, client_area)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (matcher, client_area);
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "Window target resolution is available only on Windows",
+        ))
+    }
+}
+
 fn rect_from_signed_metrics(x: i32, y: i32, width: i32, height: i32) -> ExecResult<ScreenRect> {
     if width <= 0 || height <= 0 {
         return Err(invalid(format!(

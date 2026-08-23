@@ -1465,6 +1465,16 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     }
     let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
+    let overlay_was_active = d.action_editor.visual_overlay.operation_id().is_some();
+    for event in d.action_editor.visual_overlay.poll() {
+        use super::visual_overlay::VisualOverlayEvent;
+        if let VisualOverlayEvent::Error { error, .. } = event {
+            d.action_editor.capture_message = Some(error.to_string());
+        }
+    }
+    if overlay_was_active || d.action_editor.visual_overlay.operation_id().is_some() {
+        ctx.request_repaint();
+    }
     let workflow_active = d
         .action_editor
         .visual_capture
@@ -1515,7 +1525,42 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
                     Some(PickRectangle) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::ImageRegion),
-                    Some(other) => state.capture_message = Some(format!("{other:?} requested; desktop overlay is not available on this platform")),
+                    Some(PreviewRectangle) => {
+                        let image = state.image_search.as_ref().unwrap();
+                        if image.rectangle.is_empty() {
+                            state.capture_message = Some("Rectangle width and height must be positive".into());
+                        } else {
+                            state.visual_overlay.preview_rectangle(image.rectangle);
+                        }
+                    }
+                    Some(HighlightMonitor) => {
+                        let image = state.image_search.as_mut().unwrap();
+                        image.refresh_monitors();
+                        match &image.monitors {
+                            Ok(monitors) => match monitors.iter().find(|m| m.index == image.monitor_index) {
+                                Some(m) => { state.visual_overlay.highlight_monitor(m.clone()); }
+                                None => state.capture_message = Some(format!("Monitor {} is currently unavailable", image.monitor_index)),
+                            },
+                            Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
+                        }
+                    }
+                    Some(IdentifyMonitors) => {
+                        let image = state.image_search.as_mut().unwrap();
+                        image.refresh_monitors();
+                        match &image.monitors {
+                            Ok(monitors) if !monitors.is_empty() => { state.visual_overlay.identify_monitors(monitors.clone()); }
+                            Ok(_) => state.capture_message = Some("No monitors are currently available".into()),
+                            Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
+                        }
+                    }
+                    Some(HighlightWindow { client_area }) => {
+                        let image = state.image_search.as_ref().unwrap();
+                        let matcher = if client_area { &image.client_matcher } else { &image.window_matcher };
+                        match crate::mkmacro::resolve_window_screen_rect(matcher, client_area) {
+                            Ok(rect) => { state.visual_overlay.highlight_window(rect, if client_area { super::visual_overlay::WindowAreaKind::ClientArea } else { super::visual_overlay::WindowAreaKind::WholeWindow }); }
+                            Err(error) => state.capture_message = Some(error.to_string()),
+                        }
+                    }
                     None => {}
                 }
             }
@@ -1598,7 +1643,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     && !matches!(
                         super::action_catalog::draft_validation_contract(&step.action),
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
-                    );
+                    )
+                    && state.image_search.as_ref().and_then(|image| image.validation_error()).is_none();
                 apply = ui.add_enabled(valid && !workflow_active, egui::Button::new("Apply")).clicked();
                 cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
