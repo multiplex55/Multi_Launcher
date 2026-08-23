@@ -465,11 +465,11 @@ mod tests {
         };
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageFind(image.clone())),
-            "Reference image · Desktop · tolerance 0 · 2500 ms timeout"
+            "Asset 42 · Entire Desktop · tolerance 0"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageClick(image)),
-            "Reference image · Desktop · tolerance 0 · 2500 ms timeout"
+            "Asset 42 · Entire Desktop · center · 2500 ms"
         );
     }
 

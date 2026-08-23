@@ -14,6 +14,21 @@ use std::{
 };
 pub const MKMACROS_FILE: &str = "mkmacros.json";
 pub const ASSET_DIRECTORY: &str = "mkmacro_assets";
+pub(crate) fn managed_asset_path(
+    asset_root: &Path,
+    macro_id: u64,
+    asset_id: u64,
+) -> Result<PathBuf> {
+    if macro_id == 0
+        || asset_id == 0
+        || asset_root.file_name() != Some(std::ffi::OsStr::new(ASSET_DIRECTORY))
+    {
+        anyhow::bail!("invalid managed asset root or identifier")
+    }
+    Ok(asset_root
+        .join(macro_id.to_string())
+        .join(format!("{asset_id}.png")))
+}
 #[derive(Debug)]
 pub enum LoadDisposition {
     Missing,
@@ -35,6 +50,13 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
+    pub fn asset_root(&self) -> PathBuf {
+        self.inner
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(ASSET_DIRECTORY)
+    }
     /// Enumerates the canonical PNG assets owned by one macro.
     pub fn asset_ids(&self, macro_id: u64) -> Result<Vec<u64>> {
         if macro_id == 0 {
