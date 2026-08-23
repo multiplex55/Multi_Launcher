@@ -2587,4 +2587,409 @@ mod tests {
         assert!(json.contains("editor.exe"));
         assert!(!json.to_lowercase().contains("hwnd"));
     }
+
+    /// Full-editor regressions for the independence of reference-image capture and
+    /// search-region authoring. These deliberately install the real workflow in an
+    /// `ActionEditorState`; workflow outcomes are never applied directly.
+    mod visual_authoring_independence {
+        use super::*;
+        use crate::gui::mkmacro_dialog::{
+            image_search_editor::{ImageSearchEditorState, SearchRegionKind},
+            visual_capture_workflow::{
+                AssetStoreAdapter, CaptureAdapter, RectangleOverlay, SavedVisibility,
+                SelectionEvent, VisibilityAdapter, VisualCaptureWorkflow, WorkflowClock,
+            },
+            visual_overlay::{OperationId, RectanglePurpose},
+        };
+        use std::{
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+
+        const MACRO_ID: u64 = 73;
+        const OPERATION_ID: OperationId = 19;
+        const ORIGINAL: ScreenRect = ScreenRect {
+            x: 100,
+            y: 100,
+            width: 800,
+            height: 600,
+        };
+
+        #[derive(Default)]
+        struct FakeState {
+            hidden: bool,
+            now_ms: u64,
+            purposes: Vec<RectanglePurpose>,
+            selection: Option<SelectionEvent>,
+            capture_result: Option<Result<RgbaImage, String>>,
+            stage_result: Option<Result<u64, String>>,
+            capture_rects: Vec<ScreenRect>,
+            staged_dimensions: Vec<(u32, u32)>,
+            restores: usize,
+        }
+        struct Visibility(Arc<Mutex<FakeState>>);
+        impl VisibilityAdapter for Visibility {
+            fn snapshot(&self) -> SavedVisibility {
+                SavedVisibility {
+                    launcher: true,
+                    mkmacro_dialog: true,
+                }
+            }
+            fn request_hidden(&mut self) {}
+            fn hidden_observed(&self) -> bool {
+                self.0.lock().unwrap().hidden
+            }
+            fn restore(&mut self, _: SavedVisibility) {
+                self.0.lock().unwrap().restores += 1;
+            }
+        }
+        struct Clock(Arc<Mutex<FakeState>>);
+        impl WorkflowClock for Clock {
+            fn now(&self) -> Duration {
+                Duration::from_millis(self.0.lock().unwrap().now_ms)
+            }
+        }
+        struct Overlay(Arc<Mutex<FakeState>>);
+        impl RectangleOverlay for Overlay {
+            fn begin(&mut self, purpose: RectanglePurpose) -> Result<OperationId, String> {
+                self.0.lock().unwrap().purposes.push(purpose);
+                Ok(OPERATION_ID)
+            }
+            fn poll(&mut self) -> SelectionEvent {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .selection
+                    .take()
+                    .unwrap_or(SelectionEvent::Pending)
+            }
+            fn cancel(&mut self) {}
+        }
+        struct Capture(Arc<Mutex<FakeState>>);
+        impl CaptureAdapter for Capture {
+            fn capture_rect(&mut self, rect: ScreenRect) -> Result<RgbaImage, String> {
+                let mut state = self.0.lock().unwrap();
+                state.capture_rects.push(rect);
+                state
+                    .capture_result
+                    .take()
+                    .unwrap_or_else(|| Ok(RgbaImage::new(rect.width, rect.height)))
+            }
+        }
+        struct Assets(Arc<Mutex<FakeState>>);
+        impl AssetStoreAdapter for Assets {
+            fn write_png_asset(&mut self, _: u64, image: &RgbaImage) -> Result<u64, String> {
+                let mut state = self.0.lock().unwrap();
+                state.staged_dimensions.push(image.dimensions());
+                state.stage_result.take().unwrap_or(Ok(8))
+            }
+        }
+        struct Fixture {
+            editor: ActionEditorState,
+            fake: Arc<Mutex<FakeState>>,
+        }
+        impl Fixture {
+            fn new() -> Self {
+                let fake = Arc::new(Mutex::new(FakeState::default()));
+                let workflow = VisualCaptureWorkflow::new(
+                    Box::new(Visibility(fake.clone())),
+                    Box::new(Clock(fake.clone())),
+                    Box::new(Overlay(fake.clone())),
+                    Box::new(Capture(fake.clone())),
+                    Box::new(Assets(fake.clone())),
+                );
+                let payload = MkImagePayload {
+                    asset_id: 7,
+                    region: SearchRegion::Rectangle { rect: ORIGINAL },
+                    wait: MkWaitOptions {
+                        timeout_ms: 1_234,
+                        poll_interval_ms: 56,
+                    },
+                    tolerance: 17,
+                    alpha: AlphaPolicy::Ignore,
+                    return_point: ReturnPoint::TopLeft,
+                };
+                let mut editor = ActionEditorState::default();
+                editor.begin_edit(&step(MkAction::ImageClick(payload)));
+                editor.visual_capture = Some(workflow);
+                assert_eq!(
+                    editor.draft_generation, 1,
+                    "fixture must use a known draft generation"
+                );
+                assert_eq!(
+                    editor.image_search.as_ref().unwrap().kind,
+                    SearchRegionKind::Rectangle
+                );
+                assert_eq!(editor.image_search.as_ref().unwrap().rectangle, ORIGINAL);
+                Self { editor, fake }
+            }
+            fn begin_selecting(&mut self, purpose: RectanglePurpose) {
+                self.editor
+                    .request_visual_capture(MACRO_ID, purpose)
+                    .unwrap();
+                self.editor.tick_visual_capture(Some(MACRO_ID));
+                self.fake.lock().unwrap().hidden = true;
+                self.editor.tick_visual_capture(Some(MACRO_ID));
+                self.fake.lock().unwrap().now_ms = 34;
+                self.editor.tick_visual_capture(Some(MACRO_ID));
+                assert_eq!(self.fake.lock().unwrap().purposes, [purpose]);
+            }
+            fn selection(&mut self, event: SelectionEvent) {
+                self.fake.lock().unwrap().selection = Some(event);
+            }
+            fn tick(&mut self) {
+                self.editor.tick_visual_capture(Some(MACRO_ID));
+            }
+            fn draft_payload(&self) -> &MkImagePayload {
+                match &self.editor.draft.as_ref().unwrap().action {
+                    MkAction::ImageClick(payload) => payload,
+                    _ => panic!("visual fixture must remain an Image Click draft"),
+                }
+            }
+            fn snapshots(&self) -> (Vec<u8>, ImageSearchEditorState) {
+                (
+                    serde_json::to_vec(self.editor.draft.as_ref().unwrap()).unwrap(),
+                    self.editor.image_search.clone().unwrap(),
+                )
+            }
+        }
+
+        #[test]
+        fn pick_region_changes_only_search_geometry() {
+            let mut f = Fixture::new();
+            let unrelated = f.draft_payload().clone();
+            let selected = ScreenRect::new(200, 200, 400, 300);
+            f.begin_selecting(RectanglePurpose::SearchRegion);
+            f.selection(SelectionEvent::Confirmed {
+                operation_id: OPERATION_ID,
+                rect: selected,
+            });
+            f.tick();
+            f.tick();
+            assert_eq!(
+                f.draft_payload().asset_id,
+                7,
+                "Pick Region must not replace the reference asset"
+            );
+            assert_eq!(
+                f.editor.image_search.as_ref().unwrap().rectangle,
+                selected,
+                "Pick Region must update the editable search rectangle"
+            );
+            assert_eq!(
+                f.draft_payload(),
+                &unrelated,
+                "Pick Region must not mutate unrelated payload fields before normal synchronization"
+            );
+            f.editor.sync_image_region_to_draft();
+            let mut synchronized = unrelated;
+            synchronized.region = SearchRegion::Rectangle { rect: selected };
+            assert_eq!(
+                f.draft_payload(),
+                &synchronized,
+                "Pick Region synchronization must change only the search rectangle"
+            );
+            let state = f.fake.lock().unwrap();
+            assert!(
+                state.capture_rects.is_empty(),
+                "Pick Region must not capture the screen"
+            );
+            assert!(
+                state.staged_dimensions.is_empty(),
+                "Pick Region must not stage a reference asset"
+            );
+            assert_eq!(
+                state.restores, 1,
+                "Pick Region must restore the launcher exactly once"
+            );
+        }
+
+        #[test]
+        fn capture_changes_only_reference_asset() {
+            let mut f = Fixture::new();
+            let unrelated = f.draft_payload().clone();
+            let selected = ScreenRect::new(321, 654, 40, 30);
+            f.begin_selecting(RectanglePurpose::ReferenceImageCapture);
+            f.selection(SelectionEvent::Confirmed {
+                operation_id: OPERATION_ID,
+                rect: selected,
+            });
+            f.tick();
+            f.tick();
+            f.tick();
+            assert_eq!(
+                f.draft_payload().asset_id,
+                8,
+                "Capture must install the newly staged reference asset"
+            );
+            let mut captured = unrelated.clone();
+            captured.asset_id = 8;
+            assert_eq!(
+                f.draft_payload(),
+                &captured,
+                "Capture must change only the reference asset ID"
+            );
+            assert_eq!(
+                f.draft_payload().region,
+                unrelated.region,
+                "Capture must not overwrite the search rectangle in the draft"
+            );
+            assert_eq!(
+                f.editor.image_search.as_ref().unwrap().rectangle,
+                ORIGINAL,
+                "Capture must not overwrite the editable search rectangle"
+            );
+            let state = f.fake.lock().unwrap();
+            assert_eq!(
+                state.capture_rects,
+                [selected],
+                "Capture must use the exact nonzero-origin selection"
+            );
+            assert_eq!(
+                state.staged_dimensions,
+                [(40, 30)],
+                "Capture must stage the exact 40x30 image"
+            );
+            assert_eq!(
+                state.restores, 1,
+                "Capture must restore the launcher exactly once"
+            );
+        }
+
+        fn assert_capture_cancel(active_selection: bool) {
+            let mut f = Fixture::new();
+            let (draft, image) = f.snapshots();
+            f.begin_selecting(RectanglePurpose::ReferenceImageCapture);
+            if active_selection {
+                f.selection(SelectionEvent::Cancelled {
+                    operation_id: OPERATION_ID,
+                });
+                f.tick();
+            } else {
+                f.editor.visual_capture.as_mut().unwrap().cancel();
+            }
+            f.tick();
+            assert_eq!(
+                serde_json::to_vec(f.editor.draft.as_ref().unwrap()).unwrap(),
+                draft,
+                "Capture cancellation must preserve the complete draft byte-for-byte"
+            );
+            assert_eq!(
+                f.editor.image_search.as_ref().unwrap(),
+                &image,
+                "Capture cancellation must preserve complete image-search editor state"
+            );
+            let state = f.fake.lock().unwrap();
+            assert!(
+                state.capture_rects.is_empty(),
+                "Cancelled Capture must not call screen capture"
+            );
+            assert!(
+                state.staged_dimensions.is_empty(),
+                "Cancelled Capture must not stage an asset"
+            );
+            assert_eq!(
+                state.restores, 1,
+                "Cancelled Capture must restore the launcher exactly once"
+            );
+        }
+        #[test]
+        fn capture_cancel_before_drag_confirmation_is_lossless() {
+            assert_capture_cancel(false);
+        }
+        #[test]
+        fn capture_cancel_during_active_selection_is_lossless() {
+            assert_capture_cancel(true);
+        }
+
+        fn assert_capture_failure(stage_failure: bool) {
+            let mut f = Fixture::new();
+            let unrelated = f.draft_payload().clone();
+            if stage_failure {
+                f.fake.lock().unwrap().stage_result =
+                    Some(Err("PNG staging failed visibly".into()));
+            } else {
+                f.fake.lock().unwrap().capture_result =
+                    Some(Err("screen capture failed visibly".into()));
+            }
+            f.begin_selecting(RectanglePurpose::ReferenceImageCapture);
+            f.selection(SelectionEvent::Confirmed {
+                operation_id: OPERATION_ID,
+                rect: ScreenRect::new(9, 11, 40, 30),
+            });
+            f.tick();
+            f.tick();
+            f.tick();
+            assert_eq!(
+                f.draft_payload(),
+                &unrelated,
+                "Failed Capture must not apply any asset or unrelated payload outcome"
+            );
+            assert_eq!(
+                f.editor.image_search.as_ref().unwrap().rectangle,
+                ORIGINAL,
+                "Failed Capture must not overwrite the search rectangle"
+            );
+            assert!(
+                f.editor
+                    .capture_message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("failed visibly")),
+                "Capture failure must be visible to the user"
+            );
+            let state = f.fake.lock().unwrap();
+            assert_eq!(
+                state.capture_rects.len(),
+                1,
+                "Both downstream failures occur after one exact capture attempt"
+            );
+            assert_eq!(
+                state.staged_dimensions.len(),
+                usize::from(stage_failure),
+                "Screen-capture failure must not stage; staging failure must receive the captured image"
+            );
+            assert_eq!(
+                state.restores, 1,
+                "Failed Capture must restore the launcher exactly once"
+            );
+        }
+        #[test]
+        fn screen_capture_failure_preserves_independent_fields() {
+            assert_capture_failure(false);
+        }
+        #[test]
+        fn png_staging_failure_preserves_independent_fields() {
+            assert_capture_failure(true);
+        }
+
+        #[test]
+        fn stale_draft_token_ignores_completed_capture_but_still_restores() {
+            let mut f = Fixture::new();
+            let snapshots = f.snapshots();
+            f.begin_selecting(RectanglePurpose::ReferenceImageCapture);
+            f.selection(SelectionEvent::Confirmed {
+                operation_id: OPERATION_ID,
+                rect: ScreenRect::new(44, 55, 40, 30),
+            });
+            f.tick();
+            f.editor.draft_generation = f.editor.draft_generation.wrapping_add(1);
+            f.tick();
+            f.tick();
+            assert_eq!(
+                serde_json::to_vec(f.editor.draft.as_ref().unwrap()).unwrap(),
+                snapshots.0,
+                "A stale Capture result must not replace the reference asset"
+            );
+            assert_eq!(
+                f.editor.image_search.as_ref().unwrap(),
+                &snapshots.1,
+                "A stale Capture result must not overwrite the search rectangle"
+            );
+            assert_eq!(
+                f.fake.lock().unwrap().restores,
+                1,
+                "A stale Capture must still restore the launcher exactly once"
+            );
+        }
+    }
 }
