@@ -25,7 +25,7 @@ pub struct ActionEditorState {
     pub(crate) draft_generation: u64,
     pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
     /// Sole owner of native visual-overlay resources for this editor draft.
-    pub visual_overlay: super::visual_overlay::VisualOverlayController,
+    pub visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
     /// Installed by the owning launcher integration because it alone owns the
     /// launcher and dialog native-window visibility boundary.
     pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
@@ -230,6 +230,12 @@ impl ActionEditorState {
         }
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
+        if let Some(workflow) = &mut self.visual_capture {
+            workflow.cancel();
+            while workflow.active() {
+                workflow.tick();
+            }
+        }
         self.visual_overlay.cancel();
         self.stop_position_capture();
         if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)

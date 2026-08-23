@@ -11,6 +11,7 @@ pub mod recorder_controller;
 mod step_table;
 mod toolbar;
 pub mod uia_editor;
+pub mod visual_capture_visibility;
 pub mod visual_capture_workflow;
 pub mod visual_overlay;
 pub mod window_picker;
