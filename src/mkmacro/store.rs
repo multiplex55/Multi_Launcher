@@ -41,6 +41,8 @@ struct Inner {
     /// Orders the entire disk-read/write and publication transaction. In particular,
     /// a watcher may not publish bytes it read before a completed local save.
     transaction: Mutex<()>,
+    /// Serializes fresh asset allocation with publication of the corresponding PNG.
+    asset_authoring: Mutex<()>,
     snapshot: RwLock<Arc<MkMacroDocument>>,
     diagnostics: RwLock<Arc<[MkDiagnostic]>>,
     last_external_error: RwLock<Option<String>>,
@@ -154,6 +156,7 @@ impl MkMacroStore {
         let inner = Arc::new(Inner {
             path: path.clone(),
             transaction: Mutex::new(()),
+            asset_authoring: Mutex::new(()),
             snapshot: RwLock::new(Arc::new(MkMacroDocument::default())),
             diagnostics: RwLock::new(Arc::from([])),
             last_external_error: RwLock::new(None),
@@ -269,6 +272,18 @@ impl MkMacroStore {
         Ok(PathBuf::from(ASSET_DIRECTORY)
             .join(macro_id.to_string())
             .join(format!("{asset_id}.png")))
+    }
+
+    /// Allocates and completely stages a fresh asset as one concurrency-safe operation.
+    pub(crate) fn stage_new_png_asset(
+        &self,
+        macro_id: u64,
+        image: &RgbaImage,
+    ) -> Result<(u64, PathBuf)> {
+        let _authoring = self.inner.asset_authoring.lock().unwrap();
+        let asset_id = self.next_asset_id(macro_id)?;
+        let reference = self.write_png_asset(macro_id, asset_id, image)?;
+        Ok((asset_id, reference))
     }
     /// JSON is committed only after an asset was staged. The old path is merely
     /// returned: deletion still requires a separate, explicit `cleanup_assets` call.

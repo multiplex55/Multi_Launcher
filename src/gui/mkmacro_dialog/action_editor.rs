@@ -24,6 +24,7 @@ pub struct ActionEditorState {
     position_capture: Option<PositionCaptureState>,
     pub(crate) draft_generation: u64,
     pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
+    pub image_authoring: super::image_authoring_job::ImageAuthoringJob,
     /// Sole owner of native visual-overlay resources for this editor draft.
     pub visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
     /// Installed by the owning launcher integration because it alone owns the
@@ -139,6 +140,7 @@ impl ActionEditorState {
             return;
         }
         self.visual_overlay.cancel();
+        self.image_authoring = Default::default();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
@@ -165,6 +167,7 @@ impl ActionEditorState {
     }
     pub fn begin_edit(&mut self, step: &MkStep) {
         self.visual_overlay.cancel();
+        self.image_authoring = Default::default();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
@@ -179,6 +182,7 @@ impl ActionEditorState {
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
     pub fn cancel(&mut self) {
+        self.image_authoring = Default::default();
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
             // Cancellation is synchronous only as far as requesting cleanup;
@@ -258,6 +262,10 @@ impl ActionEditorState {
         }
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
+        if self.image_authoring.is_importing() {
+            return None;
+        }
+        self.image_authoring = Default::default();
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
             while workflow.active() {
@@ -316,6 +324,46 @@ impl ActionEditorState {
         dialog.selection.ids.insert(id);
         dialog.mark_dirty();
         Some(id)
+    }
+
+    fn poll_image_authoring(&mut self, current_macro_id: Option<u64>) {
+        let Some((active_token, previous_asset_id, completion)) = self.image_authoring.try_take()
+        else {
+            return;
+        };
+        // The receiver itself identifies the active job; this extra comparison makes
+        // it impossible for a queued completion to retire a subsequently started job.
+        if completion.token != active_token {
+            return;
+        }
+        self.image_authoring = Default::default();
+        let current = current_macro_id == Some(completion.token.macro_id)
+            && self.draft_generation == completion.token.draft_generation
+            && self.draft.as_ref().is_some_and(|step| {
+                matches!(
+                    step.action,
+                    MkAction::ImageFind(_) | MkAction::ImageClick(_)
+                )
+            });
+        if !current {
+            return;
+        }
+        match completion.result {
+            Ok(staged) => {
+                if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
+                    payload.asset_id = staged.asset_id;
+                    self.capture_message = None;
+                }
+            }
+            Err(error) => {
+                if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
+                    // Normally unchanged; restoring the snapshot also makes the failure
+                    // invariant explicit for deterministic/fake-runner tests.
+                    payload.asset_id = previous_asset_id;
+                }
+                self.capture_message = Some(error);
+            }
+        }
     }
     fn stop_position_capture(&mut self) {
         self.position_capture = None;
@@ -1410,17 +1458,6 @@ fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
     }
 }
 
-fn apply_import(
-    store: &MkMacroStore,
-    macro_id: u64,
-    payload: &mut MkImagePayload,
-    source: &std::path::Path,
-) -> anyhow::Result<()> {
-    let staged = ImageAssetAuthoringService::new(store).import_png(macro_id, source)?;
-    payload.asset_id = staged.asset_id;
-    Ok(())
-}
-
 fn apply_capture(
     store: &MkMacroStore,
     macro_id: u64,
@@ -1505,6 +1542,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     }
     let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
+    d.action_editor.poll_image_authoring(d.selected_macro_id);
+    let importing = d.action_editor.image_authoring.is_importing();
+    if importing {
+        ctx.request_repaint();
+    }
     let overlay_was_active = d.action_editor.visual_overlay.operation_id().is_some();
     d.action_editor.poll_visual_overlay();
     if overlay_was_active || d.action_editor.visual_overlay.operation_id().is_some() {
@@ -1553,7 +1595,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             pick_request = position;
             image_request = image;
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0));
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -1715,14 +1757,20 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
                     )
                     && state.image_search.as_ref().and_then(|image| image.validation_error()).is_none();
-                apply = ui.add_enabled(valid && !workflow_active, egui::Button::new("Apply")).clicked();
+                apply = ui.add_enabled(valid && !workflow_active && !importing, egui::Button::new("Apply")).clicked();
                 cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
           });
         });
-    if workflow_active && image_request.is_some() {
-        d.action_editor.capture_message =
-            Some("Finish or cancel the active visual capture first".into());
+    if (workflow_active || importing) && image_request.is_some() {
+        d.action_editor.capture_message = Some(
+            if importing {
+                "Wait for the active reference image import to finish"
+            } else {
+                "Finish or cancel the active visual capture first"
+            }
+            .into(),
+        );
     } else if let Some(request) = image_request {
         let macro_id = d.selected_macro_id.unwrap_or(0);
         let result = match request {
@@ -1730,12 +1778,21 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .add_filter("PNG image", &["png"])
                 .pick_file()
                 .map(|path| {
-                    apply_import(
-                        &d.store,
+                    let token = super::image_authoring_job::DraftToken {
                         macro_id,
-                        image_payload_mut(d.action_editor.draft.as_mut().unwrap()).unwrap(),
-                        &path,
-                    )
+                        draft_generation: d.action_editor.draft_generation,
+                    };
+                    let previous = d
+                        .action_editor
+                        .draft
+                        .as_mut()
+                        .and_then(image_payload_mut)
+                        .unwrap()
+                        .asset_id;
+                    d.action_editor
+                        .image_authoring
+                        .start(d.store.clone(), token, previous, path)
+                        .map_err(anyhow::Error::msg)
                 })
                 .transpose()
                 .map(|_| ()),
@@ -1794,6 +1851,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+    use std::sync::mpsc;
     fn step(a: MkAction) -> MkStep {
         MkStep {
             id: 7,
@@ -1822,7 +1880,11 @@ mod tests {
         };
         let bad = dir.path().join("bad.png");
         std::fs::write(&bad, b"not png").unwrap();
-        assert!(apply_import(&store, 4, &mut payload, &bad).is_err());
+        assert!(
+            ImageAssetAuthoringService::new(&store)
+                .import_png(4, &bad)
+                .is_err()
+        );
         assert_eq!(payload.asset_id, 9);
 
         let image = RgbaImage::from_pixel(3, 2, Rgba([1, 2, 3, 255]));
@@ -1848,6 +1910,117 @@ mod tests {
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
         }
+    }
+
+    fn importing_editor(
+        token: super::super::image_authoring_job::DraftToken,
+        region: SearchRegion,
+    ) -> (
+        ActionEditorState,
+        mpsc::Sender<super::super::image_authoring_job::ImageAuthoringCompletion>,
+    ) {
+        let mut editor = ActionEditorState::default();
+        editor.draft_generation = token.draft_generation;
+        editor.draft = Some(step(MkAction::ImageFind(image_payload(9, region))));
+        let (sender, completion) = mpsc::channel();
+        editor.image_authoring = super::super::image_authoring_job::ImageAuthoringJob::Importing {
+            token,
+            previous_asset_id: 9,
+            source: "chosen.png".into(),
+            completion,
+        };
+        (editor, sender)
+    }
+
+    #[test]
+    fn image_import_completion_changes_only_asset_and_failure_preserves_draft() {
+        use super::super::image_authoring_job::{DraftToken, ImageAuthoringCompletion};
+        let token = DraftToken {
+            macro_id: 4,
+            draft_generation: 2,
+        };
+        let region = SearchRegion::Rectangle {
+            rect: ScreenRect::new(1, 2, 30, 40),
+        };
+        let (mut editor, sender) = importing_editor(token, region.clone());
+        sender
+            .send(ImageAuthoringCompletion {
+                token,
+                result: Ok(crate::mkmacro::StagedImageAsset {
+                    asset_id: 10,
+                    managed_reference: "mkmacro_assets/4/10.png".into(),
+                }),
+            })
+            .unwrap();
+        editor.poll_image_authoring(Some(4));
+        let payload = editor.draft.as_mut().and_then(image_payload_mut).unwrap();
+        assert_eq!(payload.asset_id, 10);
+        assert_eq!(payload.region, region);
+        assert!(!editor.image_authoring.is_importing());
+
+        let (mut editor, sender) = importing_editor(token, region.clone());
+        sender
+            .send(ImageAuthoringCompletion {
+                token,
+                result: Err("Reference image: corrupt PNG".into()),
+            })
+            .unwrap();
+        editor.poll_image_authoring(Some(4));
+        let payload = editor.draft.as_mut().and_then(image_payload_mut).unwrap();
+        assert_eq!(payload.asset_id, 9);
+        assert_eq!(payload.region, region);
+        assert!(
+            editor
+                .capture_message
+                .as_deref()
+                .unwrap()
+                .contains("corrupt")
+        );
+    }
+
+    #[test]
+    fn stale_image_import_completions_never_touch_another_draft() {
+        use super::super::image_authoring_job::{DraftToken, ImageAuthoringCompletion};
+        let token = DraftToken {
+            macro_id: 4,
+            draft_generation: 2,
+        };
+        for (macro_id, generation) in [(5, 2), (4, 3)] {
+            let (mut editor, sender) = importing_editor(token, SearchRegion::Desktop);
+            editor.draft_generation = generation;
+            sender
+                .send(ImageAuthoringCompletion {
+                    token,
+                    result: Ok(crate::mkmacro::StagedImageAsset {
+                        asset_id: 55,
+                        managed_reference: "unused.png".into(),
+                    }),
+                })
+                .unwrap();
+            editor.poll_image_authoring(Some(macro_id));
+            assert_eq!(
+                editor
+                    .draft
+                    .as_mut()
+                    .and_then(image_payload_mut)
+                    .unwrap()
+                    .asset_id,
+                9
+            );
+        }
+        let (mut editor, sender) = importing_editor(token, SearchRegion::Desktop);
+        editor.cancel();
+        sender
+            .send(ImageAuthoringCompletion {
+                token,
+                result: Ok(crate::mkmacro::StagedImageAsset {
+                    asset_id: 55,
+                    managed_reference: "unused.png".into(),
+                }),
+            })
+            .unwrap_err();
+        editor.poll_image_authoring(Some(4));
+        assert!(editor.draft.is_none());
     }
 
     fn draft_image_payload(editor: &ActionEditorState) -> &MkImagePayload {
