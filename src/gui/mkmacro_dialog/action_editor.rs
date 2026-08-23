@@ -848,7 +848,7 @@ fn action_ui(
     let mut pick = None;
     let mut window_pick = None;
     let mut launcher_pick = None;
-    let mut image_request = None;
+    let image_request = None;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
@@ -1621,7 +1621,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         &path,
                     )
                 })
-                .transpose(),
+                .transpose()
+                .map(|_| ()),
             ImageAuthoringRequest::CaptureRectangle => start_visual_capture(
                 &mut d.action_editor,
                 macro_id,
