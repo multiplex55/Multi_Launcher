@@ -191,14 +191,12 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
     fake.script_prompt(PromptResponse::Cancelled);
     let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
     runtime.command(RuntimeCommand::Run(8));
-    let snapshot = wait(&runtime, RuntimeState::Failed);
-    assert!(
-        snapshot
-            .latest_failure
-            .unwrap()
-            .message
-            .contains("cancelled")
-    );
+    let snapshot = wait(&runtime, RuntimeState::Stopped);
+    let failure = snapshot
+        .latest_failure
+        .expect("prompt cancellation should retain its step diagnostic");
+    assert_eq!(failure.kind, DiagnosticKind::Cancelled);
+    assert!(failure.message.contains("cancelled"));
     assert!(
         !fake
             .events()
