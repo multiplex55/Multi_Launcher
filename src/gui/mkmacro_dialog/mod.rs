@@ -74,8 +74,8 @@ pub struct MkMacroDialog {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCoordinateTarget, MkHotkey,
-        MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
+        AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition, MkCoordinateTarget,
+        MkHotkey, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
         MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint,
         SCHEMA_VERSION, SearchRegion,
     };
