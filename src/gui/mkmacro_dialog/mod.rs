@@ -526,7 +526,7 @@ mod tests {
                 asset_id: 9,
                 offset: MkPoint { x: -3, y: 5 }
             }),
-            "Image asset 9 offset (-3, 5)"
+            "Missing asset · ID 9 offset (-3, 5)"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::MouseMove(MkMouseMovePayload {
