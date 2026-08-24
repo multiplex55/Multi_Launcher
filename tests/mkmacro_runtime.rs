@@ -25,9 +25,10 @@ fn wait(rt: &MacroRuntime, state: RuntimeState) -> RuntimeSnapshot {
         }
         assert!(
             Instant::now() < end,
-            "state {:?}, wanted {:?}",
+            "state {:?}, wanted {:?}, failure: {:?}",
             x.state,
-            state
+            state,
+            &x.latest_failure,
         );
         thread::sleep(Duration::from_millis(2))
     }
@@ -89,10 +90,17 @@ fn matcher() -> MkWindowMatcher {
 fn image_find_result_drives_following_mouse_move_without_platform_effects() {
     let d = tempdir().unwrap();
     let (store, _) = MkMacroStore::open(d.path()).unwrap();
+    let asset_path = store
+        .write_png_asset(
+            70,
+            10,
+            &image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255])),
+        )
+        .unwrap();
     let image = MkImagePayload {
         asset_id: 10,
         wait: MkWaitOptions {
-            timeout_ms: 0,
+            timeout_ms: 1,
             poll_interval_ms: 1,
         },
         region: Default::default(),
@@ -136,7 +144,7 @@ fn image_find_result_drives_following_mouse_move_without_platform_effects() {
                 image_assets: vec![MkImageAsset {
                     id: 10,
                     name: "fixture".into(),
-                    relative_path: "fixtures/match.png".into(),
+                    relative_path: asset_path.to_string_lossy().into_owned(),
                 }],
             }],
         })
