@@ -6,7 +6,7 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -293,8 +293,12 @@ pub enum MkCondition {
     WindowActive {
         matcher: MkWindowMatcher,
     },
-    ImageResult {
-        asset_id: u64,
+    ImageSearch {
+        search: MkImageSearchCondition,
+        found: bool,
+    },
+    PreviousImageResult {
+        asset_id: Option<u64>,
         found: bool,
     },
     PixelResult {
@@ -311,6 +315,38 @@ pub enum MkCondition {
     Not {
         condition: Box<MkCondition>,
     },
+}
+/// A single, immediate image search used by a condition.  Action polling and
+/// output policy deliberately live in [`MkImagePayload`], not here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkImageSearchCondition {
+    pub asset_id: u64,
+    #[serde(default)]
+    pub region: SearchRegion,
+    #[serde(default)]
+    pub tolerance: u8,
+    #[serde(default)]
+    pub alpha: AlphaPolicy,
+    #[serde(default)]
+    pub return_point: ReturnPoint,
+}
+
+impl MkImageSearchCondition {
+    pub fn as_payload(&self) -> MkImagePayload {
+        MkImagePayload {
+            asset_id: self.asset_id,
+            wait: MkWaitOptions {
+                timeout_ms: 0,
+                poll_interval_ms: 1,
+            },
+            region: self.region.clone(),
+            tolerance: self.tolerance,
+            alpha: self.alpha,
+            return_point: self.return_point,
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs::default(),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkTextPayload {

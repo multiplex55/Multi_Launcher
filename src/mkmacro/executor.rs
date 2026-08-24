@@ -1600,6 +1600,10 @@ impl Executor {
         v.insert("last_image_result".into(), MkValue::Boolean(found));
         v.insert("last_image_found".into(), MkValue::Boolean(found));
         let asset = super::screen::image_result_variable(p.asset_id);
+        v.insert(
+            super::screen::image_found_variable(p.asset_id),
+            MkValue::Boolean(found),
+        );
         if let Some(point) = point {
             v.insert(asset, MkValue::Point(point));
             v.insert("last_image".into(), MkValue::Point(point));
@@ -1721,40 +1725,20 @@ impl Executor {
                 v.insert("last_window_result".into(), MkValue::Boolean(x));
                 Ok(x)
             }
-            MkCondition::ImageResult { asset_id, found } => {
-                let point = self.backends.screen.find_image(
-                    macro_id,
-                    &MkImagePayload {
-                        asset_id: *asset_id,
-                        wait: MkWaitOptions {
-                            timeout_ms: 0,
-                            poll_interval_ms: 1,
-                        },
-                        region: super::SearchRegion::Desktop,
-                        tolerance: 0,
-                        alpha: super::AlphaPolicy::Compare,
-                        return_point: super::ReturnPoint::Center,
-                        not_found_policy: MkImageNotFoundPolicy::Fail,
-                        outputs: MkImageOutputs::default(),
-                    },
-                )?;
-                // This condition intentionally performs a fresh, immediate
-                // search, but shares the same coherent compatibility snapshot.
-                let payload = MkImagePayload {
-                    asset_id: *asset_id,
-                    wait: MkWaitOptions {
-                        timeout_ms: 0,
-                        poll_interval_ms: 1,
-                    },
-                    region: super::SearchRegion::Desktop,
-                    tolerance: 0,
-                    alpha: super::AlphaPolicy::Compare,
-                    return_point: super::ReturnPoint::Center,
-                    not_found_policy: MkImageNotFoundPolicy::Fail,
-                    outputs: Default::default(),
-                };
+            MkCondition::ImageSearch { search, found } => {
+                let payload = search.as_payload();
+                // Exactly one immediate backend call per condition evaluation.
+                let point = self.backends.screen.find_image(macro_id, &payload)?;
                 Self::write_image_result(v, &payload, point);
                 Ok(point.is_some() == *found)
+            }
+            MkCondition::PreviousImageResult { asset_id, found } => {
+                let key = asset_id
+                    .map(super::screen::image_found_variable)
+                    .unwrap_or_else(|| "last_image_found".into());
+                // No recorded result is explicitly treated as "not found".
+                let recorded = matches!(v.get(&key), Some(MkValue::Boolean(true)));
+                Ok(recorded == *found)
             }
             MkCondition::PixelResult {
                 target,

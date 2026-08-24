@@ -415,8 +415,11 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if version <= 3 {
         migrate_v3_to_v4(&mut value);
     }
+    if version <= 4 {
+        migrate_v4_to_v5(&mut value)?;
+    }
     let mut doc: MkMacroDocument = match version {
-        0 | 1 | 2 | 3 | 4 => serde_json::from_value(value)
+        0 | 1 | 2 | 3 | 4 | 5 => serde_json::from_value(value)
             .context("mkmacros.json does not match the macro schema")?,
         _ => unreachable!(),
     };
@@ -424,6 +427,74 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+/// Splits the schema-4 ambiguous `image_result` condition into an explicit live
+/// search. Previous-result conditions did not exist in schema 4.
+fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<()> {
+    fn condition(value: &mut serde_json::Value) -> Result<()> {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("condition is not an object"))?;
+        match object.get("type").and_then(serde_json::Value::as_str) {
+            Some("image_result") => {
+                let asset_id = object
+                    .remove("asset_id")
+                    .ok_or_else(|| anyhow::anyhow!("legacy image_result has no asset_id"))?;
+                object.insert("type".into(), serde_json::json!("image_search"));
+                object.insert(
+                    "search".into(),
+                    serde_json::json!({
+                        "asset_id": asset_id,
+                        "region": {"type": "desktop"},
+                        "tolerance": 0,
+                        "alpha": "compare",
+                        "return_point": "center"
+                    }),
+                );
+            }
+            Some("all" | "any") => {
+                if let Some(children) = object.get_mut("conditions").and_then(|v| v.as_array_mut())
+                {
+                    for child in children {
+                        condition(child)?;
+                    }
+                }
+            }
+            Some("not") => {
+                if let Some(child) = object.get_mut("condition") {
+                    condition(child)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    if let Some(macros) = value.get_mut("macros").and_then(|v| v.as_array_mut()) {
+        for mac in macros {
+            if let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) {
+                for step in steps {
+                    let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut())
+                    else {
+                        continue;
+                    };
+                    let ty = action.get("type").and_then(|v| v.as_str());
+                    if matches!(ty, Some("if" | "while_start")) {
+                        if let Some(data) = action.get_mut("data") {
+                            condition(data)?;
+                        }
+                    } else if ty == Some("wait_until") {
+                        if let Some(c) = action.get_mut("data").and_then(|v| v.get_mut("condition"))
+                        {
+                            condition(c)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(5);
+    Ok(())
 }
 /// Adds the document-wide recorder control without replacing a value supplied by
 /// a forward-compatible older writer.
@@ -554,7 +625,7 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkPoint, SearchRegion};
+    use crate::mkmacro::{AlphaPolicy, MkPoint, ReturnPoint, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
     fn document() -> MkMacroDocument {
         MkMacroDocument {
@@ -578,6 +649,74 @@ mod tests {
                 image_assets: vec![],
             }],
         }
+    }
+    #[test]
+    fn v4_image_conditions_migrate_recursively_with_live_search_defaults() {
+        let legacy = serde_json::json!({
+            "schema_version": 4,
+            "macros": [{"id":1,"name":"m","steps":[{"id":2,"action":{
+                "type":"wait_until","data":{"wait":{"timeout_ms":1,"poll_interval_ms":1},
+                "condition":{"type":"all","conditions":[
+                    {"type":"image_result","asset_id":7,"found":true},
+                    {"type":"not","condition":{"type":"any","conditions":[
+                        {"type":"image_result","asset_id":8,"found":false}
+                    ]}}
+                ]}}
+            }}]}]
+        });
+        let mut migrated = legacy;
+        migrate_v4_to_v5(&mut migrated).unwrap();
+        assert_eq!(migrated["schema_version"], 5);
+        let doc: MkMacroDocument = serde_json::from_value(migrated).unwrap();
+        let MkAction::WaitUntil { condition, .. } = &doc.macros[0].steps[0].action else {
+            panic!()
+        };
+        let json = serde_json::to_value(condition).unwrap();
+        let first = &json["conditions"][0];
+        assert_eq!(first["type"], "image_search");
+        assert_eq!(first["found"], true);
+        assert_eq!(
+            first["search"],
+            serde_json::json!({
+                "asset_id":7,"region":{"type":"desktop"},"tolerance":0,
+                "alpha":"compare","return_point":"center"
+            })
+        );
+        let nested = &json["conditions"][1]["condition"]["conditions"][0];
+        assert_eq!(nested["type"], "image_search");
+        assert_eq!(nested["found"], false);
+    }
+
+    #[test]
+    fn v5_condition_types_round_trip_with_distinct_names() {
+        let conditions = vec![
+            MkCondition::ImageSearch {
+                search: MkImageSearchCondition {
+                    asset_id: 3,
+                    region: SearchRegion::Desktop,
+                    tolerance: 4,
+                    alpha: AlphaPolicy::Ignore,
+                    return_point: ReturnPoint::TopLeft,
+                },
+                found: false,
+            },
+            MkCondition::PreviousImageResult {
+                asset_id: None,
+                found: true,
+            },
+            MkCondition::PreviousImageResult {
+                asset_id: Some(3),
+                found: false,
+            },
+        ];
+        let json = serde_json::to_string(&conditions).unwrap();
+        assert!(json.contains("image_search"));
+        assert!(json.contains("previous_image_result"));
+        assert!(!json.contains("\"type\":\"image_result\""));
+        assert_eq!(
+            serde_json::from_str::<Vec<MkCondition>>(&json).unwrap(),
+            conditions
+        );
     }
     #[test]
     fn missing_empty_and_malformed_are_recoverable() {

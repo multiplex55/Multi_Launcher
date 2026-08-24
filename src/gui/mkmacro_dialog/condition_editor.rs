@@ -2,7 +2,10 @@
 
 use super::action_editor::{matcher_ui, target_ui, value_ui};
 use crate::mkmacro::variables::{MkPoint, MkValue};
-use crate::mkmacro::{MkCompareOp, MkCondition, MkCoordinateTarget, MkImageAsset, MkWindowMatcher};
+use crate::mkmacro::{
+    AlphaPolicy, MkCompareOp, MkCondition, MkCoordinateTarget, MkImageAsset,
+    MkImageSearchCondition, MkWindowMatcher, ReturnPoint, SearchRegion,
+};
 use eframe::egui;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,7 +13,8 @@ pub enum ConditionKind {
     Variable,
     WindowExists,
     WindowActive,
-    ImageResult,
+    ImageSearch,
+    PreviousImageResult,
     PixelResult,
     All,
     Any,
@@ -30,8 +34,18 @@ pub fn default_condition(kind: ConditionKind) -> MkCondition {
         ConditionKind::WindowActive => MkCondition::WindowActive {
             matcher: default_matcher(),
         },
-        ConditionKind::ImageResult => MkCondition::ImageResult {
-            asset_id: 1,
+        ConditionKind::ImageSearch => MkCondition::ImageSearch {
+            search: MkImageSearchCondition {
+                asset_id: 1,
+                region: SearchRegion::Desktop,
+                tolerance: 0,
+                alpha: AlphaPolicy::Compare,
+                return_point: ReturnPoint::Center,
+            },
+            found: true,
+        },
+        ConditionKind::PreviousImageResult => MkCondition::PreviousImageResult {
+            asset_id: None,
             found: true,
         },
         ConditionKind::PixelResult => MkCondition::PixelResult {
@@ -61,7 +75,8 @@ pub fn condition_kind(c: &MkCondition) -> ConditionKind {
         MkCondition::Variable { .. } => ConditionKind::Variable,
         MkCondition::WindowExists { .. } => ConditionKind::WindowExists,
         MkCondition::WindowActive { .. } => ConditionKind::WindowActive,
-        MkCondition::ImageResult { .. } => ConditionKind::ImageResult,
+        MkCondition::ImageSearch { .. } => ConditionKind::ImageSearch,
+        MkCondition::PreviousImageResult { .. } => ConditionKind::PreviousImageResult,
         MkCondition::PixelResult { .. } => ConditionKind::PixelResult,
         MkCondition::All { .. } => ConditionKind::All,
         MkCondition::Any { .. } => ConditionKind::Any,
@@ -138,7 +153,8 @@ pub fn condition_ui_with_assets(
                     ConditionKind::Variable,
                     ConditionKind::WindowExists,
                     ConditionKind::WindowActive,
-                    ConditionKind::ImageResult,
+                    ConditionKind::ImageSearch,
+                    ConditionKind::PreviousImageResult,
                     ConditionKind::PixelResult,
                     ConditionKind::All,
                     ConditionKind::Any,
@@ -182,7 +198,7 @@ pub fn condition_ui_with_assets(
                     requested = Some(vec![]);
                 }
             }
-            MkCondition::ImageResult { asset_id, found } => {
+            MkCondition::ImageSearch { search: MkImageSearchCondition { asset_id, .. }, found } => {
                 if assets.is_empty() {
                     ui.colored_label(egui::Color32::YELLOW, "No reference images. Create or import one through Find Image or Click Image.");
                 } else {
@@ -196,6 +212,16 @@ pub fn condition_ui_with_assets(
                         ui.selectable_value(found, true, "Found");
                         ui.selectable_value(found, false, "Not found");
                     });
+            }
+            MkCondition::PreviousImageResult { asset_id, found } => {
+                let mut specific = asset_id.is_some();
+                if ui.checkbox(&mut specific, "Use a specific image's latest result").changed() {
+                    *asset_id = specific.then_some(assets.first().map_or(1, |a| a.id));
+                }
+                if let Some(id) = asset_id {
+                    egui::ComboBox::from_label("Reference image").selected_text(super::action_editor::image_asset_label(*id, assets)).show_ui(ui, |ui| for asset in assets { ui.selectable_value(id, asset.id, super::action_editor::image_asset_label(asset.id, assets)); });
+                }
+                egui::ComboBox::from_label("Result").selected_text(if *found { "Found" } else { "Not found" }).show_ui(ui, |ui| { ui.selectable_value(found, true, "Found"); ui.selectable_value(found, false, "Not found"); });
             }
             MkCondition::PixelResult {
                 target,
@@ -256,7 +282,8 @@ fn kind_label(k: ConditionKind) -> &'static str {
         ConditionKind::Variable => "Variable comparison",
         ConditionKind::WindowExists => "Window exists",
         ConditionKind::WindowActive => "Window active",
-        ConditionKind::ImageResult => "Image found / not found",
+        ConditionKind::ImageSearch => "Search image now",
+        ConditionKind::PreviousImageResult => "Previous image result",
         ConditionKind::PixelResult => "Pixel matches",
         ConditionKind::All => "ALL",
         ConditionKind::Any => "ANY",
@@ -304,8 +331,8 @@ mod tests {
                         MkCondition::WindowExists {
                             matcher: default_matcher(),
                         },
-                        MkCondition::ImageResult {
-                            asset_id: 42,
+                        MkCondition::PreviousImageResult {
+                            asset_id: Some(42),
                             found: false,
                         },
                     ],

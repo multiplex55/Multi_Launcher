@@ -555,7 +555,27 @@ fn condition(
         MkCondition::WindowExists { matcher: x } | MkCondition::WindowActive { matcher: x } => {
             matcher(x, m, s, o)
         }
-        MkCondition::ImageResult { asset_id, .. } => asset(*asset_id, m, s, root, o),
+        MkCondition::ImageSearch { search, .. } => {
+            asset(search.asset_id, m, s, root, o);
+            match &search.region {
+                SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => push(
+                    o,
+                    m,
+                    s,
+                    "invalid_image_region",
+                    "Image search rectangle is invalid",
+                ),
+                SearchRegion::Window { matcher: x } | SearchRegion::ClientArea { matcher: x } => {
+                    matcher(x, m, s, o)
+                }
+                _ => {}
+            }
+        }
+        MkCondition::PreviousImageResult {
+            asset_id: Some(asset_id),
+            ..
+        } => asset(*asset_id, m, s, root, o),
+        MkCondition::PreviousImageResult { asset_id: None, .. } => {}
         MkCondition::All { conditions } | MkCondition::Any { conditions } => {
             for x in conditions {
                 condition(x, m, s, root, o)

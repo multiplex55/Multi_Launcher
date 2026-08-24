@@ -13,6 +13,11 @@ pub(crate) fn image_result_variable(asset_id: u64) -> String {
     format!("__image.{asset_id}")
 }
 
+/// Runtime-only variable recording whether the latest search for an asset found it.
+pub(crate) fn image_found_variable(asset_id: u64) -> String {
+    format!("__image_found.{asset_id}")
+}
+
 pub(crate) trait WindowsGeometry: Send + Sync {
     /// `(x, y, width, height)`, in desktop pixels. Width/height remain signed so
     /// malformed platform data can be diagnosed rather than silently cast.
