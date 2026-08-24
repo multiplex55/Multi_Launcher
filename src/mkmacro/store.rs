@@ -736,9 +736,9 @@ mod tests {
         );
         for (step, found) in [(0, true), (1, false), (2, true)] {
             let action = &doc.macros[0].steps[step].action;
-            let condition = match action {
+            let condition: &MkCondition = match action {
                 MkAction::If(c) => c,
-                MkAction::WhileStart { condition, .. } => condition.as_ref(),
+                MkAction::WhileStart { condition, .. } => condition,
                 MkAction::WaitUntil { condition, .. } => condition,
                 _ => unreachable!(),
             };
@@ -768,7 +768,7 @@ mod tests {
             else {
                 panic!()
             };
-            assert_eq!(*actual, found);
+            assert_eq!(actual, found);
             assert_eq!(search.region, SearchRegion::Desktop);
             assert_eq!(search.tolerance, 0);
             assert_eq!(search.alpha, AlphaPolicy::Compare);
