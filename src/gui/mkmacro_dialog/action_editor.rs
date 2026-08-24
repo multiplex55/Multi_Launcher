@@ -23,6 +23,8 @@ pub struct ActionEditorState {
     pub editor: Option<super::action_catalog::EditorKind>,
     position_capture: Option<PositionCaptureState>,
     pub(crate) draft_generation: u64,
+    /// Set by defensive asynchronous completion application, independently of document dirty state.
+    pub(crate) draft_changed: bool,
     pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
     /// Typed requests collected by the widget and executed only when Apply confirms the draft.
     pub add_smooth_move: bool,
@@ -42,6 +44,22 @@ pub enum InsertionIntent {
     Plain { after_step_id: Option<u64> },
     Wrap { step_ids: Vec<u64> },
     EditExisting { step_id: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConditionOperationDestination {
+    pub macro_id: u64,
+    pub step_id: Option<u64>,
+    pub draft_generation: u64,
+    pub path: super::condition_editor::ConditionPath,
+    pub operation: super::condition_editor::ConditionImageOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConditionOperationResult {
+    Asset(u64),
+    Rectangle(ScreenRect),
+    Matcher(MkWindowMatcher),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +110,79 @@ struct NativePositionPicker {
 }
 
 impl ActionEditorState {
+    pub fn condition_destination(
+        &self,
+        macro_id: u64,
+        request: super::condition_editor::ConditionImageRequest,
+    ) -> ConditionOperationDestination {
+        ConditionOperationDestination {
+            macro_id,
+            step_id: self.editing_id,
+            draft_generation: self.draft_generation,
+            path: request.path,
+            operation: request.operation,
+        }
+    }
+    /// Applies only to the exact still-live condition and compatible field selected when work began.
+    pub fn apply_condition_result(
+        &mut self,
+        destination: &ConditionOperationDestination,
+        result: ConditionOperationResult,
+        current_macro_id: Option<u64>,
+    ) -> bool {
+        if current_macro_id != Some(destination.macro_id)
+            || self.draft_generation != destination.draft_generation
+            || self.editing_id != destination.step_id
+        {
+            return false;
+        }
+        let Some(step) = self.draft.as_mut() else {
+            return false;
+        };
+        let root = match &mut step.action {
+            MkAction::If(c)
+            | MkAction::WhileStart { condition: c }
+            | MkAction::WaitUntil { condition: c, .. } => c,
+            _ => return false,
+        };
+        let Some(MkCondition::ImageSearch { search, .. }) =
+            super::condition_editor::resolve_condition_mut(root, &destination.path)
+        else {
+            return false;
+        };
+        let applied = match (&destination.operation, result) {
+            (
+                super::condition_editor::ConditionImageOperation::ImportPng
+                | super::condition_editor::ConditionImageOperation::CaptureRectangle,
+                ConditionOperationResult::Asset(id),
+            ) => {
+                search.asset_id = id;
+                true
+            }
+            (
+                super::condition_editor::ConditionImageOperation::PickRectangle,
+                ConditionOperationResult::Rectangle(rect),
+            ) if matches!(search.region, SearchRegion::Rectangle { .. }) => {
+                search.region = SearchRegion::Rectangle { rect };
+                true
+            }
+            (
+                super::condition_editor::ConditionImageOperation::PickWindow,
+                ConditionOperationResult::Matcher(matcher),
+            ) => match &mut search.region {
+                SearchRegion::Window { matcher: m } | SearchRegion::ClientArea { matcher: m } => {
+                    *m = matcher;
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if applied {
+            self.draft_changed = true;
+        }
+        applied
+    }
     fn start_import_from_selected_path(
         &mut self,
         store: std::sync::Arc<MkMacroStore>,
@@ -203,6 +294,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
+        self.draft_changed = false;
         self.add_smooth_move = false;
         self.add_activate_before = false;
         // The dialog supplies the precise insertion intent immediately after
@@ -232,6 +324,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
+        self.draft_changed = false;
         self.add_smooth_move = false;
         self.add_activate_before = false;
         self.insertion = Some(InsertionIntent::EditExisting { step_id: step.id });
@@ -1408,17 +1501,29 @@ fn action_ui(
             });
         }
         MkAction::If(condition) | MkAction::WhileStart { condition } => {
-            if let Some(path) =
+            if let Some(request) =
                 super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
             {
-                window_pick = Some(super::window_picker::MatcherPath::Condition(path));
+                if let super::condition_editor::ConditionEditorRequest::WindowMatcher { path } =
+                    request
+                {
+                    window_pick = Some(super::window_picker::MatcherPath::Condition(
+                        path.indexes().to_vec(),
+                    ));
+                }
             }
         }
         MkAction::WaitUntil { condition, wait } => {
-            if let Some(path) =
+            if let Some(request) =
                 super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
             {
-                window_pick = Some(super::window_picker::MatcherPath::Condition(path));
+                if let super::condition_editor::ConditionEditorRequest::WindowMatcher { path } =
+                    request
+                {
+                    window_pick = Some(super::window_picker::MatcherPath::Condition(
+                        path.indexes().to_vec(),
+                    ));
+                }
             }
             ui.horizontal(|ui| {
                 ui.label("Timeout (ms)");
