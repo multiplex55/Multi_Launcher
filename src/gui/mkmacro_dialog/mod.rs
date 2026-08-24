@@ -576,11 +576,11 @@ mod tests {
         };
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageFind(image.clone())),
-            "Asset 42 · Entire Desktop · tolerance 0 · fail if absent"
+            "Missing image #42 · Entire Desktop · fail if missing"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageClick(image)),
-            "Asset 42 · Entire Desktop · center · 2500 ms"
+            "Missing image #42 · Entire Desktop · center · 2500 ms"
         );
     }
 
