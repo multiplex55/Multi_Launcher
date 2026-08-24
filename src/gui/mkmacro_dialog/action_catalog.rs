@@ -842,8 +842,28 @@ pub fn draft_validation_contract(action: &MkAction) -> DraftValidationContract {
         MkAction::ImageFind(payload) | MkAction::ImageClick(payload) if payload.asset_id == 0 => {
             DraftValidationContract::AwaitingRequiredAsset
         }
+        MkAction::WaitUntil {
+            condition: MkCondition::ImageSearch { search, .. },
+            ..
+        } if search.asset_id == 0 => DraftValidationContract::AwaitingRequiredAsset,
         _ => DraftValidationContract::CommitReady,
     }
+}
+
+/// Catalog presets may give a canonical action a more discoverable authoring
+/// name without introducing a new persisted action variant.
+pub fn descriptor_name_matches_action(descriptor: &ActionDescriptor, action: &MkAction) -> bool {
+    descriptor.name == action_name(action)
+        || matches!(
+            (descriptor.name, action),
+            (
+                "Wait for Image" | "Wait for Image to Disappear",
+                MkAction::WaitUntil {
+                    condition: MkCondition::ImageSearch { .. },
+                    ..
+                }
+            )
+        )
 }
 
 /// Structural markers are complete actions at insertion time and intentionally
