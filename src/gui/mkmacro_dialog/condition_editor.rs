@@ -8,6 +8,59 @@ use crate::mkmacro::{
 };
 use eframe::egui;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ConditionPath(Vec<usize>);
+impl ConditionPath {
+    pub fn root() -> Self {
+        Self::default()
+    }
+    pub fn from_indexes(indexes: impl Into<Vec<usize>>) -> Self {
+        Self(indexes.into())
+    }
+    pub fn indexes(&self) -> &[usize] {
+        &self.0
+    }
+    fn prepend(&mut self, index: usize) {
+        self.0.insert(0, index);
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConditionImageOperation {
+    ImportPng,
+    CaptureRectangle,
+    PickRectangle,
+    PreviewRectangle,
+    HighlightMonitor,
+    PickWindow,
+    HighlightWindow,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConditionImageRequest {
+    pub path: ConditionPath,
+    pub operation: ConditionImageOperation,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConditionEditorRequest {
+    WindowMatcher { path: ConditionPath },
+    Image(ConditionImageRequest),
+}
+
+pub fn resolve_condition_mut<'a>(
+    mut condition: &'a mut MkCondition,
+    path: &ConditionPath,
+) -> Option<&'a mut MkCondition> {
+    for &index in path.indexes() {
+        condition = match condition {
+            MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+                conditions.get_mut(index)?
+            }
+            MkCondition::Not { condition } if index == 0 => condition,
+            _ => return None,
+        };
+    }
+    Some(condition)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConditionKind {
     Variable,
@@ -107,7 +160,10 @@ pub fn remove_child(c: &mut MkCondition, index: usize) -> bool {
     }
 }
 
-pub fn condition_ui(ui: &mut egui::Ui, condition: &mut MkCondition) -> Option<Vec<usize>> {
+pub fn condition_ui(
+    ui: &mut egui::Ui,
+    condition: &mut MkCondition,
+) -> Option<ConditionEditorRequest> {
     condition_ui_with_assets(ui, condition, &[])
 }
 
@@ -141,7 +197,7 @@ pub fn condition_ui_with_assets(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
     assets: &[MkImageAsset],
-) -> Option<Vec<usize>> {
+) -> Option<ConditionEditorRequest> {
     let mut requested = None;
     ui.group(|ui| {
         let kind = condition_kind(condition);
@@ -195,19 +251,39 @@ pub fn condition_ui_with_assets(
             }
             MkCondition::WindowExists { matcher } | MkCondition::WindowActive { matcher } => {
                 if matcher_ui(ui, matcher) {
-                    requested = Some(vec![]);
+                    requested = Some(ConditionEditorRequest::WindowMatcher {
+                        path: ConditionPath::root(),
+                    });
                 }
             }
-            MkCondition::ImageSearch { search: MkImageSearchCondition { asset_id, .. }, found } => {
-                if assets.is_empty() {
-                    ui.colored_label(egui::Color32::YELLOW, "No reference images. Create or import one through Find Image or Click Image.");
-                } else {
-                    egui::ComboBox::from_label("Reference image")
-                        .selected_text(if assets.iter().any(|asset| asset.id == *asset_id) { super::action_editor::image_asset_label(*asset_id, assets) } else { super::action_editor::image_asset_label(*asset_id, assets) })
-                        .show_ui(ui, |ui| for id in assets { ui.selectable_value(asset_id, id.id, super::action_editor::image_asset_label(id.id, assets)); });
+            MkCondition::ImageSearch { search, found } => {
+                if let Some(operation) = super::image_search_controls::show_shared_fields(
+                    ui,
+                    &mut search.asset_id,
+                    &mut search.region,
+                    &mut search.tolerance,
+                    &mut search.alpha,
+                    &mut search.return_point,
+                    assets,
+                ) {
+                    use super::image_search_controls::SharedImageOperation as S;
+                    use ConditionImageOperation as O;
+                    let operation = match operation {
+                        S::ImportPng => O::ImportPng,
+                        S::CaptureRectangle => O::CaptureRectangle,
+                        S::PickRectangle => O::PickRectangle,
+                        S::PreviewRectangle => O::PreviewRectangle,
+                        S::HighlightMonitor => O::HighlightMonitor,
+                        S::PickWindow => O::PickWindow,
+                        S::HighlightWindow => O::HighlightWindow,
+                    };
+                    requested = Some(ConditionEditorRequest::Image(ConditionImageRequest {
+                        path: ConditionPath::root(),
+                        operation,
+                    }));
                 }
-                egui::ComboBox::from_label("Result")
-                    .selected_text(if *found { "Found" } else { "Not found" })
+                egui::ComboBox::from_label("Expected")
+                    .selected_text(if *found { "Found" } else { "Not Found" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(found, true, "Found");
                         ui.selectable_value(found, false, "Not found");
@@ -215,13 +291,31 @@ pub fn condition_ui_with_assets(
             }
             MkCondition::PreviousImageResult { asset_id, found } => {
                 let mut specific = asset_id.is_some();
-                if ui.checkbox(&mut specific, "Use a specific image's latest result").changed() {
+                if ui
+                    .checkbox(&mut specific, "Use a specific image's latest result")
+                    .changed()
+                {
                     *asset_id = specific.then_some(assets.first().map_or(1, |a| a.id));
                 }
                 if let Some(id) = asset_id {
-                    egui::ComboBox::from_label("Reference image").selected_text(super::action_editor::image_asset_label(*id, assets)).show_ui(ui, |ui| for asset in assets { ui.selectable_value(id, asset.id, super::action_editor::image_asset_label(asset.id, assets)); });
+                    egui::ComboBox::from_label("Reference image")
+                        .selected_text(super::action_editor::image_asset_label(*id, assets))
+                        .show_ui(ui, |ui| {
+                            for asset in assets {
+                                ui.selectable_value(
+                                    id,
+                                    asset.id,
+                                    super::action_editor::image_asset_label(asset.id, assets),
+                                );
+                            }
+                        });
                 }
-                egui::ComboBox::from_label("Result").selected_text(if *found { "Found" } else { "Not found" }).show_ui(ui, |ui| { ui.selectable_value(found, true, "Found"); ui.selectable_value(found, false, "Not found"); });
+                egui::ComboBox::from_label("Result")
+                    .selected_text(if *found { "Found" } else { "Not found" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(found, true, "Found");
+                        ui.selectable_value(found, false, "Not found");
+                    });
             }
             MkCondition::PixelResult {
                 target,
@@ -241,9 +335,9 @@ pub fn condition_ui_with_assets(
             }
             MkCondition::Not { condition } => {
                 ui.indent("not-child", |ui| {
-                    if let Some(mut p) = condition_ui_with_assets(ui, condition, assets) {
-                        p.insert(0, 0);
-                        requested = Some(p)
+                    if let Some(mut request) = condition_ui_with_assets(ui, condition, assets) {
+                        prepend_request(&mut request, 0);
+                        requested = Some(request)
                     }
                 });
             }
@@ -255,14 +349,14 @@ fn group_ui(
     ui: &mut egui::Ui,
     conditions: &mut Vec<MkCondition>,
     assets: &[MkImageAsset],
-) -> Option<Vec<usize>> {
+) -> Option<ConditionEditorRequest> {
     let mut remove = None;
     let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
-            if let Some(mut p) = condition_ui_with_assets(ui, child, assets) {
-                p.insert(0, index);
-                requested = Some(p);
+            if let Some(mut request) = condition_ui_with_assets(ui, child, assets) {
+                prepend_request(&mut request, index);
+                requested = Some(request);
             }
             if ui.button("Remove").clicked() {
                 remove = Some(index);
@@ -276,6 +370,12 @@ fn group_ui(
         conditions.push(default_condition(ConditionKind::Variable));
     }
     requested
+}
+fn prepend_request(request: &mut ConditionEditorRequest, index: usize) {
+    match request {
+        ConditionEditorRequest::WindowMatcher { path }
+        | ConditionEditorRequest::Image(ConditionImageRequest { path, .. }) => path.prepend(index),
+    }
 }
 fn kind_label(k: ConditionKind) -> &'static str {
     match k {
@@ -365,5 +465,68 @@ mod tests {
         assert!(append_child(&mut edited));
         assert!(remove_child(&mut edited, 4));
         assert_eq!(edited, nested);
+    }
+
+    #[test]
+    fn typed_paths_resolve_nested_groups_and_not_strictly() {
+        let image = default_condition(ConditionKind::ImageSearch);
+        let mut root = MkCondition::All {
+            conditions: vec![
+                image.clone(),
+                MkCondition::Not {
+                    condition: Box::new(image.clone()),
+                },
+                MkCondition::Any {
+                    conditions: vec![MkCondition::All {
+                        conditions: vec![image],
+                    }],
+                },
+            ],
+        };
+        for path in [vec![0], vec![1, 0], vec![2, 0, 0]] {
+            assert!(matches!(
+                resolve_condition_mut(&mut root, &ConditionPath::from_indexes(path)),
+                Some(MkCondition::ImageSearch { .. })
+            ));
+        }
+        assert!(resolve_condition_mut(&mut root, &ConditionPath::from_indexes(vec![9])).is_none());
+        assert!(
+            resolve_condition_mut(&mut root, &ConditionPath::from_indexes(vec![1, 1])).is_none()
+        );
+        replace_condition(
+            resolve_condition_mut(&mut root, &ConditionPath::from_indexes(vec![0])).unwrap(),
+            ConditionKind::Variable,
+        );
+        assert!(!matches!(
+            resolve_condition_mut(&mut root, &ConditionPath::from_indexes(vec![0])),
+            Some(MkCondition::ImageSearch { .. })
+        ));
+    }
+
+    #[test]
+    fn request_prepending_preserves_operation_and_full_path() {
+        for operation in [
+            ConditionImageOperation::ImportPng,
+            ConditionImageOperation::CaptureRectangle,
+            ConditionImageOperation::PickRectangle,
+            ConditionImageOperation::PreviewRectangle,
+            ConditionImageOperation::HighlightMonitor,
+            ConditionImageOperation::PickWindow,
+            ConditionImageOperation::HighlightWindow,
+        ] {
+            let mut request = ConditionEditorRequest::Image(ConditionImageRequest {
+                path: ConditionPath::root(),
+                operation,
+            });
+            prepend_request(&mut request, 1);
+            prepend_request(&mut request, 0);
+            assert_eq!(
+                request,
+                ConditionEditorRequest::Image(ConditionImageRequest {
+                    path: ConditionPath::from_indexes(vec![0, 1]),
+                    operation
+                })
+            );
+        }
     }
 }
