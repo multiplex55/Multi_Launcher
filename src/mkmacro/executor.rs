@@ -1,10 +1,11 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
-    Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan, MkImagePayload,
-    MkKey, MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkPlayback, MkPoint, MkProcessPayload,
-    MkPromptInputPayload, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher,
-    MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend, PromptRequest,
-    PromptResponse, RuntimeVariables, interpolate,
+    Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan,
+    MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMacroStore, MkMouseButton,
+    MkMouseScrollAxis, MkPlayback, MkPoint, MkProcessPayload, MkPromptInputPayload, MkTextPayload,
+    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
+    MkWindowPayload, MkWindowState, PromptBackend, PromptRequest, PromptResponse, RuntimeVariables,
+    interpolate,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -865,15 +866,17 @@ mod tests {
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs::default(),
         };
         let mut vars = RuntimeVariables::new();
         assert_eq!(
             executor.wait_image(1, &payload(7), &mut vars).unwrap(),
-            MkPoint { x: 1, y: 1 }
+            Some(MkPoint { x: 1, y: 1 })
         );
         assert_eq!(
             executor.wait_image(1, &payload(8), &mut vars).unwrap(),
-            MkPoint { x: 1, y: 1 }
+            Some(MkPoint { x: 1, y: 1 })
         );
         for key in [
             "last_image",
@@ -898,16 +901,14 @@ mod tests {
             .lock()
             .unwrap()
             .insert("image".into(), false);
-        let error = executor.wait_image(1, &payload(7), &mut vars).unwrap_err();
-        assert_eq!(error.kind, DiagnosticKind::Timeout);
-        assert_eq!(error.message, "Image was not found within 0 ms");
         assert_eq!(
-            error.context.get("timeout_ms").map(String::as_str),
-            Some("0")
+            executor.wait_image(1, &payload(7), &mut vars).unwrap(),
+            None
         );
-        assert!(error.context.contains_key("elapsed_ms"));
         assert!(!vars.contains_key("__image.7"));
         assert!(vars.contains_key("__image.8"));
+        assert_eq!(vars.get("last_image_found"), Some(&MkValue::Boolean(false)));
+        assert!(!vars.contains_key("last_image_x"));
     }
     #[test]
     fn stop_wakes_a_long_wait() {
@@ -1410,7 +1411,14 @@ impl Executor {
             MkAction::PromptInput(p) => self.prompt_input(p, v),
             MkAction::ImageFind(p) => self.wait_image(macro_id, p, v).map(|_| ()),
             MkAction::ImageClick(p) => {
-                let pt = self.wait_image(macro_id, p, v)?;
+                let pt = self.wait_image(macro_id, p, v)?.ok_or_else(|| {
+                    ExecutionDiagnostic::new(
+                        DiagnosticKind::TargetNotFound,
+                        "Click Image requires a matching point",
+                    )
+                    .context("macro_id", macro_id.to_string())
+                    .context("asset_id", p.asset_id.to_string())
+                })?;
                 self.backends.input.move_mouse(pt)?;
                 set_point(v, "mouse", pt);
                 set_point(v, "last_point", pt);
@@ -1533,24 +1541,15 @@ impl Executor {
         macro_id: u64,
         p: &MkImagePayload,
         v: &mut RuntimeVariables,
-    ) -> ExecResult<MkPoint> {
-        let image_variable = super::screen::image_result_variable(p.asset_id);
-        v.remove(&image_variable);
-        for key in ["last_image", "last_image_x", "last_image_y"] {
-            v.remove(key);
-        }
-        let mut found = None;
+    ) -> ExecResult<Option<MkPoint>> {
         let started = Instant::now();
-        let result = loop {
+        let result: ExecResult<Option<MkPoint>> = loop {
             if let Err(error) = self.control.checkpoint() {
                 break Err(error);
             }
             match self.backends.screen.find_image(macro_id, p) {
                 Err(error) => break Err(error),
-                Ok(Some(point)) => {
-                    found = Some(point);
-                    break Ok(());
-                }
+                Ok(Some(point)) => break Ok(Some(point)),
                 Ok(None) => {}
             }
             let elapsed = started.elapsed();
@@ -1560,12 +1559,15 @@ impl Executor {
                 if let Err(error) = self.control.checkpoint() {
                     break Err(error);
                 }
-                break Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::Timeout,
-                    format!("Image was not found within {} ms", p.wait.timeout_ms),
-                )
-                .context("timeout_ms", p.wait.timeout_ms.to_string())
-                .context("elapsed_ms", elapsed.as_millis().to_string()));
+                break match p.not_found_policy {
+                    MkImageNotFoundPolicy::Continue => Ok(None),
+                    MkImageNotFoundPolicy::Fail => Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::Timeout,
+                        format!("Image was not found within {} ms", p.wait.timeout_ms),
+                    )
+                    .context("timeout_ms", p.wait.timeout_ms.to_string())
+                    .context("elapsed_ms", elapsed.as_millis().to_string())),
+                };
             }
             if let Err(error) = self.wait(
                 Duration::from_millis(p.wait.poll_interval_ms.max(1))
@@ -1574,34 +1576,69 @@ impl Executor {
                 break Err(error);
             }
         };
-        v.insert(
-            "last_image_result".into(),
-            MkValue::Boolean(found.is_some()),
-        );
-        v.insert("last_image_found".into(), MkValue::Boolean(found.is_some()));
-        if let Some(point) = found {
-            v.insert(image_variable, MkValue::Point(point));
-            v.insert("last_image".into(), MkValue::Point(point));
-            set_point(v, "last_image", point);
-            v.insert("last_image_x".into(), MkValue::Number(point.x.into()));
-            v.insert("last_image_y".into(), MkValue::Number(point.y.into()));
-        }
-        match (result, found) {
-            (_, Some(point)) => Ok(point),
-            (Err(error), None) => Err(error
+        match result {
+            Ok(point) => {
+                Self::write_image_result(v, p, point);
+                Ok(point)
+            }
+            Err(error) => Err(error
                 .context("macro_id", macro_id.to_string())
                 .context("asset_id", p.asset_id.to_string())
                 .context("region", format!("{:?}", p.region))
                 .context("tolerance", p.tolerance.to_string())
                 .context("alpha", format!("{:?}", p.alpha))
-                .context("poll_interval_ms", p.wait.poll_interval_ms.to_string())),
-            (Ok(()), None) => Err(ExecutionDiagnostic::new(
-                DiagnosticKind::TargetNotFound,
-                "Target image was not found",
-            )
-            .context("macro_id", macro_id.to_string())
-            .context("asset_id", p.asset_id.to_string())
-            .context("region", format!("{:?}", p.region))),
+                .context("timeout_ms", p.wait.timeout_ms.to_string())
+                .context("poll_interval_ms", p.wait.poll_interval_ms.to_string())
+                .context("elapsed_ms", started.elapsed().as_millis().to_string())),
+        }
+    }
+    /// Commits one completed search snapshot. Technical errors intentionally
+    /// leave the previous snapshot untouched: they are not a negative search.
+    fn write_image_result(v: &mut RuntimeVariables, p: &MkImagePayload, point: Option<MkPoint>) {
+        let found = point.is_some();
+        v.insert("last_image_result".into(), MkValue::Boolean(found));
+        v.insert("last_image_found".into(), MkValue::Boolean(found));
+        let asset = super::screen::image_result_variable(p.asset_id);
+        if let Some(point) = point {
+            v.insert(asset, MkValue::Point(point));
+            v.insert("last_image".into(), MkValue::Point(point));
+            set_point(v, "last_image", point);
+            v.insert("last_image_x".into(), MkValue::Number(point.x.into()));
+            v.insert("last_image_y".into(), MkValue::Number(point.y.into()));
+        } else {
+            v.remove(&asset);
+            for key in [
+                "last_image",
+                "last_image.x",
+                "last_image.y",
+                "last_image_x",
+                "last_image_y",
+            ] {
+                v.remove(key);
+            }
+        }
+        for (name, value) in [
+            (&p.outputs.found, MkValue::Boolean(found)),
+            (
+                &p.outputs.point,
+                point.map(MkValue::Point).unwrap_or(MkValue::Null),
+            ),
+            (
+                &p.outputs.x,
+                point
+                    .map(|p| MkValue::Number(p.x.into()))
+                    .unwrap_or(MkValue::Null),
+            ),
+            (
+                &p.outputs.y,
+                point
+                    .map(|p| MkValue::Number(p.y.into()))
+                    .unwrap_or(MkValue::Null),
+            ),
+        ] {
+            if let Some(name) = name {
+                v.insert(name.clone(), value);
+            }
         }
     }
     fn wait_condition(
@@ -1696,19 +1733,26 @@ impl Executor {
                         tolerance: 0,
                         alpha: super::AlphaPolicy::Compare,
                         return_point: super::ReturnPoint::Center,
+                        not_found_policy: MkImageNotFoundPolicy::Fail,
+                        outputs: MkImageOutputs::default(),
                     },
                 )?;
-                v.insert(
-                    "last_image_result".into(),
-                    MkValue::Boolean(point.is_some()),
-                );
-                v.insert("last_image_found".into(), MkValue::Boolean(point.is_some()));
-                if let Some(p) = point {
-                    v.insert("last_image".into(), MkValue::Point(p));
-                    set_point(v, "last_image", p);
-                    v.insert("last_image_x".into(), MkValue::Number(p.x.into()));
-                    v.insert("last_image_y".into(), MkValue::Number(p.y.into()));
+                // This condition intentionally performs a fresh, immediate
+                // search, but shares the same coherent compatibility snapshot.
+                let payload = MkImagePayload {
+                    asset_id: *asset_id,
+                    wait: MkWaitOptions {
+                        timeout_ms: 0,
+                        poll_interval_ms: 1,
+                    },
+                    region: super::SearchRegion::Desktop,
+                    tolerance: 0,
+                    alpha: super::AlphaPolicy::Compare,
+                    return_point: super::ReturnPoint::Center,
+                    not_found_policy: MkImageNotFoundPolicy::Fail,
+                    outputs: Default::default(),
                 };
+                Self::write_image_result(v, &payload, point);
                 Ok(point.is_some() == *found)
             }
             MkCondition::PixelResult {

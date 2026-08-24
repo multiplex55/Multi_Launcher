@@ -74,8 +74,9 @@ mod tests {
     use super::*;
     use crate::mkmacro::{
         AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCoordinateTarget, MkHotkey,
-        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
-        MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
+        MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
+        MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint,
+        SCHEMA_VERSION, SearchRegion,
     };
     use std::{
         fs, thread,
@@ -467,10 +468,12 @@ mod tests {
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
         };
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageFind(image.clone())),
-            "Asset 42 · Entire Desktop · tolerance 0"
+            "Asset 42 · Entire Desktop · tolerance 0 · fail if absent"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageClick(image)),

@@ -371,6 +371,42 @@ pub struct MkWindowMoveResizePayload {
     pub height: Option<u32>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkImageNotFoundPolicy {
+    Continue,
+    Fail,
+}
+impl Default for MkImageNotFoundPolicy {
+    /// Authoring default. Persisted legacy data deliberately uses
+    /// `legacy_image_not_found_policy` instead.
+    fn default() -> Self {
+        Self::Continue
+    }
+}
+fn legacy_image_not_found_policy() -> MkImageNotFoundPolicy {
+    MkImageNotFoundPolicy::Fail
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkImageOutputs {
+    #[serde(default)]
+    pub found: Option<String>,
+    #[serde(default)]
+    pub point: Option<String>,
+    #[serde(default)]
+    pub x: Option<String>,
+    #[serde(default)]
+    pub y: Option<String>,
+}
+impl MkImageOutputs {
+    pub fn normalize(&mut self) {
+        for value in [&mut self.found, &mut self.point, &mut self.x, &mut self.y] {
+            if value.as_ref().is_some_and(|name| name.trim().is_empty()) {
+                *value = None;
+            }
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkImagePayload {
     pub asset_id: u64,
     pub wait: MkWaitOptions,
@@ -382,6 +418,11 @@ pub struct MkImagePayload {
     pub alpha: AlphaPolicy,
     #[serde(default)]
     pub return_point: ReturnPoint,
+    /// Missing in historical documents meant that absence failed the action.
+    #[serde(default = "legacy_image_not_found_policy")]
+    pub not_found_policy: MkImageNotFoundPolicy,
+    #[serde(default)]
+    pub outputs: MkImageOutputs,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkUiPayload {
@@ -583,8 +624,32 @@ mod image_payload_tests {
         assert_eq!(p.tolerance, 0);
         assert_eq!(p.alpha, AlphaPolicy::Compare);
         assert_eq!(p.return_point, ReturnPoint::Center);
+        assert_eq!(p.not_found_policy, MkImageNotFoundPolicy::Fail);
+        assert_eq!(p.outputs, MkImageOutputs::default());
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<MkImagePayload>(&json).unwrap(), p);
+    }
+    #[test]
+    fn image_policy_and_outputs_have_stable_json_and_round_trip() {
+        let mut p: MkImagePayload =
+            serde_json::from_str(r#"{"asset_id":4,"wait":{"timeout_ms":10,"poll_interval_ms":2}}"#)
+                .unwrap();
+        p.not_found_policy = MkImageNotFoundPolicy::Continue;
+        p.outputs = MkImageOutputs {
+            found: Some("found_out".into()),
+            point: Some("point_out".into()),
+            x: Some("x_out".into()),
+            y: Some("y_out".into()),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""not_found_policy":"continue""#));
+        assert_eq!(serde_json::from_str::<MkImagePayload>(&json).unwrap(), p);
+        p.not_found_policy = MkImageNotFoundPolicy::Fail;
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains(r#""not_found_policy":"fail""#)
+        );
     }
     #[test]
     fn matched_window_coordinate_has_stable_tag_and_round_trips() {

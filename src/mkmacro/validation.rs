@@ -44,6 +44,35 @@ fn push(
         message: msg.into(),
     })
 }
+fn image_outputs(p: &MkImagePayload, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+    let slots = [
+        ("found", "invalid_image_output_found", &p.outputs.found),
+        ("point", "invalid_image_output_point", &p.outputs.point),
+        ("x", "invalid_image_output_x", &p.outputs.x),
+        ("y", "invalid_image_output_y", &p.outputs.y),
+    ];
+    let mut names = HashSet::new();
+    for (slot, code, name) in slots {
+        let Some(name) = name else { continue };
+        if let Err(reason) = validate_variable_name(name) {
+            push(
+                out,
+                m,
+                s,
+                code,
+                format!("Image output {slot} name '{name}' is invalid: {reason}"),
+            );
+        } else if !names.insert(name.as_str()) {
+            push(
+                out,
+                m,
+                s,
+                code,
+                format!("Image output {slot} duplicates configured name '{name}'"),
+            );
+        }
+    }
+}
 pub fn can_run(ds: &[MkDiagnostic]) -> bool {
     !ds.iter().any(|d| d.severity == DiagnosticSeverity::Fatal)
 }
@@ -269,6 +298,7 @@ pub fn validate_document_with_context(
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                     wait(&p.wait, m.id, sid, &mut out);
                     asset(p.asset_id, m.id, sid, asset_root, &mut out);
+                    image_outputs(p, m.id, sid, &mut out);
                     match &p.region {
                         SearchRegion::Rectangle { rect } => {
                             if let Err(error) = rect.validate_capture() {

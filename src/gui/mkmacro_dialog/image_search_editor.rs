@@ -1,7 +1,7 @@
 //! Reusable image-search action editor and its UI-only authoring state.
 use crate::mkmacro::{
-    AlphaPolicy, MkImagePayload, MkWindowMatcher, MonitorDescriptor, ReturnPoint, ScreenRect,
-    SearchRegion,
+    AlphaPolicy, MkImageNotFoundPolicy, MkImagePayload, MkWindowMatcher, MonitorDescriptor,
+    ReturnPoint, ScreenRect, SearchRegion,
 };
 use eframe::egui;
 
@@ -148,6 +148,7 @@ pub(super) fn show(
     store: &crate::mkmacro::MkMacroStore,
     macro_id: u64,
     authoring_busy: bool,
+    find_action: bool,
 ) -> Option<ImageEditorRequest> {
     let mut out = None;
     ui.heading("Reference Image");
@@ -183,6 +184,64 @@ pub(super) fn show(
 
     ui.separator();
     ui.heading("Search Settings");
+    if find_action {
+        egui::ComboBox::from_label("When not found")
+            .selected_text(match payload.not_found_policy {
+                MkImageNotFoundPolicy::Continue => "Continue",
+                MkImageNotFoundPolicy::Fail => "Fail Action",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut payload.not_found_policy,
+                    MkImageNotFoundPolicy::Continue,
+                    "Continue",
+                );
+                ui.selectable_value(
+                    &mut payload.not_found_policy,
+                    MkImageNotFoundPolicy::Fail,
+                    "Fail Action",
+                );
+            });
+        ui.separator();
+        ui.heading("Outputs");
+        ui.small("Optional named outputs; compatibility variables such as last_image_found remain available.");
+        for (label, value) in [
+            ("Found", &mut payload.outputs.found),
+            ("Point", &mut payload.outputs.point),
+            ("X", &mut payload.outputs.x),
+            ("Y", &mut payload.outputs.y),
+        ] {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.text_edit_singleline(value.get_or_insert_with(String::new));
+            });
+            if let Some(name) = value.as_deref() {
+                if let Err(error) = crate::mkmacro::variables::validate_variable_name(name) {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("{label}: {error}"));
+                }
+            }
+        }
+        let configured: Vec<_> = [
+            &payload.outputs.found,
+            &payload.outputs.point,
+            &payload.outputs.x,
+            &payload.outputs.y,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|n| !n.is_empty())
+        .collect();
+        if configured
+            .iter()
+            .enumerate()
+            .any(|(i, n)| configured[..i].contains(n))
+        {
+            ui.colored_label(ui.visuals().error_fg_color, "Output names must be unique");
+        }
+    } else {
+        // Click requires a point; do not expose an unsupported continuation contract.
+        payload.not_found_policy = MkImageNotFoundPolicy::Fail;
+    }
     ui.horizontal(|ui| {
         ui.label("Tolerance");
         ui.add(egui::Slider::new(&mut payload.tolerance, 0..=255));
@@ -365,7 +424,7 @@ pub(super) fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::MkWaitOptions;
+    use crate::mkmacro::{MkImageOutputs, MkWaitOptions};
     fn payload(region: SearchRegion) -> MkImagePayload {
         MkImagePayload {
             asset_id: 3,
@@ -377,6 +436,8 @@ mod tests {
             tolerance: 2,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
         }
     }
     #[test]

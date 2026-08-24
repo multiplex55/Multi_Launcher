@@ -10,7 +10,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{MkImagePayload, MkPoint, ScreenCaptureBackend, SearchRegion, VisualSearch};
+use super::{
+    MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkPoint, ScreenCaptureBackend,
+    SearchRegion, VisualSearch,
+};
 
 /// Run-scoped decode cache. Construct one for each playback; repeated visual waits
 /// and searches using the same stable reference share the decoded pixels.
@@ -401,6 +404,8 @@ mod tests {
             tolerance,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
         }
     }
     fn adapter_fixture(

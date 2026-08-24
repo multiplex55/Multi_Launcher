@@ -64,6 +64,8 @@ fn image_catalog_defaults_require_assets_and_configured_payload_round_trips() {
         tolerance: 9,
         alpha: AlphaPolicy::Ignore,
         return_point: ReturnPoint::TopLeft,
+        not_found_policy: MkImageNotFoundPolicy::Fail,
+        outputs: MkImageOutputs::default(),
     };
     let action = MkAction::ImageClick(payload.clone());
     assert_eq!(
@@ -95,6 +97,8 @@ fn image_wait_cancels_promptly_without_real_screen_access() {
                     tolerance: 0,
                     alpha: AlphaPolicy::Compare,
                     return_point: ReturnPoint::Center,
+                    not_found_policy: MkImageNotFoundPolicy::Fail,
+                    outputs: MkImageOutputs::default(),
                 })),
                 &|_| {},
             )

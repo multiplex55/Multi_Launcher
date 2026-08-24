@@ -1501,6 +1501,27 @@ fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
         _ => None,
     }
 }
+fn image_output_names_valid(action: &MkAction) -> bool {
+    let MkAction::ImageFind(p) = action else {
+        return true;
+    };
+    let names: Vec<_> = [
+        &p.outputs.found,
+        &p.outputs.point,
+        &p.outputs.x,
+        &p.outputs.y,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    names
+        .iter()
+        .all(|name| crate::mkmacro::variables::validate_variable_name(name).is_ok())
+        && !names
+            .iter()
+            .enumerate()
+            .any(|(i, name)| names[..i].contains(name))
+}
 
 fn apply_capture(
     store: &MkMacroStore,
@@ -1638,8 +1659,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let (position, mut window, launcher, image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
             pick_request = position;
             image_request = image;
+            let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing);
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -1796,6 +1818,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             ui.separator();
             ui.horizontal(|ui| {
                 let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
+                    && image_output_names_valid(&step.action)
                     && !matches!(
                         super::action_catalog::draft_validation_contract(&step.action),
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
@@ -1851,6 +1874,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.set_captured_keys(keys);
     }
     if apply {
+        if let Some(payload) = d.action_editor.draft.as_mut().and_then(image_payload_mut) {
+            payload.outputs.normalize();
+        }
         if let Some(MkStep {
             action: MkAction::PixelCheck { color, .. },
             ..
@@ -1921,6 +1947,8 @@ mod tests {
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
         };
         let bad = dir.path().join("bad.png");
         std::fs::write(&bad, b"not png").unwrap();
@@ -1953,6 +1981,8 @@ mod tests {
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
             return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
         }
     }
 
@@ -2279,6 +2309,8 @@ mod tests {
                         matcher: MkWindowMatcher::default(),
                     },
                     return_point: ReturnPoint::Center,
+                    not_found_policy: MkImageNotFoundPolicy::Fail,
+                    outputs: MkImageOutputs::default(),
                     wait: MkWaitOptions {
                         timeout_ms: 0,
                         poll_interval_ms: 1,
@@ -2343,6 +2375,8 @@ mod tests {
                 rect: ScreenRect::new(-10, 20, 30, 40),
             },
             return_point: ReturnPoint::TopLeft,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
             wait: MkWaitOptions {
                 timeout_ms: 2_000,
                 poll_interval_ms: 25,
@@ -2814,6 +2848,8 @@ mod tests {
                     tolerance: 17,
                     alpha: AlphaPolicy::Ignore,
                     return_point: ReturnPoint::TopLeft,
+                    not_found_policy: MkImageNotFoundPolicy::Fail,
+                    outputs: MkImageOutputs::default(),
                 };
                 let mut editor = ActionEditorState::default();
                 editor.begin_edit(&step(MkAction::ImageClick(payload)));
