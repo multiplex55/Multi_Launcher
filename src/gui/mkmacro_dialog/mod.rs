@@ -473,7 +473,7 @@ mod tests {
         };
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageFind(image.clone())),
-            "Asset 42 · Entire Desktop · tolerance 0"
+            "Asset 42 · Entire Desktop · tolerance 0 · fail if absent"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageClick(image)),
