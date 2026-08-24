@@ -768,7 +768,7 @@ mod tests {
             else {
                 panic!()
             };
-            assert_eq!(actual, found);
+            assert_eq!(actual, &found);
             assert_eq!(search.region, SearchRegion::Desktop);
             assert_eq!(search.tolerance, 0);
             assert_eq!(search.alpha, AlphaPolicy::Compare);
