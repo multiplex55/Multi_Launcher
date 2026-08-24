@@ -484,8 +484,10 @@ mod tests {
             relative_path: "refs/save_button.png".into(),
         }];
         let details = action_catalog::action_details_with_assets(&action, &assets);
-        assert!(details.contains("Save Button · save_button.png · ID 10"));
-        assert!(details.contains("offset (2, -3)"));
+        assert_eq!(
+            details,
+            "Image Result: Save Button + (2,-3) · Smooth 500 ms"
+        );
     }
 
     #[test]
@@ -527,7 +529,7 @@ mod tests {
                 asset_id: 9,
                 offset: MkPoint { x: -3, y: 5 }
             }),
-            "Missing asset · ID 9 offset (-3, 5)"
+            "Image Result: Missing image #9 + (-3,5)"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::MouseMove(MkMouseMovePayload {
