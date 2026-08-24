@@ -19,6 +19,7 @@ fn mac(steps: Vec<MkStep>) -> MkMacro {
         hotkey: None,
         playback: Default::default(),
         steps,
+        image_assets: vec![],
     }
 }
 

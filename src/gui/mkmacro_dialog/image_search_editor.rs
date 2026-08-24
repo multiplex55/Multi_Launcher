@@ -36,6 +36,8 @@ pub enum ImageEditorRequest {
     IdentifyMonitors,
     PickWindow { client_area: bool },
     HighlightWindow { client_area: bool },
+    AddSmoothMouseMove,
+    AddActivateWindowBefore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +151,7 @@ pub(super) fn show(
     macro_id: u64,
     authoring_busy: bool,
     find_action: bool,
+    valid_asset: bool,
 ) -> Option<ImageEditorRequest> {
     let mut out = None;
     ui.heading("Reference Image");
@@ -415,6 +418,35 @@ pub(super) fn show(
                     &mut out,
                 );
             });
+        }
+    }
+    ui.separator();
+    ui.heading("Related actions");
+    if find_action {
+        let response = ui.add_enabled(
+            valid_asset,
+            egui::Button::new("Add Smooth Mouse Move to Result"),
+        );
+        if response
+            .on_hover_text(if valid_asset {
+                "On Apply, adds an independent 500 ms move immediately after this Find Image step."
+            } else {
+                "Select a valid reference image before adding a result move."
+            })
+            .clicked()
+        {
+            out = Some(ImageEditorRequest::AddSmoothMouseMove);
+        }
+        if !valid_asset {
+            ui.small("Select a valid reference image to enable the smooth-move shortcut.");
+        }
+    }
+    if matches!(
+        state.kind,
+        SearchRegionKind::Window | SearchRegionKind::ClientArea
+    ) {
+        if ui.button("Add Activate Window Before").on_hover_text("On Apply, adds one independent activation row immediately before this search. Repeated requests are allowed and predictable.").clicked() {
+            out = Some(ImageEditorRequest::AddActivateWindowBefore);
         }
     }
     state.pending_request = out;

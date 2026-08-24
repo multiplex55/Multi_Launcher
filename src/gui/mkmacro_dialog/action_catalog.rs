@@ -955,9 +955,15 @@ fn mouse(b: &MkMouseButton) -> &'static str {
     }
 }
 pub fn action_details(a: &MkAction) -> String {
-    action_details_with_asset_name(a, None)
+    action_details_core(a, None, &[])
 }
 pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) -> String {
+    action_details_core(a, asset_name, &[])
+}
+pub fn action_details_with_assets(a: &MkAction, assets: &[MkImageAsset]) -> String {
+    action_details_core(a, None, assets)
+}
+fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImageAsset]) -> String {
     match a {
         MkAction::KeyDown(k) | MkAction::KeyUp(k) | MkAction::KeyPress(k) => {
             super::key_capture::key_name(k)
@@ -979,7 +985,7 @@ pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) ->
             "{} ×{} @ {}",
             mouse(&p.button),
             p.clicks,
-            format_coordinate_target(&p.target)
+            format_coordinate_target_with_assets(&p.target, assets)
         ),
         MkAction::MouseDown(b) | MkAction::MouseUp(b) => mouse(b).into(),
         MkAction::MouseScroll { axis, i32_delta } => {
@@ -1019,15 +1025,15 @@ pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) ->
             }
         ),
         MkAction::RepeatStart { count } => format!("{count} times"),
-        MkAction::ImageFind(p) => format_image_details(p, asset_name, false),
-        MkAction::ImageClick(p) => format_image_details(p, asset_name, true),
+        MkAction::ImageFind(p) => format_image_details(p, asset_name, assets, false),
+        MkAction::ImageClick(p) => format_image_details(p, asset_name, assets, true),
         MkAction::PixelCheck {
             target,
             color,
             tolerance,
         } => format!(
             "{color} ±{tolerance} @ {}",
-            format_coordinate_target(target)
+            format_coordinate_target_with_assets(target, assets)
         ),
         MkAction::UiSetValue { value, .. } => {
             format!("Unavailable UI Automation action (set value to {value})")
@@ -1037,7 +1043,7 @@ pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) ->
         }
         MkAction::MouseMove(p) => format!(
             "{} · {}",
-            format_coordinate_target(&p.target),
+            format_coordinate_target_with_assets(&p.target, assets),
             if p.duration_ms == 0 {
                 "Instant".into()
             } else {
@@ -1046,8 +1052,8 @@ pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) ->
         ),
         MkAction::MouseDrag(p) => format!(
             "{} → {} · {} · {} ms",
-            format_coordinate_target(&p.from),
-            format_coordinate_target(&p.to),
+            format_coordinate_target_with_assets(&p.from, assets),
+            format_coordinate_target_with_assets(&p.to, assets),
             mouse(&p.button),
             p.duration_ms
         ),
@@ -1128,16 +1134,25 @@ fn region_summary(region: &SearchRegion) -> String {
         SearchRegion::ClientArea { matcher } => format!("Client: {}", matcher_summary(matcher)),
     }
 }
-fn format_image_details(p: &MkImagePayload, asset_name: Option<&str>, click: bool) -> String {
-    let image = asset_name
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            std::path::Path::new(s)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(s)
+fn format_image_details(
+    p: &MkImagePayload,
+    asset_name: Option<&str>,
+    assets: &[MkImageAsset],
+    click: bool,
+) -> String {
+    let image = assets
+        .iter()
+        .find(|asset| asset.id == p.asset_id)
+        .map(|_| super::action_editor::image_asset_label(p.asset_id, assets))
+        .or_else(|| {
+            asset_name.filter(|s| !s.trim().is_empty()).map(|s| {
+                std::path::Path::new(s)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(s)
+                    .to_owned()
+            })
         })
-        .map(str::to_owned)
         .unwrap_or_else(|| format!("Asset {}", p.asset_id));
     let mut parts = vec![image, region_summary(&p.region)];
     if !click {
@@ -1208,6 +1223,12 @@ mod paste_tests {
     }
 }
 pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
+    format_coordinate_target_with_assets(target, &[])
+}
+pub fn format_coordinate_target_with_assets(
+    target: &MkCoordinateTarget,
+    assets: &[MkImageAsset],
+) -> String {
     match target {
         MkCoordinateTarget::Screen { point } => format!("Screen ({}, {})", point.x, point.y),
         MkCoordinateTarget::ActiveWindow { point } => {
@@ -1225,7 +1246,12 @@ pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
         }
         MkCoordinateTarget::Variable { name } => format!("Variable <{name}>"),
         MkCoordinateTarget::Image { asset_id, offset } => {
-            format!("Image asset {asset_id} offset ({}, {})", offset.x, offset.y)
+            format!(
+                "{} offset ({}, {})",
+                super::action_editor::image_asset_label(*asset_id, assets),
+                offset.x,
+                offset.y
+            )
         }
     }
 }

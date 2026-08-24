@@ -24,6 +24,9 @@ pub struct ActionEditorState {
     position_capture: Option<PositionCaptureState>,
     pub(crate) draft_generation: u64,
     pub image_search: Option<super::image_search_editor::ImageSearchEditorState>,
+    /// Typed requests collected by the widget and executed only when Apply confirms the draft.
+    pub add_smooth_move: bool,
+    pub add_activate_before: bool,
     pub image_authoring: super::image_authoring_job::ImageAuthoringJob,
     /// Sole owner of native visual-overlay resources for this editor draft.
     pub visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
@@ -200,6 +203,8 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
+        self.add_smooth_move = false;
+        self.add_activate_before = false;
         // The dialog supplies the precise insertion intent immediately after
         // this call. This fallback keeps programmatic callers insertion-safe.
         self.insertion = Some(InsertionIntent::Plain {
@@ -227,6 +232,8 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
+        self.add_smooth_move = false;
+        self.add_activate_before = false;
         self.insertion = Some(InsertionIntent::EditExisting { step_id: step.id });
         self.draft = Some(step.clone());
         self.image_search = match &step.action {
@@ -811,7 +818,67 @@ pub(super) struct TargetUiOutcome {
     pick_position: bool,
     pick_matcher: bool,
 }
-pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> TargetUiOutcome {
+
+/// Produces one consistent, stable description wherever an image asset is shown.
+pub(crate) fn image_asset_label(asset_id: u64, assets: &[MkImageAsset]) -> String {
+    let Some(asset) = assets.iter().find(|asset| asset.id == asset_id) else {
+        return format!("Missing asset · ID {asset_id}");
+    };
+    let filename = std::path::Path::new(&asset.relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .trim();
+    let friendly = asset.name.trim();
+    let mut parts = Vec::new();
+    if !friendly.is_empty() {
+        parts.push(friendly.to_owned());
+    }
+    if !filename.is_empty() && filename != friendly {
+        parts.push(filename.to_owned());
+    }
+    if parts.is_empty() {
+        parts.push("Image asset".to_owned());
+    }
+    parts.push(format!("ID {}", asset.id));
+    parts.join(" · ")
+}
+
+pub(crate) fn select_image_asset(asset_id: &mut u64, selected: u64) {
+    *asset_id = selected;
+}
+
+pub(crate) fn change_target_kind(
+    target: &mut MkCoordinateTarget,
+    next: usize,
+    assets: &[MkImageAsset],
+) {
+    *target = match next {
+        0 => MkCoordinateTarget::Screen {
+            point: MkPoint { x: 0, y: 0 },
+        },
+        1 => MkCoordinateTarget::ActiveWindow {
+            point: MkPoint { x: 0, y: 0 },
+        },
+        2 => MkCoordinateTarget::WindowClient {
+            matcher: MkWindowMatcher::default(),
+            point: MkPoint { x: 0, y: 0 },
+        },
+        3 => MkCoordinateTarget::Variable {
+            name: String::new(),
+        },
+        _ => MkCoordinateTarget::Image {
+            asset_id: assets.first().map_or(0, |a| a.id),
+            offset: MkPoint { x: 0, y: 0 },
+        },
+    };
+}
+
+pub(super) fn target_ui(
+    ui: &mut egui::Ui,
+    target: &mut MkCoordinateTarget,
+    assets: &[MkImageAsset],
+) -> TargetUiOutcome {
     let kind = match target {
         MkCoordinateTarget::Screen { .. } => 0,
         MkCoordinateTarget::ActiveWindow { .. } => 1,
@@ -835,28 +902,12 @@ pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> T
             ui.selectable_value(&mut next, 1, "Active Window");
             ui.selectable_value(&mut next, 2, "Matched Window");
             ui.selectable_value(&mut next, 3, "Variable");
-            ui.selectable_value(&mut next, 4, "Image Result");
+            ui.add_enabled_ui(!assets.is_empty(), |ui| {
+                ui.selectable_value(&mut next, 4, "Image Result");
+            });
         });
     if next != kind {
-        *target = match next {
-            0 => MkCoordinateTarget::Screen {
-                point: MkPoint { x: 0, y: 0 },
-            },
-            1 => MkCoordinateTarget::ActiveWindow {
-                point: MkPoint { x: 0, y: 0 },
-            },
-            2 => MkCoordinateTarget::WindowClient {
-                matcher: MkWindowMatcher::default(),
-                point: MkPoint { x: 0, y: 0 },
-            },
-            3 => MkCoordinateTarget::Variable {
-                name: String::new(),
-            },
-            _ => MkCoordinateTarget::Image {
-                asset_id: 0,
-                offset: MkPoint { x: 0, y: 0 },
-            },
-        };
+        change_target_kind(target, next, assets);
     }
     match target {
         MkCoordinateTarget::Screen { point } | MkCoordinateTarget::ActiveWindow { point } => {
@@ -895,8 +946,6 @@ pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> T
                 ui.add_enabled(false, egui::Button::new("Pick Position (Windows only)"));
                 false
             };
-            // The matcher picker is routed by the action-level caller; position capture remains
-            // the boolean return for backward-compatible shared condition editing.
             return TargetUiOutcome {
                 pick_position: position,
                 pick_matcher: choose,
@@ -909,11 +958,30 @@ pub(super) fn target_ui(ui: &mut egui::Ui, target: &mut MkCoordinateTarget) -> T
             });
         }
         MkCoordinateTarget::Image { asset_id, offset } => {
+            if assets.is_empty() {
+                ui.add_enabled(
+                    false,
+                    egui::Label::new("No image results are available in this context."),
+                );
+            } else {
+                egui::ComboBox::from_label("Result from")
+                    .selected_text(image_asset_label(*asset_id, assets))
+                    .show_ui(ui, |ui| {
+                        for asset in assets {
+                            let label = image_asset_label(asset.id, assets);
+                            if ui.selectable_label(*asset_id == asset.id, label).clicked() {
+                                select_image_asset(asset_id, asset.id);
+                            }
+                        }
+                    });
+            }
+            ui.heading("Offset");
             ui.horizontal(|ui| {
-                ui.label("Image asset ID");
-                ui.add(egui::DragValue::new(asset_id));
-                ui.label("Offset X/Y");
+                ui.label("X");
                 ui.add(egui::DragValue::new(&mut offset.x));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Y");
                 ui.add(egui::DragValue::new(&mut offset.y));
             });
         }
@@ -985,7 +1053,7 @@ fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
     capture: &mut bool,
-    image_assets: &[u64],
+    image_assets: &[MkImageAsset],
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -1027,7 +1095,7 @@ fn action_ui(
             }
         }
         MkAction::MouseMove(p) => {
-            let response = target_ui(ui, &mut p.target);
+            let response = target_ui(ui, &mut p.target, image_assets);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::MoveTarget);
             }
@@ -1057,7 +1125,7 @@ fn action_ui(
         }
         MkAction::MouseDrag(p) => {
             ui.label("Start");
-            let response = target_ui(ui, &mut p.from);
+            let response = target_ui(ui, &mut p.from, image_assets);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragFrom);
             }
@@ -1067,7 +1135,7 @@ fn action_ui(
                 ));
             }
             ui.label("Destination");
-            let response = target_ui(ui, &mut p.to);
+            let response = target_ui(ui, &mut p.to, image_assets);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragTo);
             }
@@ -1095,7 +1163,7 @@ fn action_ui(
             });
         }
         MkAction::MouseClick(p) => {
-            let response = target_ui(ui, &mut p.target);
+            let response = target_ui(ui, &mut p.target, image_assets);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::ClickTarget);
             }
@@ -1388,7 +1456,7 @@ fn action_ui(
             tolerance,
         } => {
             ui.heading("Coordinate");
-            let response = target_ui(ui, target);
+            let response = target_ui(ui, target, image_assets);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::PixelPosition);
             }
@@ -1493,6 +1561,112 @@ fn start_visual_capture(
     purpose: super::visual_overlay::RectanglePurpose,
 ) -> anyhow::Result<()> {
     state.request_visual_capture(macro_id, purpose)
+}
+
+fn image_payload(step: &MkStep) -> Option<&MkImagePayload> {
+    match &step.action {
+        MkAction::ImageFind(p) | MkAction::ImageClick(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// Inserts an independent smooth move after the stable image-search step.
+pub(crate) fn insert_smooth_move_after(
+    dialog: &mut MkMacroDialog,
+    anchor_id: u64,
+    payload: &MkImagePayload,
+) -> bool {
+    let Some(macro_) = dialog.selected_macro_mut() else {
+        return false;
+    };
+    let Some(index) = macro_.steps.iter().position(|step| step.id == anchor_id) else {
+        return false;
+    };
+    macro_.steps.insert(
+        index + 1,
+        MkStep {
+            id: 0,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Image {
+                    asset_id: payload.asset_id,
+                    offset: MkPoint { x: 0, y: 0 },
+                },
+                duration_ms: 500,
+            }),
+        },
+    );
+    repair_and_report_change(dialog);
+    true
+}
+
+pub(crate) fn activation_matcher(region: &SearchRegion) -> Option<MkWindowMatcher> {
+    match region {
+        SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+            Some(matcher.clone())
+        }
+        SearchRegion::Desktop | SearchRegion::Monitor { .. } | SearchRegion::Rectangle { .. } => {
+            None
+        }
+    }
+}
+
+/// Inserts a normal activation action before the stable search row.
+pub(crate) fn insert_activate_window_before(
+    dialog: &mut MkMacroDialog,
+    anchor_id: u64,
+    payload: &MkImagePayload,
+) -> bool {
+    let Some(matcher) = activation_matcher(&payload.region) else {
+        return false;
+    };
+    let Some(macro_) = dialog.selected_macro_mut() else {
+        return false;
+    };
+    let Some(index) = macro_.steps.iter().position(|step| step.id == anchor_id) else {
+        return false;
+    };
+    macro_.steps.insert(
+        index,
+        MkStep {
+            id: 0,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::WindowActivate(MkWindowPayload {
+                matcher,
+                wait: None,
+            }),
+        },
+    );
+    repair_and_report_change(dialog);
+    true
+}
+
+fn repair_and_report_change(dialog: &mut MkMacroDialog) {
+    crate::mkmacro::repair_ids(&mut dialog.draft);
+    dialog.mark_dirty();
+}
+
+fn ensure_image_asset_catalog_entry(dialog: &mut MkMacroDialog, asset_id: u64) {
+    if asset_id == 0 {
+        return;
+    }
+    let Some(macro_) = dialog.selected_macro_mut() else {
+        return;
+    };
+    if !macro_.image_assets.iter().any(|asset| asset.id == asset_id) {
+        macro_.image_assets.push(MkImageAsset {
+            id: asset_id,
+            name: String::new(),
+            relative_path: format!("mkmacro_assets/{}/{}.png", macro_.id, asset_id),
+        });
+        dialog.mark_dirty();
+    }
 }
 
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
@@ -1642,8 +1816,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut pick_request = None;
     let mut image_request = None;
     let image_assets = d
-        .selected_macro_id
-        .and_then(|id| d.store.asset_ids(id).ok())
+        .selected_macro()
+        .map(|m| m.image_assets.clone())
         .unwrap_or_default();
     egui::Window::new("Action Editor")
         .open(&mut open)
@@ -1661,7 +1835,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             image_request = image;
             let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action);
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action, image_assets.iter().any(|asset| asset.id == payload.asset_id));
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -1719,6 +1893,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
                         }
                     }
+                    Some(AddSmoothMouseMove) => state.add_smooth_move = true,
+                    Some(AddActivateWindowBefore) => state.add_activate_before = true,
                     Some(HighlightWindow { client_area }) => {
                         let image = state.image_search.as_ref().unwrap();
                         let matcher = if client_area { &image.client_matcher } else { &image.window_matcher };
@@ -1891,7 +2067,19 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
         }
         let mut state = std::mem::take(&mut d.action_editor);
-        state.apply(d);
+        let smooth = state.add_smooth_move;
+        let activate = state.add_activate_before;
+        let shortcut_payload = state.draft.as_ref().and_then(image_payload).cloned();
+        let anchor = state.apply(d);
+        if let (Some(anchor), Some(payload)) = (anchor, shortcut_payload.as_ref()) {
+            if activate {
+                insert_activate_window_before(d, anchor, payload);
+            }
+            if smooth {
+                insert_smooth_move_after(d, anchor, payload);
+            }
+            ensure_image_asset_catalog_entry(d, payload.asset_id);
+        }
         d.action_editor = state;
         d.window_picker
             .cancel("Window picker closed because the action editor was applied");
@@ -1931,6 +2119,92 @@ mod tests {
             on_error: Default::default(),
             action: a,
         }
+    }
+
+    fn asset(id: u64, name: &str, path: &str) -> MkImageAsset {
+        MkImageAsset {
+            id,
+            name: name.into(),
+            relative_path: path.into(),
+        }
+    }
+
+    #[test]
+    fn asset_labels_cover_names_paths_duplicates_missing_and_id_fallback() {
+        assert_eq!(
+            image_asset_label(10, &[asset(10, "Save Button", "images/save_button.png")]),
+            "Save Button · save_button.png · ID 10"
+        );
+        assert_eq!(
+            image_asset_label(10, &[asset(10, "", "images/save_button.png")]),
+            "save_button.png · ID 10"
+        );
+        assert_eq!(
+            image_asset_label(
+                10,
+                &[asset(10, "save_button.png", "images/save_button.png")]
+            ),
+            "save_button.png · ID 10"
+        );
+        assert_eq!(image_asset_label(44, &[]), "Missing asset · ID 44");
+        assert_eq!(
+            image_asset_label(10, &[asset(10, "", "")]),
+            "Image asset · ID 10"
+        );
+    }
+
+    #[test]
+    fn selecting_asset_preserves_offset_and_image_kind_uses_first_asset() {
+        let mut target = MkCoordinateTarget::Image {
+            asset_id: 5,
+            offset: MkPoint { x: 12, y: -7 },
+        };
+        if let MkCoordinateTarget::Image { asset_id, .. } = &mut target {
+            select_image_asset(asset_id, 10);
+        }
+        assert_eq!(
+            target,
+            MkCoordinateTarget::Image {
+                asset_id: 10,
+                offset: MkPoint { x: 12, y: -7 }
+            }
+        );
+        change_target_kind(&mut target, 4, &[asset(22, "", "22.png")]);
+        assert_eq!(
+            target,
+            MkCoordinateTarget::Image {
+                asset_id: 22,
+                offset: MkPoint { x: 0, y: 0 }
+            }
+        );
+    }
+
+    #[test]
+    fn shortcut_region_and_payload_helpers_are_exact() {
+        let matcher = MkWindowMatcher {
+            title: Some("Title".into()),
+            process: Some("app.exe".into()),
+            title_regex: Some("T.*".into()),
+            class: Some("Class".into()),
+        };
+        for region in [
+            SearchRegion::Window {
+                matcher: matcher.clone(),
+            },
+            SearchRegion::ClientArea {
+                matcher: matcher.clone(),
+            },
+        ] {
+            assert_eq!(activation_matcher(&region), Some(matcher.clone()));
+        }
+        assert!(activation_matcher(&SearchRegion::Desktop).is_none());
+        assert!(activation_matcher(&SearchRegion::Monitor { index: 1 }).is_none());
+        assert!(
+            activation_matcher(&SearchRegion::Rectangle {
+                rect: ScreenRect::new(0, 0, 1, 1)
+            })
+            .is_none()
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ fn legacy_and_mkmacro_routes_coexist_and_disable_independently() {
                 hotkey: None,
                 playback: Default::default(),
                 steps: vec![],
+                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -51,6 +52,7 @@ fn rename_keeps_id_based_launcher_action() {
                 hotkey: None,
                 playback: Default::default(),
                 steps: vec![],
+                image_assets: vec![],
             }],
         };
         // Seed the persisted state before opening the watched store. Replacing a

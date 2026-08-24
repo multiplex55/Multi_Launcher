@@ -21,6 +21,7 @@ fn invalid_doc() -> MkMacroDocument {
                 on_error: Default::default(),
                 action: MkAction::Else,
             }],
+            image_assets: vec![],
         }],
     }
 }
@@ -86,6 +87,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                         mode: MkTextMode::Type,
                     }),
                 }],
+                image_assets: vec![],
             },
             MkMacro {
                 id: 102,
@@ -102,6 +104,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                     on_error: Default::default(),
                     action: MkAction::Delay { milliseconds: 42 },
                 }],
+                image_assets: vec![],
             },
         ],
     };

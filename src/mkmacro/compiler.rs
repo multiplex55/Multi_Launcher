@@ -124,6 +124,7 @@ mod tests {
             hotkey: None,
             playback: Default::default(),
             steps,
+            image_assets: vec![],
         }
     }
     #[test]

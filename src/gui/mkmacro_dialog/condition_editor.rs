@@ -2,7 +2,7 @@
 
 use super::action_editor::{matcher_ui, target_ui, value_ui};
 use crate::mkmacro::variables::{MkPoint, MkValue};
-use crate::mkmacro::{MkCompareOp, MkCondition, MkCoordinateTarget, MkWindowMatcher};
+use crate::mkmacro::{MkCompareOp, MkCondition, MkCoordinateTarget, MkImageAsset, MkWindowMatcher};
 use eframe::egui;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +125,7 @@ pub(super) fn first_window_picker_path(condition: &MkCondition) -> Option<Vec<us
 pub fn condition_ui_with_assets(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
-    assets: &[u64],
+    assets: &[MkImageAsset],
 ) -> Option<Vec<usize>> {
     let mut requested = None;
     ui.group(|ui| {
@@ -187,8 +187,8 @@ pub fn condition_ui_with_assets(
                     ui.colored_label(egui::Color32::YELLOW, "No reference images. Create or import one through Find Image or Click Image.");
                 } else {
                     egui::ComboBox::from_label("Reference image")
-                        .selected_text(if assets.contains(asset_id) { format!("{}.png", asset_id) } else { format!("Missing asset (ID {})", asset_id) })
-                        .show_ui(ui, |ui| for id in assets { ui.selectable_value(asset_id, *id, format!("{}.png  ·  ID {}", id, id)); });
+                        .selected_text(if assets.iter().any(|asset| asset.id == *asset_id) { super::action_editor::image_asset_label(*asset_id, assets) } else { super::action_editor::image_asset_label(*asset_id, assets) })
+                        .show_ui(ui, |ui| for id in assets { ui.selectable_value(asset_id, id.id, super::action_editor::image_asset_label(id.id, assets)); });
                 }
                 egui::ComboBox::from_label("Result")
                     .selected_text(if *found { "Found" } else { "Not found" })
@@ -202,7 +202,7 @@ pub fn condition_ui_with_assets(
                 color,
                 tolerance,
             } => {
-                let _ = target_ui(ui, target);
+                let _ = target_ui(ui, target, assets);
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.text_edit_singleline(color);
@@ -228,7 +228,7 @@ pub fn condition_ui_with_assets(
 fn group_ui(
     ui: &mut egui::Ui,
     conditions: &mut Vec<MkCondition>,
-    assets: &[u64],
+    assets: &[MkImageAsset],
 ) -> Option<Vec<usize>> {
     let mut remove = None;
     let mut requested = None;
