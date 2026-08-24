@@ -74,8 +74,8 @@ pub struct MkMacroDialog {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCoordinateTarget, MkHotkey,
-        MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
+        AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition, MkCoordinateTarget,
+        MkHotkey, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
         MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint,
         SCHEMA_VERSION, SearchRegion,
     };
@@ -955,6 +955,10 @@ mod tests {
                     MkAction::VirtualDesktop(operation) => {
                         Some(format!("virtual_desktop:{operation:?}"))
                     }
+                    MkAction::WaitUntil {
+                        condition: MkCondition::ImageSearch { found, .. },
+                        ..
+                    } => Some(format!("wait_image:{found}")),
                     _ => None,
                 },
             );
@@ -1033,6 +1037,9 @@ mod tests {
                     let draft = &dialog.action_editor.draft.as_ref().unwrap().action;
                     assert!(
                         matches!(draft, MkAction::ImageFind(p) | MkAction::ImageClick(p) if p.asset_id == 0)
+                            || matches!(draft, MkAction::WaitUntil {
+                                condition: MkCondition::ImageSearch { search, .. }, ..
+                            } if search.asset_id == 0)
                     );
                 }
             }
@@ -1060,9 +1067,8 @@ mod tests {
                 "{context}: duplicate descriptor name"
             );
             if descriptor.category != action_catalog::ActionCategory::UiAutomation {
-                assert_eq!(
-                    descriptor.name,
-                    action_catalog::action_name(&action),
+                assert!(
+                    action_catalog::descriptor_name_matches_action(&descriptor, &action),
                     "{context}: action-name mapping"
                 );
             } else {
@@ -1176,9 +1182,8 @@ mod tests {
                         serde_json::to_vec(&action).is_ok(),
                         "{context}: serialization"
                     );
-                    assert_eq!(
-                        descriptor.name,
-                        action_catalog::action_name(&action),
+                    assert!(
+                        action_catalog::descriptor_name_matches_action(&descriptor, &action),
                         "{context}: action name"
                     );
                     let details = action_catalog::action_details(&action);

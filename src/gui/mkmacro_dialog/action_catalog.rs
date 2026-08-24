@@ -102,6 +102,20 @@ fn point() -> MkCoordinateTarget {
 fn cond() -> MkCondition {
     MkCondition::All { conditions: vec![] }
 }
+fn image_cond(found: bool) -> MkCondition {
+    MkCondition::ImageSearch {
+        search: MkImageSearchCondition {
+            // Required-asset draft sentinel; Apply remains disabled until the
+            // user imports, captures, or selects a reference image.
+            asset_id: 0,
+            region: SearchRegion::Desktop,
+            tolerance: 0,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+        },
+        found,
+    }
+}
 fn wait() -> MkWaitOptions {
     MkWaitOptions {
         timeout_ms: 5000,
@@ -338,6 +352,44 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             Condition,
             MkAction::WaitUntil {
                 condition: cond(),
+                wait: wait()
+            }
+        ),
+        d!(
+            Visual,
+            "Wait for Image",
+            "Wait until a reference image becomes visible",
+            &[
+                "wait",
+                "image",
+                "visual",
+                "appear",
+                "visible",
+                "disappear",
+                "gone"
+            ],
+            Condition,
+            MkAction::WaitUntil {
+                condition: image_cond(true),
+                wait: wait()
+            }
+        ),
+        d!(
+            Visual,
+            "Wait for Image to Disappear",
+            "Wait until a reference image is no longer visible",
+            &[
+                "wait",
+                "image",
+                "visual",
+                "appear",
+                "visible",
+                "disappear",
+                "gone"
+            ],
+            Condition,
+            MkAction::WaitUntil {
+                condition: image_cond(false),
                 wait: wait()
             }
         ),
@@ -790,8 +842,28 @@ pub fn draft_validation_contract(action: &MkAction) -> DraftValidationContract {
         MkAction::ImageFind(payload) | MkAction::ImageClick(payload) if payload.asset_id == 0 => {
             DraftValidationContract::AwaitingRequiredAsset
         }
+        MkAction::WaitUntil {
+            condition: MkCondition::ImageSearch { search, .. },
+            ..
+        } if search.asset_id == 0 => DraftValidationContract::AwaitingRequiredAsset,
         _ => DraftValidationContract::CommitReady,
     }
+}
+
+/// Catalog presets may give a canonical action a more discoverable authoring
+/// name without introducing a new persisted action variant.
+pub fn descriptor_name_matches_action(descriptor: &ActionDescriptor, action: &MkAction) -> bool {
+    descriptor.name == action_name(action)
+        || matches!(
+            (descriptor.name, action),
+            (
+                "Wait for Image" | "Wait for Image to Disappear",
+                MkAction::WaitUntil {
+                    condition: MkCondition::ImageSearch { .. },
+                    ..
+                }
+            )
+        )
 }
 
 /// Structural markers are complete actions at insertion time and intentionally
@@ -1092,6 +1164,23 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
             "Close the current virtual desktop using native Windows behavior".into()
         }
+        MkAction::WaitUntil {
+            condition: MkCondition::ImageSearch { search, found },
+            wait,
+        } => {
+            let image = assets
+                .iter()
+                .find(|asset| asset.id == search.asset_id)
+                .map(|_| super::action_editor::image_asset_label(search.asset_id, assets))
+                .or_else(|| asset_name.map(str::to_owned))
+                .unwrap_or_else(|| format!("Asset {}", search.asset_id));
+            format!(
+                "Image {} · {} · Timeout {} ms",
+                if *found { "visible" } else { "not visible" },
+                image,
+                wait.timeout_ms
+            )
+        }
         MkAction::WaitUntil { wait, .. } => format!("Timeout {} ms", wait.timeout_ms),
         MkAction::If(_) | MkAction::WhileStart { .. } => "Condition".into(),
         MkAction::Else
@@ -1220,6 +1309,72 @@ mod paste_tests {
         assert!(details.contains("Horizontal Left"));
         assert!(details.contains("2 notch(es)"));
         assert!(details.contains("-240 wheel units"));
+    }
+
+    #[test]
+    fn image_wait_presets_are_searchable_configurable_wait_until_actions() {
+        let standard_wait = wait();
+        for (name, expected_found) in [
+            ("Wait for Image", true),
+            ("Wait for Image to Disappear", false),
+        ] {
+            let descriptor = visible_descriptors()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap_or_else(|| panic!("missing visible descriptor {name}"));
+            assert_eq!(descriptor.category, ActionCategory::Visual);
+            assert_eq!(descriptor.editor, EditorKind::Condition);
+            assert_eq!(descriptor.runtime, RuntimeAvailability::Supported);
+            assert!(matches!(
+                descriptor.editor.contract(),
+                Some(EditorContract::Configurable { field_count: 1.. })
+            ));
+            for keyword in [
+                "wait",
+                "image",
+                "visual",
+                "appear",
+                "visible",
+                "disappear",
+                "gone",
+            ] {
+                assert!(
+                    matches(&descriptor, keyword),
+                    "{name} did not match {keyword}"
+                );
+            }
+
+            let action = (descriptor.make_default)();
+            assert!(editor_route_recognizes(&action, EditorKind::Condition));
+            let MkAction::WaitUntil { condition, wait } = action else {
+                panic!("{name} did not create WaitUntil")
+            };
+            assert_eq!(wait, standard_wait);
+            assert_eq!(
+                condition,
+                image_cond(expected_found),
+                "{name} image-search defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn image_wait_details_distinguish_expected_result_and_asset() {
+        let visible = MkAction::WaitUntil {
+            condition: image_cond(true),
+            wait: wait(),
+        };
+        let absent = MkAction::WaitUntil {
+            condition: image_cond(false),
+            wait: wait(),
+        };
+        assert!(
+            action_details_with_asset_name(&visible, Some("button.png"))
+                .contains("Image visible · button.png")
+        );
+        assert!(
+            action_details_with_asset_name(&absent, Some("button.png"))
+                .contains("Image not visible · button.png")
+        );
     }
 }
 pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
