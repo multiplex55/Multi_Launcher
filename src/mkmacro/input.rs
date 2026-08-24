@@ -337,8 +337,8 @@ fn button(b: MkMouseButton, up: bool) -> (u32, u32) {
 
 /// Time-based movement capped at 120 updates/second. Cancellation is checked
 /// before every update; the number of events depends on time, not pixel count.
-pub fn smooth_move(
-    backend: &dyn InputBackend,
+pub fn smooth_move<B: InputBackend + ?Sized>(
+    backend: &B,
     control: &super::RunControl,
     from: MkPoint,
     to: MkPoint,

@@ -86,6 +86,75 @@ fn matcher() -> MkWindowMatcher {
 }
 
 #[test]
+fn image_find_result_drives_following_mouse_move_without_platform_effects() {
+    let d = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(d.path()).unwrap();
+    let image = MkImagePayload {
+        asset_id: 10,
+        wait: MkWaitOptions {
+            timeout_ms: 0,
+            poll_interval_ms: 1,
+        },
+        region: Default::default(),
+        tolerance: 0,
+        alpha: Default::default(),
+        return_point: Default::default(),
+        not_found_policy: MkImageNotFoundPolicy::Continue,
+        outputs: MkImageOutputs::default(),
+    };
+    store
+        .save(MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            settings: Default::default(),
+            macros: vec![MkMacro {
+                id: 70,
+                name: "image sequence".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps: vec![
+                    s(1, MkAction::ImageFind(image)),
+                    s(
+                        2,
+                        MkAction::MouseMove(MkMouseMovePayload {
+                            target: MkCoordinateTarget::Image {
+                                asset_id: 10,
+                                offset: MkPoint { x: 4, y: -3 },
+                            },
+                            duration_ms: 250,
+                        }),
+                    ),
+                    s(
+                        3,
+                        MkAction::Text(MkTextPayload {
+                            text: "after-image".into(),
+                            mode: MkTextMode::Type,
+                        }),
+                    ),
+                ],
+                image_assets: vec![MkImageAsset {
+                    id: 10,
+                    name: "fixture".into(),
+                    relative_path: "fixtures/match.png".into(),
+                }],
+            }],
+        })
+        .unwrap();
+    let fake = Arc::new(FakeBackend::default());
+    fake.script_image(10, Ok(Some(MkPoint { x: 30, y: 40 })));
+    let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
+    assert_eq!(
+        runtime.command(RuntimeCommand::Run(70)),
+        CommandResult::Accepted
+    );
+    let snapshot = wait(&runtime, RuntimeState::Completed);
+    assert!(snapshot.latest_failure.is_none());
+    assert!(fake.events().contains(&"smooth_move:34,37:250".into()));
+    assert!(fake.events().contains(&"text:after-image".into()));
+}
+
+#[test]
 fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
     let d = tempdir().unwrap();
     let (store, _) = MkMacroStore::open(d.path()).unwrap();
