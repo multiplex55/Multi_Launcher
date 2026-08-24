@@ -74,8 +74,9 @@ mod tests {
     use super::*;
     use crate::mkmacro::{
         AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCoordinateTarget, MkHotkey,
-        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
-        MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
+        MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
+        MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint,
+        SCHEMA_VERSION, SearchRegion,
     };
     use std::{
         fs, thread,

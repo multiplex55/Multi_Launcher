@@ -424,7 +424,7 @@ pub(super) fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::MkWaitOptions;
+    use crate::mkmacro::{MkImageOutputs, MkWaitOptions};
     fn payload(region: SearchRegion) -> MkImagePayload {
         MkImagePayload {
             asset_id: 3,

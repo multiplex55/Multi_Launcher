@@ -3102,8 +3102,8 @@ mod tests {
             visual_overlay::{OperationId, RectanglePurpose},
         };
         use crate::mkmacro::{
-            AlphaPolicy, MkAction, MkImagePayload, MkWaitOptions, ReturnPoint, ScreenRect,
-            SearchRegion,
+            AlphaPolicy, MkAction, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
+            MkWaitOptions, ReturnPoint, ScreenRect, SearchRegion,
         };
         use image::{Rgba, RgbaImage};
 
