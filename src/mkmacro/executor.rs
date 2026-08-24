@@ -2149,7 +2149,11 @@ pub mod fake {
                 },
                 MkCoordinateTarget::Image { asset_id, offset } => {
                     match v.get(&super::super::screen::image_result_variable(*asset_id)) {
-                        Some(MkValue::Point(point)) => Ok(offset_point(*point, offset.x, offset.y)),
+                        Some(MkValue::Point(point)) => Ok(offset_point(
+                            *point,
+                            i64::from(offset.x),
+                            i64::from(offset.y),
+                        )),
                         _ => Err(ExecutionDiagnostic::new(
                             DiagnosticKind::TargetNotFound,
                             "image target not found",
@@ -2977,7 +2981,7 @@ mod phase_d_tests {
         let mut vars = RuntimeVariables::new();
         image_action(&executor, &payload, &mut vars).unwrap();
         assert_eq!(vars.get("point"), Some(&MkValue::Point(point)));
-        assert_eq!(vars.get("x"), Some(&MkValue::Number(40)));
+        assert_eq!(vars.get("x"), Some(&MkValue::Number(40.0)));
 
         fake.script_image(10, Ok(None));
         image_action(&executor, &payload, &mut vars).unwrap();
