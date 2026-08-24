@@ -762,6 +762,7 @@ mod tests {
                         }),
                     ),
                 ],
+                image_assets: vec![],
             }],
             ..Default::default()
         };

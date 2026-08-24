@@ -575,6 +575,7 @@ mod tests {
                     on_error: Default::default(),
                     action: MkAction::Delay { milliseconds: 1 },
                 }],
+                image_assets: vec![],
             }],
         }
     }

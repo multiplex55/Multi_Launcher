@@ -663,6 +663,7 @@ mod recording_controller_tests {
                         hotkey: None,
                         playback: MkPlayback::default(),
                         steps: vec![],
+                        image_assets: vec![],
                     })
                     .collect(),
             })

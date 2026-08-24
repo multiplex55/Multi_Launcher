@@ -643,6 +643,7 @@ mod tests {
             hotkey: None,
             playback: MkPlayback::default(),
             steps,
+            image_assets: vec![],
         })
         .unwrap()
     }
@@ -2448,6 +2449,7 @@ mod phase_d_tests {
             hotkey: None,
             playback: MkPlayback::default(),
             steps,
+            image_assets: vec![],
         })
         .unwrap()
     }

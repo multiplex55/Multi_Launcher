@@ -61,6 +61,7 @@ pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) ->
             hotkey: None,
             playback: Default::default(),
             steps: steps.clone(),
+            image_assets: vec![],
         }],
     };
     crate::mkmacro::repair_ids(&mut d);
@@ -222,13 +223,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         }
                     });
                     r.col(|ui| {
-                        let asset_name = match &s.action {
-                            crate::mkmacro::MkAction::ImageFind(p) | crate::mkmacro::MkAction::ImageClick(p) =>
-                                d.store.asset_path(mid, p.asset_id).ok()
-                                    .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())),
-                            _ => None,
-                        };
-                        let full=super::action_catalog::action_details_with_asset_name(&s.action, asset_name.as_deref()); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}let block=crate::mkmacro::analyze_structure(&m.steps).block_for_marker(s.id).is_some();response.context_menu(|ui|context_menu(ui,s.id,block,&mut command));
+                        let full=super::action_catalog::action_details_with_assets(&s.action, &m.image_assets); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}let block=crate::mkmacro::analyze_structure(&m.steps).block_for_marker(s.id).is_some();response.context_menu(|ui|context_menu(ui,s.id,block,&mut command));
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();

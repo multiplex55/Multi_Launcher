@@ -96,6 +96,7 @@ mod tests {
                     hotkey: None,
                     playback: Default::default(),
                     steps: vec![],
+                    image_assets: vec![],
                 })
                 .collect(),
         }
@@ -131,6 +132,86 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         (dir, MkMacroDialog::new(Arc::new(store)))
     }
+    #[test]
+    fn image_shortcuts_insert_around_stable_nested_anchor_and_report_change() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        let matcher = crate::mkmacro::MkWindowMatcher {
+            title: Some("Exact".into()),
+            title_regex: Some("E.*".into()),
+            process: Some("app.exe".into()),
+            class: Some("Widget".into()),
+        };
+        let payload = MkImagePayload {
+            asset_id: 10,
+            region: SearchRegion::ClientArea {
+                matcher: matcher.clone(),
+            },
+            tolerance: 0,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+            wait: MkWaitOptions {
+                timeout_ms: 1000,
+                poll_interval_ms: 50,
+            },
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
+        };
+        let steps = &mut d.selected_macro_mut().unwrap().steps;
+        steps.extend([
+            MkStep {
+                id: 11,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::RepeatStart { count: 2 },
+            },
+            MkStep {
+                id: 12,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::ImageFind(payload.clone()),
+            },
+            MkStep {
+                id: 13,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::RepeatEnd,
+            },
+        ]);
+        assert!(action_editor::insert_smooth_move_after(
+            &mut d, 12, &payload
+        ));
+        assert!(action_editor::insert_activate_window_before(
+            &mut d, 12, &payload
+        ));
+        let steps = &d.selected_macro().unwrap().steps;
+        let anchor = steps.iter().position(|s| s.id == 12).unwrap();
+        assert!(
+            matches!(&steps[anchor - 1].action, MkAction::WindowActivate(p) if p.matcher == matcher)
+        );
+        assert!(matches!(
+            &steps[anchor + 1].action,
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Image {
+                    asset_id: 10,
+                    offset: crate::mkmacro::variables::MkPoint { x: 0, y: 0 }
+                },
+                duration_ms: 500
+            })
+        ));
+        let ids: std::collections::HashSet<_> = steps.iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), steps.len());
+        assert!(steps.iter().all(|s| s.id != 0));
+        assert!(d.dirty);
+        assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
+    }
+
     #[test]
     fn create_duplicate_and_delete_are_draft_only() {
         let (_dir, mut d) = dialog();
@@ -385,6 +466,25 @@ mod tests {
                     | MkAction::VirtualDesktop(_)
             ));
         }
+    }
+
+    #[test]
+    fn image_result_details_use_friendly_catalog_description() {
+        let action = MkAction::MouseMove(MkMouseMovePayload {
+            target: MkCoordinateTarget::Image {
+                asset_id: 10,
+                offset: crate::mkmacro::variables::MkPoint { x: 2, y: -3 },
+            },
+            duration_ms: 500,
+        });
+        let assets = [crate::mkmacro::MkImageAsset {
+            id: 10,
+            name: "Save Button".into(),
+            relative_path: "refs/save_button.png".into(),
+        }];
+        let details = action_catalog::action_details_with_assets(&action, &assets);
+        assert!(details.contains("Save Button · save_button.png · ID 10"));
+        assert!(details.contains("offset (2, -3)"));
     }
 
     #[test]
@@ -1424,6 +1524,7 @@ impl MkMacroDialog {
             hotkey: None,
             playback: Default::default(),
             steps: vec![],
+            image_assets: vec![],
         });
         repair_ids(&mut self.draft);
         self.set_selected_macro(self.draft.macros.last().map(|m| m.id));

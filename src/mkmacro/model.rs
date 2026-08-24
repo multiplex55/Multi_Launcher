@@ -64,6 +64,9 @@ pub struct MkMacro {
     pub playback: MkPlayback,
     #[serde(default)]
     pub steps: Vec<MkStep>,
+    /// Reference images owned by this macro. IDs remain the persisted action reference.
+    #[serde(default)]
+    pub image_assets: Vec<MkImageAsset>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkStep {

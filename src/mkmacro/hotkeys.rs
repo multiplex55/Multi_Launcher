@@ -409,6 +409,7 @@ mod tests {
             }),
             playback: MkPlayback::default(),
             steps: vec![],
+            image_assets: vec![],
         }
     }
     #[test]
