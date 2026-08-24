@@ -1119,7 +1119,7 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             if p.duration_ms == 0 {
                 "Instant".into()
             } else {
-                format!("{} ms", p.duration_ms)
+                format!("Smooth {} ms", p.duration_ms)
             }
         ),
         MkAction::MouseDrag(p) => format!(
@@ -1164,25 +1164,12 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
             "Close the current virtual desktop using native Windows behavior".into()
         }
-        MkAction::WaitUntil {
-            condition: MkCondition::ImageSearch { search, found },
-            wait,
-        } => {
-            let image = assets
-                .iter()
-                .find(|asset| asset.id == search.asset_id)
-                .map(|_| super::action_editor::image_asset_label(search.asset_id, assets))
-                .or_else(|| asset_name.map(str::to_owned))
-                .unwrap_or_else(|| format!("Asset {}", search.asset_id));
-            format!(
-                "Image {} · {} · Timeout {} ms",
-                if *found { "visible" } else { "not visible" },
-                image,
-                wait.timeout_ms
-            )
+        MkAction::WaitUntil { condition, wait } => {
+            format_wait_until(condition, wait, asset_name, assets)
         }
-        MkAction::WaitUntil { wait, .. } => format!("Timeout {} ms", wait.timeout_ms),
-        MkAction::If(_) | MkAction::WhileStart { .. } => "Condition".into(),
+        MkAction::If(condition) | MkAction::WhileStart { condition } => {
+            condition_summary(condition, asset_name, assets)
+        }
         MkAction::Else
         | MkAction::EndIf
         | MkAction::RepeatEnd
@@ -1211,6 +1198,32 @@ fn matcher_summary(m: &MkWindowMatcher) -> String {
     .collect::<Vec<_>>()
     .join(" / ")
 }
+fn asset_display_name(id: u64, preferred: Option<&str>, assets: &[MkImageAsset]) -> String {
+    assets
+        .iter()
+        .find(|asset| asset.id == id)
+        .and_then(|asset| {
+            let name = asset.name.trim();
+            if !name.is_empty() {
+                Some(name.to_owned())
+            } else {
+                std::path::Path::new(&asset.relative_path)
+                    .file_name()?
+                    .to_str()
+                    .map(str::to_owned)
+            }
+        })
+        .or_else(|| {
+            preferred.filter(|s| !s.trim().is_empty()).map(|s| {
+                std::path::Path::new(s)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(s)
+                    .to_owned()
+            })
+        })
+        .unwrap_or_else(|| format!("Missing image #{id}"))
+}
 fn region_summary(region: &SearchRegion) -> String {
     match region {
         SearchRegion::Desktop => "Entire Desktop".into(),
@@ -1223,28 +1236,100 @@ fn region_summary(region: &SearchRegion) -> String {
         SearchRegion::ClientArea { matcher } => format!("Client: {}", matcher_summary(matcher)),
     }
 }
+fn condition_region_summary(region: &SearchRegion) -> String {
+    match region {
+        SearchRegion::Rectangle { rect } => format!("Rectangle {}×{}", rect.width, rect.height),
+        other => region_summary(other),
+    }
+}
+fn condition_summary(c: &MkCondition, preferred: Option<&str>, assets: &[MkImageAsset]) -> String {
+    match c {
+        MkCondition::ImageSearch { search, found } => format!(
+            "Image currently {}: {} · {}",
+            if *found { "visible" } else { "not visible" },
+            asset_display_name(search.asset_id, preferred, assets),
+            condition_region_summary(&search.region)
+        ),
+        MkCondition::PreviousImageResult { asset_id, found } => format!(
+            "Previous image search: {} = {}",
+            asset_id
+                .map(|id| asset_display_name(id, preferred, assets))
+                .unwrap_or_else(|| "any image".into()),
+            if *found { "Found" } else { "Not Found" }
+        ),
+        MkCondition::All { conditions } => format!(
+            "All ({})",
+            conditions
+                .iter()
+                .map(|c| condition_summary(c, preferred, assets))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        MkCondition::Any { conditions } => format!(
+            "Any ({})",
+            conditions
+                .iter()
+                .map(|c| condition_summary(c, preferred, assets))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        MkCondition::Not { condition } => {
+            format!("Not ({})", condition_summary(condition, preferred, assets))
+        }
+        MkCondition::WindowExists { matcher } => {
+            format!("Window exists: {}", matcher_summary(matcher))
+        }
+        MkCondition::WindowActive { matcher } => {
+            format!("Window active: {}", matcher_summary(matcher))
+        }
+        MkCondition::Variable { name, op, value } => format!("{name} {op:?} {value:?}"),
+        MkCondition::PixelResult {
+            target,
+            color,
+            tolerance,
+        } => format!(
+            "Pixel {color} ±{tolerance} @ {}",
+            format_coordinate_target_with_assets(target, assets)
+        ),
+    }
+}
+fn format_wait_until(
+    c: &MkCondition,
+    wait: &MkWaitOptions,
+    preferred: Option<&str>,
+    assets: &[MkImageAsset],
+) -> String {
+    if let MkCondition::ImageSearch { search, found } = c {
+        let mut parts = vec![format!(
+            "{} {}",
+            asset_display_name(search.asset_id, preferred, assets),
+            if *found { "appears" } else { "disappears" }
+        )];
+        if !matches!(search.region, SearchRegion::Desktop) {
+            parts.push(condition_region_summary(&search.region));
+        }
+        parts.push(format!("timeout {} ms", wait.timeout_ms));
+        if wait.poll_interval_ms != 100 {
+            parts.push(format!("poll every {} ms", wait.poll_interval_ms));
+        }
+        parts.join(" · ")
+    } else {
+        format!(
+            "{} · timeout {} ms",
+            condition_summary(c, preferred, assets),
+            wait.timeout_ms
+        )
+    }
+}
 fn format_image_details(
     p: &MkImagePayload,
     asset_name: Option<&str>,
     assets: &[MkImageAsset],
     click: bool,
 ) -> String {
-    let image = assets
-        .iter()
-        .find(|asset| asset.id == p.asset_id)
-        .map(|_| super::action_editor::image_asset_label(p.asset_id, assets))
-        .or_else(|| {
-            asset_name.filter(|s| !s.trim().is_empty()).map(|s| {
-                std::path::Path::new(s)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(s)
-                    .to_owned()
-            })
-        })
-        .unwrap_or_else(|| format!("Asset {}", p.asset_id));
+    let image = asset_display_name(p.asset_id, asset_name, assets);
     let mut parts = vec![image, region_summary(&p.region)];
-    if !click {
+    if !click && p.tolerance != 0 {
         parts.push(format!("tolerance {}", p.tolerance));
     }
     if click {
@@ -1258,8 +1343,8 @@ fn format_image_details(
     }
     if !click {
         parts.push(match p.not_found_policy {
-            MkImageNotFoundPolicy::Continue => "continue if absent".into(),
-            MkImageNotFoundPolicy::Fail => "fail if absent".into(),
+            MkImageNotFoundPolicy::Continue => "continue if missing".into(),
+            MkImageNotFoundPolicy::Fail => "fail if missing".into(),
         });
         let outputs = [
             ("found", &p.outputs.found),
@@ -1369,12 +1454,98 @@ mod paste_tests {
         };
         assert!(
             action_details_with_asset_name(&visible, Some("button.png"))
-                .contains("Image visible · button.png")
+                .contains("button.png appears · timeout 5000 ms")
         );
         assert!(
             action_details_with_asset_name(&absent, Some("button.png"))
-                .contains("Image not visible · button.png")
+                .contains("button.png disappears · timeout 5000 ms")
         );
+    }
+
+    #[test]
+    fn image_summaries_use_friendly_names_and_exact_intent() {
+        let assets = [MkImageAsset {
+            id: 7,
+            name: "save.png".into(),
+            relative_path: "images/original.png".into(),
+        }];
+        let mut payload = ip(MkImageNotFoundPolicy::Continue);
+        payload.asset_id = 7;
+        payload.region = SearchRegion::Window {
+            matcher: MkWindowMatcher {
+                process: Some("explorer.exe".into()),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            action_details_with_assets(&MkAction::ImageFind(payload), &assets),
+            "save.png · Window: explorer.exe · continue if missing"
+        );
+
+        let target = MkCoordinateTarget::Image {
+            asset_id: 7,
+            offset: MkPoint { x: 0, y: 0 },
+        };
+        assert_eq!(
+            format_coordinate_target_with_assets(&target, &assets),
+            "Image Result: save.png + (0,0)"
+        );
+        assert_eq!(
+            action_details_with_assets(
+                &MkAction::MouseMove(MkMouseMovePayload {
+                    target,
+                    duration_ms: 500
+                }),
+                &assets
+            ),
+            "Image Result: save.png + (0,0) · Smooth 500 ms"
+        );
+    }
+
+    #[test]
+    fn recursive_image_conditions_keep_live_and_previous_results_distinct() {
+        let assets = [MkImageAsset {
+            id: 7,
+            name: "save.png".into(),
+            relative_path: String::new(),
+        }];
+        let live = MkCondition::ImageSearch {
+            search: MkImageSearchCondition {
+                asset_id: 7,
+                region: SearchRegion::Rectangle {
+                    rect: ScreenRect {
+                        x: 10,
+                        y: 20,
+                        width: 800,
+                        height: 500,
+                    },
+                },
+                tolerance: 0,
+                alpha: AlphaPolicy::Compare,
+                return_point: ReturnPoint::Center,
+            },
+            found: true,
+        };
+        assert_eq!(
+            condition_summary(&live, None, &assets),
+            "Image currently visible: save.png · Rectangle 800×500"
+        );
+        let nested = MkCondition::All {
+            conditions: vec![
+                live,
+                MkCondition::Not {
+                    condition: Box::new(MkCondition::PreviousImageResult {
+                        asset_id: Some(7),
+                        found: false,
+                    }),
+                },
+            ],
+        };
+        assert_eq!(
+            condition_summary(&nested, None, &assets),
+            "All (Image currently visible: save.png · Rectangle 800×500; Not (Previous image search: save.png = Not Found))"
+        );
+        assert_eq!(asset_display_name(9, None, &assets), "Missing image #9");
     }
 }
 pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
@@ -1402,8 +1573,8 @@ pub fn format_coordinate_target_with_assets(
         MkCoordinateTarget::Variable { name } => format!("Variable <{name}>"),
         MkCoordinateTarget::Image { asset_id, offset } => {
             format!(
-                "{} offset ({}, {})",
-                super::action_editor::image_asset_label(*asset_id, assets),
+                "Image Result: {} + ({},{})",
+                asset_display_name(*asset_id, None, assets),
                 offset.x,
                 offset.y
             )
