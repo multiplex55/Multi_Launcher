@@ -51,6 +51,7 @@ fn run_window_action(
                 hotkey: None,
                 playback: Default::default(),
                 steps: vec![s(1, action)],
+                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -118,6 +119,7 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
                         }),
                     ),
                 ],
+                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -184,6 +186,7 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
                         }),
                     ),
                 ],
+                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -404,6 +407,7 @@ fn window_wait_is_cancellable_without_window_mutation() {
                         }),
                     }),
                 )],
+                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -523,6 +527,7 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
                         },
                     ),
                 ],
+                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -577,6 +582,7 @@ fn stop_during_held_key_wakes_and_cleans_up() {
                     ),
                     s(3, MkAction::KeyPress(MkKey::Enter)),
                 ],
+                image_assets: vec![],
             }],
         })
         .unwrap();

@@ -23,6 +23,7 @@ fn plan(action: MkAction) -> MkExecutionPlan {
         hotkey: None,
         playback: Default::default(),
         steps: vec![s(action)],
+        image_assets: vec![],
     })
     .unwrap()
 }
