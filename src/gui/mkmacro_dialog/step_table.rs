@@ -91,7 +91,7 @@ pub fn move_steps(steps: &mut [MkStep], ids: &BTreeSet<u64>, down: bool) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Edit(u64),
     Duplicate,
@@ -106,6 +106,108 @@ enum Command {
     InsertBelow(u64),
     RunOne,
     RunFrom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MenuEntry {
+    label: &'static str,
+    command: Option<Command>,
+    enabled: bool,
+    disabled_reason: Option<&'static str>,
+}
+
+impl MenuEntry {
+    fn action(label: &'static str, command: Command, enabled: bool) -> Self {
+        Self {
+            label,
+            command: Some(command),
+            enabled,
+            disabled_reason: None,
+        }
+    }
+    fn separator() -> Self {
+        Self {
+            label: "",
+            command: None,
+            enabled: false,
+            disabled_reason: None,
+        }
+    }
+}
+
+/// Pure description of a row menu. Structural markers are deliberately resolved
+/// through the analysis rather than inferred from their spelling or position.
+fn menu_model(
+    step: &MkStep,
+    selection: &BTreeSet<u64>,
+    steps: &[MkStep],
+    analysis: &crate::mkmacro::StructureAnalysis,
+) -> Vec<MenuEntry> {
+    let id = step.id;
+    if step.action.is_block_marker() {
+        if let Some(block) = analysis.block_for_marker(id) {
+            let edit = match block.kind {
+                crate::mkmacro::BlockKind::If => "Edit Condition",
+                crate::mkmacro::BlockKind::Repeat => "Edit Repeat",
+                crate::mkmacro::BlockKind::While => "Edit While",
+            };
+            return vec![
+                MenuEntry::action(edit, Command::Edit(block.opener_id), true),
+                MenuEntry::action("Run From Here", Command::RunFrom, true),
+                MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
+                MenuEntry::action("Insert Below", Command::InsertBelow(id), true),
+                MenuEntry::separator(),
+                MenuEntry::action("Delete Block", Command::DeleteBlock(id), true),
+                MenuEntry::action("Unwrap Block", Command::UnwrapBlock(id), true),
+            ];
+        }
+        let mut delete = MenuEntry::action("Delete Block", Command::DeleteBlock(id), false);
+        delete.disabled_reason = Some("This marker is not part of a complete block");
+        let mut unwrap = MenuEntry::action("Unwrap Block", Command::UnwrapBlock(id), false);
+        unwrap.disabled_reason = delete.disabled_reason;
+        return vec![
+            MenuEntry::action(
+                "Edit",
+                Command::Edit(id),
+                step.action
+                    .block_marker()
+                    .is_some_and(|m| matches!(m, crate::mkmacro::MkBlockMarker::Open(_))),
+            ),
+            MenuEntry::action("Run From Here", Command::RunFrom, true),
+            MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
+            MenuEntry::action("Insert Below", Command::InsertBelow(id), true),
+            MenuEntry::separator(),
+            delete,
+            unwrap,
+        ];
+    }
+    let ids = if selection.contains(&id) {
+        selection.clone()
+    } else {
+        BTreeSet::from([id])
+    };
+    let move_enabled = |down| {
+        let mut candidate = steps.to_vec();
+        move_selection_structurally(&mut candidate, &ids, down).is_ok_and(|_| candidate != steps)
+    };
+    let can_up = move_enabled(false);
+    let can_down = move_enabled(true);
+    vec![
+        MenuEntry::action("Edit", Command::Edit(id), true),
+        MenuEntry::action("Run This Step", Command::RunOne, true),
+        MenuEntry::action("Run From Here", Command::RunFrom, true),
+        MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
+        MenuEntry::action("Insert Below", Command::InsertBelow(id), true),
+        MenuEntry::action("Duplicate", Command::Duplicate, true),
+        MenuEntry::action(
+            if step.enabled { "Disable" } else { "Enable" },
+            Command::Toggle,
+            step.action.can_be_disabled(),
+        ),
+        MenuEntry::action("Move Up", Command::Up, can_up),
+        MenuEntry::action("Move Down", Command::Down, can_down),
+        MenuEntry::action("Delete", Command::DeleteRow(id), true),
+    ]
 }
 const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
 
@@ -156,6 +258,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     };
     let rows: Vec<u64> = m.steps.iter().map(|s| s.id).collect();
     let depths = super::action_catalog::action_depths(m);
+    let structure = crate::mkmacro::analyze_structure(&m.steps);
     let mut clicked = None;
     let mut changed = false;
     let mut updates = Vec::new();
@@ -210,8 +313,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         let label = format!("{}{}", "  ".repeat(depths[i]), super::action_catalog::action_name(&s.action));
                         let response=if structural { ui.strong(label) } else { ui.label(label) };
                         if response.double_clicked(){command=Some(Command::Edit(s.id));}
-                        let block = crate::mkmacro::analyze_structure(&m.steps).block_for_marker(s.id).is_some();
-                        response.context_menu(|ui| context_menu(ui,s.id,block,&mut command));
+                        if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }
+                        let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure);
+                        response.context_menu(|ui| render_context_menu(ui, &menu, &mut command));
                         if let Some(items) = row_diagnostics.get(&s.id) {
                             let first = items[0];
                             let color = match first.severity {
@@ -223,7 +327,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         }
                     });
                     r.col(|ui| {
-                        let full=super::action_catalog::action_details_with_assets(&s.action, &m.image_assets); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}let block=crate::mkmacro::analyze_structure(&m.steps).block_for_marker(s.id).is_some();response.context_menu(|ui|context_menu(ui,s.id,block,&mut command));
+                        let full=super::action_catalog::action_details_with_assets(&s.action, &m.image_assets); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure);response.context_menu(|ui|render_context_menu(ui, &menu, &mut command));
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
@@ -300,44 +404,26 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     }
 }
 
-fn context_menu(
+fn render_context_menu(
     ui: &mut eframe::egui::Ui,
-    id: u64,
-    complete_block: bool,
+    entries: &[MenuEntry],
     out: &mut Option<Command>,
 ) {
-    let delete = if complete_block {
-        Command::DeleteBlock(id)
-    } else {
-        Command::DeleteRow(id)
-    };
-    for (label, c) in [
-        ("Edit", Command::Edit(id)),
-        ("Run This Step", Command::RunOne),
-        ("Run From Here", Command::RunFrom),
-        ("Insert Above", Command::InsertAbove(id)),
-        ("Insert Below", Command::InsertBelow(id)),
-        ("Duplicate", Command::Duplicate),
-        ("Enable/Disable", Command::Toggle),
-        ("Move Up", Command::Up),
-        ("Move Down", Command::Down),
-        (
-            if complete_block {
-                "Delete Block"
-            } else {
-                "Delete"
-            },
-            delete,
-        ),
-    ] {
-        if ui.button(label).clicked() {
-            *out = Some(c);
+    for entry in entries {
+        let Some(command) = entry.command else {
+            ui.separator();
+            continue;
+        };
+        let response = ui.add_enabled(entry.enabled, eframe::egui::Button::new(entry.label));
+        let response = if let Some(reason) = entry.disabled_reason {
+            response.on_disabled_hover_text(reason)
+        } else {
+            response
+        };
+        if response.clicked() {
+            *out = Some(command);
             ui.close_menu();
         }
-    }
-    if complete_block && ui.button("Unwrap Block").clicked() {
-        *out = Some(Command::UnwrapBlock(id));
-        ui.close_menu();
     }
 }
 fn apply_command(d: &mut MkMacroDialog, c: Command) {
@@ -349,9 +435,30 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
         }
     }
     if let Command::Edit(id) = c {
+        let edit_id = d.selected_macro().and_then(|m| {
+            let step = m.steps.iter().find(|s| s.id == id)?;
+            if !step.action.is_block_marker() {
+                return Some(id);
+            }
+            crate::mkmacro::analyze_structure(&m.steps)
+                .block_for_marker(id)
+                .map(|block| block.opener_id)
+                .or_else(|| {
+                    matches!(
+                        step.action.block_marker(),
+                        Some(crate::mkmacro::MkBlockMarker::Open(_))
+                    )
+                    .then_some(id)
+                })
+        });
+        let Some(edit_id) = edit_id else {
+            d.command_error =
+                Some("The selected closing marker is not part of a complete block".into());
+            return;
+        };
         if let Some(s) = d
             .selected_macro()
-            .and_then(|m| m.steps.iter().find(|s| s.id == id))
+            .and_then(|m| m.steps.iter().find(|s| s.id == edit_id))
             .cloned()
         {
             if matches!(
@@ -659,5 +766,86 @@ mod layout_tests {
         );
         let mut malformed = vec![step(1, MkAction::RepeatStart { count: 1 }), delay(2)];
         assert!(move_selection_structurally(&mut malformed, &BTreeSet::from([1]), true).is_err());
+    }
+
+    fn labels(rows: &[MkStep], id: u64) -> Vec<(&'static str, bool)> {
+        let analysis = crate::mkmacro::analyze_structure(rows);
+        let row = rows.iter().find(|row| row.id == id).unwrap();
+        menu_model(row, &BTreeSet::from([id]), rows, &analysis)
+            .into_iter()
+            .map(|entry| (entry.label, entry.enabled))
+            .collect()
+    }
+
+    #[test]
+    fn menu_models_are_action_and_structure_aware() {
+        let ordinary = vec![delay(1), delay(2), delay(3)];
+        assert_eq!(
+            labels(&ordinary, 2),
+            vec![
+                ("Edit", true),
+                ("Run This Step", true),
+                ("Run From Here", true),
+                ("Insert Above", true),
+                ("Insert Below", true),
+                ("Duplicate", true),
+                ("Disable", true),
+                ("Move Up", true),
+                ("Move Down", true),
+                ("Delete", true),
+            ]
+        );
+        for action in [MkAction::Break, MkAction::Continue] {
+            let rows = vec![delay(1), step(2, action), delay(3)];
+            assert_eq!(labels(&rows, 2), labels(&ordinary, 2));
+        }
+
+        let if_rows = vec![
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            delay(2),
+            step(3, MkAction::Else),
+            delay(4),
+            step(5, MkAction::EndIf),
+        ];
+        let if_expected = vec![
+            ("Edit Condition", true),
+            ("Run From Here", true),
+            ("Insert Above", true),
+            ("Insert Below", true),
+            ("", false),
+            ("Delete Block", true),
+            ("Unwrap Block", true),
+        ];
+        for id in [1, 3, 5] {
+            assert_eq!(labels(&if_rows, id), if_expected);
+        }
+
+        let repeat = vec![
+            step(1, MkAction::RepeatStart { count: 2 }),
+            delay(2),
+            step(3, MkAction::RepeatEnd),
+        ];
+        let while_rows = vec![
+            step(
+                1,
+                MkAction::WhileStart {
+                    condition: MkCondition::All { conditions: vec![] },
+                },
+            ),
+            delay(2),
+            step(3, MkAction::WhileEnd),
+        ];
+        for id in [1, 3] {
+            assert_eq!(labels(&repeat, id)[0], ("Edit Repeat", true));
+            assert_eq!(labels(&while_rows, id)[0], ("Edit While", true));
+        }
+
+        let malformed = vec![step(1, MkAction::EndIf)];
+        let malformed_menu = labels(&malformed, 1);
+        assert_eq!(malformed_menu[0], ("Edit", false));
+        assert_eq!(
+            &malformed_menu[5..],
+            &[("Delete Block", false), ("Unwrap Block", false)]
+        );
     }
 }
