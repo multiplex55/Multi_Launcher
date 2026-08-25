@@ -773,31 +773,18 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
-        use super::mkmacro_dialog::visual_capture_visibility::VisibilityRequest;
-        match self.visual_capture_visibility.process_frame(
-            self.visible_flag.load(Ordering::SeqCst),
-            self.mkmacro_dialog.open,
-        ) {
-            VisibilityRequest::Hide => {
-                self.visible_flag.store(false, Ordering::SeqCst);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                ctx.request_repaint();
-            }
-            VisibilityRequest::Restore(saved) => {
-                self.mkmacro_dialog.open = saved.mkmacro_dialog;
-                self.visible_flag.store(saved.launcher, Ordering::SeqCst);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(saved.launcher));
-                ctx.request_repaint();
-            }
-            VisibilityRequest::None => {}
-        }
-        if self.visual_capture_visibility.pending()
+        if self
+            .mkmacro_dialog
+            .action_editor
+            .visual_capture
+            .as_ref()
+            .is_some_and(|w| w.active())
             || self
                 .mkmacro_dialog
                 .action_editor
-                .visual_capture
-                .as_ref()
-                .is_some_and(|w| w.active())
+                .visual_overlay
+                .operation_id()
+                .is_some()
         {
             ctx.request_repaint();
         }

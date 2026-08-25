@@ -1,17 +1,9 @@
-//! Non-blocking orchestration for rectangle authoring.
+//! Immediate, host-independent rectangle authoring orchestration.
 //!
-//! This module intentionally knows nothing about egui.  The owning GUI supplies
-//! the window, overlay, clock, capture and store boundaries and calls [`tick`]
-//! once per frame.  Consequently hiding a window never leads to a sleep on the
-//! UI thread and every terminal path passes through the same restoration step.
-//!
-//! Rectangle purposes deliberately diverge immediately after confirmation:
-//! [`RectanglePurpose::SearchRegion`] publishes the overlay geometry directly,
-//! whereas [`RectanglePurpose::ReferenceImageCapture`] carries that exact
-//! geometry through capture and transactional asset staging. Neither path reads
-//! an image action's persisted search region. All terminal results (including
-//! cancellation and failure) are held in [`WorkflowState::Restoring`] until the
-//! launcher's previous visibility has been restored exactly once.
+//! Selection starts synchronously when requested. Confirmation completes in the
+//! purpose-specific way: search regions publish geometry directly, while
+//! reference images are captured and persisted. The workflow neither observes
+//! nor changes launcher or dialog visibility, and has no restoration phase.
 
 use super::visual_overlay::{
     OperationId, RectanglePurpose, VisualOverlayController, VisualOverlayEvent,
@@ -20,38 +12,6 @@ use crate::mkmacro::ScreenRect;
 use crate::mkmacro::{ImageAssetAuthoringService, MkMacroStore, ScreenCaptureBackend};
 use image::RgbaImage;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-
-/// Exact visibility to put back after an authoring operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SavedVisibility {
-    pub launcher: bool,
-    pub mkmacro_dialog: bool,
-}
-
-pub trait VisibilityAdapter: Send {
-    fn snapshot(&self) -> SavedVisibility;
-    fn request_hidden(&mut self);
-    fn hidden_observed(&self) -> bool;
-    fn restore(&mut self, saved: SavedVisibility);
-}
-pub trait WorkflowClock: Send {
-    fn now(&self) -> Duration;
-}
-
-/// Monotonic production clock.  The private epoch also makes its values small
-/// and immune to wall-clock adjustments.
-pub struct SystemWorkflowClock(Instant);
-impl Default for SystemWorkflowClock {
-    fn default() -> Self {
-        Self(Instant::now())
-    }
-}
-impl WorkflowClock for SystemWorkflowClock {
-    fn now(&self) -> Duration {
-        self.0.elapsed()
-    }
-}
 
 /// Cloneable, single-queue facade for the overlay controller.  Workflow events
 /// are routed to its adapter while passive/editor events remain available to
@@ -251,47 +211,26 @@ pub enum WorkflowOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowState {
     Idle,
-    HidingLauncher {
-        saved_visibility: SavedVisibility,
-        requested_at: Duration,
-    },
-    WaitingForDesktopRedraw {
-        saved_visibility: SavedVisibility,
-        ready_at: Duration,
-    },
     Selecting {
-        saved_visibility: SavedVisibility,
         operation_id: OperationId,
         purpose: RectanglePurpose,
     },
     Capturing {
-        saved_visibility: SavedVisibility,
         rect: ScreenRect,
-    },
-    Restoring {
-        saved_visibility: SavedVisibility,
-        outcome: WorkflowOutcome,
     },
 }
 
 pub struct VisualCaptureWorkflow {
     state: WorkflowState,
     token: Option<DraftToken>,
-    purpose: Option<RectanglePurpose>,
-    visibility: Box<dyn VisibilityAdapter>,
-    clock: Box<dyn WorkflowClock>,
     overlay: Box<dyn RectangleOverlay>,
     capture: Box<dyn CaptureAdapter>,
     assets: Box<dyn AssetStoreAdapter>,
-    redraw_delay: Duration,
-    restored: bool,
     completed: Option<WorkflowOutcome>,
 }
 
 impl VisualCaptureWorkflow {
     pub fn new(
-        visibility: Box<dyn VisibilityAdapter>,
-        clock: Box<dyn WorkflowClock>,
         overlay: Box<dyn RectangleOverlay>,
         capture: Box<dyn CaptureAdapter>,
         assets: Box<dyn AssetStoreAdapter>,
@@ -299,14 +238,9 @@ impl VisualCaptureWorkflow {
         Self {
             state: WorkflowState::Idle,
             token: None,
-            purpose: None,
-            visibility,
-            clock,
             overlay,
             capture,
             assets,
-            redraw_delay: Duration::from_millis(34),
-            restored: true,
             completed: None,
         }
     }
@@ -316,9 +250,6 @@ impl VisualCaptureWorkflow {
     pub fn active(&self) -> bool {
         !matches!(self.state, WorkflowState::Idle)
     }
-    pub fn set_redraw_delay(&mut self, delay: Duration) {
-        self.redraw_delay = delay;
-    }
     pub fn begin(
         &mut self,
         token: DraftToken,
@@ -327,96 +258,60 @@ impl VisualCaptureWorkflow {
         if self.active() {
             return Err("a visual authoring operation is already active");
         }
-        let saved_visibility = self.visibility.snapshot();
-        let requested_at = self.clock.now();
-        self.token = Some(token);
-        self.purpose = Some(purpose);
-        self.restored = false;
         self.completed = None;
-        self.visibility.request_hidden();
-        self.state = WorkflowState::HidingLauncher {
-            saved_visibility,
-            requested_at,
-        };
-        Ok(())
-    }
-    /// Advances at most one asynchronous stage. It never waits or sleeps.
-    pub fn tick(&mut self) {
-        let state = self.state.clone();
-        match state {
-            WorkflowState::Idle => {}
-            WorkflowState::HidingLauncher {
-                saved_visibility, ..
-            } if self.visibility.hidden_observed() => {
-                self.state = WorkflowState::WaitingForDesktopRedraw {
-                    saved_visibility,
-                    ready_at: self.clock.now().saturating_add(self.redraw_delay),
+        match self.overlay.begin(purpose) {
+            Ok(operation_id) => {
+                self.token = Some(token);
+                self.state = WorkflowState::Selecting {
+                    operation_id,
+                    purpose,
                 };
+                Ok(())
             }
-            WorkflowState::WaitingForDesktopRedraw {
-                saved_visibility,
-                ready_at,
-            } if self.clock.now() >= ready_at => {
-                let purpose = self.purpose.expect("active workflow has purpose");
-                match self.overlay.begin(purpose) {
-                    Ok(operation_id) => {
-                        self.state = WorkflowState::Selecting {
-                            saved_visibility,
-                            operation_id,
-                            purpose,
-                        }
-                    }
-                    Err(error) => self.finish(saved_visibility, WorkflowOutcome::Failed(error)),
-                }
+            Err(error) => {
+                self.complete(WorkflowOutcome::Failed(error));
+                Ok(())
             }
+        }
+    }
+    pub fn tick(&mut self) {
+        match self.state.clone() {
+            WorkflowState::Idle => {}
             WorkflowState::Selecting {
-                saved_visibility,
                 operation_id,
                 purpose,
             } => match self.overlay.poll() {
                 SelectionEvent::Pending => {}
                 SelectionEvent::Cancelled { operation_id: id } if id == operation_id => {
-                    self.finish(saved_visibility, WorkflowOutcome::Cancelled)
+                    self.complete_with_cleanup(WorkflowOutcome::Cancelled)
                 }
                 SelectionEvent::Failed {
                     operation_id: id,
                     message,
                 } if id == operation_id => {
-                    self.finish(saved_visibility, WorkflowOutcome::Failed(message))
+                    self.complete_with_cleanup(WorkflowOutcome::Failed(message))
                 }
                 SelectionEvent::Confirmed {
                     operation_id: id,
                     rect,
                 } if id == operation_id => {
                     if rect.is_empty() {
-                        self.finish(
-                            saved_visibility,
-                            WorkflowOutcome::Failed("selection must be nonempty".into()),
-                        );
+                        self.complete_with_cleanup(WorkflowOutcome::Failed(
+                            "selection must be nonempty".into(),
+                        ));
+                    } else if purpose == RectanglePurpose::SearchRegion {
+                        self.complete_with_cleanup(WorkflowOutcome::Region {
+                            token: self.token.unwrap(),
+                            rect,
+                        });
                     } else {
-                        match purpose {
-                            RectanglePurpose::SearchRegion => self.finish(
-                                saved_visibility,
-                                WorkflowOutcome::Region {
-                                    token: self.token.unwrap(),
-                                    rect,
-                                },
-                            ),
-                            RectanglePurpose::ReferenceImageCapture => {
-                                self.state = WorkflowState::Capturing {
-                                    saved_visibility,
-                                    rect,
-                                };
-                            }
-                        }
+                        self.overlay.cancel();
+                        self.state = WorkflowState::Capturing { rect };
                     }
                 }
-                _ => {} // stale native events are deliberately ignored
+                _ => {}
             },
-            WorkflowState::Capturing {
-                saved_visibility,
-                rect,
-            } => {
+            WorkflowState::Capturing { rect } => {
                 let token = self.token.unwrap();
                 let outcome = self
                     .capture
@@ -424,85 +319,32 @@ impl VisualCaptureWorkflow {
                     .and_then(|image| self.assets.write_png_asset(token.macro_id, &image))
                     .map(|asset_id| WorkflowOutcome::Asset { token, asset_id })
                     .unwrap_or_else(WorkflowOutcome::Failed);
-                self.finish(saved_visibility, outcome);
+                self.complete(outcome);
             }
-            WorkflowState::Restoring {
-                saved_visibility,
-                outcome,
-            } => {
-                self.restore_once(saved_visibility);
-                self.completed = Some(outcome);
-                self.state = WorkflowState::Idle;
-                self.token = None;
-                self.purpose = None;
-            }
-            _ => {}
         }
     }
-    fn finish(&mut self, saved_visibility: SavedVisibility, outcome: WorkflowOutcome) {
+    fn complete_with_cleanup(&mut self, outcome: WorkflowOutcome) {
         self.overlay.cancel();
-        self.state = WorkflowState::Restoring {
-            saved_visibility,
-            outcome,
-        };
+        self.complete(outcome);
     }
-    fn restore_once(&mut self, saved: SavedVisibility) {
-        if !self.restored {
-            self.visibility.restore(saved);
-            self.restored = true;
-        }
+    fn complete(&mut self, outcome: WorkflowOutcome) {
+        self.state = WorkflowState::Idle;
+        self.token = None;
+        self.completed = Some(outcome);
     }
     pub fn cancel(&mut self) {
-        let saved = match self.state {
-            WorkflowState::HidingLauncher {
-                saved_visibility, ..
-            }
-            | WorkflowState::WaitingForDesktopRedraw {
-                saved_visibility, ..
-            }
-            | WorkflowState::Selecting {
-                saved_visibility, ..
-            }
-            | WorkflowState::Capturing {
-                saved_visibility, ..
-            }
-            | WorkflowState::Restoring {
-                saved_visibility, ..
-            } => Some(saved_visibility),
-            WorkflowState::Idle => None,
-        };
-        if let Some(saved) = saved {
-            self.finish(saved, WorkflowOutcome::Cancelled);
+        if self.active() {
+            self.complete_with_cleanup(WorkflowOutcome::Cancelled);
         }
     }
-    /// Returns results only after the restoration stage has run.
     pub fn take_completed(&mut self) -> Option<WorkflowOutcome> {
         self.completed.take()
     }
 }
 impl Drop for VisualCaptureWorkflow {
     fn drop(&mut self) {
-        self.overlay.cancel();
-        let saved = match self.state {
-            WorkflowState::HidingLauncher {
-                saved_visibility, ..
-            }
-            | WorkflowState::WaitingForDesktopRedraw {
-                saved_visibility, ..
-            }
-            | WorkflowState::Selecting {
-                saved_visibility, ..
-            }
-            | WorkflowState::Capturing {
-                saved_visibility, ..
-            }
-            | WorkflowState::Restoring {
-                saved_visibility, ..
-            } => Some(saved_visibility),
-            WorkflowState::Idle => None,
-        };
-        if let Some(saved) = saved {
-            self.restore_once(saved);
+        if self.active() {
+            self.overlay.cancel();
         }
     }
 }
@@ -515,61 +357,37 @@ mod tests {
 
     #[derive(Default)]
     struct Log {
-        entries: Vec<String>,
-        restores: usize,
-        saved: Option<SavedVisibility>,
-        now_ms: u64,
-        event: Option<SelectionEvent>,
+        begins: Vec<RectanglePurpose>,
+        events: Vec<SelectionEvent>,
+        cancels: usize,
+        captures: Vec<ScreenRect>,
+        writes: usize,
         capture_error: bool,
         write_error: bool,
     }
-    struct Vis(Arc<Mutex<Log>>, SavedVisibility);
-    impl VisibilityAdapter for Vis {
-        fn snapshot(&self) -> SavedVisibility {
-            self.1
-        }
-        fn request_hidden(&mut self) {
-            self.0.lock().unwrap().entries.push("hide".into());
-        }
-        fn hidden_observed(&self) -> bool {
-            true
-        }
-        fn restore(&mut self, saved: SavedVisibility) {
-            let mut l = self.0.lock().unwrap();
-            l.restores += 1;
-            l.saved = Some(saved);
-            l.entries.push("restore".into());
-        }
-    }
-    struct Clock(Arc<Mutex<Log>>);
-    impl WorkflowClock for Clock {
-        fn now(&self) -> Duration {
-            Duration::from_millis(self.0.lock().unwrap().now_ms)
-        }
-    }
     struct Overlay(Arc<Mutex<Log>>);
     impl RectangleOverlay for Overlay {
-        fn begin(&mut self, _: RectanglePurpose) -> Result<OperationId, String> {
-            self.0.lock().unwrap().entries.push("overlay".into());
+        fn begin(&mut self, p: RectanglePurpose) -> Result<OperationId, String> {
+            self.0.lock().unwrap().begins.push(p);
             Ok(7)
         }
         fn poll(&mut self) -> SelectionEvent {
-            self.0
-                .lock()
-                .unwrap()
-                .event
-                .take()
-                .unwrap_or(SelectionEvent::Pending)
+            let mut l = self.0.lock().unwrap();
+            if l.events.is_empty() {
+                SelectionEvent::Pending
+            } else {
+                l.events.remove(0)
+            }
         }
         fn cancel(&mut self) {
-            self.0.lock().unwrap().entries.push("overlay-close".into());
+            self.0.lock().unwrap().cancels += 1;
         }
     }
     struct Capture(Arc<Mutex<Log>>);
     impl CaptureAdapter for Capture {
         fn capture_rect(&mut self, r: ScreenRect) -> Result<RgbaImage, String> {
             let mut l = self.0.lock().unwrap();
-            l.entries.push(format!("capture:{r:?}"));
+            l.captures.push(r);
             if l.capture_error {
                 Err("capture failed".into())
             } else {
@@ -581,11 +399,11 @@ mod tests {
             }
         }
     }
-    struct Assets(Arc<Mutex<Log>>);
-    impl AssetStoreAdapter for Assets {
+    struct Store(Arc<Mutex<Log>>);
+    impl AssetStoreAdapter for Store {
         fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
             let mut l = self.0.lock().unwrap();
-            l.entries.push("write".into());
+            l.writes += 1;
             if l.write_error {
                 Err("write failed".into())
             } else {
@@ -593,242 +411,155 @@ mod tests {
             }
         }
     }
-    fn fixture(saved: SavedVisibility) -> (VisualCaptureWorkflow, Arc<Mutex<Log>>) {
+    fn fixture() -> (VisualCaptureWorkflow, Arc<Mutex<Log>>) {
         let l = Arc::new(Mutex::new(Log::default()));
         (
             VisualCaptureWorkflow::new(
-                Box::new(Vis(l.clone(), saved)),
-                Box::new(Clock(l.clone())),
                 Box::new(Overlay(l.clone())),
                 Box::new(Capture(l.clone())),
-                Box::new(Assets(l.clone())),
+                Box::new(Store(l.clone())),
             ),
             l,
         )
     }
-    fn reach_selecting(
-        w: &mut VisualCaptureWorkflow,
-        l: &Arc<Mutex<Log>>,
-        purpose: RectanglePurpose,
-    ) {
-        w.begin(
-            DraftToken {
-                macro_id: 3,
-                draft_generation: 9,
-            },
-            purpose,
-        )
-        .unwrap();
-        w.tick();
-        assert!(matches!(
-            w.state(),
-            WorkflowState::WaitingForDesktopRedraw { .. }
-        ));
-        w.tick();
-        assert!(
-            matches!(w.state(), WorkflowState::WaitingForDesktopRedraw { .. }),
-            "clock wait is nonblocking"
-        );
-        l.lock().unwrap().now_ms = 34;
-        w.tick();
-        assert!(matches!(w.state(), WorkflowState::Selecting { .. }));
-    }
-    fn complete_restoration(w: &mut VisualCaptureWorkflow) {
-        while w.active() {
-            w.tick();
+    fn token() -> DraftToken {
+        DraftToken {
+            macro_id: 3,
+            draft_generation: 9,
         }
+    }
+    fn confirm(l: &Arc<Mutex<Log>>, id: OperationId, rect: ScreenRect) {
+        l.lock().unwrap().events.push(SelectionEvent::Confirmed {
+            operation_id: id,
+            rect,
+        });
     }
 
     #[test]
-    fn pick_region_hides_waits_selects_restores_then_publishes() {
-        let (mut w, l) = fixture(SavedVisibility {
-            launcher: true,
-            mkmacro_dialog: true,
-        });
-        reach_selecting(&mut w, &l, RectanglePurpose::SearchRegion);
-        let rect = ScreenRect::new(-20, 4, 12, 8);
-        l.lock().unwrap().event = Some(SelectionEvent::Confirmed {
-            operation_id: 7,
-            rect,
-        });
-        w.tick();
-        assert!(matches!(w.state(), WorkflowState::Restoring { .. }));
-        assert!(w.take_completed().is_none());
+    fn begin_starts_overlay_immediately() {
+        let (mut w, l) = fixture();
+        w.begin(token(), RectanglePurpose::SearchRegion).unwrap();
+        assert_eq!(
+            l.lock().unwrap().begins,
+            vec![RectanglePurpose::SearchRegion]
+        );
+        assert!(matches!(
+            w.state(),
+            WorkflowState::Selecting {
+                operation_id: 7,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn search_region_confirmation_completes_without_capture() {
+        let (mut w, l) = fixture();
+        let r = ScreenRect::new(-4, 8, 9, 3);
+        w.begin(token(), RectanglePurpose::SearchRegion).unwrap();
+        confirm(&l, 7, r);
         w.tick();
         assert_eq!(
             w.take_completed(),
             Some(WorkflowOutcome::Region {
-                token: DraftToken {
-                    macro_id: 3,
-                    draft_generation: 9
-                },
-                rect
+                token: token(),
+                rect: r
             })
         );
-        let g = l.lock().unwrap();
-        assert_eq!(g.restores, 1);
-        assert_eq!(g.entries[0..3], ["hide", "overlay", "overlay-close"]);
-        assert_eq!(g.entries.last().map(String::as_str), Some("restore"));
-        assert!(!g.entries.iter().any(|entry| entry.starts_with("capture:")));
-        assert!(!g.entries.iter().any(|entry| entry == "write"));
+        let l = l.lock().unwrap();
+        assert!(l.captures.is_empty());
+        assert_eq!(l.writes, 0);
     }
     #[test]
-    fn reference_capture_occurs_only_after_confirmation_and_preserves_exact_rect() {
-        let (mut w, l) = fixture(SavedVisibility {
-            launcher: true,
-            mkmacro_dialog: true,
-        });
-        reach_selecting(&mut w, &l, RectanglePurpose::ReferenceImageCapture);
-        assert!(
-            !l.lock()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|x| x.starts_with("capture"))
-        );
-        let rect = ScreenRect::new(5, -8, 2, 3);
-        l.lock().unwrap().event = Some(SelectionEvent::Confirmed {
-            operation_id: 7,
-            rect,
-        });
+    fn reference_confirmation_captures_and_stages_exact_rectangle() {
+        let (mut w, l) = fixture();
+        let r = ScreenRect::new(-13, 27, 6, 4);
+        w.begin(token(), RectanglePurpose::ReferenceImageCapture)
+            .unwrap();
+        confirm(&l, 7, r);
         w.tick();
-        assert!(matches!(w.state(),WorkflowState::Capturing{rect:r,..} if *r==rect));
-        w.tick();
+        assert_eq!(w.state(), &WorkflowState::Capturing { rect: r });
         w.tick();
         assert_eq!(
             w.take_completed(),
             Some(WorkflowOutcome::Asset {
-                token: DraftToken {
-                    macro_id: 3,
-                    draft_generation: 9
-                },
+                token: token(),
                 asset_id: 42
             })
         );
-        assert!(
-            l.lock()
-                .unwrap()
-                .entries
-                .contains(&format!("capture:{rect:?}"))
-        );
-        assert_eq!(
-            l.lock()
-                .unwrap()
-                .entries
-                .iter()
-                .filter(|e| *e == "write")
-                .count(),
-            1
-        );
+        let l = l.lock().unwrap();
+        assert_eq!(l.captures, vec![r]);
+        assert_eq!(l.writes, 1);
     }
     #[test]
-    fn escape_before_or_during_drag_restores_exactly_once() {
-        for event in [
-            SelectionEvent::Cancelled { operation_id: 7 },
-            SelectionEvent::Cancelled { operation_id: 7 },
-        ] {
-            let saved = SavedVisibility {
-                launcher: false,
-                mkmacro_dialog: true,
-            };
-            let (mut w, l) = fixture(saved);
-            reach_selecting(&mut w, &l, RectanglePurpose::ReferenceImageCapture);
-            l.lock().unwrap().event = Some(event);
-            complete_restoration(&mut w);
-            let g = l.lock().unwrap();
-            assert_eq!(g.restores, 1);
-            assert_eq!(g.saved, Some(saved));
-            assert!(!g.entries.iter().any(|entry| entry.starts_with("capture:")));
-            assert!(!g.entries.iter().any(|entry| entry == "write"));
+    fn cancel_before_or_during_drag_completes_once() {
+        for via_event in [false, true] {
+            let (mut w, l) = fixture();
+            w.begin(token(), RectanglePurpose::ReferenceImageCapture)
+                .unwrap();
+            if via_event {
+                l.lock()
+                    .unwrap()
+                    .events
+                    .push(SelectionEvent::Cancelled { operation_id: 7 });
+                w.tick()
+            } else {
+                w.cancel()
+            }
+            assert_eq!(w.take_completed(), Some(WorkflowOutcome::Cancelled));
+            w.cancel();
+            assert_eq!(w.take_completed(), None);
+            let l = l.lock().unwrap();
+            assert_eq!(l.cancels, 1);
+            assert!(l.captures.is_empty());
+            assert_eq!(l.writes, 0);
         }
     }
     #[test]
-    fn zero_sized_selection_restores_without_capture_or_write() {
-        let (mut w, l) = fixture(SavedVisibility {
-            launcher: true,
-            mkmacro_dialog: true,
-        });
-        reach_selecting(&mut w, &l, RectanglePurpose::ReferenceImageCapture);
-        l.lock().unwrap().event = Some(SelectionEvent::Confirmed {
-            operation_id: 7,
-            rect: ScreenRect::new(-10, -20, 0, 4),
-        });
-        complete_restoration(&mut w);
+    fn capture_failure_completes_without_followup_restoration_stage() {
+        let (mut w, l) = fixture();
+        l.lock().unwrap().capture_error = true;
+        w.begin(token(), RectanglePurpose::ReferenceImageCapture)
+            .unwrap();
+        confirm(&l, 7, ScreenRect::new(1, 2, 3, 4));
+        w.tick();
+        w.tick();
         assert!(matches!(
             w.take_completed(),
             Some(WorkflowOutcome::Failed(_))
         ));
-        let g = l.lock().unwrap();
-        assert_eq!(g.restores, 1);
-        assert!(!g.entries.iter().any(|entry| entry.starts_with("capture:")));
-        assert!(!g.entries.iter().any(|entry| entry == "write"));
+        assert_eq!(w.state(), &WorkflowState::Idle);
+        assert_eq!(l.lock().unwrap().writes, 0);
     }
     #[test]
-    fn failures_restore_and_never_publish_an_asset() {
-        for capture_failure in [true, false] {
-            let (mut w, l) = fixture(SavedVisibility {
-                launcher: true,
-                mkmacro_dialog: true,
-            });
-            {
-                let mut g = l.lock().unwrap();
-                g.capture_error = capture_failure;
-                g.write_error = !capture_failure;
-            }
-            reach_selecting(&mut w, &l, RectanglePurpose::ReferenceImageCapture);
-            l.lock().unwrap().event = Some(SelectionEvent::Confirmed {
-                operation_id: 7,
-                rect: ScreenRect::new(0, 0, 1, 1),
-            });
-            complete_restoration(&mut w);
-            assert!(matches!(
-                w.take_completed(),
-                Some(WorkflowOutcome::Failed(_))
-            ));
-            assert_eq!(l.lock().unwrap().restores, 1);
-            let entries = &l.lock().unwrap().entries;
-            if capture_failure {
-                assert!(!entries.iter().any(|entry| entry == "write"));
-            } else {
-                assert_eq!(entries.iter().filter(|entry| *entry == "write").count(), 1);
-            }
-        }
-    }
-    #[test]
-    fn editor_close_and_drop_are_idempotent() {
-        let (mut w, l) = fixture(SavedVisibility {
-            launcher: false,
-            mkmacro_dialog: false,
-        });
-        w.begin(
-            DraftToken {
-                macro_id: 1,
-                draft_generation: 1,
-            },
-            RectanglePurpose::SearchRegion,
-        )
-        .unwrap();
-        w.cancel();
-        w.cancel();
-        complete_restoration(&mut w);
-        assert_eq!(l.lock().unwrap().restores, 1);
-        drop(w);
-        assert_eq!(l.lock().unwrap().restores, 1);
-    }
-    #[test]
-    fn stale_overlay_result_is_ignored() {
-        let (mut w, l) = fixture(SavedVisibility {
-            launcher: true,
-            mkmacro_dialog: true,
-        });
-        reach_selecting(&mut w, &l, RectanglePurpose::SearchRegion);
-        l.lock().unwrap().event = Some(SelectionEvent::Confirmed {
-            operation_id: 6,
-            rect: ScreenRect::new(0, 0, 4, 4),
-        });
+    fn asset_failure_completes_once() {
+        let (mut w, l) = fixture();
+        l.lock().unwrap().write_error = true;
+        w.begin(token(), RectanglePurpose::ReferenceImageCapture)
+            .unwrap();
+        confirm(&l, 7, ScreenRect::new(1, 2, 3, 4));
         w.tick();
-        assert!(matches!(w.state(), WorkflowState::Selecting { .. }));
-        w.cancel();
-        complete_restoration(&mut w);
+        w.tick();
+        assert!(matches!(
+            w.take_completed(),
+            Some(WorkflowOutcome::Failed(_))
+        ));
+        w.tick();
+        assert_eq!(w.take_completed(), None);
+        assert_eq!(l.lock().unwrap().writes, 1);
+    }
+    #[test]
+    fn stale_operation_event_is_ignored() {
+        let (mut w, l) = fixture();
+        w.begin(token(), RectanglePurpose::SearchRegion).unwrap();
+        confirm(&l, 6, ScreenRect::new(0, 0, 4, 4));
+        w.tick();
+        assert!(matches!(
+            w.state(),
+            WorkflowState::Selecting {
+                operation_id: 7,
+                ..
+            }
+        ));
+        assert_eq!(w.take_completed(), None);
     }
 }
