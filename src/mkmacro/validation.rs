@@ -103,6 +103,15 @@ pub fn validate_document_with_context(
             )
         };
         let mut ids = HashSet::new();
+        let pixel_search_ids: HashSet<u64> = m
+            .steps
+            .iter()
+            .filter_map(|s| match &s.action {
+                MkAction::FindPixel(p) if p.search_id != 0 => Some(p.search_id),
+                _ => None,
+            })
+            .collect();
+        let mut seen_pixel_ids = HashSet::new();
         let mut stack: Vec<(&str, bool)> = vec![];
         if m.playback.speed_percent == 0 {
             push(
@@ -350,11 +359,75 @@ pub fn validate_document_with_context(
                         _ => {}
                     }
                 }
-                MkAction::MouseMove(p) => target(&p.target, m.id, sid, asset_root, &mut out),
-                MkAction::MouseClick(p) => target(&p.target, m.id, sid, asset_root, &mut out),
+                MkAction::FindPixel(p) => {
+                    if p.search_id == 0 || !seen_pixel_ids.insert(p.search_id) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_pixel_search_id",
+                            "Pixel search IDs must be non-zero and unique",
+                        );
+                    }
+                    wait(&p.wait, m.id, sid, &mut out);
+                    if super::screen::parse_rgb(&p.color).is_err() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_pixel_color",
+                            "Enter a color as #RRGGBB",
+                        );
+                    }
+                    for name in [
+                        &p.outputs.found,
+                        &p.outputs.point,
+                        &p.outputs.x,
+                        &p.outputs.y,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if validate_variable_name(name).is_err() {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "invalid_pixel_output",
+                                format!("Invalid pixel output variable '{name}'"),
+                            );
+                        }
+                    }
+                    match &p.region {
+                        SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "invalid_pixel_region",
+                                "Pixel search rectangle is invalid",
+                            )
+                        }
+                        SearchRegion::Window { matcher: x }
+                        | SearchRegion::ClientArea { matcher: x } => {
+                            matcher(x, m.id, sid, &mut out)
+                        }
+                        _ => {}
+                    }
+                }
+                MkAction::MouseMove(p) => {
+                    target(&p.target, m.id, sid, asset_root, &mut out);
+                    validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
+                }
+                MkAction::MouseClick(p) => {
+                    target(&p.target, m.id, sid, asset_root, &mut out);
+                    validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
+                }
                 MkAction::MouseDrag(p) => {
                     target(&p.from, m.id, sid, asset_root, &mut out);
                     target(&p.to, m.id, sid, asset_root, &mut out);
+                    validate_pixel_reference(&p.from, &pixel_search_ids, m.id, sid, &mut out);
+                    validate_pixel_reference(&p.to, &pixel_search_ids, m.id, sid, &mut out);
                 }
                 MkAction::PixelCheck {
                     target: t, color, ..
@@ -508,7 +581,35 @@ fn target(
             "Point variable name is invalid",
         ),
         MkCoordinateTarget::Image { asset_id, .. } => asset(*asset_id, m, s, root, out),
+        MkCoordinateTarget::Pixel { search_id, .. } if *search_id == 0 => push(
+            out,
+            m,
+            s,
+            "missing_pixel_search",
+            "Select a Find Pixel Color result",
+        ),
+        MkCoordinateTarget::Pixel { .. } => {}
         _ => {}
+    }
+}
+fn validate_pixel_reference(
+    target: &MkCoordinateTarget,
+    ids: &HashSet<u64>,
+    m: u64,
+    s: Option<u64>,
+    out: &mut Vec<MkDiagnostic>,
+) {
+    if let MkCoordinateTarget::Pixel { search_id, .. } = target
+        && *search_id != 0
+        && !ids.contains(search_id)
+    {
+        push(
+            out,
+            m,
+            s,
+            "unknown_pixel_search",
+            format!("Pixel result references unknown search {search_id}"),
+        );
     }
 }
 fn condition(

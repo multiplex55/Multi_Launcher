@@ -2,8 +2,8 @@
 //! Coordinates in a [`CapturedRegion`] are local; `origin` converts them back to
 //! virtual-desktop coordinates (and may therefore be negative).
 use crate::mkmacro::{
-    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkCoordinateTarget, MkImagePayload, MkPoint,
-    MkValue, MkWindowMatcher, RuntimeVariables, ScreenBackend,
+    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkCoordinateTarget, MkImagePayload,
+    MkPixelSearchPayload, MkPoint, MkValue, MkWindowMatcher, RuntimeVariables, ScreenBackend,
 };
 use image::RgbaImage;
 use std::sync::Arc;
@@ -16,6 +16,12 @@ pub(crate) fn image_result_variable(asset_id: u64) -> String {
 /// Runtime-only variable recording whether the latest search for an asset found it.
 pub(crate) fn image_found_variable(asset_id: u64) -> String {
     format!("__image_found.{asset_id}")
+}
+pub(crate) fn pixel_result_variable(search_id: u64) -> String {
+    format!("__pixel.{search_id}")
+}
+pub(crate) fn pixel_found_variable(search_id: u64) -> String {
+    format!("__pixel_found.{search_id}")
 }
 
 pub(crate) trait WindowsGeometry: Send + Sync {
@@ -30,6 +36,12 @@ pub(crate) trait WindowsGeometry: Send + Sync {
 pub(crate) trait VisualSearch: Send + Sync {
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
     fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]>;
+    fn find_pixel(&self, _: &MkPixelSearchPayload) -> ExecResult<Option<MkPoint>> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "pixel search is unavailable",
+        ))
+    }
 }
 
 /// Parse the persisted pixel-check color. The only accepted representation is
@@ -241,6 +253,26 @@ impl ScreenBackend for WindowsScreenBackend {
                     .context("variable", key)),
                 }
             }
+            MkCoordinateTarget::Pixel { search_id, offset } => {
+                let key = pixel_result_variable(*search_id);
+                match variables.get(&key) {
+                    Some(MkValue::Point(point)) => Ok(MkPoint {
+                        x: point
+                            .x
+                            .checked_add(offset.x)
+                            .ok_or_else(|| invalid("pixel result X offset overflow"))?,
+                        y: point
+                            .y
+                            .checked_add(offset.y)
+                            .ok_or_else(|| invalid("pixel result Y offset overflow"))?,
+                    }),
+                    Some(value) => Err(type_mismatch(&key, value)),
+                    None => Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::TargetNotFound,
+                        format!("pixel search {search_id} has no result in the current run"),
+                    )),
+                }
+            }
         }
     }
 
@@ -250,6 +282,9 @@ impl ScreenBackend for WindowsScreenBackend {
 
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
         self.visual.find_image(macro_id, payload)
+    }
+    fn find_pixel(&self, payload: &MkPixelSearchPayload) -> ExecResult<Option<MkPoint>> {
+        self.visual.find_pixel(payload)
     }
 
     fn pixel_matches(

@@ -48,6 +48,12 @@ pub trait CoordinateData {
     fn active_client_origin(&self) -> ExecResult<MkPoint>;
     fn mouse_position(&self) -> ExecResult<MkPoint>;
     fn image_result(&self, id: u64) -> ExecResult<MkPoint>;
+    fn pixel_result(&self, id: u64) -> ExecResult<MkPoint> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::TargetNotFound,
+            format!("pixel search {id} has no coordinate result"),
+        ))
+    }
     fn uia_result(&self, id: &str) -> ExecResult<MkPoint>;
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +63,7 @@ pub enum CoordinateBase {
     Client(MkPoint),
     RelativeMouse(MkPoint),
     ImageResult { id: u64, offset: MkPoint },
+    PixelResult { id: u64, offset: MkPoint },
     UiAutomationElement { id: String, offset: MkPoint },
 }
 pub trait OffsetRng {
@@ -83,6 +90,7 @@ pub fn resolve_coordinate(
         CoordinateBase::Client(p) => add(data.active_client_origin()?, *p),
         CoordinateBase::RelativeMouse(p) => add(data.mouse_position()?, *p),
         CoordinateBase::ImageResult { id, offset } => add(data.image_result(*id)?, *offset),
+        CoordinateBase::PixelResult { id, offset } => add(data.pixel_result(*id)?, *offset),
         CoordinateBase::UiAutomationElement { id, offset } => add(data.uia_result(id)?, *offset),
     };
     let r = radius.min(i32::MAX as u32) as i32;
@@ -163,6 +171,58 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+    struct PixelData;
+    impl CoordinateData for PixelData {
+        fn virtual_desktop(&self) -> ExecResult<VirtualDesktop> {
+            Ok(VirtualDesktop {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            })
+        }
+        fn active_window_rect(&self) -> ExecResult<Rect> {
+            unreachable!()
+        }
+        fn active_client_origin(&self) -> ExecResult<MkPoint> {
+            unreachable!()
+        }
+        fn mouse_position(&self) -> ExecResult<MkPoint> {
+            unreachable!()
+        }
+        fn image_result(&self, _: u64) -> ExecResult<MkPoint> {
+            unreachable!()
+        }
+        fn pixel_result(&self, id: u64) -> ExecResult<MkPoint> {
+            assert_eq!(id, 42);
+            Ok(MkPoint { x: 20, y: 30 })
+        }
+        fn uia_result(&self, _: &str) -> ExecResult<MkPoint> {
+            unreachable!()
+        }
+    }
+    struct NoOffset;
+    impl OffsetRng for NoOffset {
+        fn inclusive(&mut self, _: i32, _: i32) -> i32 {
+            0
+        }
+    }
+    #[test]
+    fn pixel_result_supports_offsets() {
+        assert_eq!(
+            resolve_coordinate(
+                &PixelData,
+                &CoordinateBase::PixelResult {
+                    id: 42,
+                    offset: MkPoint { x: -3, y: 5 }
+                },
+                0,
+                &mut NoOffset
+            )
+            .unwrap(),
+            MkPoint { x: 17, y: 35 }
         );
     }
 }

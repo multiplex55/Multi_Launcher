@@ -6,7 +6,7 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -187,6 +187,12 @@ pub enum MkCoordinateTarget {
         asset_id: u64,
         offset: MkPoint,
     },
+    /// Result produced by a particular Find Pixel Color action.
+    Pixel {
+        search_id: u64,
+        #[serde(default)]
+        offset: MkPoint,
+    },
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkWindowMatcher {
@@ -260,7 +266,7 @@ pub enum MkUiPattern {
     SelectionItem,
     Focus,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MkWaitOptions {
     pub timeout_ms: u64,
     pub poll_interval_ms: u64,
@@ -463,6 +469,25 @@ pub struct MkImagePayload {
     #[serde(default)]
     pub outputs: MkImageOutputs,
 }
+/// A first-class, asset-independent pixel search. Tolerance is the maximum
+/// absolute difference allowed independently for each RGB channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkPixelSearchPayload {
+    /// Stable identity used to isolate coordinate results from other searches.
+    #[serde(default)]
+    pub search_id: u64,
+    pub color: String,
+    #[serde(default)]
+    pub tolerance: u8,
+    #[serde(default)]
+    pub region: SearchRegion,
+    #[serde(default)]
+    pub wait: MkWaitOptions,
+    #[serde(default)]
+    pub not_found_policy: MkImageNotFoundPolicy,
+    #[serde(default)]
+    pub outputs: MkImageOutputs,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkUiPayload {
     pub window: MkWindowMatcher,
@@ -582,6 +607,7 @@ pub enum MkAction {
     Continue,
     ImageFind(MkImagePayload),
     ImageClick(MkImagePayload),
+    FindPixel(MkPixelSearchPayload),
     PixelCheck {
         target: MkCoordinateTarget,
         color: String,
