@@ -488,11 +488,11 @@ fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<()> {
                         continue;
                     };
                     let ty = action.get("type").and_then(|v| v.as_str());
-                    if matches!(ty, Some("if" | "while_start")) {
+                    if ty == Some("if") {
                         if let Some(data) = action.get_mut("data") {
                             condition(data)?;
                         }
-                    } else if ty == Some("wait_until") {
+                    } else if matches!(ty, Some("while_start" | "wait_until")) {
                         if let Some(c) = action.get_mut("data").and_then(|v| v.get_mut("condition"))
                         {
                             condition(c)?;
