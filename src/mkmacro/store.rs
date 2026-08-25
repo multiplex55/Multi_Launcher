@@ -440,6 +440,15 @@ fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<()> {
                 let asset_id = object
                     .remove("asset_id")
                     .ok_or_else(|| anyhow::anyhow!("legacy image_result has no asset_id"))?;
+                if !asset_id.as_u64().is_some_and(|id| id > 0) {
+                    anyhow::bail!("legacy image_result has an invalid asset_id")
+                }
+                if !object
+                    .get("found")
+                    .is_some_and(serde_json::Value::is_boolean)
+                {
+                    anyhow::bail!("legacy image_result has an invalid found value")
+                }
                 object.insert("type".into(), serde_json::json!("image_search"));
                 object.insert(
                     "search".into(),
@@ -479,11 +488,11 @@ fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<()> {
                         continue;
                     };
                     let ty = action.get("type").and_then(|v| v.as_str());
-                    if matches!(ty, Some("if" | "while_start")) {
+                    if ty == Some("if") {
                         if let Some(data) = action.get_mut("data") {
                             condition(data)?;
                         }
-                    } else if ty == Some("wait_until") {
+                    } else if matches!(ty, Some("while_start" | "wait_until")) {
                         if let Some(c) = action.get_mut("data").and_then(|v| v.get_mut("condition"))
                         {
                             condition(c)?;
@@ -685,6 +694,114 @@ mod tests {
         let nested = &json["conditions"][1]["condition"]["conditions"][0];
         assert_eq!(nested["type"], "image_search");
         assert_eq!(nested["found"], false);
+    }
+
+    #[test]
+    fn complete_v4_condition_document_migrates_once_and_round_trips_stably() {
+        let unrelated = serde_json::json!({
+            "type":"variable", "name":"sentinel", "op":"eq",
+            "value":{"type":"string","value":"unchanged"}
+        });
+        let legacy = serde_json::json!({
+            "schema_version":4,
+            "settings":{"record_toggle_hotkey":{"key":{"function":9},"modifiers":[]}},
+            "macros":[{"id":1,"name":"complete","description":"","enabled":true,
+                "hotkey":null,"playback":{"speed_percent":100,"random_delay_ms":0,
+                    "random_offset_px":0},"image_assets":[],"steps":[
+                {"id":10,"enabled":true,"repeat":1,"delay_after_ms":0,"on_error":"stop",
+                 "action":{"type":"if","data":{"type":"image_result","asset_id":7,"found":true}}},
+                {"id":11,"enabled":true,"repeat":1,"delay_after_ms":0,"on_error":"stop",
+                 "action":{"type":"while_start","data":{"condition":{"type":"not","condition":
+                    {"type":"image_result","asset_id":8,"found":false}},"max_iterations":9}}},
+                {"id":12,"enabled":true,"repeat":1,"delay_after_ms":0,"on_error":"stop",
+                 "action":{"type":"wait_until","data":{"wait":{"timeout_ms":10,"poll_interval_ms":1},
+                    "condition":{"type":"all","conditions":[
+                        {"type":"any","conditions":[unrelated.clone(),{"type":"not","condition":
+                            {"type":"image_result","asset_id":9,"found":true}}]},
+                        {"type":"image_result","asset_id":10,"found":false}]}}}}
+            ]}]
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let (doc, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(doc.schema_version, 5);
+        let encoded = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            encoded["macros"][0]["steps"][2]["action"]["data"]["condition"]["conditions"][0]["conditions"]
+                [0],
+            unrelated
+        );
+        for (step, found) in [(0, true), (1, false), (2, true)] {
+            let action = &doc.macros[0].steps[step].action;
+            let condition: &MkCondition = match action {
+                MkAction::If(c) => c,
+                MkAction::WhileStart { condition, .. } => condition,
+                MkAction::WaitUntil { condition, .. } => condition,
+                _ => unreachable!(),
+            };
+            let image = if step == 1 {
+                let MkCondition::Not { condition } = condition else {
+                    panic!()
+                };
+                condition.as_ref()
+            } else if step == 2 {
+                let MkCondition::All { conditions } = condition else {
+                    panic!()
+                };
+                let MkCondition::Any { conditions } = &conditions[0] else {
+                    panic!()
+                };
+                let MkCondition::Not { condition } = &conditions[1] else {
+                    panic!()
+                };
+                condition.as_ref()
+            } else {
+                condition
+            };
+            let MkCondition::ImageSearch {
+                search,
+                found: actual,
+            } = image
+            else {
+                panic!()
+            };
+            assert_eq!(actual, &found);
+            assert_eq!(search.region, SearchRegion::Desktop);
+            assert_eq!(search.tolerance, 0);
+            assert_eq!(search.alpha, AlphaPolicy::Compare);
+            assert_eq!(search.return_point, ReturnPoint::Center);
+        }
+
+        persist(&path, &doc).unwrap();
+        let (reloaded, changed_again) = read_document(&path).unwrap().unwrap();
+        assert!(!changed_again);
+        assert_eq!(reloaded, doc);
+    }
+
+    #[test]
+    fn malformed_v4_image_conditions_are_recoverable_load_errors() {
+        for malformed in [
+            serde_json::json!({"type":"image_result","found":true}),
+            serde_json::json!({"type":"image_result","asset_id":0,"found":true}),
+            serde_json::json!({"type":"image_result","asset_id":7,"found":"yes"}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let value = serde_json::json!({"schema_version":4,"macros":[{"id":1,"name":"m",
+                "steps":[{"id":2,"action":{"type":"if","data":malformed}}]}]});
+            fs::write(
+                dir.path().join(MKMACROS_FILE),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+            let (_, disposition) = MkMacroStore::open(dir.path()).unwrap();
+            assert!(matches!(
+                disposition,
+                LoadDisposition::NeedsUserRecovery { .. }
+            ));
+        }
     }
 
     #[test]
