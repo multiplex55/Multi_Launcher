@@ -2,32 +2,32 @@
 //! physical monitor: a single virtual-desktop popup would cover monitor gaps.
 use super::*;
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{
-            GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT,
+            COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT,
             WPARAM,
         },
         Graphics::Gdi::{
             BeginPaint, CreatePen, CreateSolidBrush, DeleteObject, EndPaint, EnumDisplayMonitors,
-            FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect, Rectangle, SelectObject,
-            SetBkMode, SetTextColor, TextOutW, UpdateWindow, HDC, HGDIOBJ, HMONITOR, MONITORINFO,
-            NULL_BRUSH, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+            FillRect, GetMonitorInfoW, GetStockObject, HDC, HGDIOBJ, HMONITOR, InvalidateRect,
+            MONITORINFO, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, Rectangle, SelectObject, SetBkMode,
+            SetTextColor, TRANSPARENT, TextOutW, UpdateWindow,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON},
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-                GetWindowLongPtrW, PeekMessageW, RegisterClassW, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CREATESTRUCTW,
-                CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, LWA_COLORKEY, MSG, PM_REMOVE,
-                SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_NCCREATE,
-                WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                WS_EX_TRANSPARENT, WS_POPUP,
+                CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
+                DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
+                HWND_TOPMOST, LWA_COLORKEY, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
+                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW,
+                SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WM_ERASEBKGND, WM_NCCREATE, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
+    core::PCWSTR,
 };
 
 // COLORREF is 0x00bbggrr. Magenta is reserved exclusively for transparency.
@@ -39,6 +39,7 @@ const LABEL_COLOR: COLORREF = COLORREF(0x00ffffff);
 struct WindowPaintState {
     bounds: ScreenRect,
     frame: Vec<OverlayFramePrimitive>,
+    hint: Option<String>,
 }
 struct OverlayWindow {
     hwnd: HWND,
@@ -48,6 +49,7 @@ struct OverlayWindow {
 
 pub(super) struct NativeOverlayRenderer {
     windows: Vec<OverlayWindow>,
+    tooltip: Option<OverlayWindow>,
     operation_id: Option<OperationId>,
     visual: Option<OverlayVisual>,
     left_down: bool,
@@ -58,6 +60,7 @@ impl Default for NativeOverlayRenderer {
     fn default() -> Self {
         Self {
             windows: vec![],
+            tooltip: None,
             operation_id: None,
             visual: None,
             left_down: false,
@@ -107,7 +110,25 @@ unsafe fn paint_frame(dc: HDC, state: &WindowPaintState) {
         let _ = DeleteObject(HGDIOBJ(clear.0));
     };
 
-    let pen = unsafe { CreatePen(PS_SOLID, 5, OUTLINE_COLOR) };
+    if let Some(text) = &state.hint {
+        let background = unsafe { CreateSolidBrush(COLORREF(0x00202020)) };
+        unsafe { FillRect(dc, &client, background) };
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(background.0));
+        }
+        unsafe {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, LABEL_COLOR);
+        }
+        for (line, value) in text.lines().enumerate() {
+            let encoded: Vec<u16> = value.encode_utf16().collect();
+            unsafe {
+                let _ = TextOutW(dc, 10, 9 + line as i32 * 18, &encoded);
+            }
+        }
+        return;
+    }
+    let pen = unsafe { CreatePen(PS_SOLID, RECTANGLE_OUTLINE_WIDTH, OUTLINE_COLOR) };
     let old_pen = unsafe { SelectObject(dc, HGDIOBJ(pen.0)) };
     let old_brush = unsafe { SelectObject(dc, GetStockObject(NULL_BRUSH)) };
     for primitive in &state.frame {
@@ -208,6 +229,15 @@ impl NativeOverlayRenderer {
 }
 
 impl OverlayRenderer for NativeOverlayRenderer {
+    fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
+        let mut point = POINT::default();
+        unsafe { GetCursorPos(&mut point) }
+            .map_err(|e| platform(format!("cursor query failed: {e}")))?;
+        Ok(MkPoint {
+            x: point.x,
+            y: point.y,
+        })
+    }
     fn show(
         &mut self,
         operation_id: OperationId,
@@ -244,6 +274,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             let mut state = Box::new(WindowPaintState {
                 bounds,
                 frame: frame.clone(),
+                hint: None,
             });
             let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             if overlay_is_mouse_transparent(visual) {
@@ -299,6 +330,57 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 }));
             }
         }
+        if let OverlayVisual::RectanglePicker { tooltip, .. } = visual {
+            let all = displays();
+            let monitor = monitor_nearest_pointer(&all, tooltip.pointer)
+                .ok_or_else(|| platform("No display is available for the selection tooltip"))?;
+            let size = (330, 76);
+            let at =
+                place_rectangle_tooltip(tooltip.pointer, size, monitor, RECTANGLE_TOOLTIP_OFFSET);
+            let bounds = ScreenRect::new(at.x, at.y, size.0, size.1);
+            let mut state = Box::new(WindowPaintState {
+                bounds,
+                frame: vec![],
+                hint: Some(tooltip.text.clone()),
+            });
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                    class,
+                    PCWSTR::null(),
+                    WS_POPUP,
+                    at.x,
+                    at.y,
+                    size.0 as i32,
+                    size.1 as i32,
+                    None,
+                    None,
+                    module,
+                    Some(state.as_mut() as *mut _ as *const _),
+                )
+            }
+            .map_err(|e| platform(format!("tooltip window creation failed: {e}")))?;
+            self.tooltip = Some(OverlayWindow { hwnd, state });
+            unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
+                .map_err(|e| platform(format!("tooltip layered configuration failed: {e}")))?;
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    at.x,
+                    at.y,
+                    size.0 as i32,
+                    size.1 as i32,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            }
+            .map_err(|e| platform(format!("tooltip positioning failed: {e}")))?;
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = InvalidateRect(hwnd, None, false);
+                let _ = UpdateWindow(hwnd);
+            }
+        }
         self.operation_id = Some(operation_id);
         self.visual = Some(visual.clone());
         Ok(())
@@ -322,6 +404,38 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 return Err(platform(format!("overlay repaint failed: {}", unsafe {
                     GetLastError().0
                 })));
+            }
+        }
+        if let (Some(window), OverlayVisual::RectanglePicker { tooltip, .. }) =
+            (&mut self.tooltip, visual)
+        {
+            window.state.hint = Some(tooltip.text.clone());
+            let all = displays();
+            if let Some(monitor) = monitor_nearest_pointer(&all, tooltip.pointer) {
+                let at = place_rectangle_tooltip(
+                    tooltip.pointer,
+                    (window.state.bounds.width, window.state.bounds.height),
+                    monitor,
+                    RECTANGLE_TOOLTIP_OFFSET,
+                );
+                window.state.bounds.x = at.x;
+                window.state.bounds.y = at.y;
+                unsafe {
+                    SetWindowPos(
+                        window.hwnd,
+                        HWND_TOPMOST,
+                        at.x,
+                        at.y,
+                        0,
+                        0,
+                        SWP_NOACTIVATE | SWP_NOSIZE,
+                    )
+                }
+                .map_err(|e| platform(format!("tooltip move failed: {e}")))?;
+                unsafe {
+                    let _ = InvalidateRect(window.hwnd, None, false);
+                    let _ = UpdateWindow(window.hwnd);
+                }
             }
         }
         Ok(())
@@ -374,6 +488,12 @@ impl OverlayRenderer for NativeOverlayRenderer {
     }
 
     fn close(&mut self) {
+        if let Some(window) = self.tooltip.take() {
+            unsafe {
+                SetWindowLongPtrW(window.hwnd, GWLP_USERDATA, 0);
+                let _ = DestroyWindow(window.hwnd);
+            }
+        }
         for window in self.windows.drain(..) {
             unsafe {
                 SetWindowLongPtrW(window.hwnd, GWLP_USERDATA, 0);

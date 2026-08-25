@@ -13,6 +13,64 @@ use std::{
 /// Passive overlays remain visible long enough to be recognized without
 /// becoming persistent desktop furniture.
 pub const PASSIVE_OVERLAY_DURATION: Duration = Duration::from_millis(2500);
+pub const RECTANGLE_OUTLINE_WIDTH: i32 = 3;
+pub const RECTANGLE_TOOLTIP_OFFSET: (i32, i32) = (16, 16);
+pub const RECTANGLE_INSTRUCTION: &str = "Draw a rectangle around the region — Esc to cancel";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RectangleTooltip {
+    pub text: String,
+    pub pointer: MkPoint,
+}
+
+pub fn rectangle_tooltip_text(selection: Option<ScreenRect>) -> String {
+    match selection {
+        None => RECTANGLE_INSTRUCTION.to_owned(),
+        Some(rect) => format!(
+            "X: {}  Y: {}\nW: {}  H: {}\nRelease to select — Esc to cancel",
+            rect.x, rect.y, rect.width, rect.height
+        ),
+    }
+}
+
+/// Places a tooltip near a pointer, flipping before it at crowded right/bottom edges.
+pub fn place_rectangle_tooltip(
+    pointer: MkPoint,
+    size: (u32, u32),
+    monitor: ScreenRect,
+    offset: (i32, i32),
+) -> MkPoint {
+    let width = i64::from(size.0);
+    let height = i64::from(size.1);
+    let left = i64::from(monitor.x);
+    let top = i64::from(monitor.y);
+    let max_x = (monitor.right() - width).max(left);
+    let max_y = (monitor.bottom() - height).max(top);
+    let preferred_x = i64::from(pointer.x) + i64::from(offset.0);
+    let preferred_y = i64::from(pointer.y) + i64::from(offset.1);
+    let x = if preferred_x + width <= monitor.right() {
+        preferred_x
+    } else {
+        i64::from(pointer.x) - i64::from(offset.0) - width
+    };
+    let y = if preferred_y + height <= monitor.bottom() {
+        preferred_y
+    } else {
+        i64::from(pointer.y) - i64::from(offset.1) - height
+    };
+    MkPoint {
+        x: x.clamp(left, max_x) as i32,
+        y: y.clamp(top, max_y) as i32,
+    }
+}
+
+pub fn monitor_nearest_pointer(monitors: &[ScreenRect], pointer: MkPoint) -> Option<ScreenRect> {
+    monitors.iter().copied().min_by_key(|m| {
+        let x = i64::from(pointer.x).clamp(i64::from(m.x), m.right().saturating_sub(1));
+        let y = i64::from(pointer.y).clamp(i64::from(m.y), m.bottom().saturating_sub(1));
+        (i64::from(pointer.x) - x).pow(2) + (i64::from(pointer.y) - y).pow(2)
+    })
+}
 
 pub type OperationId = u64;
 
@@ -126,6 +184,7 @@ pub enum OverlayVisual {
     RectanglePicker {
         virtual_desktop: ScreenRect,
         selection: Option<ScreenRect>,
+        tooltip: RectangleTooltip,
     },
     RectanglePreview(ScreenRect),
     Monitor(MonitorDescriptor),
@@ -229,6 +288,7 @@ pub(crate) fn overlay_is_mouse_transparent(visual: &OverlayVisual) -> bool {
 /// Isolates native windows, input, painting and resource ownership from the
 /// deterministic state machine.
 pub trait OverlayRenderer: Send {
+    fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError>;
     fn show(
         &mut self,
         operation_id: OperationId,
@@ -271,6 +331,7 @@ pub struct VisualOverlayController {
     clock: Box<dyn OverlayClock>,
     events: VecDeque<VisualOverlayEvent>,
     virtual_desktop: Option<ScreenRect>,
+    picker_pointer: Option<MkPoint>,
     shut_down: bool,
 }
 
@@ -292,6 +353,7 @@ impl VisualOverlayController {
             clock,
             events: VecDeque::new(),
             virtual_desktop: None,
+            picker_pointer: None,
             shut_down: false,
         }
     }
@@ -318,6 +380,7 @@ impl VisualOverlayController {
         }
         self.state = VisualOverlayState::Idle;
         self.virtual_desktop = None;
+        self.picker_pointer = None;
         self.allocate()
     }
     fn start(&mut self, state: VisualOverlayState, visual: OverlayVisual) -> OperationId {
@@ -362,6 +425,18 @@ impl VisualOverlayController {
             });
             return id;
         }
+        let pointer = match self.renderer.cursor_position() {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                let id = self.replace();
+                self.events.push_back(VisualOverlayEvent::Error {
+                    operation_id: id,
+                    error,
+                });
+                return id;
+            }
+        };
+        self.picker_pointer = Some(pointer);
         let id = self.start(
             VisualOverlayState::PickingRectangle {
                 start: None,
@@ -371,6 +446,10 @@ impl VisualOverlayController {
             OverlayVisual::RectanglePicker {
                 virtual_desktop,
                 selection: None,
+                tooltip: RectangleTooltip {
+                    text: rectangle_tooltip_text(None),
+                    pointer,
+                },
             },
         );
         if self.operation_id == Some(id) {
@@ -434,6 +513,7 @@ impl VisualOverlayController {
         }
         self.state = VisualOverlayState::Idle;
         self.virtual_desktop = None;
+        self.picker_pointer = None;
     }
     pub fn shutdown(&mut self) {
         if self.shut_down {
@@ -443,6 +523,7 @@ impl VisualOverlayController {
         self.operation_id = None;
         self.state = VisualOverlayState::Idle;
         self.virtual_desktop = None;
+        self.picker_pointer = None;
         self.events.clear();
         self.shut_down = true;
     }
@@ -496,18 +577,18 @@ impl VisualOverlayController {
                 };
                 *start = Some(point);
                 *current = Some(point);
+                self.picker_pointer = Some(point);
                 self.repaint_picker();
             }
             OverlayInputKind::PointerMoved(point) => {
-                let VisualOverlayState::PickingRectangle {
-                    start: Some(_),
-                    current,
-                    ..
-                } = &mut self.state
+                let VisualOverlayState::PickingRectangle { start, current, .. } = &mut self.state
                 else {
                     return;
                 };
-                *current = Some(point);
+                if start.is_some() {
+                    *current = Some(point);
+                }
+                self.picker_pointer = Some(point);
                 self.repaint_picker();
             }
             OverlayInputKind::LeftReleased(point) => {
@@ -520,6 +601,7 @@ impl VisualOverlayController {
                     return;
                 };
                 *current = Some(point);
+                self.picker_pointer = Some(point);
                 // Publish the final pointer position through the same repaint
                 // path as press/move before confirmation tears the windows down.
                 self.repaint_picker();
@@ -537,12 +619,21 @@ impl VisualOverlayController {
             .zip(current)
             .and_then(|(a, b)| normalized_rect(a, b).ok())
             .filter(|r| !r.is_empty());
+        let pointer = self
+            .picker_pointer
+            .or(current)
+            .or(start)
+            .unwrap_or(MkPoint { x: 0, y: 0 });
         if let (Some(id), Some(virtual_desktop)) = (self.operation_id, self.virtual_desktop) {
             if let Err(error) = self.renderer.repaint(
                 id,
                 &OverlayVisual::RectanglePicker {
                     virtual_desktop,
                     selection,
+                    tooltip: RectangleTooltip {
+                        text: rectangle_tooltip_text(selection),
+                        pointer,
+                    },
                 },
             ) {
                 self.renderer.close();
@@ -631,6 +722,9 @@ use native::NativeOverlayRenderer;
 struct NativeOverlayRenderer;
 #[cfg(not(windows))]
 impl OverlayRenderer for NativeOverlayRenderer {
+    fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
+        Err(VisualOverlayError::unsupported())
+    }
     fn show(
         &mut self,
         _: OperationId,
@@ -677,6 +771,9 @@ mod tests {
     }
     struct FakeRenderer(Arc<Mutex<FakeData>>);
     impl OverlayRenderer for FakeRenderer {
+        fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
+            Ok(point(40, 50))
+        }
         fn show(
             &mut self,
             operation_id: OperationId,
@@ -777,6 +874,103 @@ mod tests {
     }
 
     #[test]
+    fn tooltip_text_is_deterministic_for_every_direction_and_negative_geometry() {
+        let expected = "X: -20  Y: -30\nW: 30  H: 50\nRelease to select — Esc to cancel";
+        for (a, b) in [
+            (point(-20, -30), point(10, 20)),
+            (point(10, -30), point(-20, 20)),
+            (point(-20, 20), point(10, -30)),
+            (point(10, 20), point(-20, -30)),
+        ] {
+            assert_eq!(
+                rectangle_tooltip_text(Some(normalized_rect(a, b).unwrap())),
+                expected
+            );
+        }
+        assert_eq!(rectangle_tooltip_text(None), RECTANGLE_INSTRUCTION);
+    }
+
+    #[test]
+    fn tooltip_placement_flips_clamps_and_supports_signed_offset_monitors() {
+        let monitor = ScreenRect::new(-1000, 200, 800, 600);
+        assert_eq!(
+            place_rectangle_tooltip(point(-990, 210), (100, 50), monitor, (16, 16)),
+            point(-974, 226)
+        );
+        assert_eq!(
+            place_rectangle_tooltip(point(-210, 790), (100, 50), monitor, (16, 16)),
+            point(-326, 724)
+        );
+        assert_eq!(
+            place_rectangle_tooltip(point(-500, 500), (900, 700), monitor, (16, 16)),
+            point(-1000, 200)
+        );
+        assert_eq!(
+            monitor_nearest_pointer(
+                &[monitor, ScreenRect::new(0, -500, 500, 500)],
+                point(-20, -20)
+            ),
+            Some(ScreenRect::new(0, -500, 500, 500))
+        );
+    }
+
+    #[test]
+    fn picker_shows_initial_hint_and_moves_replace_geometry_and_hint_together() {
+        let (mut c, fake, _) = controller();
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(-100, -100, 400, 400),
+        );
+        let calls = fake.lock().unwrap().calls.clone();
+        assert!(
+            matches!(&calls[0], RecordedCall::Show { visual: OverlayVisual::RectanglePicker { selection: None, tooltip, .. }, .. } if tooltip.text == RECTANGLE_INSTRUCTION && tooltip.pointer == point(40, 50))
+        );
+        fake.lock().unwrap().inputs = vec![
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(10, 20)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(-10, -20)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(30, 40)),
+            },
+        ];
+        assert!(c.poll().is_empty());
+        let repaints: Vec<_> = fake
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                RecordedCall::Repaint { visual, .. } => Some(visual.clone()),
+                _ => None,
+            })
+            .collect();
+        for visual in &repaints {
+            let OverlayVisual::RectanglePicker {
+                selection, tooltip, ..
+            } = visual
+            else {
+                panic!()
+            };
+            let frame = overlay_frame(visual);
+            assert_eq!(frame.first(), Some(&OverlayFramePrimitive::Clear));
+            assert_eq!(
+                frame.get(1),
+                selection.map(OverlayFramePrimitive::Outline).as_ref()
+            );
+            assert_eq!(tooltip.text, rectangle_tooltip_text(*selection));
+        }
+        assert!(
+            matches!(repaints.last(), Some(OverlayVisual::RectanglePicker { selection: Some(r), .. }) if *r == ScreenRect::new(10, 20, 20, 20))
+        );
+    }
+
+    #[test]
     fn half_open_drag_geometry_is_identical_in_all_four_directions() {
         let expected = ScreenRect::new(500, 300, 700, 600);
         for (a, b) in [
@@ -835,6 +1029,10 @@ mod tests {
         let picker = OverlayVisual::RectanglePicker {
             virtual_desktop: ScreenRect::new(0, 0, 1, 1),
             selection: None,
+            tooltip: RectangleTooltip {
+                text: rectangle_tooltip_text(None),
+                pointer: point(0, 0),
+            },
         };
         assert!(!overlay_is_mouse_transparent(&picker));
         assert!(overlay_is_mouse_transparent(
@@ -853,6 +1051,10 @@ mod tests {
             let frame = overlay_frame(&OverlayVisual::RectanglePicker {
                 virtual_desktop: ScreenRect::new(-100, -100, 200, 200),
                 selection,
+                tooltip: RectangleTooltip {
+                    text: rectangle_tooltip_text(selection),
+                    pointer: point(0, 0),
+                },
             });
             assert_eq!(frame.first(), Some(&OverlayFramePrimitive::Clear));
             assert_eq!(
