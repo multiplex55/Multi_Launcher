@@ -34,6 +34,17 @@ pub enum ConditionImageOperation {
     PickWindow,
     HighlightWindow,
 }
+
+impl ConditionImageOperation {
+    pub(crate) fn rectangle_purpose(&self) -> Option<super::visual_overlay::RectanglePurpose> {
+        use super::visual_overlay::RectanglePurpose;
+        match self {
+            Self::CaptureRectangle => Some(RectanglePurpose::ReferenceImageCapture),
+            Self::PickRectangle => Some(RectanglePurpose::SearchRegion),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConditionImageRequest {
     pub path: ConditionPath,
