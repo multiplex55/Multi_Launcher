@@ -3198,6 +3198,168 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct HostCaptureLog {
+        begins: Vec<mkmacro_dialog::visual_overlay::RectanglePurpose>,
+        events: Vec<mkmacro_dialog::visual_capture_workflow::SelectionEvent>,
+        captures: Vec<crate::mkmacro::ScreenRect>,
+        writes: usize,
+    }
+    struct HostOverlay(Arc<Mutex<HostCaptureLog>>);
+    impl mkmacro_dialog::visual_capture_workflow::RectangleOverlay for HostOverlay {
+        fn begin(
+            &mut self,
+            purpose: mkmacro_dialog::visual_overlay::RectanglePurpose,
+        ) -> Result<u64, String> {
+            self.0.lock().unwrap().begins.push(purpose);
+            Ok(101)
+        }
+        fn poll(&mut self) -> mkmacro_dialog::visual_capture_workflow::SelectionEvent {
+            let mut log = self.0.lock().unwrap();
+            if log.events.is_empty() {
+                mkmacro_dialog::visual_capture_workflow::SelectionEvent::Pending
+            } else {
+                log.events.remove(0)
+            }
+        }
+        fn cancel(&mut self) {}
+    }
+    struct HostCapture(Arc<Mutex<HostCaptureLog>>);
+    impl mkmacro_dialog::visual_capture_workflow::CaptureAdapter for HostCapture {
+        fn capture_rect(&mut self, rect: crate::mkmacro::ScreenRect) -> Result<RgbaImage, String> {
+            self.0.lock().unwrap().captures.push(rect);
+            Ok(RgbaImage::new(rect.width, rect.height))
+        }
+    }
+    struct HostAssets(Arc<Mutex<HostCaptureLog>>);
+    impl mkmacro_dialog::visual_capture_workflow::AssetStoreAdapter for HostAssets {
+        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
+            self.0.lock().unwrap().writes += 1;
+            Ok(88)
+        }
+    }
+    fn host_capture_dependencies(log: Arc<Mutex<HostCaptureLog>>) -> VisualCaptureDependencies {
+        VisualCaptureDependencies {
+            overlay: Box::new(HostOverlay(log.clone())),
+            capture: Box::new(HostCapture(log.clone())),
+            assets: Box::new(HostAssets(log)),
+        }
+    }
+
+    #[test]
+    fn installed_visual_capture_issues_rectangle_request_immediately() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let log = Arc::new(Mutex::new(HostCaptureLog::default()));
+        install_visual_capture(
+            &mut app.mkmacro_dialog,
+            host_capture_dependencies(log.clone()),
+        );
+        app.mkmacro_dialog
+            .action_editor
+            .request_rectangle_selection(
+                9,
+                mkmacro_dialog::visual_overlay::RectanglePurpose::SearchRegion,
+            )
+            .unwrap();
+        assert_eq!(
+            log.lock().unwrap().begins,
+            [mkmacro_dialog::visual_overlay::RectanglePurpose::SearchRegion]
+        );
+        assert!(
+            app.mkmacro_dialog
+                .action_editor
+                .visual_capture
+                .as_ref()
+                .unwrap()
+                .active()
+        );
+    }
+
+    #[test]
+    fn capture_authoring_never_changes_launcher_or_dialog_host_state() {
+        use mkmacro_dialog::visual_capture_workflow::SelectionEvent;
+        use mkmacro_dialog::visual_overlay::RectanglePurpose;
+        for outcome in ["success", "cancel", "failure"] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.mkmacro_dialog.open = true;
+            let log = Arc::new(Mutex::new(HostCaptureLog::default()));
+            install_visual_capture(
+                &mut app.mkmacro_dialog,
+                host_capture_dependencies(log.clone()),
+            );
+            let host_before = (
+                app.visible_flag.load(Ordering::SeqCst),
+                app.last_visible,
+                app.mkmacro_dialog.open,
+                app.panel_states.mkmacro_dialog,
+            );
+            app.mkmacro_dialog
+                .action_editor
+                .request_rectangle_selection(9, RectanglePurpose::ReferenceImageCapture)
+                .unwrap();
+            assert_eq!(
+                (
+                    app.visible_flag.load(Ordering::SeqCst),
+                    app.last_visible,
+                    app.mkmacro_dialog.open,
+                    app.panel_states.mkmacro_dialog
+                ),
+                host_before
+            );
+            log.lock().unwrap().events.push(match outcome {
+                "success" => SelectionEvent::Confirmed {
+                    operation_id: 101,
+                    rect: crate::mkmacro::ScreenRect::new(-20, 30, 4, 5),
+                },
+                "cancel" => SelectionEvent::Cancelled { operation_id: 101 },
+                _ => SelectionEvent::Failed {
+                    operation_id: 101,
+                    message: "overlay failed".into(),
+                },
+            });
+            for _ in 0..4 {
+                app.mkmacro_dialog
+                    .action_editor
+                    .tick_visual_capture(Some(9));
+            }
+            let effects = {
+                let log = log.lock().unwrap();
+                (log.begins.clone(), log.captures.clone(), log.writes)
+            };
+            for _ in 0..3 {
+                app.mkmacro_dialog
+                    .action_editor
+                    .tick_visual_capture(Some(9));
+            }
+            assert_eq!(
+                (
+                    app.visible_flag.load(Ordering::SeqCst),
+                    app.last_visible,
+                    app.mkmacro_dialog.open,
+                    app.panel_states.mkmacro_dialog
+                ),
+                host_before,
+                "{outcome}"
+            );
+            let after = log.lock().unwrap();
+            assert_eq!(
+                (after.begins.clone(), after.captures.clone(), after.writes),
+                effects,
+                "terminal ticks must have no effects for {outcome}"
+            );
+        }
+        let render = include_str!("render.rs");
+        assert!(
+            !render
+                .lines()
+                .any(|line| line.contains("ViewportCommand::Visible")
+                    && line.to_ascii_lowercase().contains("capture")),
+            "render host must not contain a capture-specific visibility command"
+        );
+    }
+
     #[test]
     fn inline_error_visibility_respects_setting() {
         let ctx = egui::Context::default();

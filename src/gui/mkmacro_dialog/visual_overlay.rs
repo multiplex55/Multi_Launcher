@@ -1435,4 +1435,150 @@ mod tests {
         drop(c);
         assert!(close_count(&fake) > before);
     }
+
+    #[test]
+    fn rectangle_picker_full_lifecycle_records_visuals_frames_tooltips_and_cleanup() {
+        for purpose in [
+            RectanglePurpose::SearchRegion,
+            RectanglePurpose::ReferenceImageCapture,
+        ] {
+            let (mut controller, fake, _) = controller();
+            let desktop = ScreenRect::new(-100, -80, 400, 300);
+            let id = controller.begin_rectangle_pick(purpose, desktop);
+            fake.lock().unwrap().inputs = vec![OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(20, 30)),
+            }];
+            assert!(controller.poll().is_empty());
+            fake.lock().unwrap().inputs = vec![OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(-40, -10)),
+            }];
+            assert!(controller.poll().is_empty());
+            fake.lock().unwrap().inputs = vec![OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftReleased(point(-40, -10)),
+            }];
+            assert_eq!(
+                controller.poll(),
+                vec![VisualOverlayEvent::RectangleConfirmed {
+                    operation_id: id,
+                    purpose,
+                    rect: ScreenRect::new(-40, -10, 60, 40),
+                }]
+            );
+            assert_eq!(controller.state(), &VisualOverlayState::Idle);
+
+            let calls = fake.lock().unwrap().calls.clone();
+            let visuals: Vec<_> = calls
+                .iter()
+                .filter_map(|call| match call {
+                    RecordedCall::Show {
+                        operation_id,
+                        visual,
+                        mouse_transparent,
+                    } => Some((*operation_id, visual.clone(), *mouse_transparent)),
+                    RecordedCall::Repaint {
+                        operation_id,
+                        visual,
+                    } => Some((*operation_id, visual.clone(), false)),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                visuals.len() >= 3,
+                "initial hint, press, and move/release visuals must be recorded"
+            );
+            assert!(
+                visuals
+                    .iter()
+                    .all(|(operation_id, _, transparent)| *operation_id == id && !transparent)
+            );
+            assert!(
+                matches!(&visuals[0].1, OverlayVisual::RectanglePicker { selection: None, tooltip, .. } if tooltip.text == RECTANGLE_INSTRUCTION)
+            );
+            assert!(visuals.iter().any(|(_, visual, _)| matches!(visual, OverlayVisual::RectanglePicker { selection: Some(rect), tooltip, .. }
+                if *rect == ScreenRect::new(-40, -10, 60, 40) && tooltip.text == rectangle_tooltip_text(Some(*rect)))));
+            for (_, visual, _) in &visuals {
+                let frame = overlay_frame(visual);
+                assert_eq!(frame.first(), Some(&OverlayFramePrimitive::Clear));
+            }
+            assert_eq!(close_count(&fake), 1);
+        }
+    }
+
+    #[test]
+    fn search_region_and_reference_capture_have_identical_picker_presentation() {
+        let mut presentations = Vec::new();
+        for purpose in [
+            RectanglePurpose::SearchRegion,
+            RectanglePurpose::ReferenceImageCapture,
+        ] {
+            let (mut controller, fake, _) = controller();
+            let id = controller.begin_rectangle_pick(purpose, ScreenRect::new(-10, -20, 100, 80));
+            fake.lock().unwrap().inputs = vec![
+                OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::LeftPressed(point(8, 9)),
+                },
+                OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::PointerMoved(point(18, 29)),
+                },
+            ];
+            assert!(controller.poll().is_empty());
+            presentations.push(
+                fake.lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter_map(|call| match call {
+                        RecordedCall::Show {
+                            visual,
+                            mouse_transparent,
+                            ..
+                        } => Some((visual.clone(), *mouse_transparent, overlay_frame(visual))),
+                        RecordedCall::Repaint { visual, .. } => {
+                            Some((visual.clone(), false, overlay_frame(visual)))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(presentations[0], presentations[1]);
+    }
+
+    #[test]
+    fn escape_before_and_during_drag_closes_once_and_emits_one_cancellation() {
+        for start_drag in [false, true] {
+            let (mut controller, fake, _) = controller();
+            let id = controller.begin_rectangle_pick(
+                RectanglePurpose::SearchRegion,
+                ScreenRect::new(0, 0, 100, 100),
+            );
+            let mut inputs = Vec::new();
+            if start_drag {
+                inputs.push(OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::LeftPressed(point(10, 20)),
+                });
+                inputs.push(OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::PointerMoved(point(30, 40)),
+                });
+            }
+            inputs.push(OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Escape,
+            });
+            fake.lock().unwrap().inputs = inputs;
+            assert_eq!(
+                controller.poll(),
+                vec![VisualOverlayEvent::Cancelled { operation_id: id }]
+            );
+            assert!(controller.poll().is_empty());
+            assert_eq!(close_count(&fake), 1);
+        }
+    }
 }

@@ -355,71 +355,81 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use std::sync::{Arc, Mutex};
 
-    #[derive(Default)]
-    struct Log {
-        begins: Vec<RectanglePurpose>,
-        events: Vec<SelectionEvent>,
-        cancels: usize,
-        captures: Vec<ScreenRect>,
-        writes: usize,
-        capture_error: bool,
-        write_error: bool,
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Call {
+        Begin(RectanglePurpose),
+        Poll,
+        Cancel,
+        Capture(ScreenRect),
+        Write {
+            macro_id: u64,
+            dimensions: (u32, u32),
+        },
     }
-    struct Overlay(Arc<Mutex<Log>>);
+    #[derive(Default)]
+    struct FakeState {
+        calls: Vec<Call>,
+        events: Vec<SelectionEvent>,
+        begin_error: Option<String>,
+        capture_error: Option<String>,
+        write_error: Option<String>,
+    }
+    struct Overlay(Arc<Mutex<FakeState>>);
     impl RectangleOverlay for Overlay {
-        fn begin(&mut self, p: RectanglePurpose) -> Result<OperationId, String> {
-            self.0.lock().unwrap().begins.push(p);
-            Ok(7)
+        fn begin(&mut self, purpose: RectanglePurpose) -> Result<OperationId, String> {
+            let mut fake = self.0.lock().unwrap();
+            fake.calls.push(Call::Begin(purpose));
+            fake.begin_error.take().map_or(Ok(7), Err)
         }
         fn poll(&mut self) -> SelectionEvent {
-            let mut l = self.0.lock().unwrap();
-            if l.events.is_empty() {
+            let mut fake = self.0.lock().unwrap();
+            fake.calls.push(Call::Poll);
+            if fake.events.is_empty() {
                 SelectionEvent::Pending
             } else {
-                l.events.remove(0)
+                fake.events.remove(0)
             }
         }
         fn cancel(&mut self) {
-            self.0.lock().unwrap().cancels += 1;
+            self.0.lock().unwrap().calls.push(Call::Cancel);
         }
     }
-    struct Capture(Arc<Mutex<Log>>);
+    struct Capture(Arc<Mutex<FakeState>>);
     impl CaptureAdapter for Capture {
-        fn capture_rect(&mut self, r: ScreenRect) -> Result<RgbaImage, String> {
-            let mut l = self.0.lock().unwrap();
-            l.captures.push(r);
-            if l.capture_error {
-                Err("capture failed".into())
+        fn capture_rect(&mut self, rect: ScreenRect) -> Result<RgbaImage, String> {
+            let mut fake = self.0.lock().unwrap();
+            fake.calls.push(Call::Capture(rect));
+            if let Some(error) = fake.capture_error.take() {
+                Err(error)
             } else {
                 Ok(RgbaImage::from_pixel(
-                    r.width,
-                    r.height,
+                    rect.width,
+                    rect.height,
                     Rgba([1, 2, 3, 255]),
                 ))
             }
         }
     }
-    struct Store(Arc<Mutex<Log>>);
+    struct Store(Arc<Mutex<FakeState>>);
     impl AssetStoreAdapter for Store {
-        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
-            let mut l = self.0.lock().unwrap();
-            l.writes += 1;
-            if l.write_error {
-                Err("write failed".into())
-            } else {
-                Ok(42)
-            }
+        fn write_png_asset(&mut self, macro_id: u64, image: &RgbaImage) -> Result<u64, String> {
+            let mut fake = self.0.lock().unwrap();
+            fake.calls.push(Call::Write {
+                macro_id,
+                dimensions: image.dimensions(),
+            });
+            fake.write_error.take().map_or(Ok(42), Err)
         }
     }
-    fn fixture() -> (VisualCaptureWorkflow, Arc<Mutex<Log>>) {
-        let l = Arc::new(Mutex::new(Log::default()));
+    fn fixture() -> (VisualCaptureWorkflow, Arc<Mutex<FakeState>>) {
+        let fake = Arc::new(Mutex::new(FakeState::default()));
         (
             VisualCaptureWorkflow::new(
-                Box::new(Overlay(l.clone())),
-                Box::new(Capture(l.clone())),
-                Box::new(Store(l.clone())),
+                Box::new(Overlay(fake.clone())),
+                Box::new(Capture(fake.clone())),
+                Box::new(Store(fake.clone())),
             ),
-            l,
+            fake,
         )
     }
     fn token() -> DraftToken {
@@ -428,138 +438,262 @@ mod tests {
             draft_generation: 9,
         }
     }
-    fn confirm(l: &Arc<Mutex<Log>>, id: OperationId, rect: ScreenRect) {
-        l.lock().unwrap().events.push(SelectionEvent::Confirmed {
-            operation_id: id,
-            rect,
-        });
+    fn queue(fake: &Arc<Mutex<FakeState>>, event: SelectionEvent) {
+        fake.lock().unwrap().events.push(event);
+    }
+    fn confirm(fake: &Arc<Mutex<FakeState>>, operation_id: OperationId, rect: ScreenRect) {
+        queue(fake, SelectionEvent::Confirmed { operation_id, rect });
+    }
+    fn data_calls(fake: &Arc<Mutex<FakeState>>) -> Vec<Call> {
+        fake.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| !matches!(call, Call::Poll | Call::Cancel))
+            .cloned()
+            .collect()
     }
 
     #[test]
-    fn begin_starts_overlay_immediately() {
-        let (mut w, l) = fixture();
-        w.begin(token(), RectanglePurpose::SearchRegion).unwrap();
+    fn begin_is_immediate_and_pending_selection_has_no_downstream_effects() {
+        let (mut workflow, fake) = fixture();
+        workflow
+            .begin(token(), RectanglePurpose::SearchRegion)
+            .unwrap();
         assert_eq!(
-            l.lock().unwrap().begins,
-            vec![RectanglePurpose::SearchRegion]
+            fake.lock().unwrap().calls,
+            [Call::Begin(RectanglePurpose::SearchRegion)]
         );
+        workflow.tick();
         assert!(matches!(
-            w.state(),
+            workflow.state(),
             WorkflowState::Selecting {
                 operation_id: 7,
-                ..
+                purpose: RectanglePurpose::SearchRegion
             }
         ));
-    }
-    #[test]
-    fn search_region_confirmation_completes_without_capture() {
-        let (mut w, l) = fixture();
-        let r = ScreenRect::new(-4, 8, 9, 3);
-        w.begin(token(), RectanglePurpose::SearchRegion).unwrap();
-        confirm(&l, 7, r);
-        w.tick();
+        assert_eq!(workflow.take_completed(), None);
         assert_eq!(
-            w.take_completed(),
+            data_calls(&fake),
+            [Call::Begin(RectanglePurpose::SearchRegion)]
+        );
+    }
+
+    #[test]
+    fn only_the_exact_operation_id_can_complete_selection() {
+        let (mut workflow, fake) = fixture();
+        workflow
+            .begin(token(), RectanglePurpose::SearchRegion)
+            .unwrap();
+        confirm(&fake, 6, ScreenRect::new(1, 2, 3, 4));
+        workflow.tick();
+        assert!(workflow.active());
+        assert_eq!(workflow.take_completed(), None);
+        confirm(&fake, 7, ScreenRect::new(-20, -30, 30, 50));
+        workflow.tick();
+        assert_eq!(
+            workflow.take_completed(),
             Some(WorkflowOutcome::Region {
                 token: token(),
-                rect: r
+                rect: ScreenRect::new(-20, -30, 30, 50)
             })
         );
-        let l = l.lock().unwrap();
-        assert!(l.captures.is_empty());
-        assert_eq!(l.writes, 0);
     }
+
     #[test]
-    fn reference_confirmation_captures_and_stages_exact_rectangle() {
-        let (mut w, l) = fixture();
-        let r = ScreenRect::new(-13, 27, 6, 4);
-        w.begin(token(), RectanglePurpose::ReferenceImageCapture)
+    fn signed_normalized_search_region_completes_without_capture_or_write() {
+        let (mut workflow, fake) = fixture();
+        let normalized = ScreenRect::new(-1920, -900, 1820, 1050);
+        workflow
+            .begin(token(), RectanglePurpose::SearchRegion)
             .unwrap();
-        confirm(&l, 7, r);
-        w.tick();
-        assert_eq!(w.state(), &WorkflowState::Capturing { rect: r });
-        w.tick();
+        confirm(&fake, 7, normalized);
+        workflow.tick();
         assert_eq!(
-            w.take_completed(),
+            workflow.take_completed(),
+            Some(WorkflowOutcome::Region {
+                token: token(),
+                rect: normalized
+            })
+        );
+        assert_eq!(
+            data_calls(&fake),
+            [Call::Begin(RectanglePurpose::SearchRegion)]
+        );
+    }
+
+    #[test]
+    fn reference_capture_orders_confirmation_before_capture_and_write() {
+        let (mut workflow, fake) = fixture();
+        let rect = ScreenRect::new(-13, 27, 6, 4);
+        workflow
+            .begin(token(), RectanglePurpose::ReferenceImageCapture)
+            .unwrap();
+        confirm(&fake, 7, rect);
+        workflow.tick();
+        assert_eq!(workflow.state(), &WorkflowState::Capturing { rect });
+        assert_eq!(
+            data_calls(&fake),
+            [Call::Begin(RectanglePurpose::ReferenceImageCapture)]
+        );
+        workflow.tick();
+        assert_eq!(
+            workflow.take_completed(),
             Some(WorkflowOutcome::Asset {
                 token: token(),
                 asset_id: 42
             })
         );
-        let l = l.lock().unwrap();
-        assert_eq!(l.captures, vec![r]);
-        assert_eq!(l.writes, 1);
+        assert_eq!(
+            data_calls(&fake),
+            [
+                Call::Begin(RectanglePurpose::ReferenceImageCapture),
+                Call::Capture(rect),
+                Call::Write {
+                    macro_id: 3,
+                    dimensions: (6, 4)
+                }
+            ]
+        );
     }
+
     #[test]
-    fn cancel_before_or_during_drag_completes_once() {
+    fn cancellation_event_and_explicit_cancel_never_capture_or_write() {
         for via_event in [false, true] {
-            let (mut w, l) = fixture();
-            w.begin(token(), RectanglePurpose::ReferenceImageCapture)
+            let (mut workflow, fake) = fixture();
+            workflow
+                .begin(token(), RectanglePurpose::ReferenceImageCapture)
                 .unwrap();
             if via_event {
-                l.lock()
-                    .unwrap()
-                    .events
-                    .push(SelectionEvent::Cancelled { operation_id: 7 });
-                w.tick()
+                queue(&fake, SelectionEvent::Cancelled { operation_id: 7 });
+                workflow.tick();
             } else {
-                w.cancel()
+                workflow.cancel();
             }
-            assert_eq!(w.take_completed(), Some(WorkflowOutcome::Cancelled));
-            w.cancel();
-            assert_eq!(w.take_completed(), None);
-            let l = l.lock().unwrap();
-            assert_eq!(l.cancels, 1);
-            assert!(l.captures.is_empty());
-            assert_eq!(l.writes, 0);
+            assert_eq!(workflow.take_completed(), Some(WorkflowOutcome::Cancelled));
+            workflow.tick();
+            workflow.cancel();
+            assert_eq!(workflow.take_completed(), None);
+            assert_eq!(
+                data_calls(&fake),
+                [Call::Begin(RectanglePurpose::ReferenceImageCapture)]
+            );
         }
     }
+
     #[test]
-    fn capture_failure_completes_without_followup_restoration_stage() {
-        let (mut w, l) = fixture();
-        l.lock().unwrap().capture_error = true;
-        w.begin(token(), RectanglePurpose::ReferenceImageCapture)
-            .unwrap();
-        confirm(&l, 7, ScreenRect::new(1, 2, 3, 4));
-        w.tick();
-        w.tick();
-        assert!(matches!(
-            w.take_completed(),
-            Some(WorkflowOutcome::Failed(_))
-        ));
-        assert_eq!(w.state(), &WorkflowState::Idle);
-        assert_eq!(l.lock().unwrap().writes, 0);
-    }
-    #[test]
-    fn asset_failure_completes_once() {
-        let (mut w, l) = fixture();
-        l.lock().unwrap().write_error = true;
-        w.begin(token(), RectanglePurpose::ReferenceImageCapture)
-            .unwrap();
-        confirm(&l, 7, ScreenRect::new(1, 2, 3, 4));
-        w.tick();
-        w.tick();
-        assert!(matches!(
-            w.take_completed(),
-            Some(WorkflowOutcome::Failed(_))
-        ));
-        w.tick();
-        assert_eq!(w.take_completed(), None);
-        assert_eq!(l.lock().unwrap().writes, 1);
-    }
-    #[test]
-    fn stale_operation_event_is_ignored() {
-        let (mut w, l) = fixture();
-        w.begin(token(), RectanglePurpose::SearchRegion).unwrap();
-        confirm(&l, 6, ScreenRect::new(0, 0, 4, 4));
-        w.tick();
-        assert!(matches!(
-            w.state(),
-            WorkflowState::Selecting {
+    fn overlay_failure_and_empty_geometry_are_terminal_without_capture_or_write() {
+        for event in [
+            SelectionEvent::Failed {
                 operation_id: 7,
-                ..
+                message: "overlay failed".into(),
+            },
+            SelectionEvent::Confirmed {
+                operation_id: 7,
+                rect: ScreenRect::new(-5, 8, 0, 4),
+            },
+        ] {
+            let (mut workflow, fake) = fixture();
+            workflow
+                .begin(token(), RectanglePurpose::ReferenceImageCapture)
+                .unwrap();
+            queue(&fake, event);
+            workflow.tick();
+            assert!(matches!(
+                workflow.take_completed(),
+                Some(WorkflowOutcome::Failed(_))
+            ));
+            assert_eq!(
+                data_calls(&fake),
+                [Call::Begin(RectanglePurpose::ReferenceImageCapture)]
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_begin_failure_is_reported_synchronously() {
+        let (mut workflow, fake) = fixture();
+        fake.lock().unwrap().begin_error = Some("overlay unavailable".into());
+        workflow
+            .begin(token(), RectanglePurpose::SearchRegion)
+            .unwrap();
+        assert_eq!(
+            workflow.take_completed(),
+            Some(WorkflowOutcome::Failed("overlay unavailable".into()))
+        );
+        assert!(!workflow.active());
+    }
+
+    #[test]
+    fn capture_and_store_failures_stop_at_the_failed_boundary() {
+        for store_failure in [false, true] {
+            let (mut workflow, fake) = fixture();
+            if store_failure {
+                fake.lock().unwrap().write_error = Some("write failed".into());
+            } else {
+                fake.lock().unwrap().capture_error = Some("capture failed".into());
             }
-        ));
-        assert_eq!(w.take_completed(), None);
+            let rect = ScreenRect::new(1, 2, 3, 4);
+            workflow
+                .begin(token(), RectanglePurpose::ReferenceImageCapture)
+                .unwrap();
+            confirm(&fake, 7, rect);
+            workflow.tick();
+            workflow.tick();
+            assert!(matches!(
+                workflow.take_completed(),
+                Some(WorkflowOutcome::Failed(_))
+            ));
+            let calls = data_calls(&fake);
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| matches!(c, Call::Capture(_)))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| matches!(c, Call::Write { .. }))
+                    .count(),
+                usize::from(store_failure)
+            );
+        }
+    }
+
+    #[test]
+    fn drop_cleans_up_an_active_overlay_once() {
+        let (mut workflow, fake) = fixture();
+        workflow
+            .begin(token(), RectanglePurpose::SearchRegion)
+            .unwrap();
+        drop(workflow);
+        assert_eq!(
+            fake.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| matches!(c, Call::Cancel))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_polling_is_idempotent() {
+        let (mut workflow, fake) = fixture();
+        workflow
+            .begin(token(), RectanglePurpose::SearchRegion)
+            .unwrap();
+        queue(&fake, SelectionEvent::Cancelled { operation_id: 7 });
+        workflow.tick();
+        let calls = fake.lock().unwrap().calls.len();
+        assert_eq!(workflow.take_completed(), Some(WorkflowOutcome::Cancelled));
+        for _ in 0..3 {
+            workflow.tick();
+            assert_eq!(workflow.take_completed(), None);
+        }
+        assert_eq!(fake.lock().unwrap().calls.len(), calls);
     }
 }

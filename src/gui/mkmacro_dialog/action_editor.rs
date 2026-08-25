@@ -235,7 +235,7 @@ impl ActionEditorState {
         let workflow = self
             .visual_capture
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("desktop visibility integration is unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("visual capture integration is unavailable"))?;
         workflow
             .begin(
                 super::visual_capture_workflow::DraftToken {
@@ -349,8 +349,7 @@ impl ActionEditorState {
         self.image_authoring = Default::default();
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
-            // Cancellation is synchronous only as far as requesting cleanup;
-            // drive the restoration stage before discarding the editor draft.
+            // Cancellation synchronously releases the active overlay before the draft is discarded.
             while workflow.active() {
                 workflow.tick();
             }
