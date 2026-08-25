@@ -4380,6 +4380,7 @@ mod tests {
     fn begin_ctrl_v_frame(ctx: &egui::Context, editor_id: egui::Id) {
         let mut input = egui::RawInput {
             time: Some(123.456),
+            modifiers: egui::Modifiers::CTRL,
             ..Default::default()
         };
         input.events.push(egui::Event::Key {
