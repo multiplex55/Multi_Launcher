@@ -1044,6 +1044,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn screenshot_file_collision_policies_are_explicit_and_transactional() {
+        let directory = tempfile::tempdir().unwrap();
+        let requested = directory.path().join("state.png");
+        std::fs::write(&requested, b"old").unwrap();
+        let files = HostScreenshotFileSystem;
+
+        let conflict = files
+            .write_transactional(&requested, b"new", MkFileCollisionPolicy::Error)
+            .unwrap_err();
+        assert_eq!(conflict.kind, DiagnosticKind::InputRejected);
+        assert_eq!(std::fs::read(&requested).unwrap(), b"old");
+
+        let overwritten = files
+            .write_transactional(&requested, b"new", MkFileCollisionPolicy::Overwrite)
+            .unwrap();
+        assert_eq!(overwritten, requested);
+        assert_eq!(std::fs::read(&requested).unwrap(), b"new");
+
+        let unique = files
+            .write_transactional(&requested, b"unique", MkFileCollisionPolicy::Unique)
+            .unwrap();
+        assert_eq!(unique.file_name().unwrap(), "state_1.png");
+        assert_eq!(std::fs::read(&unique).unwrap(), b"unique");
+        assert_eq!(std::fs::read(&requested).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+                .count(),
+            0,
+            "successful publishes must not leave temporary files behind"
+        );
+    }
+
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
             id,

@@ -6,7 +6,11 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 7;
+// Capture Screenshot is an additive action variant and does not alter the
+// representation of existing documents, so it intentionally remains in the
+// current schema generation. Bumping this value would rewrite every loaded
+// document and break stable migration/round-trip guarantees.
+pub const SCHEMA_VERSION: u32 = 6;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
