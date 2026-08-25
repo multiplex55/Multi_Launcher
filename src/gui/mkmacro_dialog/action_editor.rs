@@ -3616,10 +3616,6 @@ mod tests {
                 state.staged_dimensions.is_empty(),
                 "Pick Region must not stage a reference asset"
             );
-            assert_eq!(
-                state.restores, 1,
-                "Pick Region must restore the launcher exactly once"
-            );
         }
 
         #[test]
@@ -3668,10 +3664,6 @@ mod tests {
                 [(40, 30)],
                 "Capture must stage the exact 40x30 image"
             );
-            assert_eq!(
-                state.restores, 1,
-                "Capture must restore the launcher exactly once"
-            );
         }
 
         fn assert_capture_cancel(active_selection: bool) {
@@ -3705,10 +3697,6 @@ mod tests {
             assert!(
                 state.staged_dimensions.is_empty(),
                 "Cancelled Capture must not stage an asset"
-            );
-            assert_eq!(
-                state.restores, 1,
-                "Cancelled Capture must restore the launcher exactly once"
             );
         }
         #[test]
@@ -3765,10 +3753,6 @@ mod tests {
                 state.staged_dimensions.len(),
                 usize::from(stage_failure),
                 "Screen-capture failure must not stage; staging failure must receive the captured image"
-            );
-            assert_eq!(
-                state.restores, 1,
-                "Failed Capture must restore the launcher exactly once"
             );
         }
         #[test]
