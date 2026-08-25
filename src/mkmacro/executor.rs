@@ -1,15 +1,18 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
-    Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan,
-    MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMacroStore, MkMouseButton,
-    MkMouseScrollAxis, MkPlayback, MkPoint, MkProcessPayload, MkPromptInputPayload, MkTextPayload,
-    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
-    MkWindowPayload, MkWindowState, PromptBackend, PromptRequest, PromptResponse, RuntimeVariables,
+    CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan,
+    MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey,
+    MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkPlayback, MkPoint, MkProcessPayload,
+    MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
+    MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
+    PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, SearchRegion,
     interpolate,
 };
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
+    io::Cursor,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
@@ -149,6 +152,22 @@ pub trait ClipboardBackend: Send + Sync {
     /// formats must reject those contents rather than destroying them.
     fn snapshot_text(&self) -> ExecResult<String>;
     fn set_text(&self, text: &str) -> ExecResult;
+    fn set_image(&self, _: &CapturedRegion) -> ExecResult {
+        unsupported_context("clipboard", "publish image")
+    }
+}
+pub trait ScreenshotEncoder: Send + Sync {
+    fn encode(&self, image: &CapturedRegion, format: MkScreenshotFormat) -> ExecResult<Vec<u8>>;
+}
+pub trait ScreenshotFileSystem: Send + Sync {
+    /// Atomically publishes bytes and returns the final path (which may differ
+    /// under `Unique`). No partial destination may be visible on failure.
+    fn write_transactional(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        collision: MkFileCollisionPolicy,
+    ) -> ExecResult<PathBuf>;
 }
 #[derive(Clone)]
 pub struct Backends {
@@ -159,6 +178,9 @@ pub struct Backends {
     pub launcher: Arc<dyn LauncherBackend>,
     pub prompt: Arc<dyn PromptBackend>,
     pub clipboard: Arc<dyn ClipboardBackend>,
+    pub screenshot_capture: Arc<dyn ScreenCaptureBackend>,
+    pub screenshot_encoder: Arc<dyn ScreenshotEncoder>,
+    pub screenshot_files: Arc<dyn ScreenshotFileSystem>,
     pub virtual_desktop: Arc<dyn super::virtual_desktops::VirtualDesktopBackend>,
 }
 impl Backends {
@@ -184,6 +206,11 @@ impl Backends {
             launcher,
             prompt,
             clipboard,
+            screenshot_capture: Arc::new(Unsupported {
+                backend: "screen capture",
+            }),
+            screenshot_encoder: Arc::new(ImageScreenshotEncoder),
+            screenshot_files: Arc::new(HostScreenshotFileSystem),
             virtual_desktop: Arc::new(super::virtual_desktops::UnsupportedVirtualDesktopBackend),
         }
     }
@@ -363,6 +390,9 @@ pub fn production_backends() -> Backends {
             launcher: Arc::new(ProductionLauncher),
             prompt: super::prompt::production_prompt_broker(),
             clipboard: Arc::new(ProductionClipboard),
+            screenshot_capture: Arc::new(super::screen::WindowsScreenCaptureBackend::system()),
+            screenshot_encoder: Arc::new(ImageScreenshotEncoder),
+            screenshot_files: Arc::new(HostScreenshotFileSystem),
         }
     }
     #[cfg(not(windows))]
@@ -408,6 +438,138 @@ impl ClipboardBackend for Unsupported {
         unsupported_context(self.backend, "set text")
     }
 }
+impl ScreenCaptureBackend for Unsupported {
+    fn virtual_desktop(&self) -> ExecResult<super::ScreenRect> {
+        unsupported_context(self.backend, "resolve virtual desktop")
+    }
+    fn region_bounds(&self, _: &SearchRegion) -> ExecResult<super::ScreenRect> {
+        unsupported_context(self.backend, "resolve capture region")
+    }
+    fn capture_rect(
+        &self,
+        _: super::ScreenRect,
+        _: &dyn Fn() -> bool,
+    ) -> ExecResult<image::RgbaImage> {
+        unsupported_context(self.backend, "capture screen")
+    }
+}
+impl ScreenshotEncoder for Unsupported {
+    fn encode(&self, _: &CapturedRegion, _: MkScreenshotFormat) -> ExecResult<Vec<u8>> {
+        unsupported_context(self.backend, "encode screenshot")
+    }
+}
+impl ScreenshotFileSystem for Unsupported {
+    fn write_transactional(
+        &self,
+        _: &Path,
+        _: &[u8],
+        _: MkFileCollisionPolicy,
+    ) -> ExecResult<PathBuf> {
+        unsupported_context(self.backend, "write screenshot")
+    }
+}
+
+struct ImageScreenshotEncoder;
+impl ScreenshotEncoder for ImageScreenshotEncoder {
+    fn encode(&self, frame: &CapturedRegion, format: MkScreenshotFormat) -> ExecResult<Vec<u8>> {
+        let mut bytes = Cursor::new(Vec::new());
+        let format = match format {
+            MkScreenshotFormat::Png => image::ImageOutputFormat::Png,
+            MkScreenshotFormat::Jpeg => image::ImageOutputFormat::Jpeg(90),
+            MkScreenshotFormat::Bmp => image::ImageOutputFormat::Bmp,
+        };
+        image::DynamicImage::ImageRgba8(frame.image.clone())
+            .write_to(&mut bytes, format)
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("failed to encode screenshot: {e}"),
+                )
+                .context("operation", "encode screenshot")
+            })?;
+        Ok(bytes.into_inner())
+    }
+}
+struct HostScreenshotFileSystem;
+impl ScreenshotFileSystem for HostScreenshotFileSystem {
+    fn write_transactional(
+        &self,
+        requested: &Path,
+        bytes: &[u8],
+        collision: MkFileCollisionPolicy,
+    ) -> ExecResult<PathBuf> {
+        let mut path = requested.to_path_buf();
+        if path.as_os_str().is_empty() {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "screenshot path is empty",
+            ));
+        }
+        if matches!(collision, MkFileCollisionPolicy::Error) && path.exists() {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InputRejected,
+                format!("screenshot file already exists: {}", path.display()),
+            )
+            .context("path", path.display().to_string()));
+        }
+        if matches!(collision, MkFileCollisionPolicy::Unique) {
+            let mut n = 1;
+            while path.exists() {
+                let stem = requested
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("screenshot");
+                let ext = requested.extension().and_then(|s| s.to_str());
+                path.set_file_name(match ext {
+                    Some(e) => format!("{stem}_{n}.{e}"),
+                    None => format!("{stem}_{n}"),
+                });
+                n += 1;
+            }
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!("failed to create screenshot directory: {e}"),
+            )
+        })?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!("failed to create temporary screenshot file: {e}"),
+            )
+        })?;
+        std::io::Write::write_all(&mut temp, bytes)
+            .and_then(|_| temp.as_file().sync_all())
+            .map_err(|e| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!("failed to write screenshot: {e}"),
+                )
+            })?;
+        let publish = if matches!(collision, MkFileCollisionPolicy::Overwrite) {
+            temp.persist(&path).map(|_| ()).map_err(|e| e.error)
+        } else {
+            temp.persist_noclobber(&path)
+                .map(|_| ())
+                .map_err(|e| e.error)
+        };
+        publish.map_err(|e| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!(
+                    "failed to atomically publish screenshot {}: {e}",
+                    path.display()
+                ),
+            )
+        })?;
+        Ok(path)
+    }
+}
 struct ProductionClipboard;
 impl ClipboardBackend for ProductionClipboard {
     fn snapshot_text(&self) -> ExecResult<String> {
@@ -419,6 +581,16 @@ impl ClipboardBackend for ProductionClipboard {
         arboard::Clipboard::new()
             .and_then(|mut c| c.set_text(text.to_owned()))
             .map_err(|e| clipboard_error("set_text", e))
+    }
+    fn set_image(&self, frame: &CapturedRegion) -> ExecResult {
+        let data = arboard::ImageData {
+            width: frame.image.width() as usize,
+            height: frame.image.height() as usize,
+            bytes: std::borrow::Cow::Owned(frame.image.as_raw().clone()),
+        };
+        arboard::Clipboard::new()
+            .and_then(|mut c| c.set_image(data))
+            .map_err(|e| clipboard_error("set_image", e))
     }
 }
 fn clipboard_error(operation: &'static str, error: impl fmt::Display) -> ExecutionDiagnostic {
@@ -640,6 +812,237 @@ mod tests {
     use crate::mkmacro::{
         AlphaPolicy, MkErrorPolicy, MkMacro, MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
     };
+
+    #[derive(Default)]
+    struct ShotCapture {
+        regions: Mutex<Vec<SearchRegion>>,
+        fail: bool,
+    }
+    impl ScreenCaptureBackend for ShotCapture {
+        fn virtual_desktop(&self) -> ExecResult<super::super::ScreenRect> {
+            Ok(super::super::ScreenRect::new(0, 0, 2000, 1200))
+        }
+        fn region_bounds(&self, region: &SearchRegion) -> ExecResult<super::super::ScreenRect> {
+            self.regions.lock().unwrap().push(region.clone());
+            if self.fail {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::TargetNotFound,
+                    "capture target missing",
+                ));
+            }
+            Ok(super::super::ScreenRect::new(1, 2, 3, 4))
+        }
+        fn capture_rect(
+            &self,
+            rect: super::super::ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<image::RgbaImage> {
+            Ok(image::RgbaImage::new(rect.width, rect.height))
+        }
+    }
+    struct ShotEncoder {
+        calls: Mutex<usize>,
+        fail: bool,
+    }
+    impl ScreenshotEncoder for ShotEncoder {
+        fn encode(&self, _: &CapturedRegion, _: MkScreenshotFormat) -> ExecResult<Vec<u8>> {
+            *self.calls.lock().unwrap() += 1;
+            if self.fail {
+                Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "encoder failed",
+                ))
+            } else {
+                Ok(vec![1, 2, 3])
+            }
+        }
+    }
+    struct ShotFiles {
+        paths: Mutex<Vec<PathBuf>>,
+        fail: bool,
+    }
+    impl ScreenshotFileSystem for ShotFiles {
+        fn write_transactional(
+            &self,
+            path: &Path,
+            _: &[u8],
+            _: MkFileCollisionPolicy,
+        ) -> ExecResult<PathBuf> {
+            self.paths.lock().unwrap().push(path.to_owned());
+            if self.fail {
+                Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::InputRejected,
+                    "file conflict",
+                ))
+            } else {
+                Ok(PathBuf::from("actual.png"))
+            }
+        }
+    }
+    struct ShotClipboard {
+        calls: Mutex<usize>,
+        fail: bool,
+    }
+    impl ClipboardBackend for ShotClipboard {
+        fn snapshot_text(&self) -> ExecResult<String> {
+            Ok(String::new())
+        }
+        fn set_text(&self, _: &str) -> ExecResult {
+            Ok(())
+        }
+        fn set_image(&self, _: &CapturedRegion) -> ExecResult {
+            *self.calls.lock().unwrap() += 1;
+            if self.fail {
+                Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    "clipboard failed",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn screenshot_action(destination: super::super::MkScreenshotDestination) -> MkAction {
+        MkAction::CaptureScreenshot(super::super::MkScreenshotPayload {
+            region: SearchRegion::Desktop,
+            destination,
+            path: Some("shots/${name}.png".into()),
+            format: MkScreenshotFormat::Png,
+            collision: MkFileCollisionPolicy::Error,
+            path_output: Some("written".into()),
+        })
+    }
+    fn run_screenshot(
+        backends: Backends,
+        action: &MkAction,
+        vars: &mut RuntimeVariables,
+    ) -> ExecResult {
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(backends.clone(), control);
+        let mut guard = InputCleanupGuard::new(backends.input.clone());
+        executor.action(1, action, &MkPlayback::default(), vars, &mut guard)
+    }
+
+    #[test]
+    fn screenshot_every_region_uses_shared_capture_boundary() {
+        let capture = Arc::new(ShotCapture::default());
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.backends();
+        backends.screenshot_capture = capture.clone();
+        backends.clipboard = Arc::new(ShotClipboard {
+            calls: Mutex::new(0),
+            fail: false,
+        });
+        let matcher = super::super::MkWindowMatcher {
+            title: Some("App".into()),
+            ..Default::default()
+        };
+        let regions = vec![
+            SearchRegion::Desktop,
+            SearchRegion::Monitor { index: 2 },
+            SearchRegion::Rectangle {
+                rect: super::super::ScreenRect::new(1, 2, 3, 4),
+            },
+            SearchRegion::Window {
+                matcher: matcher.clone(),
+            },
+            SearchRegion::ClientArea { matcher },
+        ];
+        for region in &regions {
+            let mut action = screenshot_action(super::super::MkScreenshotDestination::Clipboard);
+            if let MkAction::CaptureScreenshot(p) = &mut action {
+                p.region = region.clone();
+                p.path = None;
+                p.path_output = None;
+            }
+            run_screenshot(backends.clone(), &action, &mut RuntimeVariables::new()).unwrap();
+        }
+        assert_eq!(*capture.regions.lock().unwrap(), regions);
+    }
+
+    #[test]
+    fn screenshot_both_captures_once_interpolates_and_sets_output_after_write() {
+        let capture = Arc::new(ShotCapture::default());
+        let encoder = Arc::new(ShotEncoder {
+            calls: Mutex::new(0),
+            fail: false,
+        });
+        let files = Arc::new(ShotFiles {
+            paths: Mutex::new(vec![]),
+            fail: false,
+        });
+        let clipboard = Arc::new(ShotClipboard {
+            calls: Mutex::new(0),
+            fail: false,
+        });
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.backends();
+        backends.screenshot_capture = capture.clone();
+        backends.screenshot_encoder = encoder.clone();
+        backends.screenshot_files = files.clone();
+        backends.clipboard = clipboard.clone();
+        let mut vars = RuntimeVariables::new();
+        vars.insert("name".into(), MkValue::String("state".into()));
+        run_screenshot(
+            backends,
+            &screenshot_action(super::super::MkScreenshotDestination::Both),
+            &mut vars,
+        )
+        .unwrap();
+        assert_eq!(capture.regions.lock().unwrap().len(), 1);
+        assert_eq!(*encoder.calls.lock().unwrap(), 1);
+        assert_eq!(*clipboard.calls.lock().unwrap(), 1);
+        assert_eq!(
+            files.paths.lock().unwrap()[0],
+            PathBuf::from("shots/state.png")
+        );
+        assert_eq!(
+            vars.get("written"),
+            Some(&MkValue::String("actual.png".into()))
+        );
+    }
+
+    #[test]
+    fn screenshot_boundaries_report_independent_failures_and_output_timing() {
+        for stage in ["capture", "encode", "file", "clipboard"] {
+            let fake = Arc::new(FakeBackend::default());
+            let mut backends = fake.backends();
+            backends.screenshot_capture = Arc::new(ShotCapture {
+                regions: Mutex::new(vec![]),
+                fail: stage == "capture",
+            });
+            backends.screenshot_encoder = Arc::new(ShotEncoder {
+                calls: Mutex::new(0),
+                fail: stage == "encode",
+            });
+            backends.screenshot_files = Arc::new(ShotFiles {
+                paths: Mutex::new(vec![]),
+                fail: stage == "file",
+            });
+            backends.clipboard = Arc::new(ShotClipboard {
+                calls: Mutex::new(0),
+                fail: stage == "clipboard",
+            });
+            let mut vars = RuntimeVariables::new();
+            vars.insert("name".into(), MkValue::String("state".into()));
+            let error = run_screenshot(
+                backends,
+                &screenshot_action(super::super::MkScreenshotDestination::Both),
+                &mut vars,
+            )
+            .unwrap_err();
+            assert!(
+                error.message.contains(stage) || error.context.values().any(|v| v.contains(stage)),
+                "{stage}: {error:?}"
+            );
+            assert_eq!(
+                vars.contains_key("written"),
+                stage == "clipboard",
+                "path output is only visible after the file transaction succeeds"
+            );
+        }
+    }
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -1444,6 +1847,57 @@ impl Executor {
                 g.up_button(MkMouseButton::Left)
             }
             MkAction::FindPixel(p) => self.wait_pixel(p, v).map(|_| ()),
+            MkAction::CaptureScreenshot(p) => {
+                let path = if p.destination.produces_file() {
+                    let template = p.path.as_deref().ok_or_else(|| {
+                        ExecutionDiagnostic::new(
+                            DiagnosticKind::InvalidTarget,
+                            "file screenshot destination requires a path",
+                        )
+                    })?;
+                    Some(
+                        interpolate(template, v)
+                            .map_err(|e| e.context("field", "capture_screenshot.path"))?,
+                    )
+                } else {
+                    None
+                };
+                // Capture is intentionally performed once and the immutable frame is
+                // then supplied to each requested sink.
+                let frame = self
+                    .backends
+                    .screenshot_capture
+                    .capture(&p.region, &|| self.control.is_stopped())
+                    .map_err(|e| {
+                        e.context("action", "capture screenshot")
+                            .context("region", format!("{:?}", p.region))
+                    })?;
+                if let Some(path) = path {
+                    let bytes = self
+                        .backends
+                        .screenshot_encoder
+                        .encode(&frame, p.format)
+                        .map_err(|e| e.context("format", format!("{:?}", p.format)))?;
+                    let actual = self
+                        .backends
+                        .screenshot_files
+                        .write_transactional(Path::new(&path), &bytes, p.collision)
+                        .map_err(|e| e.context("path", path))?;
+                    if let Some(output) = p.path_output.as_ref() {
+                        v.insert(
+                            output.clone(),
+                            MkValue::String(actual.to_string_lossy().into_owned()),
+                        );
+                    }
+                }
+                if p.destination.produces_clipboard() {
+                    self.backends
+                        .clipboard
+                        .set_image(&frame)
+                        .map_err(|e| e.context("action", "publish screenshot to clipboard"))?;
+                }
+                Ok(())
+            }
             MkAction::PixelCheck {
                 target,
                 color,
@@ -1922,6 +2376,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::Continue
         | MkAction::PixelCheck { .. }
         | MkAction::FindPixel(_) => true,
+        MkAction::CaptureScreenshot(_) => true,
         MkAction::VirtualDesktop(_) => cfg!(windows),
         // Production installs `ProductionVisualSearch`, backed by the same
         // screen capture and matcher used by all visual-search execution.
@@ -1951,6 +2406,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::ImageClick(_)
         | MkAction::FindPixel(_)
         | MkAction::PixelCheck { .. } => "screen",
+        MkAction::CaptureScreenshot(_) => "screen capture",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -2094,6 +2550,11 @@ pub mod fake {
                 launcher: self.clone(),
                 prompt: self.clone(),
                 clipboard: self.clone(),
+                screenshot_capture: Arc::new(Unsupported {
+                    backend: "fake screen capture",
+                }),
+                screenshot_encoder: Arc::new(ImageScreenshotEncoder),
+                screenshot_files: Arc::new(HostScreenshotFileSystem),
                 virtual_desktop: self.clone(),
             }
         }

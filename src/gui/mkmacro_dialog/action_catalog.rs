@@ -62,6 +62,7 @@ pub enum EditorKind {
     Process,
     Launcher,
     Image,
+    Screenshot,
     Pixel,
     Condition,
     Repeat,
@@ -631,6 +632,21 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Visual,
+            "Capture Screenshot",
+            "Capture a desktop, monitor, rectangle, window, or client area",
+            &["screenshot", "capture", "clipboard", "image"],
+            Screenshot,
+            MkAction::CaptureScreenshot(MkScreenshotPayload {
+                region: SearchRegion::Desktop,
+                destination: MkScreenshotDestination::File,
+                path: Some("screenshots/screenshot.png".into()),
+                format: MkScreenshotFormat::Png,
+                collision: MkFileCollisionPolicy::Unique,
+                path_output: None,
+            })
+        ),
+        d!(
+            Visual,
             "Click Image",
             "Find and click an image",
             &["image", "click"],
@@ -779,6 +795,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::Break
         | MkAction::Continue => EditorKind::DirectInsert,
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
+        MkAction::CaptureScreenshot(_) => EditorKind::Screenshot,
         MkAction::PixelCheck { .. } | MkAction::FindPixel(_) => EditorKind::Pixel,
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
@@ -832,6 +849,7 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Process
         | EditorKind::Launcher
         | EditorKind::Image
+        | EditorKind::Screenshot
         | EditorKind::Pixel
         | EditorKind::Condition
         | EditorKind::Repeat
@@ -942,6 +960,7 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => {
             Some(EditorContract::Configurable { field_count: 2 })
         }
+        EditorKind::Screenshot => Some(EditorContract::Configurable { field_count: 6 }),
         EditorKind::MouseDrag | EditorKind::Window => {
             Some(EditorContract::Configurable { field_count: 3 })
         }
@@ -1025,6 +1044,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::FindPixel(_) => "Find Pixel Color",
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel Color",
+        MkAction::CaptureScreenshot(_) => "Capture Screenshot",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -1134,6 +1154,18 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             "{color} ±{tolerance} @ {}",
             format_coordinate_target_with_assets(target, assets)
         ),
+        MkAction::CaptureScreenshot(p) => {
+            let destination = match p.destination {
+                MkScreenshotDestination::File => "File",
+                MkScreenshotDestination::Clipboard => "Clipboard",
+                MkScreenshotDestination::Both => "File + Clipboard",
+            };
+            let mut summary = region_summary(&p.region);
+            if let Some(path) = &p.path {
+                summary.push_str(&format!(" → {path}"));
+            }
+            format!("{summary} · {destination}")
+        }
         MkAction::UiSetValue { value, .. } => {
             format!("Unavailable UI Automation action (set value to {value})")
         }

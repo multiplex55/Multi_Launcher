@@ -1575,6 +1575,115 @@ fn action_ui(
             }
         }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
+        MkAction::CaptureScreenshot(p) => {
+            ui.heading("Capture Screenshot");
+            let mut region =
+                super::image_search_controls::ImageSearchControlState::from_region(&p.region);
+            egui::ComboBox::from_label("Region")
+                .selected_text(format!("{:?}", region.kind))
+                .show_ui(ui, |ui| {
+                    use super::image_search_controls::SearchRegionKind as K;
+                    for (kind, label) in [
+                        (K::Desktop, "Desktop"),
+                        (K::Monitor, "Monitor"),
+                        (K::Rectangle, "Rectangle"),
+                        (K::Window, "Window"),
+                        (K::ClientArea, "Client Area"),
+                    ] {
+                        ui.selectable_value(&mut region.kind, kind, label);
+                    }
+                });
+            match region.kind {
+                super::image_search_controls::SearchRegionKind::Monitor => {
+                    ui.add(egui::DragValue::new(&mut region.monitor_index).prefix("Monitor "));
+                }
+                super::image_search_controls::SearchRegionKind::Rectangle => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut region.rectangle.x).prefix("X "));
+                        ui.add(egui::DragValue::new(&mut region.rectangle.y).prefix("Y "));
+                        ui.add(egui::DragValue::new(&mut region.rectangle.width).prefix("W "));
+                        ui.add(egui::DragValue::new(&mut region.rectangle.height).prefix("H "));
+                    });
+                }
+                super::image_search_controls::SearchRegionKind::Window
+                | super::image_search_controls::SearchRegionKind::ClientArea => {
+                    let matcher = if matches!(
+                        region.kind,
+                        super::image_search_controls::SearchRegionKind::Window
+                    ) {
+                        &mut region.window_matcher
+                    } else {
+                        &mut region.client_matcher
+                    };
+                    ui.label("Window matcher");
+                    ui.text_edit_singleline(matcher.title.get_or_insert_default());
+                    ui.small("Title matcher; advanced matcher fields remain preserved.");
+                }
+                _ => {}
+            }
+            p.region = region.selected_region();
+            egui::ComboBox::from_label("Destination")
+                .selected_text(format!("{:?}", p.destination))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut p.destination, MkScreenshotDestination::File, "File");
+                    ui.selectable_value(
+                        &mut p.destination,
+                        MkScreenshotDestination::Clipboard,
+                        "Clipboard",
+                    );
+                    ui.selectable_value(
+                        &mut p.destination,
+                        MkScreenshotDestination::Both,
+                        "File + Clipboard",
+                    );
+                });
+            if p.destination.produces_file() {
+                ui.horizontal(|ui| {
+                    ui.label("Path template");
+                    ui.text_edit_singleline(p.path.get_or_insert_default());
+                });
+                egui::ComboBox::from_label("Format")
+                    .selected_text(format!("{:?}", p.format))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut p.format, MkScreenshotFormat::Png, "PNG");
+                        ui.selectable_value(&mut p.format, MkScreenshotFormat::Jpeg, "JPEG");
+                        ui.selectable_value(&mut p.format, MkScreenshotFormat::Bmp, "BMP");
+                    });
+                egui::ComboBox::from_label("If file exists")
+                    .selected_text(format!("{:?}", p.collision))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut p.collision, MkFileCollisionPolicy::Error, "Fail");
+                        ui.selectable_value(
+                            &mut p.collision,
+                            MkFileCollisionPolicy::Overwrite,
+                            "Overwrite",
+                        );
+                        ui.selectable_value(
+                            &mut p.collision,
+                            MkFileCollisionPolicy::Unique,
+                            "Create unique name",
+                        );
+                    });
+                let mut enabled = p.path_output.is_some();
+                ui.checkbox(&mut enabled, "Store written path");
+                if enabled {
+                    ui.text_edit_singleline(
+                        p.path_output
+                            .get_or_insert_with(|| "screenshot_path".into()),
+                    );
+                } else {
+                    p.path_output = None;
+                }
+            } else {
+                p.path = None;
+                p.path_output = None;
+                ui.add_enabled(
+                    false,
+                    egui::TextEdit::singleline(&mut String::new())
+                        .hint_text("File path (not used)"),
+                );
+            }
+        }
         MkAction::FindPixel(p) => {
             ui.heading("Find Pixel Color");
             ui.horizontal(|ui| {

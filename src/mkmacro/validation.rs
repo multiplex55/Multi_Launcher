@@ -415,6 +415,74 @@ pub fn validate_document_with_context(
                         _ => {}
                     }
                 }
+                MkAction::CaptureScreenshot(p) => {
+                    if p.destination.produces_file() {
+                        if p.path.as_ref().is_none_or(|path| path.trim().is_empty()) {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "empty_screenshot_path",
+                                "File screenshot destination requires a non-empty path",
+                            );
+                        }
+                    } else {
+                        if p.path.is_some() {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "incompatible_screenshot_path",
+                                "Clipboard-only screenshots cannot specify a file path",
+                            );
+                        }
+                        if p.path_output.is_some() {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "incompatible_screenshot_output",
+                                "Clipboard-only screenshots cannot set a path output variable",
+                            );
+                        }
+                    }
+                    if let Some(name) = &p.path_output
+                        && validate_variable_name(name).is_err()
+                    {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_screenshot_output",
+                            format!("Invalid screenshot path output variable '{name}'"),
+                        );
+                    }
+                    match &p.region {
+                        SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "invalid_screenshot_region",
+                                "Screenshot rectangle is invalid",
+                            )
+                        }
+                        SearchRegion::Window { matcher: x }
+                        | SearchRegion::ClientArea { matcher: x } => {
+                            matcher(x, m.id, sid, &mut out)
+                        }
+                        SearchRegion::Monitor { index } if matches!(context.monitors, MonitorValidation::Available(monitors) if !monitors.iter().any(|d| d.index == *index)) => {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "unavailable_screenshot_monitor",
+                                format!("Selected monitor {index} is no longer available"),
+                            )
+                        }
+                        _ => {}
+                    }
+                }
                 MkAction::MouseMove(p) => {
                     target(&p.target, m.id, sid, asset_root, &mut out);
                     validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
