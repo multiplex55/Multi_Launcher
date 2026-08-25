@@ -483,6 +483,75 @@ pub fn validate_document_with_context(
                         _ => {}
                     }
                 }
+                MkAction::WaitForVisualChange(p) => {
+                    if !p.change_threshold_percent.is_finite()
+                        || !(0.0..=100.0).contains(&p.change_threshold_percent)
+                        || p.change_threshold_percent == 0.0
+                    {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_visual_change_threshold",
+                            "Visual change threshold must be greater than 0 and at most 100 percent",
+                        );
+                    }
+                    if p.timeout_ms == 0 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_visual_change_timeout",
+                            "Visual change timeout must be greater than zero",
+                        );
+                    }
+                    if p.poll_interval_ms == 0 || p.poll_interval_ms > p.timeout_ms {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_visual_change_poll",
+                            "Visual change poll interval must be greater than zero and no longer than the timeout",
+                        );
+                    }
+                    if p.consecutive_changed_frames.unwrap_or(1) == 0
+                        || u64::from(p.consecutive_changed_frames.unwrap_or(1))
+                            > p.timeout_ms / p.poll_interval_ms.max(1) + 1
+                    {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "impossible_visual_change_settling",
+                            "Visual change settling frames cannot be observed within the timeout",
+                        );
+                    }
+                    match &p.region {
+                        SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "invalid_visual_change_region",
+                                "Visual change rectangle is invalid",
+                            )
+                        }
+                        SearchRegion::Window { matcher: x }
+                        | SearchRegion::ClientArea { matcher: x } => {
+                            matcher(x, m.id, sid, &mut out)
+                        }
+                        SearchRegion::Monitor { index } if matches!(context.monitors, MonitorValidation::Available(monitors) if !monitors.iter().any(|d| d.index == *index)) => {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "unavailable_visual_change_monitor",
+                                format!("Selected monitor {index} is no longer available"),
+                            )
+                        }
+                        _ => {}
+                    }
+                }
                 MkAction::MouseMove(p) => {
                     target(&p.target, m.id, sid, asset_root, &mut out);
                     validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);

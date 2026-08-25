@@ -604,6 +604,33 @@ pub enum MkMouseScrollAxis {
     Vertical,
     Horizontal,
 }
+/// Waits until a stable percentage of pixels differs from the frame captured
+/// when the action starts. `change_threshold_percent` is in user-facing percent
+/// units (5.0 means five percent); a pixel is changed when any RGBA channel
+/// differs by more than `per_pixel_tolerance`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitForVisualChange {
+    pub region: SearchRegion,
+    pub timeout_ms: u64,
+    pub poll_interval_ms: u64,
+    pub change_threshold_percent: f64,
+    #[serde(default)]
+    pub per_pixel_tolerance: Option<u8>,
+    #[serde(default)]
+    pub consecutive_changed_frames: Option<u32>,
+}
+impl Default for WaitForVisualChange {
+    fn default() -> Self {
+        Self {
+            region: SearchRegion::Desktop,
+            timeout_ms: 10_000,
+            poll_interval_ms: 100,
+            change_threshold_percent: 5.0,
+            per_pixel_tolerance: Some(8),
+            consecutive_changed_frames: Some(2),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MkAction {
@@ -670,6 +697,7 @@ pub enum MkAction {
     ImageClick(MkImagePayload),
     FindPixel(MkPixelSearchPayload),
     CaptureScreenshot(MkScreenshotPayload),
+    WaitForVisualChange(WaitForVisualChange),
     PixelCheck {
         target: MkCoordinateTarget,
         color: String,

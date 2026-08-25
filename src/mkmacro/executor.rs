@@ -1581,6 +1581,61 @@ impl Executor {
         }
         Ok(())
     }
+
+    fn wait_for_visual_change(&self, p: &super::WaitForVisualChange) -> ExecResult {
+        let capture = || {
+            self.backends
+                .screenshot_capture
+                .capture(&p.region, &|| self.control.is_stopped())
+                .map_err(|e| {
+                    e.context("action", "wait for visual change")
+                        .context("region", format!("{:?}", p.region))
+                })
+        };
+        // This frame is never replaced: every poll is measured against the
+        // visual state at action entry rather than against the previous poll.
+        let baseline = capture()?;
+        let started = Instant::now();
+        let timeout = Duration::from_millis(p.timeout_ms);
+        let required = p.consecutive_changed_frames.unwrap_or(1).max(1);
+        let mut consecutive = 0u32;
+        loop {
+            self.control.checkpoint()?;
+            let fresh = capture()?;
+            let changed = match super::visual_frame_difference(
+                &baseline,
+                &fresh,
+                p.per_pixel_tolerance.unwrap_or(0),
+            )? {
+                super::VisualFrameDifference::RegionSizeChanged => true,
+                super::VisualFrameDifference::ChangedPixelPercent(percent) => {
+                    percent >= p.change_threshold_percent
+                }
+            };
+            // Drop the fresh frame before sleeping; only the baseline survives.
+            drop(fresh);
+            consecutive = if changed {
+                consecutive.saturating_add(1)
+            } else {
+                0
+            };
+            if consecutive >= required {
+                return Ok(());
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Timeout,
+                    "timed out waiting for visual change",
+                )
+                .context("timeout_ms", p.timeout_ms.to_string())
+                .context("threshold_percent", p.change_threshold_percent.to_string()));
+            }
+            self.wait(
+                Duration::from_millis(p.poll_interval_ms).min(timeout.saturating_sub(elapsed)),
+            )?;
+        }
+    }
     pub fn execute(&self, plan: &MkExecutionPlan, observe: &dyn Fn(ExecutionEvent)) -> ExecResult {
         let _activity = RunActivityGuard(&self.control);
         let mut guard = InputCleanupGuard::new(self.backends.input.clone());
@@ -1934,6 +1989,7 @@ impl Executor {
                 }
                 Ok(())
             }
+            MkAction::WaitForVisualChange(p) => self.wait_for_visual_change(p),
             MkAction::PixelCheck {
                 target,
                 color,
@@ -2412,7 +2468,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::Continue
         | MkAction::PixelCheck { .. }
         | MkAction::FindPixel(_) => true,
-        MkAction::CaptureScreenshot(_) => true,
+        MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => true,
         MkAction::VirtualDesktop(_) => cfg!(windows),
         // Production installs `ProductionVisualSearch`, backed by the same
         // screen capture and matcher used by all visual-search execution.
@@ -2442,7 +2498,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::ImageClick(_)
         | MkAction::FindPixel(_)
         | MkAction::PixelCheck { .. } => "screen",
-        MkAction::CaptureScreenshot(_) => "screen capture",
+        MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => "screen capture",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }

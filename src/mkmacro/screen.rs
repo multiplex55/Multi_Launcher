@@ -550,6 +550,41 @@ mod capture_geometry_tests {
                 .contains("allocation size overflow")
         );
     }
+
+    fn frame(width: u32, height: u32, pixels: &[[u8; 4]]) -> CapturedRegion {
+        CapturedRegion {
+            image: RgbaImage::from_raw(width, height, pixels.iter().flatten().copied().collect())
+                .unwrap(),
+            origin: (0, 0),
+        }
+    }
+
+    #[test]
+    fn visual_difference_is_deterministic_at_boundary_and_ignores_noise() {
+        let baseline = frame(2, 2, &[[0, 0, 0, 255]; 4]);
+        let one_changed = frame(
+            2,
+            2,
+            &[
+                [9, 0, 0, 255],
+                [0, 0, 0, 255],
+                [0, 0, 0, 255],
+                [0, 0, 0, 255],
+            ],
+        );
+        assert_eq!(
+            visual_frame_difference(&baseline, &one_changed, 8).unwrap(),
+            VisualFrameDifference::ChangedPixelPercent(25.0)
+        );
+        assert_eq!(
+            visual_frame_difference(&baseline, &one_changed, 9).unwrap(),
+            VisualFrameDifference::ChangedPixelPercent(0.0)
+        );
+        assert_eq!(
+            visual_frame_difference(&baseline, &frame(1, 1, &[[0, 0, 0, 255]]), 0).unwrap(),
+            VisualFrameDifference::RegionSizeChanged
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,6 +616,52 @@ impl CapturedRegion {
         let p = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
         (p.0 < self.image.width() && p.1 < self.image.height()).then_some(p)
     }
+}
+
+/// Result of comparing a fresh capture with the immutable initial capture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VisualFrameDifference {
+    /// A changed capture geometry is itself a meaningful visual change.
+    RegionSizeChanged,
+    /// Percentage of pixels for which at least one channel exceeds tolerance.
+    ChangedPixelPercent(f64),
+}
+
+/// Compares logical pixels row-by-row. Iterating image rows deliberately avoids
+/// treating storage outside a row's pixel width (backend row padding/stride) as
+/// image content. Integer counts use `u64`; the dimension product is checked.
+pub fn visual_frame_difference(
+    baseline: &CapturedRegion,
+    fresh: &CapturedRegion,
+    tolerance: u8,
+) -> ExecResult<VisualFrameDifference> {
+    if baseline.image.dimensions() != fresh.image.dimensions() {
+        return Ok(VisualFrameDifference::RegionSizeChanged);
+    }
+    let total = u64::from(baseline.image.width())
+        .checked_mul(u64::from(baseline.image.height()))
+        .ok_or_else(|| invalid("visual comparison pixel count overflow"))?;
+    if total == 0 {
+        return Err(invalid("visual comparison region is empty"));
+    }
+    let mut changed = 0u64;
+    for (base_row, fresh_row) in baseline.image.rows().zip(fresh.image.rows()) {
+        for (base, current) in base_row.zip(fresh_row) {
+            if base
+                .0
+                .iter()
+                .zip(current.0.iter())
+                .any(|(a, b)| a.abs_diff(*b) > tolerance)
+            {
+                changed = changed
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("visual comparison changed-pixel count overflow"))?;
+            }
+        }
+    }
+    Ok(VisualFrameDifference::ChangedPixelPercent(
+        (changed as f64) * 100.0 / (total as f64),
+    ))
 }
 
 /// Capture boundary. Implementations resolve windows/client areas without changing
