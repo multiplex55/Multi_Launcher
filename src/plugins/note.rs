@@ -18,6 +18,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -769,6 +770,60 @@ pub fn assets_dir() -> PathBuf {
     let dir = notes_dir().join("assets");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Encode an RGBA image as a uniquely named PNG in the notes assets directory.
+///
+/// The returned value is the asset's file name, not its full path. The final
+/// file is installed without replacing any existing asset.
+pub fn save_note_image_asset(image: &image::RgbaImage) -> anyhow::Result<String> {
+    save_note_image_asset_at(image, Local::now())
+}
+
+fn save_note_image_asset_at(
+    image: &image::RgbaImage,
+    timestamp: chrono::DateTime<Local>,
+) -> anyhow::Result<String> {
+    let dir = notes_dir().join("assets");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create note assets directory {}", dir.display()))?;
+
+    // Keep staging and destination on the same filesystem. The temporary name
+    // deliberately does not have a .png extension, so an interrupted encode
+    // can never be mistaken for a finished asset.
+    let mut staged = tempfile::Builder::new()
+        .prefix(".note-image-staging-")
+        .suffix(".tmp")
+        .tempfile_in(&dir)
+        .with_context(|| format!("create staged note image in {}", dir.display()))?;
+    image::DynamicImage::ImageRgba8(image.clone())
+        .write_to(&mut staged, image::ImageOutputFormat::Png)
+        .context("encode staged note image as PNG")?;
+    staged
+        .flush()
+        .context("flush staged note image before finalization")?;
+
+    let stem = format!("note-image-{}", timestamp.format("%Y%m%d-%H%M%S%.3f"));
+    let mut candidate_number = 1usize;
+    loop {
+        let filename = if candidate_number == 1 {
+            format!("{stem}.png")
+        } else {
+            format!("{stem}-{candidate_number}.png")
+        };
+        let destination = dir.join(&filename);
+        match staged.persist_noclobber(&destination) {
+            Ok(_) => return Ok(filename),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                staged = error.file;
+                candidate_number += 1;
+            }
+            Err(error) => {
+                return Err(error.error)
+                    .with_context(|| format!("finalize note image at {}", destination.display()));
+            }
+        }
+    }
 }
 
 /// Return a sorted list of image file names located in [`assets_dir`].
@@ -2089,6 +2144,111 @@ mod tests {
 
     static TEMPLATE_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    struct NotesDirEnvGuard(Option<std::ffi::OsString>);
+
+    impl NotesDirEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("ML_NOTES_DIR");
+            unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for NotesDirEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
+            } else {
+                unsafe { std::env::remove_var("ML_NOTES_DIR") };
+            }
+        }
+    }
+
+    #[test]
+    fn saves_png_assets_with_safe_names_and_collision_suffixes() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let notes = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(notes.path());
+        let timestamp = Local
+            .with_ymd_and_hms(2026, 8, 25, 16, 21, 45)
+            .single()
+            .unwrap()
+            + chrono::Duration::milliseconds(123);
+
+        let mut first_image = image::RgbaImage::new(2, 2);
+        first_image.put_pixel(0, 0, image::Rgba([1, 2, 3, 4]));
+        first_image.put_pixel(1, 1, image::Rgba([250, 100, 50, 255]));
+
+        let current_name = save_note_image_asset(&first_image).unwrap();
+        assert!(
+            Regex::new(r"^note-image-\d{8}-\d{6}\.\d{3}\.png$")
+                .unwrap()
+                .is_match(&current_name)
+        );
+        assert!(notes.path().join("assets").join(current_name).is_file());
+
+        let first_name = save_note_image_asset_at(&first_image, timestamp).unwrap();
+        assert_eq!(first_name, "note-image-20260825-162145.123.png");
+        let first_path = notes.path().join("assets").join(&first_name);
+        let decoded = image::open(&first_path).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 2));
+        assert_eq!(*decoded.get_pixel(0, 0), image::Rgba([1, 2, 3, 4]));
+        assert_eq!(*decoded.get_pixel(1, 1), image::Rgba([250, 100, 50, 255]));
+
+        let replacement = image::RgbaImage::from_pixel(1, 1, image::Rgba([9, 8, 7, 6]));
+        let second_name = save_note_image_asset_at(&replacement, timestamp).unwrap();
+        assert_eq!(second_name, "note-image-20260825-162145.123-2.png");
+        assert!(notes.path().join("assets").join(second_name).is_file());
+        assert_eq!(
+            *image::open(first_path).unwrap().to_rgba8().get_pixel(0, 0),
+            image::Rgba([1, 2, 3, 4])
+        );
+
+        let third_name = save_note_image_asset_at(&replacement, timestamp).unwrap();
+        assert_eq!(third_name, "note-image-20260825-162145.123-3.png");
+        assert!(notes.path().join("assets").join(third_name).is_file());
+
+        let precreated_timestamp = timestamp + chrono::Duration::seconds(1);
+        let assets = notes.path().join("assets");
+        std::fs::write(
+            assets.join("note-image-20260825-162146.123.png"),
+            b"existing one",
+        )
+        .unwrap();
+        std::fs::write(
+            assets.join("note-image-20260825-162146.123-2.png"),
+            b"existing two",
+        )
+        .unwrap();
+        let allocated = save_note_image_asset_at(&replacement, precreated_timestamp).unwrap();
+        assert_eq!(allocated, "note-image-20260825-162146.123-3.png");
+        assert_eq!(
+            std::fs::read(assets.join("note-image-20260825-162146.123.png")).unwrap(),
+            b"existing one"
+        );
+    }
+
+    #[test]
+    fn asset_directory_creation_failure_leaves_no_partial_png() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let fixture = tempfile::tempdir().unwrap();
+        let notes_file = fixture.path().join("not-a-directory");
+        std::fs::write(&notes_file, "fixture").unwrap();
+        let _env = NotesDirEnvGuard::set(&notes_file);
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 4]));
+
+        let error = save_note_image_asset(&image).unwrap_err();
+        assert!(error.to_string().contains("create note assets directory"));
+        assert!(std::fs::read_dir(fixture.path()).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                != Some("png")
+        }));
+    }
 
     fn set_note_save_hook(
         hook: impl Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync + 'static,
