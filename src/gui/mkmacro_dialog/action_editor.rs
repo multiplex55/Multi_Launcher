@@ -36,6 +36,7 @@ pub struct ActionEditorState {
     /// launcher and dialog native-window visibility boundary.
     pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
     overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
+    pending_condition_rectangle: Option<ConditionOperationDestination>,
     picker: NativePositionPicker,
 }
 
@@ -218,11 +219,18 @@ impl ActionEditorState {
             .start_with_executor(store, token, previous, path, executor)
             .map_err(anyhow::Error::msg)
     }
-    pub(crate) fn request_visual_capture(
+    /// Starts the one user-drawn desktop rectangle operation owned by the action
+    /// editor. Callers must choose the semantic purpose at the point where they
+    /// translate their typed UI request; the workflow never guesses it from the
+    /// draft, selected region, or button text.
+    pub(crate) fn request_rectangle_selection(
         &mut self,
         macro_id: u64,
         purpose: super::visual_overlay::RectanglePurpose,
     ) -> anyhow::Result<()> {
+        if self.image_authoring.is_importing() || self.position_capture.is_some() {
+            anyhow::bail!("an authoring operation is already active");
+        }
         let generation = self.draft_generation;
         let workflow = self
             .visual_capture
@@ -375,7 +383,23 @@ impl ActionEditorState {
         use super::visual_capture_workflow::WorkflowOutcome;
         match outcome {
             WorkflowOutcome::Region { token, rect } => {
-                if current_macro_id == Some(token.macro_id)
+                if self
+                    .pending_condition_rectangle
+                    .as_ref()
+                    .is_some_and(|destination| {
+                        destination.macro_id == token.macro_id
+                            && destination.draft_generation == token.draft_generation
+                            && current_macro_id == Some(token.macro_id)
+                            && self.draft_generation == token.draft_generation
+                    })
+                {
+                    let destination = self.pending_condition_rectangle.take().unwrap();
+                    self.apply_condition_result(
+                        &destination,
+                        ConditionOperationResult::Rectangle(rect),
+                        current_macro_id,
+                    );
+                } else if current_macro_id == Some(token.macro_id)
                     && self.draft_generation == token.draft_generation
                     && let Some(image) = self.image_search.as_mut()
                 {
@@ -384,7 +408,23 @@ impl ActionEditorState {
                 }
             }
             WorkflowOutcome::Asset { token, asset_id } => {
-                if current_macro_id == Some(token.macro_id)
+                if self
+                    .pending_condition_rectangle
+                    .as_ref()
+                    .is_some_and(|destination| {
+                        destination.macro_id == token.macro_id
+                            && destination.draft_generation == token.draft_generation
+                            && current_macro_id == Some(token.macro_id)
+                            && self.draft_generation == token.draft_generation
+                    })
+                {
+                    let destination = self.pending_condition_rectangle.take().unwrap();
+                    self.apply_condition_result(
+                        &destination,
+                        ConditionOperationResult::Asset(asset_id),
+                        current_macro_id,
+                    );
+                } else if current_macro_id == Some(token.macro_id)
                     && self.draft_generation == token.draft_generation
                     && let Some(payload) = self.draft.as_mut().and_then(image_payload_mut)
                 {
@@ -1172,11 +1212,13 @@ fn action_ui(
     Option<super::window_picker::MatcherPath>,
     Option<super::launcher_action_picker::PickerPurpose>,
     Option<ImageAuthoringRequest>,
+    Option<super::condition_editor::ConditionImageRequest>,
 ) {
     let mut pick = None;
     let mut window_pick = None;
     let mut launcher_pick = None;
     let image_request = None;
+    let mut condition_image_request = None;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
@@ -1524,12 +1566,15 @@ fn action_ui(
             if let Some(request) =
                 super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
             {
-                if let super::condition_editor::ConditionEditorRequest::WindowMatcher { path } =
-                    request
-                {
-                    window_pick = Some(super::window_picker::MatcherPath::Condition(
-                        path.indexes().to_vec(),
-                    ));
+                match request {
+                    super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
+                        window_pick = Some(super::window_picker::MatcherPath::Condition(
+                            path.indexes().to_vec(),
+                        ));
+                    }
+                    super::condition_editor::ConditionEditorRequest::Image(request) => {
+                        condition_image_request = Some(request);
+                    }
                 }
             }
         }
@@ -1537,12 +1582,15 @@ fn action_ui(
             if let Some(request) =
                 super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
             {
-                if let super::condition_editor::ConditionEditorRequest::WindowMatcher { path } =
-                    request
-                {
-                    window_pick = Some(super::window_picker::MatcherPath::Condition(
-                        path.indexes().to_vec(),
-                    ));
+                match request {
+                    super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
+                        window_pick = Some(super::window_picker::MatcherPath::Condition(
+                            path.indexes().to_vec(),
+                        ));
+                    }
+                    super::condition_editor::ConditionEditorRequest::Image(request) => {
+                        condition_image_request = Some(request);
+                    }
                 }
             }
             ui.horizontal(|ui| {
@@ -1938,7 +1986,13 @@ fn action_ui(
             );
         }
     }
-    (pick, window_pick, launcher_pick, image_request)
+    (
+        pick,
+        window_pick,
+        launcher_pick,
+        image_request,
+        condition_image_request,
+    )
 }
 
 fn apply_scroll_direction(
@@ -1992,12 +2046,15 @@ enum ImageAuthoringRequest {
     PickRectangle,
 }
 
-fn start_visual_capture(
-    state: &mut ActionEditorState,
-    macro_id: u64,
-    purpose: super::visual_overlay::RectanglePurpose,
-) -> anyhow::Result<()> {
-    state.request_visual_capture(macro_id, purpose)
+impl ImageAuthoringRequest {
+    fn rectangle_purpose(self) -> Option<super::visual_overlay::RectanglePurpose> {
+        use super::visual_overlay::RectanglePurpose;
+        match self {
+            Self::Import => None,
+            Self::CaptureRectangle => Some(RectanglePurpose::ReferenceImageCapture),
+            Self::PickRectangle => Some(RectanglePurpose::SearchRegion),
+        }
+    }
 }
 
 fn image_payload(step: &MkStep) -> Option<&MkImagePayload> {
@@ -2252,6 +2309,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     }
     let mut pick_request = None;
     let mut image_request = None;
+    let mut condition_image_request = None;
     let image_assets = d
         .selected_macro()
         .map(|m| m.image_assets.clone())
@@ -2267,9 +2325,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
-            let (position, mut window, launcher, image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
+            let (position, mut window, launcher, image, condition_image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
             pick_request = position;
             image_request = image;
+            condition_image_request = condition_image;
             let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
                 let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action, image_assets.iter().any(|asset| asset.id == payload.asset_id));
@@ -2463,19 +2522,38 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 })
                 .transpose()
                 .map(|_| ()),
-            ImageAuthoringRequest::CaptureRectangle => start_visual_capture(
-                &mut d.action_editor,
-                macro_id,
-                super::visual_overlay::RectanglePurpose::ReferenceImageCapture,
-            ),
-            ImageAuthoringRequest::PickRectangle => start_visual_capture(
-                &mut d.action_editor,
-                macro_id,
-                super::visual_overlay::RectanglePurpose::SearchRegion,
-            ),
+            request @ (ImageAuthoringRequest::CaptureRectangle
+            | ImageAuthoringRequest::PickRectangle) => {
+                d.action_editor.pending_condition_rectangle = None;
+                d.action_editor.request_rectangle_selection(
+                    macro_id,
+                    request
+                        .rectangle_purpose()
+                        .expect("rectangle request has a purpose"),
+                )
+            }
         };
         if let Err(error) = result {
             d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
+        }
+    }
+    if let Some(request) = condition_image_request
+        && let Some(purpose) = request.operation.rectangle_purpose()
+    {
+        let macro_id = d.selected_macro_id.unwrap_or(0);
+        if workflow_active || importing {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else {
+            let destination = d.action_editor.condition_destination(macro_id, request);
+            d.action_editor.pending_condition_rectangle = Some(destination);
+            if let Err(error) = d
+                .action_editor
+                .request_rectangle_selection(macro_id, purpose)
+            {
+                d.action_editor.pending_condition_rectangle = None;
+                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
+            }
         }
     }
     if let Some(slot) = pick_request {
@@ -2532,6 +2610,39 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_typed_rectangle_request_has_one_explicit_purpose() {
+        use super::super::condition_editor::ConditionImageOperation;
+        use super::super::visual_overlay::RectanglePurpose;
+
+        assert_eq!(
+            ImageAuthoringRequest::CaptureRectangle.rectangle_purpose(),
+            Some(RectanglePurpose::ReferenceImageCapture)
+        );
+        assert_eq!(
+            ImageAuthoringRequest::PickRectangle.rectangle_purpose(),
+            Some(RectanglePurpose::SearchRegion)
+        );
+        assert_eq!(ImageAuthoringRequest::Import.rectangle_purpose(), None);
+        assert_eq!(
+            ConditionImageOperation::CaptureRectangle.rectangle_purpose(),
+            Some(RectanglePurpose::ReferenceImageCapture)
+        );
+        assert_eq!(
+            ConditionImageOperation::PickRectangle.rectangle_purpose(),
+            Some(RectanglePurpose::SearchRegion)
+        );
+        for operation in [
+            ConditionImageOperation::ImportPng,
+            ConditionImageOperation::PreviewRectangle,
+            ConditionImageOperation::HighlightMonitor,
+            ConditionImageOperation::PickWindow,
+            ConditionImageOperation::HighlightWindow,
+        ] {
+            assert_eq!(operation.rectangle_purpose(), None);
+        }
+    }
     use image::{GenericImageView, Rgba, RgbaImage};
     use std::sync::mpsc;
 
@@ -3548,7 +3659,7 @@ mod tests {
             }
             fn begin_selecting(&mut self, purpose: RectanglePurpose) {
                 self.editor
-                    .request_visual_capture(MACRO_ID, purpose)
+                    .request_rectangle_selection(MACRO_ID, purpose)
                     .unwrap();
                 assert_eq!(self.fake.lock().unwrap().purposes, [purpose]);
             }
