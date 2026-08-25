@@ -6,6 +6,10 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// Capture Screenshot is an additive action variant and does not alter the
+// representation of existing documents, so it intentionally remains in the
+// current schema generation. Bumping this value would rewrite every loaded
+// document and break stable migration/round-trip guarantees.
 pub const SCHEMA_VERSION: u32 = 6;
 fn schema() -> u32 {
     SCHEMA_VERSION
@@ -496,6 +500,55 @@ pub struct MkPixelSearchPayload {
     #[serde(default)]
     pub outputs: MkImageOutputs,
 }
+/// Where a captured screenshot is published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkScreenshotDestination {
+    File,
+    Clipboard,
+    Both,
+}
+
+impl MkScreenshotDestination {
+    pub fn produces_file(self) -> bool {
+        matches!(self, Self::File | Self::Both)
+    }
+    pub fn produces_clipboard(self) -> bool {
+        matches!(self, Self::Clipboard | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkScreenshotFormat {
+    Png,
+    Jpeg,
+    Bmp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkFileCollisionPolicy {
+    Error,
+    Overwrite,
+    Unique,
+}
+
+/// Persisted Capture Screenshot action. `path` is an interpolation template and
+/// is deliberately optional so clipboard-only actions do not retain a dormant
+/// file destination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkScreenshotPayload {
+    #[serde(default)]
+    pub region: SearchRegion,
+    pub destination: MkScreenshotDestination,
+    #[serde(default)]
+    pub path: Option<String>,
+    pub format: MkScreenshotFormat,
+    pub collision: MkFileCollisionPolicy,
+    #[serde(default)]
+    pub path_output: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkUiPayload {
     pub window: MkWindowMatcher,
@@ -616,6 +669,7 @@ pub enum MkAction {
     ImageFind(MkImagePayload),
     ImageClick(MkImagePayload),
     FindPixel(MkPixelSearchPayload),
+    CaptureScreenshot(MkScreenshotPayload),
     PixelCheck {
         target: MkCoordinateTarget,
         color: String,

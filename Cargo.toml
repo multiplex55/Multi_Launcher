@@ -63,7 +63,8 @@ trash = { version = "5.2", default-features = false, features = ["coinit_apartme
 sysinfo = "0.35"
 chrono = "0.4"
 screenshots = "0.8.10"
-image = { version = "0.24", default-features = false, features = ["png"] }
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp"] }
+tempfile = "3"
 ipconfig = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 base64 = "0.21"
@@ -83,7 +84,6 @@ bytes = ">=1.11.1, <2"
 unstable_grab = ["rdev/unstable_grab"]
 
 [dev-dependencies]
-tempfile = "3"
 image = { version = "0.24", default-features = false, features = ["jpeg"] }
 criterion = "0.5"
 serial_test = "2"
