@@ -148,6 +148,23 @@ impl VisualSearch for ProductionVisualSearch {
             .capture(&SearchRegion::Rectangle { rect }, &|| false)?;
         Ok(frame.image.get_pixel(0, 0).0)
     }
+
+    fn find_pixel(
+        &self,
+        payload: &crate::mkmacro::MkPixelSearchPayload,
+    ) -> ExecResult<Option<MkPoint>> {
+        let rgb = crate::mkmacro::screen::parse_rgb(&payload.color)?;
+        let frame = self.capture.capture(&payload.region, &|| false)?;
+        find_pixel(
+            &frame,
+            Rgba([rgb[0], rgb[1], rgb[2], 255]),
+            payload.tolerance,
+            AlphaPolicy::Ignore,
+            PixelScanOrder::TopLeftRows,
+            &|| false,
+        )
+        .map(|p| p.map(|(x, y)| MkPoint { x, y }))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

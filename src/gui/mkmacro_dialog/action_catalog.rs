@@ -639,6 +639,22 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Visual,
+            "Find Pixel Color",
+            "Find the first matching pixel in a region",
+            &["pixel", "color", "search"],
+            Pixel,
+            MkAction::FindPixel(MkPixelSearchPayload {
+                search_id: 1,
+                color: "#000000".into(),
+                tolerance: 0,
+                region: SearchRegion::Desktop,
+                wait: MkWaitOptions::default(),
+                not_found_policy: MkImageNotFoundPolicy::Continue,
+                outputs: MkImageOutputs::default(),
+            })
+        ),
+        d!(
+            Visual,
             "Check Pixel Color",
             "Check the color at one pixel coordinate",
             &["pixel", "color", "screen"],
@@ -763,7 +779,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::Break
         | MkAction::Continue => EditorKind::DirectInsert,
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
-        MkAction::PixelCheck { .. } => EditorKind::Pixel,
+        MkAction::PixelCheck { .. } | MkAction::FindPixel(_) => EditorKind::Pixel,
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -1006,6 +1022,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::Break => "Break",
         MkAction::Continue => "Continue",
         MkAction::ImageFind(_) => "Find Image",
+        MkAction::FindPixel(_) => "Find Pixel Color",
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel Color",
         MkAction::UiInvoke(_)
@@ -1099,6 +1116,16 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         MkAction::RepeatStart { count } => format!("{count} times"),
         MkAction::ImageFind(p) => format_image_details(p, asset_name, assets, false),
         MkAction::ImageClick(p) => format_image_details(p, asset_name, assets, true),
+        MkAction::FindPixel(p) => format!(
+            "{} ±{} · {} · {}",
+            p.color,
+            p.tolerance,
+            region_summary(&p.region),
+            match p.not_found_policy {
+                MkImageNotFoundPolicy::Continue => "continue if missing",
+                MkImageNotFoundPolicy::Fail => "fail if missing",
+            }
+        ),
         MkAction::PixelCheck {
             target,
             color,
@@ -1224,7 +1251,7 @@ fn asset_display_name(id: u64, preferred: Option<&str>, assets: &[MkImageAsset])
         })
         .unwrap_or_else(|| format!("Missing image #{id}"))
 }
-fn region_summary(region: &SearchRegion) -> String {
+pub(super) fn region_summary(region: &SearchRegion) -> String {
     match region {
         SearchRegion::Desktop => "Entire Desktop".into(),
         SearchRegion::Monitor { index } => format!("Monitor {index}"),
@@ -1578,6 +1605,9 @@ pub fn format_coordinate_target_with_assets(
                 offset.x,
                 offset.y
             )
+        }
+        MkCoordinateTarget::Pixel { search_id, offset } => {
+            format!("Pixel Result: #{search_id} + ({},{})", offset.x, offset.y)
         }
     }
 }

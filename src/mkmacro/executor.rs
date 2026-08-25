@@ -106,6 +106,12 @@ pub trait ScreenBackend: Send + Sync {
         Ok(point)
     }
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
+    fn find_pixel(&self, _: &super::MkPixelSearchPayload) -> ExecResult<Option<MkPoint>> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "pixel search is unavailable",
+        ))
+    }
     fn pixel_matches(
         &self,
         target: &MkCoordinateTarget,
@@ -1437,6 +1443,7 @@ impl Executor {
                 g.down_button(MkMouseButton::Left)?;
                 g.up_button(MkMouseButton::Left)
             }
+            MkAction::FindPixel(p) => self.wait_pixel(p, v).map(|_| ()),
             MkAction::PixelCheck {
                 target,
                 color,
@@ -1605,6 +1612,86 @@ impl Executor {
                 .context("timeout_ms", p.wait.timeout_ms.to_string())
                 .context("poll_interval_ms", p.wait.poll_interval_ms.to_string())
                 .context("elapsed_ms", started.elapsed().as_millis().to_string())),
+        }
+    }
+    fn wait_pixel(
+        &self,
+        p: &super::MkPixelSearchPayload,
+        v: &mut RuntimeVariables,
+    ) -> ExecResult<Option<MkPoint>> {
+        Self::write_pixel_result(v, p, None);
+        let started = Instant::now();
+        loop {
+            self.control.checkpoint()?;
+            match self.backends.screen.find_pixel(p) {
+                Err(e) => return Err(e),
+                Ok(Some(point)) => {
+                    Self::write_pixel_result(v, p, Some(point));
+                    return Ok(Some(point));
+                }
+                Ok(None) if started.elapsed() >= Duration::from_millis(p.wait.timeout_ms) => {
+                    Self::write_pixel_result(v, p, None);
+                    return match p.not_found_policy {
+                        MkImageNotFoundPolicy::Continue => Ok(None),
+                        MkImageNotFoundPolicy::Fail => Err(ExecutionDiagnostic::new(
+                            DiagnosticKind::TargetNotFound,
+                            "Pixel color was not found",
+                        )),
+                    };
+                }
+                Ok(None) => self.wait(Duration::from_millis(p.wait.poll_interval_ms.max(1)))?,
+            }
+        }
+    }
+    fn write_pixel_result(
+        v: &mut RuntimeVariables,
+        p: &super::MkPixelSearchPayload,
+        point: Option<MkPoint>,
+    ) {
+        let found = point.is_some();
+        v.insert("last_pixel_result".into(), MkValue::Boolean(found));
+        v.insert("last_pixel_found".into(), MkValue::Boolean(found));
+        v.insert(
+            super::screen::pixel_found_variable(p.search_id),
+            MkValue::Boolean(found),
+        );
+        let key = super::screen::pixel_result_variable(p.search_id);
+        if let Some(point) = point {
+            v.insert(key, MkValue::Point(point));
+            set_point(v, "last_pixel", point);
+            v.insert("last_pixel_x".into(), MkValue::Number(point.x.into()));
+            v.insert("last_pixel_y".into(), MkValue::Number(point.y.into()));
+        } else {
+            v.remove(&key);
+            for key in [
+                "last_pixel",
+                "last_pixel.x",
+                "last_pixel.y",
+                "last_pixel_x",
+                "last_pixel_y",
+            ] {
+                v.remove(key);
+            }
+        }
+        if let Some(name) = &p.outputs.found {
+            v.insert(name.clone(), MkValue::Boolean(found));
+        }
+        for name in [&p.outputs.point, &p.outputs.x, &p.outputs.y]
+            .into_iter()
+            .flatten()
+        {
+            v.remove(name);
+        }
+        if let Some(point) = point {
+            if let Some(name) = &p.outputs.point {
+                v.insert(name.clone(), MkValue::Point(point));
+            }
+            if let Some(name) = &p.outputs.x {
+                v.insert(name.clone(), MkValue::Number(point.x.into()));
+            }
+            if let Some(name) = &p.outputs.y {
+                v.insert(name.clone(), MkValue::Number(point.y.into()));
+            }
         }
     }
     /// Commits one completed search snapshot.
@@ -1833,7 +1920,8 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WhileEnd
         | MkAction::Break
         | MkAction::Continue
-        | MkAction::PixelCheck { .. } => true,
+        | MkAction::PixelCheck { .. }
+        | MkAction::FindPixel(_) => true,
         MkAction::VirtualDesktop(_) => cfg!(windows),
         // Production installs `ProductionVisualSearch`, backed by the same
         // screen capture and matcher used by all visual-search execution.
@@ -1859,7 +1947,10 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. } => "window",
         MkAction::VirtualDesktop(_) => "virtual desktop",
-        MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::PixelCheck { .. } => "screen",
+        MkAction::ImageFind(_)
+        | MkAction::ImageClick(_)
+        | MkAction::FindPixel(_)
+        | MkAction::PixelCheck { .. } => "screen",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -3105,5 +3196,34 @@ mod phase_d_tests {
             )
             .unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::TargetNotFound);
+    }
+
+    #[test]
+    fn pixel_found_outputs_and_miss_clear_coordinate_state() {
+        let payload = super::super::MkPixelSearchPayload {
+            search_id: 12,
+            color: "#32FF70".into(),
+            tolerance: 10,
+            region: super::super::SearchRegion::Desktop,
+            wait: MkWaitOptions::default(),
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs {
+                found: Some("hit".into()),
+                point: Some("pixel".into()),
+                x: Some("px".into()),
+                y: Some("py".into()),
+            },
+        };
+        let mut vars = RuntimeVariables::new();
+        Executor::write_pixel_result(&mut vars, &payload, Some(MkPoint { x: 8, y: 9 }));
+        assert_eq!(vars.get("hit"), Some(&MkValue::Boolean(true)));
+        assert_eq!(
+            vars.get("pixel"),
+            Some(&MkValue::Point(MkPoint { x: 8, y: 9 }))
+        );
+        Executor::write_pixel_result(&mut vars, &payload, None);
+        assert_eq!(vars.get("hit"), Some(&MkValue::Boolean(false)));
+        assert!(!vars.contains_key("pixel"));
+        assert!(!vars.contains_key("__pixel.12"));
     }
 }

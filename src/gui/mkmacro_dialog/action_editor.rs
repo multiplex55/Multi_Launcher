@@ -960,8 +960,12 @@ pub(crate) fn change_target_kind(
         3 => MkCoordinateTarget::Variable {
             name: String::new(),
         },
-        _ => MkCoordinateTarget::Image {
+        4 => MkCoordinateTarget::Image {
             asset_id: assets.first().map_or(0, |a| a.id),
+            offset: MkPoint { x: 0, y: 0 },
+        },
+        _ => MkCoordinateTarget::Pixel {
+            search_id: 0,
             offset: MkPoint { x: 0, y: 0 },
         },
     };
@@ -978,6 +982,7 @@ pub(super) fn target_ui(
         MkCoordinateTarget::WindowClient { .. } => 2,
         MkCoordinateTarget::Variable { .. } => 3,
         MkCoordinateTarget::Image { .. } => 4,
+        MkCoordinateTarget::Pixel { .. } => 5,
     };
     let mut next = kind;
     egui::ComboBox::from_label("Target")
@@ -988,6 +993,7 @@ pub(super) fn target_ui(
                 "Matched Window",
                 "Variable",
                 "Image Result",
+                "Pixel Result",
             ][kind],
         )
         .show_ui(ui, |ui| {
@@ -998,6 +1004,7 @@ pub(super) fn target_ui(
             ui.add_enabled_ui(!assets.is_empty(), |ui| {
                 ui.selectable_value(&mut next, 4, "Image Result");
             });
+            ui.selectable_value(&mut next, 5, "Pixel Result");
         });
     if next != kind {
         change_target_kind(target, next, assets);
@@ -1074,6 +1081,19 @@ pub(super) fn target_ui(
                 ui.add(egui::DragValue::new(&mut offset.x));
             });
             ui.horizontal(|ui| {
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut offset.y));
+            });
+        }
+        MkCoordinateTarget::Pixel { search_id, offset } => {
+            ui.horizontal(|ui| {
+                ui.label("Search ID");
+                ui.add(egui::DragValue::new(search_id));
+            });
+            ui.heading("Offset");
+            ui.horizontal(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut offset.x));
                 ui.label("Y");
                 ui.add(egui::DragValue::new(&mut offset.y));
             });
@@ -1555,6 +1575,134 @@ fn action_ui(
             }
         }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
+        MkAction::FindPixel(p) => {
+            ui.heading("Find Pixel Color");
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                ui.text_edit_singleline(&mut p.color);
+                if let Ok(rgb) = crate::mkmacro::screen::parse_rgb(&p.color) {
+                    let mut picked = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                    if ui.color_edit_button_srgba(&mut picked).changed() {
+                        p.color = crate::mkmacro::screen::format_rgb([
+                            picked.r(),
+                            picked.g(),
+                            picked.b(),
+                        ]);
+                    }
+                }
+                ui.label("Tolerance");
+                ui.add(egui::DragValue::new(&mut p.tolerance));
+            });
+            ui.small("Tolerance is the maximum absolute difference in each RGB channel.");
+            ui.horizontal(|ui| {
+                ui.label("Search ID");
+                ui.add(egui::DragValue::new(&mut p.search_id));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Timeout (ms)");
+                ui.add(egui::DragValue::new(&mut p.wait.timeout_ms));
+                ui.label("Poll (ms)");
+                ui.add(
+                    egui::DragValue::new(&mut p.wait.poll_interval_ms).clamp_range(1..=86_400_000),
+                );
+            });
+            egui::ComboBox::from_label("If missing")
+                .selected_text(match p.not_found_policy {
+                    MkImageNotFoundPolicy::Continue => "Continue",
+                    MkImageNotFoundPolicy::Fail => "Fail action",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut p.not_found_policy,
+                        MkImageNotFoundPolicy::Continue,
+                        "Continue",
+                    );
+                    ui.selectable_value(
+                        &mut p.not_found_policy,
+                        MkImageNotFoundPolicy::Fail,
+                        "Fail action",
+                    );
+                });
+            let mut region_kind = match p.region {
+                SearchRegion::Desktop => 0,
+                SearchRegion::Monitor { .. } => 1,
+                SearchRegion::Rectangle { .. } => 2,
+                SearchRegion::Window { .. } => 3,
+                SearchRegion::ClientArea { .. } => 4,
+            };
+            egui::ComboBox::from_label("Region")
+                .selected_text(
+                    ["Desktop", "Monitor", "Rectangle", "Window", "Client Area"][region_kind],
+                )
+                .show_ui(ui, |ui| {
+                    for (i, label) in ["Desktop", "Monitor", "Rectangle", "Window", "Client Area"]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        ui.selectable_value(&mut region_kind, i, label);
+                    }
+                });
+            let current_kind = match p.region {
+                SearchRegion::Desktop => 0,
+                SearchRegion::Monitor { .. } => 1,
+                SearchRegion::Rectangle { .. } => 2,
+                SearchRegion::Window { .. } => 3,
+                SearchRegion::ClientArea { .. } => 4,
+            };
+            if region_kind != current_kind {
+                p.region = match region_kind {
+                    0 => SearchRegion::Desktop,
+                    1 => SearchRegion::Monitor { index: 0 },
+                    2 => SearchRegion::Rectangle {
+                        rect: ScreenRect::new(0, 0, 800, 500),
+                    },
+                    3 => SearchRegion::Window {
+                        matcher: MkWindowMatcher::default(),
+                    },
+                    _ => SearchRegion::ClientArea {
+                        matcher: MkWindowMatcher::default(),
+                    },
+                };
+            }
+            match &mut p.region {
+                SearchRegion::Monitor { index } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Monitor index");
+                        ui.add(egui::DragValue::new(index));
+                    });
+                }
+                SearchRegion::Rectangle { rect } => {
+                    ui.horizontal(|ui| {
+                        ui.label("X");
+                        ui.add(egui::DragValue::new(&mut rect.x));
+                        ui.label("Y");
+                        ui.add(egui::DragValue::new(&mut rect.y));
+                        ui.label("Width");
+                        ui.add(egui::DragValue::new(&mut rect.width));
+                        ui.label("Height");
+                        ui.add(egui::DragValue::new(&mut rect.height));
+                    });
+                }
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    matcher_ui(ui, matcher);
+                }
+                SearchRegion::Desktop => {}
+            }
+            for (label, output) in [
+                ("Found output", &mut p.outputs.found),
+                ("Point output", &mut p.outputs.point),
+                ("X output", &mut p.outputs.x),
+                ("Y output", &mut p.outputs.y),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    ui.text_edit_singleline(output.get_or_insert_with(String::new));
+                });
+                if output.as_ref().is_some_and(|x| x.is_empty()) {
+                    *output = None;
+                }
+            }
+        }
         MkAction::PixelCheck {
             target,
             color,
