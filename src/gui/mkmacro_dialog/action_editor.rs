@@ -3447,15 +3447,12 @@ mod tests {
         use crate::gui::mkmacro_dialog::{
             image_search_editor::{ImageSearchEditorState, SearchRegionKind},
             visual_capture_workflow::{
-                AssetStoreAdapter, CaptureAdapter, RectangleOverlay, SavedVisibility,
-                SelectionEvent, VisibilityAdapter, VisualCaptureWorkflow, WorkflowClock,
+                AssetStoreAdapter, CaptureAdapter, RectangleOverlay, SelectionEvent,
+                VisualCaptureWorkflow,
             },
             visual_overlay::{OperationId, RectanglePurpose},
         };
-        use std::{
-            sync::{Arc, Mutex},
-            time::Duration,
-        };
+        use std::sync::{Arc, Mutex};
 
         const MACRO_ID: u64 = 73;
         const OPERATION_ID: OperationId = 19;
@@ -3468,37 +3465,12 @@ mod tests {
 
         #[derive(Default)]
         struct FakeState {
-            hidden: bool,
-            now_ms: u64,
             purposes: Vec<RectanglePurpose>,
             selection: Option<SelectionEvent>,
             capture_result: Option<Result<RgbaImage, String>>,
             stage_result: Option<Result<u64, String>>,
             capture_rects: Vec<ScreenRect>,
             staged_dimensions: Vec<(u32, u32)>,
-            restores: usize,
-        }
-        struct Visibility(Arc<Mutex<FakeState>>);
-        impl VisibilityAdapter for Visibility {
-            fn snapshot(&self) -> SavedVisibility {
-                SavedVisibility {
-                    launcher: true,
-                    mkmacro_dialog: true,
-                }
-            }
-            fn request_hidden(&mut self) {}
-            fn hidden_observed(&self) -> bool {
-                self.0.lock().unwrap().hidden
-            }
-            fn restore(&mut self, _: SavedVisibility) {
-                self.0.lock().unwrap().restores += 1;
-            }
-        }
-        struct Clock(Arc<Mutex<FakeState>>);
-        impl WorkflowClock for Clock {
-            fn now(&self) -> Duration {
-                Duration::from_millis(self.0.lock().unwrap().now_ms)
-            }
         }
         struct Overlay(Arc<Mutex<FakeState>>);
         impl RectangleOverlay for Overlay {
@@ -3543,8 +3515,6 @@ mod tests {
             fn new() -> Self {
                 let fake = Arc::new(Mutex::new(FakeState::default()));
                 let workflow = VisualCaptureWorkflow::new(
-                    Box::new(Visibility(fake.clone())),
-                    Box::new(Clock(fake.clone())),
                     Box::new(Overlay(fake.clone())),
                     Box::new(Capture(fake.clone())),
                     Box::new(Assets(fake.clone())),
@@ -3580,11 +3550,6 @@ mod tests {
                 self.editor
                     .request_visual_capture(MACRO_ID, purpose)
                     .unwrap();
-                self.editor.tick_visual_capture(Some(MACRO_ID));
-                self.fake.lock().unwrap().hidden = true;
-                self.editor.tick_visual_capture(Some(MACRO_ID));
-                self.fake.lock().unwrap().now_ms = 34;
-                self.editor.tick_visual_capture(Some(MACRO_ID));
                 assert_eq!(self.fake.lock().unwrap().purposes, [purpose]);
             }
             fn selection(&mut self, event: SelectionEvent) {
@@ -3816,7 +3781,7 @@ mod tests {
         }
 
         #[test]
-        fn stale_draft_token_ignores_completed_capture_but_still_restores() {
+        fn stale_draft_token_ignores_completed_capture() {
             let mut f = Fixture::new();
             let snapshots = f.snapshots();
             f.begin_selecting(RectanglePurpose::ReferenceImageCapture);
@@ -3837,11 +3802,6 @@ mod tests {
                 f.editor.image_search.as_ref().unwrap(),
                 &snapshots.1,
                 "A stale Capture result must not overwrite the search rectangle"
-            );
-            assert_eq!(
-                f.fake.lock().unwrap().restores,
-                1,
-                "A stale Capture must still restore the launcher exactly once"
             );
         }
     }
