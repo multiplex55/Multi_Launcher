@@ -1575,6 +1575,81 @@ fn action_ui(
             }
         }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
+        MkAction::WaitForVisualChange(p) => {
+            ui.heading("Wait for Visual Change");
+            let mut region =
+                super::image_search_controls::ImageSearchControlState::from_region(&p.region);
+            egui::ComboBox::from_label("Region")
+                .selected_text(format!("{:?}", region.kind))
+                .show_ui(ui, |ui| {
+                    use super::image_search_controls::SearchRegionKind as K;
+                    for (kind, label) in [
+                        (K::Desktop, "Desktop"),
+                        (K::Monitor, "Monitor"),
+                        (K::Rectangle, "Rectangle"),
+                        (K::Window, "Window"),
+                        (K::ClientArea, "Client Area"),
+                    ] {
+                        ui.selectable_value(&mut region.kind, kind, label);
+                    }
+                });
+            match region.kind {
+                super::image_search_controls::SearchRegionKind::Monitor => {
+                    ui.add(egui::DragValue::new(&mut region.monitor_index).prefix("Monitor "));
+                }
+                super::image_search_controls::SearchRegionKind::Rectangle => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut region.rectangle.x).prefix("X "));
+                        ui.add(egui::DragValue::new(&mut region.rectangle.y).prefix("Y "));
+                        ui.add(egui::DragValue::new(&mut region.rectangle.width).prefix("W "));
+                        ui.add(egui::DragValue::new(&mut region.rectangle.height).prefix("H "));
+                    });
+                }
+                super::image_search_controls::SearchRegionKind::Window
+                | super::image_search_controls::SearchRegionKind::ClientArea => {
+                    let matcher = if matches!(
+                        region.kind,
+                        super::image_search_controls::SearchRegionKind::Window
+                    ) {
+                        &mut region.window_matcher
+                    } else {
+                        &mut region.client_matcher
+                    };
+                    ui.label("Window matcher");
+                    ui.text_edit_singleline(matcher.title.get_or_insert_default());
+                }
+                _ => {}
+            }
+            p.region = region.selected_region();
+            ui.horizontal(|ui| {
+                ui.label("Change threshold (%)");
+                ui.add(
+                    egui::DragValue::new(&mut p.change_threshold_percent).clamp_range(0.01..=100.0),
+                );
+            });
+            ui.small("Changed-pixel percentage: a pixel counts when any RGBA channel exceeds the tolerance.");
+            ui.horizontal(|ui| {
+                ui.label("Per-channel tolerance");
+                let tolerance = p.per_pixel_tolerance.get_or_insert(8);
+                ui.add(egui::DragValue::new(tolerance));
+                if ui.button("Disable tolerance").clicked() {
+                    p.per_pixel_tolerance = None;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Timeout (ms)");
+                ui.add(egui::DragValue::new(&mut p.timeout_ms).clamp_range(1..=86_400_000));
+                ui.label("Poll (ms)");
+                ui.add(egui::DragValue::new(&mut p.poll_interval_ms).clamp_range(1..=86_400_000));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Consecutive changed frames");
+                ui.add(
+                    egui::DragValue::new(p.consecutive_changed_frames.get_or_insert(2))
+                        .clamp_range(1..=1000),
+                );
+            });
+        }
         MkAction::CaptureScreenshot(p) => {
             ui.heading("Capture Screenshot");
             let mut region =

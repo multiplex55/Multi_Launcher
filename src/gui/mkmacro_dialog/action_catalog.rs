@@ -647,6 +647,14 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Visual,
+            "Wait for Visual Change",
+            "Wait until a percentage of pixels changes from the initial frame",
+            &["wait", "change", "screen", "visual"],
+            Screenshot,
+            MkAction::WaitForVisualChange(WaitForVisualChange::default())
+        ),
+        d!(
+            Visual,
             "Click Image",
             "Find and click an image",
             &["image", "click"],
@@ -795,7 +803,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::Break
         | MkAction::Continue => EditorKind::DirectInsert,
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
-        MkAction::CaptureScreenshot(_) => EditorKind::Screenshot,
+        MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => EditorKind::Screenshot,
         MkAction::PixelCheck { .. } | MkAction::FindPixel(_) => EditorKind::Pixel,
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
@@ -1045,6 +1053,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel Color",
         MkAction::CaptureScreenshot(_) => "Capture Screenshot",
+        MkAction::WaitForVisualChange(_) => "Wait for Visual Change",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -1166,6 +1175,12 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             }
             format!("{summary} · {destination}")
         }
+        MkAction::WaitForVisualChange(p) => format!(
+            "{} changes ≥ {}% · timeout {} ms",
+            region_summary(&p.region),
+            p.change_threshold_percent,
+            p.timeout_ms
+        ),
         MkAction::UiSetValue { value, .. } => {
             format!("Unavailable UI Automation action (set value to {value})")
         }
