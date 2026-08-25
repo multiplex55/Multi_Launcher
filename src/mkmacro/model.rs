@@ -266,10 +266,18 @@ pub enum MkUiPattern {
     SelectionItem,
     Focus,
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkWaitOptions {
     pub timeout_ms: u64,
     pub poll_interval_ms: u64,
+}
+impl Default for MkWaitOptions {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 1_000,
+            poll_interval_ms: 50,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

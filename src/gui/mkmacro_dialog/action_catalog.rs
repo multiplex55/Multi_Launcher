@@ -644,7 +644,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             &["pixel", "color", "search"],
             Pixel,
             MkAction::FindPixel(MkPixelSearchPayload {
-                search_id: 0,
+                search_id: 1,
                 color: "#000000".into(),
                 tolerance: 0,
                 region: SearchRegion::Desktop,
