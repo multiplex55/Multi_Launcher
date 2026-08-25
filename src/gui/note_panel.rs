@@ -13,18 +13,19 @@ use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
     available_tags, extract_aliases, image_files, load_notes, note_alias_map_snapshot,
     note_cache_snapshot, note_link_menu_targets_snapshot, note_version, resolve_note_query,
-    save_note,
+    save_note, save_note_image_asset,
 };
 use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
+use arboard::Clipboard;
 use chrono::{DateTime, Local, TimeZone};
 use eframe::egui::{self, Color32, FontId, Key, RichText, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use image::imageops::FilterType;
+use image::{RgbaImage, imageops::FilterType};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
@@ -41,6 +42,54 @@ use url::Url;
 const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
+
+#[derive(Debug)]
+struct ClipboardRgbaData {
+    width: usize,
+    height: usize,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardImagePasteOutcome {
+    NotHandled,
+    Handled,
+}
+
+fn rgba_image_from_clipboard_data(
+    width: usize,
+    height: usize,
+    bytes: Vec<u8>,
+) -> anyhow::Result<RgbaImage> {
+    let width =
+        u32::try_from(width).map_err(|_| anyhow::anyhow!("clipboard image width is too large"))?;
+    let height = u32::try_from(height)
+        .map_err(|_| anyhow::anyhow!("clipboard image height is too large"))?;
+    if width == 0 || height == 0 {
+        anyhow::bail!("clipboard image has zero width or height");
+    }
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("clipboard image dimensions overflow"))?;
+    if bytes.len() != expected {
+        anyhow::bail!(
+            "clipboard image contains {} RGBA bytes; expected {expected}",
+            bytes.len()
+        );
+    }
+    RgbaImage::from_raw(width, height, bytes)
+        .ok_or_else(|| anyhow::anyhow!("clipboard image RGBA data is malformed"))
+}
+
+fn note_image_markdown(filename: &str) -> String {
+    format!("![{filename}](assets/{filename})")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SplitPaneWidths {
@@ -2042,6 +2091,7 @@ impl NotePanel {
         }
         match self.view_mode {
             NoteViewMode::Edit => {
+                self.intercept_clipboard_image_paste(ctx, app);
                 let resp =
                     self.render_bounded_editor(ui, app, text_id_source.clone(), available_size);
                 self.handle_editor_response(resp, ctx, app, true);
@@ -2064,6 +2114,88 @@ impl NotePanel {
                 self.render_split(ui, app, ctx, available_size);
             }
         }
+    }
+
+    fn intercept_clipboard_image_paste(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.intercept_clipboard_image_paste_with(
+            ctx,
+            app,
+            || {
+                let mut clipboard = Clipboard::new()
+                    .map_err(|error| format!("could not open the clipboard: {error}"))?;
+                match clipboard.get_image() {
+                    Ok(image) => Ok(Some(ClipboardRgbaData {
+                        width: image.width,
+                        height: image.height,
+                        bytes: image.bytes.into_owned(),
+                    })),
+                    Err(arboard::Error::ContentNotAvailable) => Ok(None),
+                    Err(error) => Err(format!("could not read a clipboard image: {error}")),
+                }
+            },
+            save_note_image_asset,
+        );
+    }
+
+    fn intercept_clipboard_image_paste_with<Lookup, Save, LookupError, SaveError>(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        mut lookup: Lookup,
+        mut save: Save,
+    ) -> ClipboardImagePasteOutcome
+    where
+        Lookup: FnMut() -> Result<Option<ClipboardRgbaData>, LookupError>,
+        Save: FnMut(&RgbaImage) -> Result<String, SaveError>,
+        LookupError: std::fmt::Display,
+        SaveError: std::fmt::Display,
+    {
+        if self.view_mode != NoteViewMode::Edit {
+            return ClipboardImagePasteOutcome::NotHandled;
+        }
+        let Some(editor_id) = self.last_textedit_id else {
+            return ClipboardImagePasteOutcome::NotHandled;
+        };
+        let eligible = ctx.memory(|memory| memory.has_focus(editor_id))
+            && ctx.input(|input| {
+                input.key_pressed(Key::V) && input.modifiers == egui::Modifiers::CTRL
+            });
+        if !eligible {
+            return ClipboardImagePasteOutcome::NotHandled;
+        }
+
+        let data = match lookup() {
+            Ok(Some(data)) => data,
+            Ok(None) => return ClipboardImagePasteOutcome::NotHandled,
+            Err(error) => {
+                app.report_error("clipboard image paste", error);
+                return ClipboardImagePasteOutcome::NotHandled;
+            }
+        };
+
+        let image = match rgba_image_from_clipboard_data(data.width, data.height, data.bytes) {
+            Ok(image) => image,
+            Err(error) => {
+                ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V));
+                app.report_error("clipboard image paste", error);
+                return ClipboardImagePasteOutcome::Handled;
+            }
+        };
+        let filename = match save(&image) {
+            Ok(filename) => filename,
+            Err(error) => {
+                ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V));
+                app.report_error(
+                    "clipboard image paste",
+                    format!("Failed to save clipboard image: {error}"),
+                );
+                return ClipboardImagePasteOutcome::Handled;
+            }
+        };
+        let markdown = note_image_markdown(&filename);
+        ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V));
+        self.insert_text_at_cursor_or_selection(ctx, editor_id, &markdown);
+        ClipboardImagePasteOutcome::Handled
     }
 
     fn handle_outline_row_click(&mut self, row: &NoteOutlineRow, ctx: &egui::Context) {
@@ -4242,6 +4374,133 @@ mod tests {
             alias: None,
             aliases: Vec::new(),
             entity_refs: Vec::new(),
+        }
+    }
+
+    fn begin_ctrl_v_frame(ctx: &egui::Context, editor_id: egui::Id) {
+        let mut input = egui::RawInput {
+            time: Some(123.456),
+            modifiers: egui::Modifiers::CTRL,
+            ..Default::default()
+        };
+        input.events.push(egui::Event::Key {
+            key: Key::V,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+        ctx.begin_frame(input);
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+    }
+
+    #[test]
+    fn clipboard_rgba_validation_and_markdown_are_independent() {
+        let image = rgba_image_from_clipboard_data(1, 2, vec![255; 8]).unwrap();
+        assert_eq!(image.dimensions(), (1, 2));
+        assert!(rgba_image_from_clipboard_data(0, 2, vec![]).is_err());
+        assert!(rgba_image_from_clipboard_data(2, 2, vec![0; 15]).is_err());
+        assert_eq!(
+            note_image_markdown("note-image-20260825-162145.123.png"),
+            "![note-image-20260825-162145.123.png](assets/note-image-20260825-162145.123.png)"
+        );
+    }
+
+    #[test]
+    fn clipboard_image_paste_replaces_unicode_selection_and_marks_dirty() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("clipboard-image-editor");
+        begin_ctrl_v_frame(&ctx, id);
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("α猫ω"));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+        panel.pending_selection = Some((1, 2));
+
+        let outcome = panel.intercept_clipboard_image_paste_with(
+            &ctx,
+            &mut app,
+            || {
+                Ok::<_, String>(Some(ClipboardRgbaData {
+                    width: 1,
+                    height: 1,
+                    bytes: vec![1, 2, 3, 255],
+                }))
+            },
+            |_| Ok::<_, String>("note-image-20260825-162145.123.png".into()),
+        );
+
+        assert_eq!(outcome, ClipboardImagePasteOutcome::Handled);
+        let markdown = note_image_markdown("note-image-20260825-162145.123.png");
+        assert_eq!(panel.note.content, format!("α{markdown}ω"));
+        assert!(panel.pending_selection.is_none());
+        assert!(panel.fast_derived_dirty);
+        assert!(panel.heavy_recompute_requested);
+        assert_eq!(panel.last_edit_at_secs, Some(123.456));
+        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
+        let range = state.cursor.char_range().unwrap();
+        assert_eq!(range.primary.index, 1 + markdown.chars().count());
+        assert_eq!(range.primary.index, range.secondary.index);
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn clipboard_no_image_leaves_shortcut_and_state_untouched() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("clipboard-text-editor");
+        begin_ctrl_v_frame(&ctx, id);
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("unchanged"));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.last_textedit_id = Some(id);
+        let saves = std::cell::Cell::new(0);
+        let outcome = panel.intercept_clipboard_image_paste_with(
+            &ctx,
+            &mut app,
+            || Ok::<_, String>(None),
+            |_| {
+                saves.set(saves.get() + 1);
+                Ok::<_, String>(String::new())
+            },
+        );
+        assert_eq!(outcome, ClipboardImagePasteOutcome::NotHandled);
+        assert_eq!(panel.note.content, "unchanged");
+        assert_eq!(saves.get(), 0);
+        assert!(ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V)));
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn clipboard_lookup_is_gated_by_mode_and_exact_focus() {
+        for (index, mode) in [
+            NoteViewMode::Preview,
+            NoteViewMode::Split,
+            NoteViewMode::Edit,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ctx = egui::Context::default();
+            let editor_id = egui::Id::new(("editor", index));
+            begin_ctrl_v_frame(&ctx, egui::Id::new("different-widget"));
+            let mut app = new_app(&ctx);
+            let mut panel = NotePanel::from_note(empty_note("unchanged"));
+            panel.view_mode = mode;
+            panel.last_textedit_id = Some(editor_id);
+            let lookups = std::cell::Cell::new(0);
+            let outcome = panel.intercept_clipboard_image_paste_with(
+                &ctx,
+                &mut app,
+                || {
+                    lookups.set(lookups.get() + 1);
+                    Ok::<_, String>(None)
+                },
+                |_| Ok::<_, String>(String::new()),
+            );
+            assert_eq!(outcome, ClipboardImagePasteOutcome::NotHandled);
+            assert_eq!(lookups.get(), 0);
+            assert!(ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V)));
+            let _ = ctx.end_frame();
         }
     }
 
