@@ -3048,6 +3048,10 @@ mod tests {
         common::slug::reset_slug_lookup,
         dashboard::config::OverflowMode,
         dashboard::layout::NormalizedSlot,
+        mkmacro::{
+            AlphaPolicy, MkAction, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
+            MkWaitOptions, ReturnPoint, SearchRegion,
+        },
         plugin::PluginManager,
         plugins::note::{NotePlugin, append_note, load_notes, save_notes},
         settings::Settings,
@@ -3246,6 +3250,19 @@ mod tests {
         }
     }
 
+    fn host_image_action() -> MkAction {
+        MkAction::ImageClick(MkImagePayload {
+            asset_id: 7,
+            region: SearchRegion::Desktop,
+            wait: MkWaitOptions::default(),
+            tolerance: 0,
+            alpha: AlphaPolicy::Ignore,
+            return_point: ReturnPoint::TopLeft,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
+        })
+    }
+
     #[test]
     fn installed_visual_capture_issues_rectangle_request_immediately() {
         let ctx = egui::Context::default();
@@ -3257,9 +3274,13 @@ mod tests {
         );
         app.mkmacro_dialog
             .action_editor
+            .begin_new(host_image_action());
+        app.mkmacro_dialog
+            .action_editor
             .request_rectangle_selection(
                 9,
                 mkmacro_dialog::visual_overlay::RectanglePurpose::SearchRegion,
+                mkmacro_dialog::action_editor::VisualRegionDestination::ImageActionSearchRegion,
             )
             .unwrap();
         assert_eq!(
@@ -3289,6 +3310,9 @@ mod tests {
                 &mut app.mkmacro_dialog,
                 host_capture_dependencies(log.clone()),
             );
+            app.mkmacro_dialog
+                .action_editor
+                .begin_new(host_image_action());
             let host_before = (
                 app.visible_flag.load(Ordering::SeqCst),
                 app.last_visible,
@@ -3297,7 +3321,11 @@ mod tests {
             );
             app.mkmacro_dialog
                 .action_editor
-                .request_rectangle_selection(9, RectanglePurpose::ReferenceImageCapture)
+                .request_rectangle_selection(
+                    9,
+                    RectanglePurpose::ReferenceImageCapture,
+                    mkmacro_dialog::action_editor::VisualRegionDestination::ImageActionReferenceAsset,
+                )
                 .unwrap();
             assert_eq!(
                 (
