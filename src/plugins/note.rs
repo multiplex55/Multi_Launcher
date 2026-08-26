@@ -784,7 +784,17 @@ fn save_note_image_asset_at(
     image: &image::RgbaImage,
     timestamp: chrono::DateTime<Local>,
 ) -> anyhow::Result<String> {
-    let dir = notes_dir().join("assets");
+    save_note_image_asset_in_dir_at(image, &notes_dir().join("assets"), timestamp)
+}
+
+/// Directory-injected implementation used by the panel's integration test. Keeping the
+/// destination explicit avoids changing `ML_NOTES_DIR` (and therefore avoids cross-test races).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn save_note_image_asset_in_dir_at(
+    image: &image::RgbaImage,
+    dir: &std::path::Path,
+    timestamp: chrono::DateTime<Local>,
+) -> anyhow::Result<String> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create note assets directory {}", dir.display()))?;
 
