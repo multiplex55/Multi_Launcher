@@ -3222,7 +3222,7 @@ mod tests {
                 log.events.remove(0)
             }
         }
-        fn cancel(&mut self) {}
+        fn cancel(&mut self, _expected_operation_id: u64) {}
     }
     struct HostCapture(Arc<Mutex<HostCaptureLog>>);
     impl mkmacro_dialog::visual_capture_workflow::CaptureAdapter for HostCapture {

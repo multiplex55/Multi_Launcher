@@ -3596,7 +3596,7 @@ mod tests {
                     .take()
                     .unwrap_or(SelectionEvent::Pending)
             }
-            fn cancel(&mut self) {}
+            fn cancel(&mut self, _expected_operation_id: OperationId) {}
         }
         struct Capture(Arc<Mutex<FakeState>>);
         impl CaptureAdapter for Capture {

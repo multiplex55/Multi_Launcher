@@ -228,6 +228,18 @@ impl NativeVisualOverlayService {
     where
         F: FnOnce() -> VisualOverlayController + Send + 'static,
     {
+        Self::start_with_wait_interval(factory, Duration::from_millis(12))
+    }
+
+    /// Test hook for running the real service loop with a deterministic controller and
+    /// a nonblocking wait. Production deliberately uses a modest blocking interval.
+    pub(crate) fn start_with_wait_interval<F>(
+        factory: F,
+        active_wait: Duration,
+    ) -> Result<Self, std::io::Error>
+    where
+        F: FnOnce() -> VisualOverlayController + Send + 'static,
+    {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -238,7 +250,7 @@ impl NativeVisualOverlayService {
                 while running {
                     let active = controller.operation_id().is_some();
                     let first = if active {
-                        match command_rx.recv_timeout(Duration::from_millis(12)) {
+                        match command_rx.recv_timeout(active_wait) {
                             Ok(command) => Some(command),
                             Err(RecvTimeoutError::Timeout) => None,
                             Err(RecvTimeoutError::Disconnected) => {
@@ -2001,5 +2013,203 @@ mod tests {
         queue_drag(&fake, id, point(10, 10), point(30, 40));
         assert!(matches!(advance_and_drain(&mut c).as_slice(),
             [VisualOverlayEvent::RectangleConfirmed { rect, .. }] if *rect == ScreenRect::new(10, 10, 20, 30)));
+    }
+
+    fn wait_until(mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !predicate() {
+            assert!(
+                Instant::now() < deadline,
+                "service worker did not make progress"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn test_service(
+        data: Arc<Mutex<FakeData>>,
+        now: Arc<Mutex<Duration>>,
+    ) -> NativeVisualOverlayService {
+        NativeVisualOverlayService::start_with_wait_interval(
+            move || {
+                VisualOverlayController::with_clock(
+                    Box::new(FakeRenderer(data)),
+                    Box::new(FakeClock(now)),
+                )
+            },
+            Duration::ZERO,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn service_worker_finishes_held_click_drag_and_repaints_without_gui_drains() {
+        let data = Arc::new(Mutex::new(FakeData {
+            left_down: true,
+            ..FakeData::default()
+        }));
+        let now = Arc::new(Mutex::new(Duration::ZERO));
+        let mut service = test_service(data.clone(), now);
+        let id = 701;
+        service
+            .commands
+            .send(VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::ReferenceImageCapture,
+                virtual_desktop: ScreenRect::new(-100, -100, 400, 300),
+            })
+            .unwrap();
+        wait_until(|| {
+            data.lock().unwrap().calls.iter().any(|call| matches!(call, RecordedCall::Show { operation_id, .. } if *operation_id == id))
+        });
+
+        // The launch release only arms the worker-owned picker. No event receiver is touched.
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::LeftReleased(point(40, 50)),
+        });
+        wait_until(|| {
+            data.lock().unwrap().calls.iter().filter(|call| matches!(call, RecordedCall::Repaint { operation_id, .. } if *operation_id == id)).count() >= 1
+        });
+        data.lock().unwrap().inputs.extend([
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(10, 20)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(30, 40)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(50, 60)),
+            },
+            // Release is authoritative and intentionally differs from the final move.
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftReleased(point(70, 80)),
+            },
+        ]);
+
+        let event = service.events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            event,
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id: id,
+                purpose: RectanglePurpose::ReferenceImageCapture,
+                rect: ScreenRect::new(10, 20, 60, 60),
+            }
+        );
+        assert!(service.events.try_recv().is_err());
+        let repaints = data.lock().unwrap().calls.iter().filter(|call| matches!(call, RecordedCall::Repaint { operation_id, .. } if *operation_id == id)).count();
+        assert!(
+            repaints >= 5,
+            "arming, press, moves, and final release repaint on the worker"
+        );
+        assert_eq!(close_count(&data), 1);
+        service.shutdown_and_join();
+    }
+
+    #[test]
+    fn service_worker_cancels_on_escape_and_never_times_out_interactive_picker() {
+        let data = Arc::new(Mutex::new(FakeData::default()));
+        let now = Arc::new(Mutex::new(Duration::ZERO));
+        let mut service = test_service(data.clone(), now.clone());
+        let id = 702;
+        service
+            .commands
+            .send(VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::SearchRegion,
+                virtual_desktop: ScreenRect::new(0, 0, 100, 100),
+            })
+            .unwrap();
+        wait_until(|| {
+            data.lock().unwrap().calls.iter().any(|call| matches!(call, RecordedCall::Show { operation_id, .. } if *operation_id == id))
+        });
+        *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION * 100;
+        data.lock().unwrap().inputs.extend([
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(1, 2)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(8, 9)),
+            },
+        ]);
+        wait_until(|| {
+            data.lock().unwrap().calls.iter().any(|call| matches!(call, RecordedCall::Repaint { operation_id, visual: OverlayVisual::RectanglePicker { selection: Some(_), .. } } if *operation_id == id))
+        });
+        assert!(
+            service.events.try_recv().is_err(),
+            "interactive operations have no deadline"
+        );
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::Escape,
+        });
+        assert_eq!(
+            service.events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            VisualOverlayEvent::Cancelled { operation_id: id }
+        );
+        assert!(service.events.try_recv().is_err());
+        assert_eq!(close_count(&data), 1);
+        service.shutdown_and_join();
+    }
+
+    #[test]
+    fn every_passive_category_expires_and_closes_on_service_thread_without_gui_polling() {
+        let data = Arc::new(Mutex::new(FakeData::default()));
+        let now = Arc::new(Mutex::new(Duration::ZERO));
+        let mut service = test_service(data.clone(), now.clone());
+        let descriptor = monitor(2, ScreenRect::new(-100, 0, 100, 80));
+        let commands = vec![
+            VisualOverlayCommand::PreviewRectangle {
+                operation_id: 801,
+                rect: ScreenRect::new(1, 2, 30, 40),
+            },
+            VisualOverlayCommand::HighlightMonitor {
+                operation_id: 802,
+                monitor: descriptor.clone(),
+            },
+            VisualOverlayCommand::IdentifyMonitors {
+                operation_id: 803,
+                monitors: vec![descriptor],
+            },
+            VisualOverlayCommand::HighlightWindow {
+                operation_id: 804,
+                rect: ScreenRect::new(5, 6, 70, 80),
+                area_kind: WindowAreaKind::ClientArea,
+            },
+        ];
+        for (index, command) in commands.into_iter().enumerate() {
+            let id = 801 + index as u64;
+            let shows_before = data
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| matches!(call, RecordedCall::Show { .. }))
+                .count();
+            service.commands.send(command).unwrap();
+            wait_until(|| {
+                data.lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter(|call| matches!(call, RecordedCall::Show { .. }))
+                    .count()
+                    > shows_before
+            });
+            // Advancing the clock is independent of receiving/draining semantic events.
+            *now.lock().unwrap() += PASSIVE_OVERLAY_DURATION;
+            assert_eq!(
+                service.events.recv_timeout(Duration::from_secs(2)).unwrap(),
+                VisualOverlayEvent::Expired { operation_id: id }
+            );
+            assert_eq!(close_count(&data), index + 1);
+        }
+        service.shutdown_and_join();
     }
 }
