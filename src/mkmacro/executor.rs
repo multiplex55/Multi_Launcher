@@ -961,6 +961,62 @@ mod tests {
         assert_eq!(*capture.regions.lock().unwrap(), regions);
     }
 
+    struct VisualChangeCapture {
+        regions: Mutex<Vec<SearchRegion>>,
+        frames: Mutex<std::collections::VecDeque<image::RgbaImage>>,
+    }
+    impl ScreenCaptureBackend for VisualChangeCapture {
+        fn virtual_desktop(&self) -> ExecResult<super::super::ScreenRect> {
+            Ok(super::super::ScreenRect::new(0, 0, 100, 100))
+        }
+        fn region_bounds(&self, region: &SearchRegion) -> ExecResult<super::super::ScreenRect> {
+            self.regions.lock().unwrap().push(region.clone());
+            Ok(super::super::ScreenRect::new(10, 20, 2, 2))
+        }
+        fn capture_rect(
+            &self,
+            _: super::super::ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<image::RgbaImage> {
+            self.frames.lock().unwrap().pop_front().ok_or_else(|| {
+                ExecutionDiagnostic::new(DiagnosticKind::Backend, "unexpected extra capture")
+            })
+        }
+    }
+
+    #[test]
+    fn wait_visual_change_captures_one_baseline_and_polls_the_configured_region() {
+        let region = SearchRegion::Rectangle {
+            rect: super::super::ScreenRect::new(10, 20, 2, 2),
+        };
+        let baseline = image::RgbaImage::new(2, 2);
+        let mut below_threshold = baseline.clone();
+        below_threshold.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        let mut reaches_threshold = below_threshold.clone();
+        reaches_threshold.put_pixel(1, 0, image::Rgba([255, 0, 0, 255]));
+        let capture = Arc::new(VisualChangeCapture {
+            regions: Mutex::new(vec![]),
+            frames: Mutex::new([baseline, below_threshold, reaches_threshold].into()),
+        });
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.backends();
+        backends.screenshot_capture = capture.clone();
+        let action = MkAction::WaitForVisualChange(super::super::WaitForVisualChange {
+            region: region.clone(),
+            timeout_ms: 1_000,
+            poll_interval_ms: 1,
+            change_threshold_percent: 50.0,
+            per_pixel_tolerance: Some(0),
+            consecutive_changed_frames: Some(1),
+        });
+        run_screenshot(backends, &action, &mut RuntimeVariables::new()).unwrap();
+        assert_eq!(
+            *capture.regions.lock().unwrap(),
+            [region.clone(), region.clone(), region]
+        );
+        assert!(capture.frames.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn screenshot_both_captures_once_interpolates_and_sets_output_after_write() {
         let capture = Arc::new(ShotCapture::default());
