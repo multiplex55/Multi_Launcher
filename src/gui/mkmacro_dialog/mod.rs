@@ -24,6 +24,7 @@ use crate::mkmacro::{
 };
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
+use visual_capture_workflow::SharedVisualOverlayController;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirtyDecision {
@@ -42,6 +43,8 @@ pub struct MkMacroDialog {
     pub open: bool,
     pub store: Arc<MkMacroStore>,
     pub authoring_context: MkMacroAuthoringContext,
+    /// Authoritative client keeping the dialog-wide native overlay service alive.
+    pub(crate) visual_overlay: SharedVisualOverlayController,
     pub draft: MkMacroDocument,
     baseline: Arc<MkMacroDocument>,
     pub dirty: bool,
@@ -1382,12 +1385,15 @@ impl MkMacroDialog {
         authoring_context: MkMacroAuthoringContext,
     ) -> Self {
         let baseline = store.snapshot();
+        let visual_overlay = SharedVisualOverlayController::default();
         Self {
             open: false,
             draft: (*baseline).clone(),
             baseline,
             store,
             authoring_context,
+            action_editor: action_editor::ActionEditorState::new(visual_overlay.clone()),
+            visual_overlay,
             dirty: false,
             conflict: false,
             selected_macro_id: None,
@@ -1403,7 +1409,6 @@ impl MkMacroDialog {
             action_search: String::new(),
             structural_insertion: None,
             uia_editor: Default::default(),
-            action_editor: Default::default(),
             window_picker: Default::default(),
             launcher_action_picker: Default::default(),
             command_error: None,
