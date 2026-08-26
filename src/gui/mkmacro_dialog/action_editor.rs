@@ -3213,10 +3213,7 @@ mod tests {
                 super::super::image_search_editor::SearchRegionKind::Rectangle
             );
             assert_eq!(image.rectangle, ScreenRect::new(-10, 20, 30, 40));
-            assert_eq!(
-                image.pending_request, None,
-                "both actions expose the same typed request channel"
-            );
+            assert_eq!(image.selected_region(), payload.region);
         }
     }
 
@@ -3901,17 +3898,21 @@ mod tests {
     #[cfg(test)]
     mod visual_region_picker_tests {
         use super::*;
+        use crate::gui::mkmacro_dialog::{
+            image_search_controls::SearchRegionKind,
+            window_picker::{MatcherDestination, MatcherEditRequest, MatcherPath},
+        };
 
         #[test]
         fn wait_visual_change_picker_requires_live_compatible_draft() {
             let mut editor = ActionEditorState::default();
             editor.begin_new(MkAction::WaitForVisualChange(WaitForVisualChange::default()));
             let generation = editor.draft_generation;
-            let request = super::super::window_picker::MatcherEditRequest {
-                destination: super::super::window_picker::MatcherDestination::Action {
+            let request = MatcherEditRequest {
+                destination: MatcherDestination::Action {
                     macro_id: 7,
                     draft_generation: generation,
-                    path: super::super::window_picker::MatcherPath::VisualRegion,
+                    path: MatcherPath::VisualRegion,
                 },
                 original: MkWindowMatcher::default(),
             };
@@ -3920,8 +3921,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(!editor.apply_window_matcher(&request, matcher.clone(), Some(7)));
-            editor.image_search.as_mut().unwrap().kind =
-                super::super::image_search_controls::SearchRegionKind::ClientArea;
+            editor.image_search.as_mut().unwrap().kind = SearchRegionKind::ClientArea;
             assert!(editor.apply_window_matcher(&request, matcher.clone(), Some(7)));
             assert_eq!(
                 editor.image_search.as_ref().unwrap().client_matcher,

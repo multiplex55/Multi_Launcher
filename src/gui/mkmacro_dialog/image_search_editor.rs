@@ -271,7 +271,7 @@ mod tests {
                 matcher: MkWindowMatcher::default(),
             },
         ] {
-            let s = ImageSearchEditorState::from_region(&payload(region.clone()));
+            let s = ImageSearchEditorState::from_region(&region);
             assert_eq!(
                 SearchRegionKind::from_region(&s.selected_region()),
                 SearchRegionKind::from_region(&region)
@@ -300,7 +300,7 @@ mod tests {
     fn transient_state_is_not_serialized_with_payload() {
         let p = payload(SearchRegion::Desktop);
         let mut s = ImageSearchEditorState::from_region(&p.region);
-        s.pending_request = Some(ImageEditorRequest::CaptureRectangle);
+        s.monitors = Err("transient discovery failure".into());
         let json = serde_json::to_string(&p).unwrap();
         assert!(
             !json.contains("pending_request")
