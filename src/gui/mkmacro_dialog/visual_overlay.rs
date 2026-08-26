@@ -1015,6 +1015,11 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    fn advance_and_drain(controller: &mut VisualOverlayController) -> Vec<VisualOverlayEvent> {
+        controller.advance();
+        controller.drain_events()
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum RecordedCall {
         Show {
@@ -1207,7 +1212,7 @@ mod tests {
                 kind: OverlayInputKind::PointerMoved(point(30, 40)),
             },
         ];
-        assert!(c.poll().is_empty());
+        assert!(advance_and_drain(&mut c).is_empty());
         let repaints: Vec<_> = fake
             .lock()
             .unwrap()
@@ -1358,7 +1363,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::RectangleConfirmed {
                 operation_id: id,
                 purpose: RectanglePurpose::ReferenceImageCapture,
@@ -1390,7 +1395,7 @@ mod tests {
         );
         queue_drag(&fake, id, point(900, 700), point(100, 200));
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::RectangleConfirmed {
                 operation_id: id,
                 purpose: RectanglePurpose::SearchRegion,
@@ -1408,7 +1413,7 @@ mod tests {
         );
         queue_drag(&fake, id, point(400, 300), point(-2100, -900));
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::RectangleConfirmed {
                 operation_id: id,
                 purpose: RectanglePurpose::ReferenceImageCapture,
@@ -1430,7 +1435,7 @@ mod tests {
             );
             queue_drag(&fake, id, start, end);
             assert!(
-                c.poll().is_empty(),
+                advance_and_drain(&mut c).is_empty(),
                 "degenerate drag {start:?} -> {end:?} emitted an event"
             );
             assert_eq!(c.operation_id(), Some(id));
@@ -1520,15 +1525,15 @@ mod tests {
         let (mut c, fake, now) = controller();
         let id = c.preview_rectangle(ScreenRect::new(-10, -20, 30, 40));
         *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION - Duration::from_nanos(1);
-        assert!(c.poll().is_empty());
+        assert!(advance_and_drain(&mut c).is_empty());
         assert_eq!(c.operation_id(), Some(id));
         *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION;
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::Expired { operation_id: id }]
         );
         assert_eq!(close_count(&fake), 1);
-        assert!(c.poll().is_empty());
+        assert!(advance_and_drain(&mut c).is_empty());
         assert_eq!(close_count(&fake), 1);
     }
 
@@ -1565,7 +1570,7 @@ mod tests {
             kind: OverlayInputKind::Escape,
         }];
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::Cancelled { operation_id: id }]
         );
         assert_eq!(c.state(), &VisualOverlayState::Idle);
@@ -1584,10 +1589,10 @@ mod tests {
             operation_id: first,
             kind: OverlayInputKind::Enter,
         }];
-        assert!(c.poll().is_empty()); // Enter cannot confirm an empty drag.
+        assert!(advance_and_drain(&mut c).is_empty()); // Enter cannot confirm an empty drag.
         let second = c.preview_rectangle(ScreenRect::new(-4, -5, 6, 7));
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::Cancelled {
                 operation_id: first
             }]
@@ -1608,7 +1613,7 @@ mod tests {
         );
         *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION;
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::Expired {
                 operation_id: second
             }]
@@ -1641,7 +1646,7 @@ mod tests {
         }];
         assert_eq!(c.operation_id(), Some(second));
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::Cancelled {
                 operation_id: first
             }]
@@ -1657,15 +1662,15 @@ mod tests {
         assert_eq!(c.state(), &VisualOverlayState::Idle);
         assert_eq!(c.operation_id(), None);
         assert!(
-            matches!(c.poll().as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == failed)
+            matches!(advance_and_drain(&mut c).as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == failed)
         );
 
         let active = c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
         fake.lock().unwrap().poll_error = Some(platform_error("poll failed"));
         assert!(
-            matches!(c.poll().as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == active)
+            matches!(advance_and_drain(&mut c).as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == active)
         );
-        assert!(c.poll().is_empty());
+        assert!(advance_and_drain(&mut c).is_empty());
         assert_eq!(c.state(), &VisualOverlayState::Idle);
     }
 
@@ -1685,14 +1690,14 @@ mod tests {
             },
         ];
         assert_eq!(
-            c.poll(),
+            advance_and_drain(&mut c),
             vec![VisualOverlayEvent::Cancelled { operation_id: id }]
         );
         c.cancel();
         c.cancel();
         c.shutdown();
         c.shutdown();
-        assert!(c.poll().is_empty());
+        assert!(advance_and_drain(&mut c).is_empty());
         let closes = close_count(&fake);
         drop(c);
         assert_eq!(close_count(&fake), closes);
@@ -1717,18 +1722,18 @@ mod tests {
                 operation_id: id,
                 kind: OverlayInputKind::LeftPressed(point(20, 30)),
             }];
-            assert!(controller.poll().is_empty());
+            assert!(advance_and_drain(&mut controller).is_empty());
             fake.lock().unwrap().inputs = vec![OverlayInput {
                 operation_id: id,
                 kind: OverlayInputKind::PointerMoved(point(-40, -10)),
             }];
-            assert!(controller.poll().is_empty());
+            assert!(advance_and_drain(&mut controller).is_empty());
             fake.lock().unwrap().inputs = vec![OverlayInput {
                 operation_id: id,
                 kind: OverlayInputKind::LeftReleased(point(-40, -10)),
             }];
             assert_eq!(
-                controller.poll(),
+                advance_and_drain(&mut controller),
                 vec![VisualOverlayEvent::RectangleConfirmed {
                     operation_id: id,
                     purpose,
@@ -1794,7 +1799,7 @@ mod tests {
                     kind: OverlayInputKind::PointerMoved(point(18, 29)),
                 },
             ];
-            assert!(controller.poll().is_empty());
+            assert!(advance_and_drain(&mut controller).is_empty());
             presentations.push(
                 fake.lock()
                     .unwrap()
@@ -1842,10 +1847,10 @@ mod tests {
             });
             fake.lock().unwrap().inputs = inputs;
             assert_eq!(
-                controller.poll(),
+                advance_and_drain(&mut controller),
                 vec![VisualOverlayEvent::Cancelled { operation_id: id }]
             );
-            assert!(controller.poll().is_empty());
+            assert!(advance_and_drain(&mut controller).is_empty());
             assert_eq!(close_count(&fake), 1);
         }
     }
