@@ -110,7 +110,131 @@ struct NativePositionPicker {
     escape_down: bool,
 }
 
+trait RegionPreviewBoundary {
+    fn preview_desktop(
+        &self,
+        monitors: Vec<MonitorDescriptor>,
+    ) -> super::visual_overlay::OperationId;
+    fn highlight_monitor(&self, monitor: MonitorDescriptor) -> super::visual_overlay::OperationId;
+    fn preview_rectangle(&self, rect: ScreenRect) -> super::visual_overlay::OperationId;
+    fn highlight_window(
+        &self,
+        rect: ScreenRect,
+        kind: super::visual_overlay::WindowAreaKind,
+    ) -> super::visual_overlay::OperationId;
+}
+impl RegionPreviewBoundary for super::visual_capture_workflow::SharedVisualOverlayController {
+    fn preview_desktop(
+        &self,
+        monitors: Vec<MonitorDescriptor>,
+    ) -> super::visual_overlay::OperationId {
+        self.preview_desktop(monitors)
+    }
+    fn highlight_monitor(&self, monitor: MonitorDescriptor) -> super::visual_overlay::OperationId {
+        self.highlight_monitor(monitor)
+    }
+    fn preview_rectangle(&self, rect: ScreenRect) -> super::visual_overlay::OperationId {
+        self.preview_rectangle(rect)
+    }
+    fn highlight_window(
+        &self,
+        rect: ScreenRect,
+        kind: super::visual_overlay::WindowAreaKind,
+    ) -> super::visual_overlay::OperationId {
+        self.highlight_window(rect, kind)
+    }
+}
+
+fn dispatch_region_preview(
+    region: &SearchRegion,
+    monitors: &Result<Vec<MonitorDescriptor>, String>,
+    resolve_window: &dyn Fn(&MkWindowMatcher, bool) -> ExecResult<ScreenRect>,
+    preview: &dyn RegionPreviewBoundary,
+) -> Result<(super::visual_overlay::OperationId, String), String> {
+    use super::visual_overlay::WindowAreaKind;
+    let monitor_list = || {
+        monitors
+            .as_ref()
+            .map_err(|e| format!("Monitor discovery failed: {e}"))
+    };
+    match region {
+        SearchRegion::Desktop => {
+            let descriptors = monitor_list()?;
+            if descriptors.is_empty() {
+                return Err("No monitors are currently available".into());
+            }
+            Ok((
+                preview.preview_desktop(descriptors.clone()),
+                "Unable to preview desktop monitors".into(),
+            ))
+        }
+        SearchRegion::Monitor { index } => {
+            let descriptor = monitor_list()?
+                .iter()
+                .find(|m| m.index == *index)
+                .cloned()
+                .ok_or_else(|| format!("Monitor index {index} no longer exists"))?;
+            Ok((
+                preview.highlight_monitor(descriptor),
+                format!("Unable to highlight monitor {index}"),
+            ))
+        }
+        SearchRegion::Rectangle { rect } => {
+            if rect.is_empty() {
+                return Err("Rectangle is invalid: width and height must be positive".into());
+            }
+            Ok((
+                preview.preview_rectangle(*rect),
+                format!("Unable to preview rectangle {rect:?}"),
+            ))
+        }
+        SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+            let client = matches!(region, SearchRegion::ClientArea { .. });
+            let rect = resolve_window(matcher, client).map_err(|e| match e.kind {
+                DiagnosticKind::TargetNotFound => "Window target was not found".into(),
+                DiagnosticKind::AmbiguousTarget => "Window matcher is ambiguous".into(),
+                _ => format!("Unable to resolve window target: {e}"),
+            })?;
+            let kind = if client {
+                WindowAreaKind::ClientArea
+            } else {
+                WindowAreaKind::WholeWindow
+            };
+            Ok((
+                preview.highlight_window(rect, kind),
+                format!(
+                    "Unable to preview {}",
+                    if client {
+                        "client area"
+                    } else {
+                        "whole window"
+                    }
+                ),
+            ))
+        }
+    }
+}
+
 impl ActionEditorState {
+    fn preview_region(&mut self, region: SearchRegion) {
+        let monitors = if matches!(region, SearchRegion::Desktop | SearchRegion::Monitor { .. }) {
+            crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string())
+        } else {
+            Ok(vec![])
+        };
+        match dispatch_region_preview(
+            &region,
+            &monitors,
+            &crate::mkmacro::resolve_window_screen_rect,
+            &self.visual_overlay,
+        ) {
+            Ok((id, context)) => {
+                self.overlay_diagnostic = Some((id, context));
+                self.capture_message = None;
+            }
+            Err(message) => self.capture_message = Some(message),
+        }
+    }
     pub fn condition_destination(
         &self,
         macro_id: u64,
@@ -460,15 +584,7 @@ impl ActionEditorState {
     }
     fn poll_visual_overlay(&mut self) {
         for event in self.visual_overlay.poll() {
-            if let super::visual_overlay::VisualOverlayEvent::Error {
-                operation_id,
-                error,
-            } = event
-                && self.overlay_diagnostic.as_ref().map(|v| v.0) == Some(operation_id)
-            {
-                let context = &self.overlay_diagnostic.as_ref().unwrap().1;
-                self.capture_message = Some(format!("{context}: {error}"));
-            }
+            apply_overlay_diagnostic(&mut self.capture_message, &self.overlay_diagnostic, event);
         }
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
@@ -714,6 +830,21 @@ impl ActionEditorState {
         };
         self.capture_keys = false;
         true
+    }
+}
+
+fn apply_overlay_diagnostic(
+    message: &mut Option<String>,
+    current: &Option<(super::visual_overlay::OperationId, String)>,
+    event: super::visual_overlay::VisualOverlayEvent,
+) {
+    if let super::visual_overlay::VisualOverlayEvent::Error {
+        operation_id,
+        error,
+    } = event
+        && current.as_ref().map(|v| v.0) == Some(operation_id)
+    {
+        *message = Some(format!("{}: {error}", current.as_ref().unwrap().1));
     }
 }
 
@@ -2286,6 +2417,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut pick_request = None;
     let mut image_request = None;
     let mut condition_image_request = None;
+    // Execute after egui releases the mutable draft borrow held by `step`.
+    let mut region_preview_request = None;
     let image_assets = d
         .selected_macro()
         .map(|m| m.image_assets.clone())
@@ -2316,12 +2449,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         R::RefreshMonitors => region_state.refresh_monitors(),
                         R::IdentifyMonitors => {},
                         R::PreviewRegion => {
-                            match region_state.kind {
-                                super::image_search_controls::SearchRegionKind::Rectangle => { let rect=region_state.rectangle; if rect.is_empty(){state.capture_message=Some("Rectangle width and height must be positive".into())} else { state.visual_overlay.preview_rectangle(rect); } },
-                                super::image_search_controls::SearchRegionKind::Monitor => { region_state.refresh_monitors(); if let Ok(ms)=&region_state.monitors { if let Some(m)=ms.iter().find(|m|m.index==region_state.monitor_index){state.visual_overlay.highlight_monitor(m.clone());} else {state.capture_message=Some(format!("Monitor {} is currently unavailable",region_state.monitor_index));} } },
-                                super::image_search_controls::SearchRegionKind::Window|super::image_search_controls::SearchRegionKind::ClientArea => {},
-                                super::image_search_controls::SearchRegionKind::Desktop => {},
-                            }
+                            region_preview_request = Some(region_state.selected_region());
                         }
                     }
                 }
@@ -2335,40 +2463,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
                     Some(SelectRegion) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::VisualRegion),
-                    Some(PreviewRegion) => {
-                        let image = state.image_search.as_ref().unwrap();
-                        if image.rectangle.is_empty() {
-                            state.capture_message = Some("Rectangle width and height must be positive".into());
-                        } else {
-                            let rect = image.rectangle;
-                            let id = state.visual_overlay.preview_rectangle(rect);
-                            state.overlay_diagnostic =
-                                Some((id, format!("Unable to preview region {rect:?}")));
-                            if state.visual_overlay.operation_id() == Some(id) {
-                                state.capture_message = None;
-                            }
-                        }
-                    }
-                    Some(HighlightMonitor) => {
-                        let image = state.image_search.as_mut().unwrap();
-                        image.refresh_monitors();
-                        match &image.monitors {
-                            Ok(monitors) => match monitors.iter().find(|m| m.index == image.monitor_index) {
-                                Some(m) => {
-                                    let index = m.index;
-                                    let id = state.visual_overlay.highlight_monitor(m.clone());
-                                    state.overlay_diagnostic = Some((
-                                        id,
-                                        format!("Unable to highlight monitor {index}"),
-                                    ));
-                                    if state.visual_overlay.operation_id() == Some(id) {
-                                        state.capture_message = None;
-                                    }
-                                }
-                                None => state.capture_message = Some(format!("Monitor {} is currently unavailable", image.monitor_index)),
-                            },
-                            Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
-                        }
+                    Some(PreviewRegion) | Some(HighlightMonitor) | Some(HighlightWindow { .. }) => {
+                        region_preview_request =
+                            Some(state.image_search.as_ref().unwrap().selected_region());
                     }
                     Some(IdentifyMonitors) => {
                         let image = state.image_search.as_mut().unwrap();
@@ -2388,26 +2485,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     }
                     Some(AddSmoothMouseMove) => state.add_smooth_move = true,
                     Some(AddActivateWindowBefore) => state.add_activate_before = true,
-                    Some(HighlightWindow { client_area }) => {
-                        let image = state.image_search.as_ref().unwrap();
-                        let matcher = if client_area { &image.client_matcher } else { &image.window_matcher };
-                        match crate::mkmacro::resolve_window_screen_rect(matcher, client_area) {
-                            Ok(rect) => {
-                                let kind = if client_area { super::visual_overlay::WindowAreaKind::ClientArea } else { super::visual_overlay::WindowAreaKind::WholeWindow };
-                                let id = state.visual_overlay.highlight_window(rect, kind);
-                                let area = if client_area { "client area" } else { "whole window" };
-                                state.overlay_diagnostic =
-                                    Some((id, format!("Unable to create {area} overlay")));
-                                if state.visual_overlay.operation_id() == Some(id) {
-                                    state.capture_message = None;
-                                }
-                            }
-                            Err(error) => {
-                                let area = if client_area { "client-area" } else { "whole-window" };
-                                state.capture_message = Some(format!("Unable to resolve {area} target: {error}"));
-                            }
-                        }
-                    }
                     None => {}
                 }
             }
@@ -2498,6 +2575,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             });
           });
         });
+    if let Some(region) = region_preview_request {
+        d.action_editor.preview_region(region);
+    }
     if (workflow_active || importing) && image_request.is_some() {
         d.action_editor.capture_message = Some(
             if importing {
@@ -2534,7 +2614,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
         }
     }
-    if let Some(request) = condition_image_request
+    if let Some(ref request) = condition_image_request
         && let Some(purpose) = request.operation.rectangle_purpose()
     {
         let macro_id = d.selected_macro_id.unwrap_or(0);
@@ -2542,7 +2622,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             d.action_editor.capture_message =
                 Some("Finish or cancel the active authoring operation first".into());
         } else {
-            let destination = d.action_editor.condition_destination(macro_id, request);
+            let destination = d
+                .action_editor
+                .condition_destination(macro_id, request.clone());
             d.action_editor.pending_condition_rectangle = Some(destination);
             if let Err(error) = d
                 .action_editor
@@ -2550,6 +2632,38 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             {
                 d.action_editor.pending_condition_rectangle = None;
                 d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
+            }
+        }
+    }
+    if let Some(ref request) = condition_image_request
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::PreviewRectangle
+                | super::condition_editor::ConditionImageOperation::HighlightMonitor
+                | super::condition_editor::ConditionImageOperation::HighlightWindow
+        )
+    {
+        let region = d
+            .action_editor
+            .draft
+            .as_ref()
+            .and_then(|step| match &step.action {
+                MkAction::If(c)
+                | MkAction::WhileStart { condition: c }
+                | MkAction::WaitUntil { condition: c, .. } => {
+                    super::condition_editor::resolve_condition(c, &request.path)
+                }
+                _ => None,
+            })
+            .and_then(|condition| match condition {
+                MkCondition::ImageSearch { search, .. } => Some(search.region.clone()),
+                _ => None,
+            });
+        match region {
+            Some(region) => d.action_editor.preview_region(region),
+            None => {
+                d.action_editor.capture_message =
+                    Some("Image-search condition is no longer available".into())
             }
         }
     }
@@ -2607,6 +2721,215 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug, PartialEq)]
+    enum PreviewCall {
+        Desktop(Vec<MonitorDescriptor>),
+        Monitor(MonitorDescriptor),
+        Rectangle(ScreenRect),
+        Window(ScreenRect, super::super::visual_overlay::WindowAreaKind),
+    }
+    #[derive(Default)]
+    struct FakePreview(Mutex<Vec<PreviewCall>>);
+    impl RegionPreviewBoundary for FakePreview {
+        fn preview_desktop(&self, v: Vec<MonitorDescriptor>) -> u64 {
+            self.0.lock().unwrap().push(PreviewCall::Desktop(v));
+            1
+        }
+        fn highlight_monitor(&self, v: MonitorDescriptor) -> u64 {
+            self.0.lock().unwrap().push(PreviewCall::Monitor(v));
+            2
+        }
+        fn preview_rectangle(&self, v: ScreenRect) -> u64 {
+            self.0.lock().unwrap().push(PreviewCall::Rectangle(v));
+            3
+        }
+        fn highlight_window(
+            &self,
+            r: ScreenRect,
+            k: super::super::visual_overlay::WindowAreaKind,
+        ) -> u64 {
+            self.0.lock().unwrap().push(PreviewCall::Window(r, k));
+            4
+        }
+    }
+    fn monitor(index: usize, rect: ScreenRect) -> MonitorDescriptor {
+        MonitorDescriptor {
+            index,
+            bounds: rect,
+            primary: index == 0,
+        }
+    }
+    fn resolve(rect: ScreenRect) -> impl Fn(&MkWindowMatcher, bool) -> ExecResult<ScreenRect> {
+        move |_, _| Ok(rect)
+    }
+
+    #[test]
+    fn region_preview_dispatches_each_authored_variant_without_desktop_union() {
+        use super::super::visual_overlay::WindowAreaKind;
+        let monitors = Ok(vec![
+            monitor(0, ScreenRect::new(-100, 0, 100, 80)),
+            monitor(7, ScreenRect::new(50, 20, 70, 60)),
+        ]);
+        let fake = FakePreview::default();
+        dispatch_region_preview(
+            &SearchRegion::Desktop,
+            &monitors,
+            &resolve(ScreenRect::new(0, 0, 1, 1)),
+            &fake,
+        )
+        .unwrap();
+        dispatch_region_preview(
+            &SearchRegion::Monitor { index: 7 },
+            &monitors,
+            &resolve(ScreenRect::new(0, 0, 1, 1)),
+            &fake,
+        )
+        .unwrap();
+        let signed = ScreenRect::new(-42, -9, 31, 27);
+        dispatch_region_preview(
+            &SearchRegion::Rectangle { rect: signed },
+            &monitors,
+            &resolve(signed),
+            &fake,
+        )
+        .unwrap();
+        dispatch_region_preview(
+            &SearchRegion::Window {
+                matcher: Default::default(),
+            },
+            &monitors,
+            &resolve(signed),
+            &fake,
+        )
+        .unwrap();
+        dispatch_region_preview(
+            &SearchRegion::ClientArea {
+                matcher: Default::default(),
+            },
+            &monitors,
+            &resolve(signed),
+            &fake,
+        )
+        .unwrap();
+        assert_eq!(
+            *fake.0.lock().unwrap(),
+            vec![
+                PreviewCall::Desktop(monitors.unwrap()),
+                PreviewCall::Monitor(monitor(7, ScreenRect::new(50, 20, 70, 60))),
+                PreviewCall::Rectangle(signed),
+                PreviewCall::Window(signed, WindowAreaKind::WholeWindow),
+                PreviewCall::Window(signed, WindowAreaKind::ClientArea)
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_region_resolution_is_visible_and_never_starts_preview() {
+        let cases: Vec<(
+            SearchRegion,
+            Result<Vec<MonitorDescriptor>, String>,
+            Box<dyn Fn(&MkWindowMatcher, bool) -> ExecResult<ScreenRect>>,
+            &str,
+        )> = vec![
+            (
+                SearchRegion::Rectangle {
+                    rect: ScreenRect::new(1, 2, 0, 4),
+                },
+                Ok(vec![]),
+                Box::new(resolve(ScreenRect::new(0, 0, 1, 1))),
+                "invalid",
+            ),
+            (
+                SearchRegion::Desktop,
+                Ok(vec![]),
+                Box::new(resolve(ScreenRect::new(0, 0, 1, 1))),
+                "No monitors",
+            ),
+            (
+                SearchRegion::Desktop,
+                Err("adapter offline".into()),
+                Box::new(resolve(ScreenRect::new(0, 0, 1, 1))),
+                "adapter offline",
+            ),
+            (
+                SearchRegion::Monitor { index: 9 },
+                Ok(vec![monitor(1, ScreenRect::new(0, 0, 1, 1))]),
+                Box::new(resolve(ScreenRect::new(0, 0, 1, 1))),
+                "no longer exists",
+            ),
+            (
+                SearchRegion::Window {
+                    matcher: Default::default(),
+                },
+                Ok(vec![]),
+                Box::new(|_, _| {
+                    Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::TargetNotFound,
+                        "x",
+                    ))
+                }),
+                "not found",
+            ),
+            (
+                SearchRegion::ClientArea {
+                    matcher: Default::default(),
+                },
+                Ok(vec![]),
+                Box::new(|_, _| {
+                    Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::AmbiguousTarget,
+                        "x",
+                    ))
+                }),
+                "ambiguous",
+            ),
+        ];
+        for (region, monitors, resolver, expected) in cases {
+            let fake = FakePreview::default();
+            let error =
+                dispatch_region_preview(&region, &monitors, resolver.as_ref(), &fake).unwrap_err();
+            assert!(error.contains(expected), "{error:?}");
+            assert!(fake.0.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn stale_overlay_error_cannot_replace_current_preview_status() {
+        use super::super::visual_overlay::{
+            OverlayErrorKind, VisualOverlayError, VisualOverlayEvent,
+        };
+        let current = Some((22, "Unable to preview current rectangle".into()));
+        let mut message = None;
+        apply_overlay_diagnostic(
+            &mut message,
+            &current,
+            VisualOverlayEvent::Error {
+                operation_id: 21,
+                error: VisualOverlayError {
+                    kind: OverlayErrorKind::Platform,
+                    message: "old failure".into(),
+                },
+            },
+        );
+        assert_eq!(message, None);
+        apply_overlay_diagnostic(
+            &mut message,
+            &current,
+            VisualOverlayEvent::Error {
+                operation_id: 22,
+                error: VisualOverlayError {
+                    kind: OverlayErrorKind::Platform,
+                    message: "current failure".into(),
+                },
+            },
+        );
+        assert_eq!(
+            message.as_deref(),
+            Some("Unable to preview current rectangle: current failure")
+        );
+    }
 
     #[test]
     fn every_typed_rectangle_request_has_one_explicit_purpose() {

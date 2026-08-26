@@ -71,6 +71,21 @@ pub fn resolve_condition_mut<'a>(
     }
     Some(condition)
 }
+pub fn resolve_condition<'a>(
+    mut condition: &'a MkCondition,
+    path: &ConditionPath,
+) -> Option<&'a MkCondition> {
+    for &index in path.indexes() {
+        condition = match condition {
+            MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+                conditions.get(index)?
+            }
+            MkCondition::Not { condition } if index == 0 => condition,
+            _ => return None,
+        };
+    }
+    Some(condition)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConditionKind {

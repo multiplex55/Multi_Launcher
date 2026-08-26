@@ -219,6 +219,7 @@ impl NativeOverlayRenderer {
             OverlayVisual::RectanglePreview(r) | OverlayVisual::Window { rect: r, .. } => Some(*r),
             OverlayVisual::Monitor(d) => Some(d.bounds),
             OverlayVisual::Monitors(ds) => monitor_union(ds),
+            OverlayVisual::Desktop(_) => None,
         }
     }
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, VisualOverlayError> {
@@ -269,10 +270,18 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 GetLastError().0
             }));
         }
-        let Some(target) = Self::target(visual) else {
-            return self.fail("No physical display intersects the requested preview region");
+        let monitor_bounds = match visual {
+            // Preserve the descriptor topology: never create a virtual-desktop union window
+            // spanning gaps between physical displays.
+            OverlayVisual::Desktop(descriptors) => descriptors.iter().map(|d| d.bounds).collect(),
+            _ => {
+                let Some(target) = Self::target(visual) else {
+                    return self
+                        .fail("No physical display intersects the requested preview region");
+                };
+                intersecting_monitor_bounds(&displays(), target)
+            }
         };
-        let monitor_bounds = intersecting_monitor_bounds(&displays(), target);
         if monitor_bounds.is_empty() {
             return self.fail("No physical display intersects the requested preview region");
         }

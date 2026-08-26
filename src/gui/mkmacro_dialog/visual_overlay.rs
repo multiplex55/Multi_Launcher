@@ -121,6 +121,10 @@ pub enum VisualOverlayState {
         descriptors: Vec<MonitorDescriptor>,
         expires_at: Duration,
     },
+    PreviewingDesktop {
+        descriptors: Vec<MonitorDescriptor>,
+        expires_at: Duration,
+    },
     HighlightingWindow {
         rect: ScreenRect,
         area_kind: WindowAreaKind,
@@ -197,6 +201,10 @@ pub(crate) enum VisualOverlayCommand {
         monitor: MonitorDescriptor,
     },
     IdentifyMonitors {
+        operation_id: OperationId,
+        monitors: Vec<MonitorDescriptor>,
+    },
+    PreviewDesktop {
         operation_id: OperationId,
         monitors: Vec<MonitorDescriptor>,
     },
@@ -328,6 +336,12 @@ fn apply_command(controller: &mut VisualOverlayController, command: VisualOverla
         } => {
             controller.identify_monitors_with_id(operation_id, monitors);
         }
+        VisualOverlayCommand::PreviewDesktop {
+            operation_id,
+            monitors,
+        } => {
+            controller.preview_desktop_with_id(operation_id, monitors);
+        }
         VisualOverlayCommand::HighlightWindow {
             operation_id,
             rect,
@@ -372,6 +386,8 @@ pub enum OverlayVisual {
     RectanglePreview(ScreenRect),
     Monitor(MonitorDescriptor),
     Monitors(Vec<MonitorDescriptor>),
+    /// Ordinary desktop coverage preview: outlines only, never identification labels.
+    Desktop(Vec<MonitorDescriptor>),
     Window {
         rect: ScreenRect,
         area_kind: WindowAreaKind,
@@ -418,6 +434,11 @@ pub(crate) fn overlay_frame(visual: &OverlayVisual) -> Vec<OverlayFramePrimitive
                     bounds: monitor.bounds,
                     index: monitor.index,
                 });
+            }
+        }
+        OverlayVisual::Desktop(monitors) => {
+            for monitor in monitors {
+                frame.push(OverlayFramePrimitive::Outline(monitor.bounds));
             }
         }
     }
@@ -738,6 +759,20 @@ impl VisualOverlayController {
             OverlayVisual::Monitors(descriptors),
         );
     }
+    pub(crate) fn preview_desktop_with_id(
+        &mut self,
+        id: OperationId,
+        descriptors: Vec<MonitorDescriptor>,
+    ) {
+        self.start_passive_with_id(
+            id,
+            VisualOverlayState::PreviewingDesktop {
+                descriptors: descriptors.clone(),
+                expires_at: self.deadline(),
+            },
+            OverlayVisual::Desktop(descriptors),
+        );
+    }
     pub(crate) fn highlight_window_with_id(
         &mut self,
         id: OperationId,
@@ -854,6 +889,7 @@ impl VisualOverlayController {
             VisualOverlayState::PreviewingRectangle { expires_at, .. }
             | VisualOverlayState::HighlightingMonitor { expires_at, .. }
             | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
+            | VisualOverlayState::PreviewingDesktop { expires_at, .. }
             | VisualOverlayState::HighlightingWindow { expires_at, .. } => {
                 self.clock.now() >= *expires_at
             }

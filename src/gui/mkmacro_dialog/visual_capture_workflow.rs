@@ -150,6 +150,16 @@ impl SharedVisualOverlayController {
             },
         )
     }
+    pub fn preview_desktop(&self, monitors: Vec<crate::mkmacro::MonitorDescriptor>) -> OperationId {
+        let id = self.allocate();
+        self.send_start(
+            id,
+            VisualOverlayCommand::PreviewDesktop {
+                operation_id: id,
+                monitors,
+            },
+        )
+    }
     pub fn highlight_window(
         &self,
         rect: ScreenRect,
