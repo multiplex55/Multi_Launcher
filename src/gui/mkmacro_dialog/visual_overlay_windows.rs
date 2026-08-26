@@ -229,6 +229,9 @@ impl NativeOverlayRenderer {
 }
 
 impl OverlayRenderer for NativeOverlayRenderer {
+    fn left_button_down(&mut self) -> Result<bool, VisualOverlayError> {
+        Ok(unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0)
+    }
     fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
         let mut point = POINT::default();
         unsafe { GetCursorPos(&mut point) }
@@ -245,6 +248,10 @@ impl OverlayRenderer for NativeOverlayRenderer {
         _mouse_transparent: bool,
     ) -> Result<(), VisualOverlayError> {
         self.close();
+        if matches!(visual, OverlayVisual::RectanglePicker { .. }) {
+            self.left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+            self.escape_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
+        }
         let module = unsafe { GetModuleHandleW(None) }
             .map_err(|e| platform(format!("overlay module lookup failed: {e}")))?;
         let class = windows::core::w!("MultiLauncherVisualOverlay");
@@ -464,12 +471,10 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 kind: OverlayInputKind::LeftPressed(MkPoint { x: p.x, y: p.y }),
             });
         }
-        if left {
-            out.push(OverlayInput {
-                operation_id: id,
-                kind: OverlayInputKind::PointerMoved(MkPoint { x: p.x, y: p.y }),
-            });
-        }
+        out.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::PointerMoved(MkPoint { x: p.x, y: p.y }),
+        });
         if !left && self.left_down {
             out.push(OverlayInput {
                 operation_id: id,
