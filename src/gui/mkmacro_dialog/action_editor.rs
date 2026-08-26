@@ -36,7 +36,7 @@ pub struct ActionEditorState {
     /// launcher and dialog native-window visibility boundary.
     pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
     overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
-    pending_condition_rectangle: Option<ConditionOperationDestination>,
+    pending_visual_region: Option<PendingVisualRegionOperation>,
     picker: NativePositionPicker,
 }
 
@@ -54,6 +54,31 @@ pub struct ConditionOperationDestination {
     pub draft_generation: u64,
     pub path: super::condition_editor::ConditionPath,
     pub operation: super::condition_editor::ConditionImageOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VisualRegionDestination {
+    ImageActionSearchRegion,
+    ImageActionReferenceAsset,
+    ConditionSearchRegion(ConditionOperationDestination),
+    WaitForVisualChangeRegion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpectedVisualAction {
+    ImageFind,
+    ImageClick,
+    Condition,
+    WaitForVisualChange,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingVisualRegionOperation {
+    destination: VisualRegionDestination,
+    macro_id: u64,
+    step_id: Option<u64>,
+    draft_generation: u64,
+    expected_action: ExpectedVisualAction,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,11 +376,45 @@ impl ActionEditorState {
         &mut self,
         macro_id: u64,
         purpose: super::visual_overlay::RectanglePurpose,
+        destination: VisualRegionDestination,
     ) -> anyhow::Result<()> {
+        self.pending_visual_region = None;
         if self.image_authoring.is_importing() || self.position_capture.is_some() {
             anyhow::bail!("an authoring operation is already active");
         }
         let generation = self.draft_generation;
+        let expected_action = match self.draft.as_ref().map(|step| &step.action) {
+            Some(MkAction::ImageFind(_)) => ExpectedVisualAction::ImageFind,
+            Some(MkAction::ImageClick(_)) => ExpectedVisualAction::ImageClick,
+            Some(MkAction::If(_))
+            | Some(MkAction::WhileStart { .. })
+            | Some(MkAction::WaitUntil { .. }) => ExpectedVisualAction::Condition,
+            Some(MkAction::WaitForVisualChange(_)) => ExpectedVisualAction::WaitForVisualChange,
+            _ => anyhow::bail!("draft does not support rectangle selection"),
+        };
+        let compatible = matches!(
+            (&destination, expected_action, purpose),
+            (
+                VisualRegionDestination::ImageActionSearchRegion,
+                ExpectedVisualAction::ImageFind | ExpectedVisualAction::ImageClick,
+                super::visual_overlay::RectanglePurpose::SearchRegion
+            ) | (
+                VisualRegionDestination::ImageActionReferenceAsset,
+                ExpectedVisualAction::ImageFind | ExpectedVisualAction::ImageClick,
+                super::visual_overlay::RectanglePurpose::ReferenceImageCapture
+            ) | (
+                VisualRegionDestination::ConditionSearchRegion(_),
+                ExpectedVisualAction::Condition,
+                _
+            ) | (
+                VisualRegionDestination::WaitForVisualChangeRegion,
+                ExpectedVisualAction::WaitForVisualChange,
+                super::visual_overlay::RectanglePurpose::SearchRegion
+            )
+        );
+        if !compatible {
+            anyhow::bail!("rectangle purpose and destination do not match the draft");
+        }
         let workflow = self
             .visual_capture
             .as_mut()
@@ -368,7 +427,15 @@ impl ActionEditorState {
                 },
                 purpose,
             )
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::msg)?;
+        self.pending_visual_region = Some(PendingVisualRegionOperation {
+            destination,
+            macro_id,
+            step_id: self.editing_id,
+            draft_generation: generation,
+            expected_action,
+        });
+        Ok(())
     }
 
     pub fn apply_window_matcher(
@@ -428,6 +495,7 @@ impl ActionEditorState {
             return;
         }
         self.visual_overlay.cancel();
+        self.pending_visual_region = None;
         self.image_authoring = Default::default();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
@@ -461,6 +529,7 @@ impl ActionEditorState {
     }
     pub fn begin_edit(&mut self, step: &MkStep) {
         self.visual_overlay.cancel();
+        self.pending_visual_region = None;
         self.image_authoring = Default::default();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
@@ -482,6 +551,7 @@ impl ActionEditorState {
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
     }
     pub fn cancel(&mut self) {
+        self.pending_visual_region = None;
         self.image_authoring = Default::default();
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
@@ -518,56 +588,108 @@ impl ActionEditorState {
         use super::visual_capture_workflow::WorkflowOutcome;
         match outcome {
             WorkflowOutcome::Region { token, rect } => {
-                if self
-                    .pending_condition_rectangle
-                    .as_ref()
-                    .is_some_and(|destination| {
-                        destination.macro_id == token.macro_id
-                            && destination.draft_generation == token.draft_generation
-                            && current_macro_id == Some(token.macro_id)
-                            && self.draft_generation == token.draft_generation
-                    })
-                {
-                    let destination = self.pending_condition_rectangle.take().unwrap();
-                    self.apply_condition_result(
-                        &destination,
-                        ConditionOperationResult::Rectangle(rect),
-                        current_macro_id,
-                    );
-                } else if current_macro_id == Some(token.macro_id)
-                    && self.draft_generation == token.draft_generation
-                    && let Some(image) = self.image_search.as_mut()
-                {
-                    image.rectangle = rect;
-                    image.kind = super::image_search_editor::SearchRegionKind::Rectangle;
+                let token_matches = self.pending_visual_region.as_ref().is_some_and(|pending| {
+                    pending.macro_id == token.macro_id
+                        && pending.draft_generation == token.draft_generation
+                });
+                if !token_matches {
+                    return;
+                }
+                let pending = self.pending_visual_region.take().unwrap();
+                let valid = current_macro_id == Some(pending.macro_id)
+                    && self.draft_generation == pending.draft_generation
+                    && self.editing_id == pending.step_id
+                    && self
+                        .draft
+                        .as_ref()
+                        .is_some_and(|step| match pending.expected_action {
+                            ExpectedVisualAction::ImageFind => {
+                                matches!(step.action, MkAction::ImageFind(_))
+                            }
+                            ExpectedVisualAction::ImageClick => {
+                                matches!(step.action, MkAction::ImageClick(_))
+                            }
+                            ExpectedVisualAction::Condition => matches!(
+                                step.action,
+                                MkAction::If(_)
+                                    | MkAction::WhileStart { .. }
+                                    | MkAction::WaitUntil { .. }
+                            ),
+                            ExpectedVisualAction::WaitForVisualChange => {
+                                matches!(step.action, MkAction::WaitForVisualChange(_))
+                            }
+                        });
+                if !valid {
+                    return;
+                }
+                let applied = match pending.destination {
+                    VisualRegionDestination::ImageActionSearchRegion => {
+                        if let Some(image) = self.image_search.as_mut() {
+                            image.rectangle = rect;
+                            image.kind = super::image_search_editor::SearchRegionKind::Rectangle;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VisualRegionDestination::ConditionSearchRegion(destination) => self
+                        .apply_condition_result(
+                            &destination,
+                            ConditionOperationResult::Rectangle(rect),
+                            current_macro_id,
+                        ),
+                    VisualRegionDestination::WaitForVisualChangeRegion => {
+                        if let (Some(step), Some(image)) = (&mut self.draft, &mut self.image_search)
+                            && let MkAction::WaitForVisualChange(payload) = &mut step.action
+                        {
+                            let region = SearchRegion::Rectangle { rect };
+                            payload.region = region.clone();
+                            image.rectangle = rect;
+                            image.kind = super::image_search_editor::SearchRegionKind::Rectangle;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VisualRegionDestination::ImageActionReferenceAsset => false,
+                };
+                if applied {
+                    self.draft_changed = true;
                 }
             }
             WorkflowOutcome::Asset { token, asset_id } => {
-                if self
-                    .pending_condition_rectangle
-                    .as_ref()
-                    .is_some_and(|destination| {
-                        destination.macro_id == token.macro_id
-                            && destination.draft_generation == token.draft_generation
-                            && current_macro_id == Some(token.macro_id)
-                            && self.draft_generation == token.draft_generation
-                    })
-                {
-                    let destination = self.pending_condition_rectangle.take().unwrap();
-                    self.apply_condition_result(
-                        &destination,
-                        ConditionOperationResult::Asset(asset_id),
-                        current_macro_id,
-                    );
-                } else if current_macro_id == Some(token.macro_id)
-                    && self.draft_generation == token.draft_generation
-                    && let Some(payload) = self.draft.as_mut().and_then(image_payload_mut)
-                {
-                    payload.asset_id = asset_id;
+                if self.pending_visual_region.as_ref().is_some_and(|pending| {
+                    pending.macro_id == token.macro_id
+                        && pending.draft_generation == token.draft_generation
+                        && current_macro_id == Some(token.macro_id)
+                        && self.draft_generation == token.draft_generation
+                        && self.editing_id == pending.step_id
+                }) {
+                    let pending = self.pending_visual_region.take().unwrap();
+                    match pending.destination {
+                        VisualRegionDestination::ImageActionReferenceAsset => {
+                            if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
+                                payload.asset_id = asset_id;
+                                self.draft_changed = true;
+                            }
+                        }
+                        VisualRegionDestination::ConditionSearchRegion(destination) => {
+                            self.apply_condition_result(
+                                &destination,
+                                ConditionOperationResult::Asset(asset_id),
+                                current_macro_id,
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
-            WorkflowOutcome::Failed(message) => self.capture_message = Some(message),
+            WorkflowOutcome::Failed(message) => {
+                self.pending_visual_region = None;
+                self.capture_message = Some(message)
+            }
             WorkflowOutcome::Cancelled => {
+                self.pending_visual_region = None;
                 self.capture_message = Some("Visual capture cancelled".into())
             }
         }
@@ -592,6 +714,7 @@ impl ActionEditorState {
             return None;
         }
         self.image_authoring = Default::default();
+        self.pending_visual_region = None;
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
             while workflow.active() {
@@ -2416,6 +2539,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     }
     let mut pick_request = None;
     let mut image_request = None;
+    let mut wait_visual_region_request = false;
     let mut condition_image_request = None;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
@@ -2444,7 +2568,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 if let Some(request) = super::image_search_controls::show_search_region_fields(ui, region_state) {
                     use super::image_search_controls::SearchRegionRequest as R;
                     match request {
-                        R::SelectRectangle => image_request = Some(ImageAuthoringRequest::PickRectangle),
+                        R::SelectRectangle => {
+                            image_request = Some(ImageAuthoringRequest::PickRectangle);
+                            wait_visual_region_request = true;
+                        }
                         R::PickWindow => window = Some(super::window_picker::MatcherPath::VisualRegion),
                         R::RefreshMonitors => region_state.refresh_monitors(),
                         R::IdentifyMonitors => {},
@@ -2601,12 +2728,19 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .map(|_| ()),
             request @ (ImageAuthoringRequest::CaptureRectangle
             | ImageAuthoringRequest::PickRectangle) => {
-                d.action_editor.pending_condition_rectangle = None;
+                let destination = if wait_visual_region_request {
+                    VisualRegionDestination::WaitForVisualChangeRegion
+                } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
+                    VisualRegionDestination::ImageActionReferenceAsset
+                } else {
+                    VisualRegionDestination::ImageActionSearchRegion
+                };
                 d.action_editor.request_rectangle_selection(
                     macro_id,
                     request
                         .rectangle_purpose()
                         .expect("rectangle request has a purpose"),
+                    destination,
                 )
             }
         };
@@ -2625,12 +2759,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let destination = d
                 .action_editor
                 .condition_destination(macro_id, request.clone());
-            d.action_editor.pending_condition_rectangle = Some(destination);
-            if let Err(error) = d
-                .action_editor
-                .request_rectangle_selection(macro_id, purpose)
-            {
-                d.action_editor.pending_condition_rectangle = None;
+            if let Err(error) = d.action_editor.request_rectangle_selection(
+                macro_id,
+                purpose,
+                VisualRegionDestination::ConditionSearchRegion(destination),
+            ) {
                 d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
             }
         }
@@ -2989,6 +3122,102 @@ mod tests {
         }
     }
 
+    fn pending_wait(editor: &ActionEditorState, macro_id: u64) -> PendingVisualRegionOperation {
+        PendingVisualRegionOperation {
+            destination: VisualRegionDestination::WaitForVisualChangeRegion,
+            macro_id,
+            step_id: editor.editing_id,
+            draft_generation: editor.draft_generation,
+            expected_action: ExpectedVisualAction::WaitForVisualChange,
+        }
+    }
+
+    #[test]
+    fn wait_visual_change_region_results_are_transactional_and_stale_safe() {
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+        let a = ScreenRect::new(1, 2, 30, 40);
+        let b = ScreenRect::new(50, 60, 70, 80);
+        let mut editor = ActionEditorState::default();
+        let mut payload = WaitForVisualChange::default();
+        payload.region = SearchRegion::Rectangle { rect: a };
+        editor.begin_edit(&step(MkAction::WaitForVisualChange(payload)));
+        let token = DraftToken {
+            macro_id: 11,
+            draft_generation: editor.draft_generation,
+        };
+
+        editor.pending_visual_region = Some(pending_wait(&editor, 11));
+        editor.apply_visual_capture_outcome(Some(11), WorkflowOutcome::Cancelled);
+        assert_eq!(editor.image_search.as_ref().unwrap().rectangle, a);
+
+        editor.pending_visual_region = Some(pending_wait(&editor, 11));
+        editor.apply_visual_capture_outcome(Some(11), WorkflowOutcome::Region { token, rect: b });
+        assert_eq!(editor.image_search.as_ref().unwrap().rectangle, b);
+        assert!(editor.draft_changed);
+        assert!(matches!(
+            &editor.draft.as_ref().unwrap().action,
+            MkAction::WaitForVisualChange(p) if p.region == SearchRegion::Rectangle { rect: b }
+        ));
+
+        // No explicit destination means no image-editor fallback.
+        editor.apply_visual_capture_outcome(Some(11), WorkflowOutcome::Region { token, rect: a });
+        assert_eq!(editor.image_search.as_ref().unwrap().rectangle, b);
+
+        editor.pending_visual_region = Some(pending_wait(&editor, 11));
+        editor.cancel();
+        editor.apply_visual_capture_outcome(Some(11), WorkflowOutcome::Region { token, rect: a });
+        assert!(editor.draft.is_none());
+    }
+
+    #[test]
+    fn wait_visual_change_rejects_wrong_identity_generation_and_action_shape() {
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+        let original = ScreenRect::new(1, 2, 3, 4);
+        let selected = ScreenRect::new(8, 9, 10, 11);
+        let mut editor = ActionEditorState::default();
+        let mut payload = WaitForVisualChange::default();
+        payload.region = SearchRegion::Rectangle { rect: original };
+        editor.begin_edit(&step(MkAction::WaitForVisualChange(payload.clone())));
+        let generation = editor.draft_generation;
+        for (current_macro, token_macro, token_generation) in [
+            (Some(12), 11, generation),
+            (Some(11), 12, generation),
+            (Some(11), 11, generation.wrapping_add(1)),
+        ] {
+            editor.pending_visual_region = Some(pending_wait(&editor, 11));
+            editor.apply_visual_capture_outcome(
+                current_macro,
+                WorkflowOutcome::Region {
+                    token: DraftToken {
+                        macro_id: token_macro,
+                        draft_generation: token_generation,
+                    },
+                    rect: selected,
+                },
+            );
+            assert_eq!(editor.image_search.as_ref().unwrap().rectangle, original);
+        }
+        editor.pending_visual_region = Some(pending_wait(&editor, 11));
+        editor.draft.as_mut().unwrap().action = MkAction::Text(MkTextPayload {
+            text: "replacement".into(),
+            mode: MkTextMode::Type,
+        });
+        editor.apply_visual_capture_outcome(
+            Some(11),
+            WorkflowOutcome::Region {
+                token: DraftToken {
+                    macro_id: 11,
+                    draft_generation: generation,
+                },
+                rect: selected,
+            },
+        );
+        assert!(matches!(
+            editor.draft.as_ref().unwrap().action,
+            MkAction::Text(_)
+        ));
+    }
+
     fn asset(id: u64, name: &str, path: &str) -> MkImageAsset {
         MkImageAsset {
             id,
@@ -3337,6 +3566,13 @@ mod tests {
             draft_generation: editor.draft_generation,
         };
         let before_editor = format!("{:?}", editor.image_search.as_ref().unwrap());
+        editor.pending_visual_region = Some(PendingVisualRegionOperation {
+            destination: VisualRegionDestination::ImageActionReferenceAsset,
+            macro_id: 11,
+            step_id: editor.editing_id,
+            draft_generation: editor.draft_generation,
+            expected_action: ExpectedVisualAction::ImageFind,
+        });
         editor
             .apply_visual_capture_outcome(Some(11), WorkflowOutcome::Asset { token, asset_id: 5 });
         assert_eq!(draft_image_payload(&editor).asset_id, 5);
@@ -3347,6 +3583,13 @@ mod tests {
         assert_eq!(draft_image_payload(&editor).region, original_region);
 
         let picked = ScreenRect::new(-123, 45, 67, 89);
+        editor.pending_visual_region = Some(PendingVisualRegionOperation {
+            destination: VisualRegionDestination::ImageActionSearchRegion,
+            macro_id: 11,
+            step_id: editor.editing_id,
+            draft_generation: editor.draft_generation,
+            expected_action: ExpectedVisualAction::ImageFind,
+        });
         editor.apply_visual_capture_outcome(
             Some(11),
             WorkflowOutcome::Region {
@@ -3975,8 +4218,16 @@ mod tests {
                 Self { editor, fake }
             }
             fn begin_selecting(&mut self, purpose: RectanglePurpose) {
+                let destination = match purpose {
+                    RectanglePurpose::SearchRegion => {
+                        VisualRegionDestination::ImageActionSearchRegion
+                    }
+                    RectanglePurpose::ReferenceImageCapture => {
+                        VisualRegionDestination::ImageActionReferenceAsset
+                    }
+                };
                 self.editor
-                    .request_rectangle_selection(MACRO_ID, purpose)
+                    .request_rectangle_selection(MACRO_ID, purpose, destination)
                     .unwrap();
                 assert_eq!(self.fake.lock().unwrap().purposes, [purpose]);
             }
