@@ -264,7 +264,13 @@ impl ActionEditorState {
         let Some(step) = self.draft.as_mut() else {
             return false;
         };
-        if matches!(path, super::window_picker::MatcherPath::ImageRegion) {
+        if matches!(path, super::window_picker::MatcherPath::VisualRegion) {
+            if !matches!(
+                step.action,
+                MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::WaitForVisualChange(_)
+            ) {
+                return false;
+            }
             let Some(image) = self.image_search.as_mut() else {
                 return false;
             };
@@ -313,7 +319,10 @@ impl ActionEditorState {
         self.editor = Some(editor);
         self.image_search = match &action {
             MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
-                Some(super::image_search_editor::ImageSearchEditorState::from_payload(p))
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
+            MkAction::WaitForVisualChange(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             _ => None,
         };
@@ -339,7 +348,10 @@ impl ActionEditorState {
         self.draft = Some(step.clone());
         self.image_search = match &step.action {
             MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
-                Some(super::image_search_editor::ImageSearchEditorState::from_payload(p))
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
+            MkAction::WaitForVisualChange(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             _ => None,
         };
@@ -437,10 +449,13 @@ impl ActionEditorState {
         }
     }
     fn sync_image_region_to_draft(&mut self) {
-        if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search)
-            && let Some(payload) = image_payload_mut(step)
-        {
-            payload.region = image.selected_region();
+        if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search) {
+            let region = image.selected_region();
+            match &mut step.action {
+                MkAction::ImageFind(p) | MkAction::ImageClick(p) => p.region = region,
+                MkAction::WaitForVisualChange(p) => p.region = region,
+                _ => {}
+            }
         }
     }
     fn poll_visual_overlay(&mut self) {
@@ -1624,50 +1639,6 @@ fn action_ui(
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
         MkAction::WaitForVisualChange(p) => {
             ui.heading("Wait for Visual Change");
-            let mut region =
-                super::image_search_controls::ImageSearchControlState::from_region(&p.region);
-            egui::ComboBox::from_label("Region")
-                .selected_text(format!("{:?}", region.kind))
-                .show_ui(ui, |ui| {
-                    use super::image_search_controls::SearchRegionKind as K;
-                    for (kind, label) in [
-                        (K::Desktop, "Desktop"),
-                        (K::Monitor, "Monitor"),
-                        (K::Rectangle, "Rectangle"),
-                        (K::Window, "Window"),
-                        (K::ClientArea, "Client Area"),
-                    ] {
-                        ui.selectable_value(&mut region.kind, kind, label);
-                    }
-                });
-            match region.kind {
-                super::image_search_controls::SearchRegionKind::Monitor => {
-                    ui.add(egui::DragValue::new(&mut region.monitor_index).prefix("Monitor "));
-                }
-                super::image_search_controls::SearchRegionKind::Rectangle => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut region.rectangle.x).prefix("X "));
-                        ui.add(egui::DragValue::new(&mut region.rectangle.y).prefix("Y "));
-                        ui.add(egui::DragValue::new(&mut region.rectangle.width).prefix("W "));
-                        ui.add(egui::DragValue::new(&mut region.rectangle.height).prefix("H "));
-                    });
-                }
-                super::image_search_controls::SearchRegionKind::Window
-                | super::image_search_controls::SearchRegionKind::ClientArea => {
-                    let matcher = if matches!(
-                        region.kind,
-                        super::image_search_controls::SearchRegionKind::Window
-                    ) {
-                        &mut region.window_matcher
-                    } else {
-                        &mut region.client_matcher
-                    };
-                    ui.label("Window matcher");
-                    ui.text_edit_singleline(matcher.title.get_or_insert_default());
-                }
-                _ => {}
-            }
-            p.region = region.selected_region();
             ui.horizontal(|ui| {
                 ui.label("Change threshold (%)");
                 ui.add(
@@ -2241,8 +2212,14 @@ fn matcher_at_path<'a>(
             | MkAction::WaitUntil { condition: c, .. } => condition_at_path(c, path),
             _ => None,
         },
-        MatcherPath::ImageRegion => match action {
+        MatcherPath::VisualRegion => match action {
             MkAction::ImageFind(p) | MkAction::ImageClick(p) => match &mut p.region {
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    Some(matcher)
+                }
+                _ => None,
+            },
+            MkAction::WaitForVisualChange(p) => match &mut p.region {
                 SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
                     Some(matcher)
                 }
@@ -2328,6 +2305,27 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             pick_request = position;
             image_request = image;
             condition_image_request = condition_image;
+            if matches!(step.action, MkAction::WaitForVisualChange(_)) {
+                ui.separator(); ui.heading("Region");
+                let region_state = state.image_search.as_mut().expect("visual change requires region state");
+                if let Some(request) = super::image_search_controls::show_search_region_fields(ui, region_state) {
+                    use super::image_search_controls::SearchRegionRequest as R;
+                    match request {
+                        R::SelectRectangle => image_request = Some(ImageAuthoringRequest::PickRectangle),
+                        R::PickWindow => window = Some(super::window_picker::MatcherPath::VisualRegion),
+                        R::RefreshMonitors => region_state.refresh_monitors(),
+                        R::IdentifyMonitors => {},
+                        R::PreviewRegion => {
+                            match region_state.kind {
+                                super::image_search_controls::SearchRegionKind::Rectangle => { let rect=region_state.rectangle; if rect.is_empty(){state.capture_message=Some("Rectangle width and height must be positive".into())} else { state.visual_overlay.preview_rectangle(rect); } },
+                                super::image_search_controls::SearchRegionKind::Monitor => { region_state.refresh_monitors(); if let Ok(ms)=&region_state.monitors { if let Some(m)=ms.iter().find(|m|m.index==region_state.monitor_index){state.visual_overlay.highlight_monitor(m.clone());} else {state.capture_message=Some(format!("Monitor {} is currently unavailable",region_state.monitor_index));} } },
+                                super::image_search_controls::SearchRegionKind::Window|super::image_search_controls::SearchRegionKind::ClientArea => {},
+                                super::image_search_controls::SearchRegionKind::Desktop => {},
+                            }
+                        }
+                    }
+                }
+            }
             let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
                 let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action, image_assets.iter().any(|asset| asset.id == payload.asset_id));
@@ -2335,9 +2333,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
-                    Some(PickRectangle) => image_request = Some(ImageAuthoringRequest::PickRectangle),
-                    Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::ImageRegion),
-                    Some(PreviewRectangle) => {
+                    Some(SelectRegion) => image_request = Some(ImageAuthoringRequest::PickRectangle),
+                    Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::VisualRegion),
+                    Some(PreviewRegion) => {
                         let image = state.image_search.as_ref().unwrap();
                         if image.rectangle.is_empty() {
                             state.capture_message = Some("Rectangle width and height must be positive".into());
@@ -2414,7 +2412,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 }
             }
             if let Some(path)=window {
-                let original = if matches!(path, super::window_picker::MatcherPath::ImageRegion) {
+                let original = if matches!(path, super::window_picker::MatcherPath::VisualRegion) {
                     let image=state.image_search.as_ref().expect("image picker requires image state");
                     if image.kind == super::image_search_editor::SearchRegionKind::ClientArea { image.client_matcher.clone() } else { image.window_matcher.clone() }
                 } else { matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone() };
@@ -3137,7 +3135,7 @@ mod tests {
                         poll_interval_ms: 1,
                     },
                 }),
-                super::super::window_picker::MatcherPath::ImageRegion,
+                super::super::window_picker::MatcherPath::VisualRegion,
             ),
         ] {
             let mut editor = ActionEditorState::default();
@@ -3151,7 +3149,7 @@ mod tests {
                 original: MkWindowMatcher::default(),
             };
             assert!(editor.apply_window_matcher(&request, replacement.clone(), Some(5)));
-            if matches!(path, super::super::window_picker::MatcherPath::ImageRegion) {
+            if matches!(path, super::super::window_picker::MatcherPath::VisualRegion) {
                 // Image regions intentionally remain in the UI-only per-mode
                 // cache until Apply; picker results must not mutate the
                 // serialized action draft behind the editor's back.
@@ -3897,6 +3895,49 @@ mod tests {
                 &snapshots.1,
                 "A stale Capture result must not overwrite the search rectangle"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod visual_region_picker_tests {
+        use super::*;
+
+        #[test]
+        fn wait_visual_change_picker_requires_live_compatible_draft() {
+            let mut editor = ActionEditorState::default();
+            editor.begin_new(MkAction::WaitForVisualChange(WaitForVisualChange::default()));
+            let generation = editor.draft_generation;
+            let request = super::super::window_picker::MatcherEditRequest {
+                destination: super::super::window_picker::MatcherDestination::Action {
+                    macro_id: 7,
+                    draft_generation: generation,
+                    path: super::super::window_picker::MatcherPath::VisualRegion,
+                },
+                original: MkWindowMatcher::default(),
+            };
+            let matcher = MkWindowMatcher {
+                title: Some("picked".into()),
+                ..Default::default()
+            };
+            assert!(!editor.apply_window_matcher(&request, matcher.clone(), Some(7)));
+            editor.image_search.as_mut().unwrap().kind =
+                super::super::image_search_controls::SearchRegionKind::ClientArea;
+            assert!(editor.apply_window_matcher(&request, matcher.clone(), Some(7)));
+            assert_eq!(
+                editor.image_search.as_ref().unwrap().client_matcher,
+                matcher
+            );
+            assert!(
+                editor
+                    .image_search
+                    .as_ref()
+                    .unwrap()
+                    .window_matcher
+                    .title
+                    .is_none()
+            );
+            editor.draft_generation += 1;
+            assert!(!editor.apply_window_matcher(&request, MkWindowMatcher::default(), Some(7)));
         }
     }
 }

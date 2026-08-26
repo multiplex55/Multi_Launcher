@@ -27,7 +27,7 @@ impl SearchRegionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageSearchControlState {
+pub struct SearchRegionEditorState {
     pub kind: SearchRegionKind,
     pub monitor_index: usize,
     pub rectangle: ScreenRect,
@@ -36,7 +36,7 @@ pub struct ImageSearchControlState {
     pub monitors: Result<Vec<MonitorDescriptor>, String>,
 }
 
-impl ImageSearchControlState {
+impl SearchRegionEditorState {
     pub fn from_region(region: &SearchRegion) -> Self {
         let mut s = Self {
             kind: SearchRegionKind::from_region(region),
@@ -75,6 +75,132 @@ impl ImageSearchControlState {
     pub fn refresh_monitors(&mut self) {
         self.monitors = crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string());
     }
+    pub fn select(&mut self, kind: SearchRegionKind) {
+        self.kind = kind;
+    }
+    pub fn validation_error(&self) -> Option<String> {
+        match self.kind {
+            SearchRegionKind::Rectangle if self.rectangle.is_empty() => {
+                Some("Rectangle width and height must be positive".into())
+            }
+            SearchRegionKind::Monitor => match &self.monitors {
+                Ok(ms) if !ms.iter().any(|m| m.index == self.monitor_index) => Some(format!(
+                    "Monitor {} is currently unavailable",
+                    self.monitor_index
+                )),
+                Err(e) => Some(format!("Monitor information unavailable: {e}")),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+pub type ImageSearchControlState = SearchRegionEditorState;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchRegionRequest {
+    SelectRectangle,
+    PreviewRegion,
+    PickWindow,
+    RefreshMonitors,
+    IdentifyMonitors,
+}
+
+/// Edits only a screen region. Native workflows are deliberately returned to the owner.
+pub fn show_search_region_fields(
+    ui: &mut egui::Ui,
+    state: &mut SearchRegionEditorState,
+) -> Option<SearchRegionRequest> {
+    let mut out = None;
+    egui::ComboBox::from_label("Area")
+        .selected_text(match state.kind {
+            SearchRegionKind::Desktop => "Desktop",
+            SearchRegionKind::Monitor => "Monitor",
+            SearchRegionKind::Rectangle => "Rectangle",
+            SearchRegionKind::Window => "Window",
+            SearchRegionKind::ClientArea => "Client Area",
+        })
+        .show_ui(ui, |ui| {
+            for (k, l) in [
+                (SearchRegionKind::Desktop, "Desktop"),
+                (SearchRegionKind::Monitor, "Monitor"),
+                (SearchRegionKind::Rectangle, "Rectangle"),
+                (SearchRegionKind::Window, "Window"),
+                (SearchRegionKind::ClientArea, "Client Area"),
+            ] {
+                ui.selectable_value(&mut state.kind, k, l);
+            }
+        });
+    match state.kind {
+        SearchRegionKind::Monitor => {
+            if ui.button("Refresh Monitors").clicked() {
+                out = Some(SearchRegionRequest::RefreshMonitors);
+            }
+            match &state.monitors {
+                Ok(ms) => {
+                    let selected = ms
+                        .iter()
+                        .find(|m| m.index == state.monitor_index)
+                        .map(MonitorDescriptor::label)
+                        .unwrap_or_else(|| {
+                            format!("Monitor {} — unavailable", state.monitor_index)
+                        });
+                    egui::ComboBox::from_label("Monitor")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for m in ms {
+                                ui.selectable_value(&mut state.monitor_index, m.index, m.label());
+                            }
+                        });
+                }
+                Err(e) => {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Monitor information unavailable: {e}"),
+                    );
+                }
+            }
+        }
+        SearchRegionKind::Rectangle => {
+            ui.horizontal(|ui| {
+                for (l, v) in [
+                    ("X", &mut state.rectangle.x),
+                    ("Y", &mut state.rectangle.y),
+                    ("W", &mut state.rectangle.width),
+                    ("H", &mut state.rectangle.height),
+                ] {
+                    ui.label(l);
+                    ui.add(egui::DragValue::new(v));
+                }
+            });
+            if ui.button("Select Region").clicked() {
+                out = Some(SearchRegionRequest::SelectRectangle);
+            }
+        }
+        SearchRegionKind::Window | SearchRegionKind::ClientArea => {
+            let m = if state.kind == SearchRegionKind::Window {
+                &mut state.window_matcher
+            } else {
+                &mut state.client_matcher
+            };
+            if super::action_editor::matcher_ui(ui, m) || ui.button("Pick Window").clicked() {
+                out = Some(SearchRegionRequest::PickWindow);
+            }
+        }
+        SearchRegionKind::Desktop => {}
+    }
+    if !matches!(
+        out,
+        Some(SearchRegionRequest::PickWindow | SearchRegionRequest::SelectRectangle)
+    ) && ui.button("Preview Region").clicked()
+    {
+        out = Some(SearchRegionRequest::PreviewRegion);
+    }
+    if let Some(e) = state.validation_error() {
+        ui.colored_label(egui::Color32::YELLOW, e);
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,61 +257,22 @@ pub fn show_shared_fields(
         ui.selectable_value(return_point, ReturnPoint::Center, "Center");
         ui.selectable_value(return_point, ReturnPoint::TopLeft, "Top-left");
     });
-    let mut state = ImageSearchControlState::from_region(region);
-    egui::ComboBox::from_label("Area")
-        .selected_text(format!("{:?}", state.kind))
-        .show_ui(ui, |ui| {
-            for (k, l) in [
-                (SearchRegionKind::Desktop, "Desktop"),
-                (SearchRegionKind::Monitor, "Monitor"),
-                (SearchRegionKind::Rectangle, "Rectangle"),
-                (SearchRegionKind::Window, "Window"),
-                (SearchRegionKind::ClientArea, "Client Area"),
-            ] {
-                ui.selectable_value(&mut state.kind, k, l);
+    let mut state = SearchRegionEditorState::from_region(region);
+    if let Some(r) = show_search_region_fields(ui, &mut state) {
+        request = Some(match r {
+            SearchRegionRequest::SelectRectangle => SharedImageOperation::PickRectangle,
+            SearchRegionRequest::PreviewRegion => match state.kind {
+                SearchRegionKind::Monitor => SharedImageOperation::HighlightMonitor,
+                SearchRegionKind::Window | SearchRegionKind::ClientArea => {
+                    SharedImageOperation::HighlightWindow
+                }
+                _ => SharedImageOperation::PreviewRectangle,
+            },
+            SearchRegionRequest::PickWindow => SharedImageOperation::PickWindow,
+            SearchRegionRequest::RefreshMonitors | SearchRegionRequest::IdentifyMonitors => {
+                SharedImageOperation::HighlightMonitor
             }
         });
-    match state.kind {
-        SearchRegionKind::Monitor => {
-            ui.add(egui::DragValue::new(&mut state.monitor_index).prefix("Monitor "));
-            if ui.button("Highlight Monitor").clicked() {
-                request = Some(SharedImageOperation::HighlightMonitor)
-            }
-        }
-        SearchRegionKind::Rectangle => {
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut state.rectangle.x).prefix("X "));
-                ui.add(egui::DragValue::new(&mut state.rectangle.y).prefix("Y "));
-                ui.add(egui::DragValue::new(&mut state.rectangle.width).prefix("W "));
-                ui.add(egui::DragValue::new(&mut state.rectangle.height).prefix("H "));
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Pick Region").clicked() {
-                    request = Some(SharedImageOperation::PickRectangle)
-                }
-                if ui.button("Preview Region").clicked() {
-                    request = Some(SharedImageOperation::PreviewRectangle)
-                }
-            });
-        }
-        SearchRegionKind::Window | SearchRegionKind::ClientArea => {
-            let matcher = if state.kind == SearchRegionKind::Window {
-                &mut state.window_matcher
-            } else {
-                &mut state.client_matcher
-            };
-            if super::action_editor::matcher_ui(ui, matcher) || ui.button("Pick Window").clicked() {
-                request = Some(SharedImageOperation::PickWindow)
-            }
-            if ui
-                .add_enabled(cfg!(windows), egui::Button::new("Highlight Window"))
-                .on_disabled_hover_text("Window highlighting is available on Windows only.")
-                .clicked()
-            {
-                request = Some(SharedImageOperation::HighlightWindow)
-            }
-        }
-        SearchRegionKind::Desktop => {}
     }
     *region = state.selected_region();
     request
