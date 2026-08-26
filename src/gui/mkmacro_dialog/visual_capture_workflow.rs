@@ -6,77 +6,227 @@
 //! nor changes launcher or dialog visibility, and has no restoration phase.
 
 use super::visual_overlay::{
-    OperationId, RectanglePurpose, VisualOverlayController, VisualOverlayEvent,
+    NativeVisualOverlayService, OperationId, OverlayErrorKind, RectanglePurpose,
+    VisualOverlayCommand, VisualOverlayController, VisualOverlayError, VisualOverlayEvent,
 };
 use crate::mkmacro::ScreenRect;
 use crate::mkmacro::{ImageAssetAuthoringService, MkMacroStore, ScreenCaptureBackend};
 use image::RgbaImage;
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
-/// Cloneable, single-queue facade for the overlay controller.  Workflow events
-/// are routed to its adapter while passive/editor events remain available to
-/// the Action Editor, so two consumers never race the native queue.
+/// Cloneable command client for the thread which exclusively owns native overlays.
+/// GUI calls only enqueue work or drain already-produced semantic events.
 #[derive(Clone)]
-pub struct SharedVisualOverlayController(Arc<Mutex<SharedOverlay>>);
-struct SharedOverlay {
-    controller: VisualOverlayController,
-    editor_events: Vec<VisualOverlayEvent>,
+pub struct SharedVisualOverlayController(Arc<SharedOverlayClient>);
+struct SharedOverlayClient {
+    service: Mutex<Option<NativeVisualOverlayService>>,
+    next_id: AtomicU64,
+    active_id: AtomicU64,
+    shutdown: AtomicBool,
+    editor_events: Mutex<VecDeque<VisualOverlayEvent>>,
 }
 impl Default for SharedVisualOverlayController {
     fn default() -> Self {
-        Self::new(VisualOverlayController::default())
+        match NativeVisualOverlayService::start() {
+            Ok(service) => Self::from_service(service),
+            Err(error) => Self(Arc::new(SharedOverlayClient {
+                service: Mutex::new(None),
+                next_id: AtomicU64::new(1),
+                active_id: AtomicU64::new(0),
+                shutdown: AtomicBool::new(true),
+                editor_events: Mutex::new(VecDeque::from([VisualOverlayEvent::Error {
+                    operation_id: 1,
+                    error: VisualOverlayError {
+                        kind: OverlayErrorKind::Platform,
+                        message: format!("failed to start visual overlay worker: {error}"),
+                    },
+                }])),
+            })),
+        }
     }
 }
 impl SharedVisualOverlayController {
+    /// Test-oriented constructor; production uses `default`, constructing native state on the worker.
     pub fn new(controller: VisualOverlayController) -> Self {
-        Self(Arc::new(Mutex::new(SharedOverlay {
-            controller,
-            editor_events: vec![],
-        })))
+        match NativeVisualOverlayService::start_with(move || controller) {
+            Ok(service) => Self::from_service(service),
+            Err(_) => Self::default(),
+        }
     }
-    pub fn operation_id(&self) -> Option<OperationId> {
-        self.0.lock().unwrap().controller.operation_id()
+    fn from_service(service: NativeVisualOverlayService) -> Self {
+        Self(Arc::new(SharedOverlayClient {
+            service: Mutex::new(Some(service)),
+            next_id: AtomicU64::new(1),
+            active_id: AtomicU64::new(0),
+            shutdown: AtomicBool::new(false),
+            editor_events: Mutex::new(VecDeque::new()),
+        }))
     }
-    pub fn cancel(&self) {
-        self.0.lock().unwrap().controller.cancel();
+    fn allocate(&self) -> OperationId {
+        loop {
+            let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
+            if id != 0 {
+                return id;
+            }
+        }
     }
-    pub fn shutdown(&self) {
-        let mut shared = self.0.lock().unwrap();
-        shared.controller.shutdown();
-        shared.editor_events.clear();
+    fn send_start(&self, id: OperationId, command: VisualOverlayCommand) -> OperationId {
+        self.0.active_id.store(id, Ordering::Release);
+        let sent = self
+            .0
+            .service
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|s| s.commands.send(command).is_ok());
+        if !sent {
+            self.0
+                .active_id
+                .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
+                .ok();
+            self.0
+                .editor_events
+                .lock()
+                .unwrap()
+                .push_back(VisualOverlayEvent::Error {
+                    operation_id: id,
+                    error: VisualOverlayError {
+                        kind: OverlayErrorKind::Platform,
+                        message: "visual overlay service is shut down".into(),
+                    },
+                });
+        }
+        id
     }
-    pub fn poll(&self) -> Vec<VisualOverlayEvent> {
-        let mut shared = self.0.lock().unwrap();
-        let mut events = std::mem::take(&mut shared.editor_events);
-        events.extend(shared.controller.poll());
-        events
+    pub fn begin_rectangle_pick(
+        &self,
+        purpose: RectanglePurpose,
+        virtual_desktop: ScreenRect,
+    ) -> OperationId {
+        let id = self.allocate();
+        self.send_start(
+            id,
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose,
+                virtual_desktop,
+            },
+        )
     }
     pub fn preview_rectangle(&self, rect: ScreenRect) -> OperationId {
-        self.0.lock().unwrap().controller.preview_rectangle(rect)
+        let id = self.allocate();
+        self.send_start(
+            id,
+            VisualOverlayCommand::PreviewRectangle {
+                operation_id: id,
+                rect,
+            },
+        )
     }
     pub fn highlight_monitor(&self, monitor: crate::mkmacro::MonitorDescriptor) -> OperationId {
-        self.0.lock().unwrap().controller.highlight_monitor(monitor)
+        let id = self.allocate();
+        self.send_start(
+            id,
+            VisualOverlayCommand::HighlightMonitor {
+                operation_id: id,
+                monitor,
+            },
+        )
     }
     pub fn identify_monitors(
         &self,
         monitors: Vec<crate::mkmacro::MonitorDescriptor>,
     ) -> OperationId {
-        self.0
-            .lock()
-            .unwrap()
-            .controller
-            .identify_monitors(monitors)
+        let id = self.allocate();
+        self.send_start(
+            id,
+            VisualOverlayCommand::IdentifyMonitors {
+                operation_id: id,
+                monitors,
+            },
+        )
     }
     pub fn highlight_window(
         &self,
         rect: ScreenRect,
-        kind: super::visual_overlay::WindowAreaKind,
+        area_kind: super::visual_overlay::WindowAreaKind,
     ) -> OperationId {
-        self.0
-            .lock()
-            .unwrap()
-            .controller
-            .highlight_window(rect, kind)
+        let id = self.allocate();
+        self.send_start(
+            id,
+            VisualOverlayCommand::HighlightWindow {
+                operation_id: id,
+                rect,
+                area_kind,
+            },
+        )
+    }
+    pub fn operation_id(&self) -> Option<OperationId> {
+        match self.0.active_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+    pub fn cancel(&self) {
+        let id = self.0.active_id.swap(0, Ordering::AcqRel);
+        if id != 0 {
+            if let Some(service) = self.0.service.lock().unwrap().as_ref() {
+                let _ = service.commands.send(VisualOverlayCommand::Cancel {
+                    expected_operation_id: Some(id),
+                });
+            }
+        }
+    }
+    pub fn shutdown(&self) {
+        if self.0.shutdown.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.0.active_id.store(0, Ordering::Release);
+        if let Some(mut service) = self.0.service.lock().unwrap().take() {
+            service.shutdown_and_join();
+        }
+    }
+    fn receive_into_editor(&self) {
+        let mut incoming = vec![];
+        if let Some(service) = self.0.service.lock().unwrap().as_ref() {
+            incoming.extend(service.events.try_iter());
+        }
+        for event in &incoming {
+            let id = match event {
+                VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+                | VisualOverlayEvent::Cancelled { operation_id }
+                | VisualOverlayEvent::Expired { operation_id }
+                | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
+            };
+            let _ = self
+                .0
+                .active_id
+                .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
+        }
+        self.0.editor_events.lock().unwrap().extend(incoming);
+    }
+    /// Drains events already produced by the native worker; it never advances native input.
+    pub fn poll(&self) -> Vec<VisualOverlayEvent> {
+        self.receive_into_editor();
+        self.0.editor_events.lock().unwrap().drain(..).collect()
+    }
+    fn poll_rectangle(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
+        self.receive_into_editor();
+        let mut queue = self.0.editor_events.lock().unwrap();
+        let position=queue.iter().position(|event| matches!(event,
+            VisualOverlayEvent::RectangleConfirmed { operation_id, .. } | VisualOverlayEvent::Cancelled { operation_id } | VisualOverlayEvent::Error { operation_id, .. } if *operation_id==expected));
+        position.and_then(|index| queue.remove(index))
+    }
+}
+impl Drop for SharedOverlayClient {
+    fn drop(&mut self) {
+        if let Some(mut service) = self.service.get_mut().unwrap().take() {
+            service.shutdown_and_join();
+        }
     }
 }
 
@@ -100,13 +250,7 @@ impl VisualOverlayRectangleAdapter {
 impl RectangleOverlay for VisualOverlayRectangleAdapter {
     fn begin(&mut self, purpose: RectanglePurpose) -> Result<OperationId, String> {
         let desktop = self.backend.virtual_desktop().map_err(|e| e.to_string())?;
-        let id = self
-            .overlay
-            .0
-            .lock()
-            .unwrap()
-            .controller
-            .begin_rectangle_pick(purpose, desktop);
+        let id = self.overlay.begin_rectangle_pick(purpose, desktop);
         self.operation_id = Some(id);
         Ok(id)
     }
@@ -114,8 +258,7 @@ impl RectangleOverlay for VisualOverlayRectangleAdapter {
         let Some(expected) = self.operation_id else {
             return SelectionEvent::Pending;
         };
-        let mut shared = self.overlay.0.lock().unwrap();
-        for event in shared.controller.poll() {
+        if let Some(event) = self.overlay.poll_rectangle(expected) {
             match event {
                 VisualOverlayEvent::RectangleConfirmed {
                     operation_id, rect, ..
@@ -134,10 +277,11 @@ impl RectangleOverlay for VisualOverlayRectangleAdapter {
                         message: error.to_string(),
                     };
                 }
-                other => shared.editor_events.push(other),
+                _ => SelectionEvent::Pending,
             }
+        } else {
+            SelectionEvent::Pending
         }
-        SelectionEvent::Pending
     }
     fn cancel(&mut self) {
         self.overlay.cancel();
