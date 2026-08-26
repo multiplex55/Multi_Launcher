@@ -4788,7 +4788,7 @@ mod tests {
                 },
                 |_| {
                     if save_fails {
-                        Err::<String, _>("disk full")
+                        Err::<String, String>("disk full".into())
                     } else {
                         Ok::<_, String>("unused.png".into())
                     }
