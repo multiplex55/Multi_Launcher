@@ -171,14 +171,30 @@ impl SharedVisualOverlayController {
             id => Some(id),
         }
     }
-    pub fn cancel(&self) {
-        let id = self.0.active_id.swap(0, Ordering::AcqRel);
-        if id != 0 {
+    pub fn cancel_operation(&self, expected_operation_id: OperationId) {
+        if self
+            .0
+            .active_id
+            .compare_exchange(
+                expected_operation_id,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
             if let Some(service) = self.0.service.lock().unwrap().as_ref() {
                 let _ = service.commands.send(VisualOverlayCommand::Cancel {
-                    expected_operation_id: Some(id),
+                    expected_operation_id: Some(expected_operation_id),
                 });
             }
+        }
+    }
+    /// Cancels the operation which is current at the instant this method is called.
+    /// Prefer [`Self::cancel_operation`] when an owner has retained its operation id.
+    pub fn cancel(&self) {
+        if let Some(id) = self.operation_id() {
+            self.cancel_operation(id);
         }
     }
     pub fn shutdown(&self) {
@@ -217,8 +233,13 @@ impl SharedVisualOverlayController {
     fn poll_rectangle(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
         self.receive_into_editor();
         let mut queue = self.0.editor_events.lock().unwrap();
-        let position=queue.iter().position(|event| matches!(event,
-            VisualOverlayEvent::RectangleConfirmed { operation_id, .. } | VisualOverlayEvent::Cancelled { operation_id } | VisualOverlayEvent::Error { operation_id, .. } if *operation_id==expected));
+        let position = queue.iter().position(|event| {
+            matches!(event,
+            VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+            | VisualOverlayEvent::Cancelled { operation_id }
+            | VisualOverlayEvent::Expired { operation_id }
+            | VisualOverlayEvent::Error { operation_id, .. } if *operation_id==expected)
+        });
         position.and_then(|index| queue.remove(index))
     }
 }
@@ -277,15 +298,23 @@ impl RectangleOverlay for VisualOverlayRectangleAdapter {
                         message: error.to_string(),
                     };
                 }
+                VisualOverlayEvent::Expired { operation_id } if operation_id == expected => {
+                    return SelectionEvent::Failed {
+                        operation_id,
+                        message: "interactive rectangle picker expired unexpectedly".into(),
+                    };
+                }
                 _ => SelectionEvent::Pending,
             }
         } else {
             SelectionEvent::Pending
         }
     }
-    fn cancel(&mut self) {
-        self.overlay.cancel();
-        self.operation_id = None;
+    fn cancel(&mut self, expected_operation_id: OperationId) {
+        if self.operation_id == Some(expected_operation_id) {
+            self.operation_id = None;
+            self.overlay.cancel_operation(expected_operation_id);
+        }
     }
 }
 
@@ -306,8 +335,10 @@ pub enum SelectionEvent {
 }
 pub trait RectangleOverlay: Send {
     fn begin(&mut self, purpose: RectanglePurpose) -> Result<OperationId, String>;
+    /// Performs a nonblocking drain of semantic events already produced by the worker.
+    /// It must not poll or otherwise advance native input.
     fn poll(&mut self) -> SelectionEvent;
-    fn cancel(&mut self);
+    fn cancel(&mut self, expected_operation_id: OperationId);
 }
 pub trait CaptureAdapter: Send {
     fn capture_rect(&mut self, rect: ScreenRect) -> Result<RgbaImage, String>;
@@ -427,29 +458,24 @@ impl VisualCaptureWorkflow {
             } => match self.overlay.poll() {
                 SelectionEvent::Pending => {}
                 SelectionEvent::Cancelled { operation_id: id } if id == operation_id => {
-                    self.complete_with_cleanup(WorkflowOutcome::Cancelled)
+                    self.complete(WorkflowOutcome::Cancelled)
                 }
                 SelectionEvent::Failed {
                     operation_id: id,
                     message,
-                } if id == operation_id => {
-                    self.complete_with_cleanup(WorkflowOutcome::Failed(message))
-                }
+                } if id == operation_id => self.complete(WorkflowOutcome::Failed(message)),
                 SelectionEvent::Confirmed {
                     operation_id: id,
                     rect,
                 } if id == operation_id => {
                     if rect.is_empty() {
-                        self.complete_with_cleanup(WorkflowOutcome::Failed(
-                            "selection must be nonempty".into(),
-                        ));
+                        self.complete(WorkflowOutcome::Failed("selection must be nonempty".into()));
                     } else if purpose == RectanglePurpose::SearchRegion {
-                        self.complete_with_cleanup(WorkflowOutcome::Region {
+                        self.complete(WorkflowOutcome::Region {
                             token: self.token.unwrap(),
                             rect,
                         });
                     } else {
-                        self.overlay.cancel();
                         self.state = WorkflowState::Capturing { rect };
                     }
                 }
@@ -468,7 +494,9 @@ impl VisualCaptureWorkflow {
         }
     }
     fn complete_with_cleanup(&mut self, outcome: WorkflowOutcome) {
-        self.overlay.cancel();
+        if let WorkflowState::Selecting { operation_id, .. } = self.state {
+            self.overlay.cancel(operation_id);
+        }
         self.complete(outcome);
     }
     fn complete(&mut self, outcome: WorkflowOutcome) {
@@ -487,8 +515,8 @@ impl VisualCaptureWorkflow {
 }
 impl Drop for VisualCaptureWorkflow {
     fn drop(&mut self) {
-        if self.active() {
-            self.overlay.cancel();
+        if let WorkflowState::Selecting { operation_id, .. } = self.state {
+            self.overlay.cancel(operation_id);
         }
     }
 }
@@ -534,7 +562,7 @@ mod tests {
                 fake.events.remove(0)
             }
         }
-        fn cancel(&mut self) {
+        fn cancel(&mut self, _expected_operation_id: OperationId) {
             self.0.lock().unwrap().calls.push(Call::Cancel);
         }
     }
@@ -676,6 +704,14 @@ mod tests {
         confirm(&fake, 7, rect);
         workflow.tick();
         assert_eq!(workflow.state(), &WorkflowState::Capturing { rect });
+        assert!(
+            !fake
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::Cancel))
+        );
         assert_eq!(
             data_calls(&fake),
             [Call::Begin(RectanglePurpose::ReferenceImageCapture)]
