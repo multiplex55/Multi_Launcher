@@ -15,7 +15,7 @@ pub enum MatcherDestination {
 pub enum MatcherPath {
     Action,
     Condition(Vec<usize>),
-    ImageRegion,
+    VisualRegion,
     Coordinate(CoordinateMatcherPath),
 }
 

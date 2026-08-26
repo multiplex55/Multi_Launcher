@@ -5,117 +5,21 @@ use crate::mkmacro::{
 };
 use eframe::egui;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchRegionKind {
-    Desktop,
-    Monitor,
-    Rectangle,
-    Window,
-    ClientArea,
-}
-
-impl SearchRegionKind {
-    pub fn from_region(region: &SearchRegion) -> Self {
-        match region {
-            SearchRegion::Desktop => Self::Desktop,
-            SearchRegion::Monitor { .. } => Self::Monitor,
-            SearchRegion::Rectangle { .. } => Self::Rectangle,
-            SearchRegion::Window { .. } => Self::Window,
-            SearchRegion::ClientArea { .. } => Self::ClientArea,
-        }
-    }
-}
+pub use super::image_search_controls::SearchRegionKind;
+pub type ImageSearchEditorState = super::image_search_controls::SearchRegionEditorState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageEditorRequest {
     ImportPng,
     CaptureRectangle,
-    PickRectangle,
-    PreviewRectangle,
+    SelectRegion,
+    PreviewRegion,
     HighlightMonitor,
     IdentifyMonitors,
     PickWindow { client_area: bool },
     HighlightWindow { client_area: bool },
     AddSmoothMouseMove,
     AddActivateWindowBefore,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageSearchEditorState {
-    pub kind: SearchRegionKind,
-    pub monitor_index: usize,
-    pub rectangle: ScreenRect,
-    pub window_matcher: MkWindowMatcher,
-    pub client_matcher: MkWindowMatcher,
-    pub monitors: Result<Vec<MonitorDescriptor>, String>,
-    pub pending_request: Option<ImageEditorRequest>,
-    pub preview_error: Option<String>,
-}
-
-impl ImageSearchEditorState {
-    pub fn from_payload(payload: &MkImagePayload) -> Self {
-        let mut state = Self {
-            kind: SearchRegionKind::from_region(&payload.region),
-            monitor_index: 0,
-            rectangle: ScreenRect::new(0, 0, 640, 480),
-            window_matcher: MkWindowMatcher::default(),
-            client_matcher: MkWindowMatcher::default(),
-            monitors: crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string()),
-            pending_request: None,
-            preview_error: None,
-        };
-        match &payload.region {
-            SearchRegion::Monitor { index } => state.monitor_index = *index,
-            SearchRegion::Rectangle { rect } => state.rectangle = *rect,
-            SearchRegion::Window { matcher } => state.window_matcher = matcher.clone(),
-            SearchRegion::ClientArea { matcher } => state.client_matcher = matcher.clone(),
-            SearchRegion::Desktop => {}
-        }
-        state
-    }
-
-    pub fn select(&mut self, kind: SearchRegionKind) {
-        self.kind = kind;
-    }
-    /// Refreshes display metadata without changing the persisted playback
-    /// index.  In particular, disconnecting a display must not silently point
-    /// an existing action at a different monitor.
-    pub fn refresh_monitors(&mut self) {
-        self.monitors = crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string());
-    }
-
-    pub fn validation_error(&self) -> Option<String> {
-        match self.kind {
-            SearchRegionKind::Rectangle if self.rectangle.is_empty() => {
-                Some("Rectangle width and height must be positive".into())
-            }
-            SearchRegionKind::Monitor => match &self.monitors {
-                Ok(monitors) if !monitors.iter().any(|m| m.index == self.monitor_index) => Some(
-                    format!("Monitor {} is currently unavailable", self.monitor_index),
-                ),
-                Err(error) => Some(format!("Monitor information unavailable: {error}")),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-    pub fn selected_region(&self) -> SearchRegion {
-        match self.kind {
-            SearchRegionKind::Desktop => SearchRegion::Desktop,
-            SearchRegionKind::Monitor => SearchRegion::Monitor {
-                index: self.monitor_index,
-            },
-            SearchRegionKind::Rectangle => SearchRegion::Rectangle {
-                rect: self.rectangle,
-            },
-            SearchRegionKind::Window => SearchRegion::Window {
-                matcher: self.window_matcher.clone(),
-            },
-            SearchRegionKind::ClientArea => SearchRegion::ClientArea {
-                matcher: self.client_matcher.clone(),
-            },
-        }
-    }
 }
 
 fn request(
@@ -277,148 +181,29 @@ pub(super) fn show(
 
     ui.separator();
     ui.heading("Search Area");
-    egui::ComboBox::from_label("Area")
-        .selected_text(match state.kind {
-            SearchRegionKind::Desktop => "Entire Desktop",
-            SearchRegionKind::Monitor => "Selected Monitor",
-            SearchRegionKind::Rectangle => "Rectangle",
-            SearchRegionKind::Window => "Window",
-            SearchRegionKind::ClientArea => "Window Client Area",
-        })
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut state.kind, SearchRegionKind::Desktop, "Entire Desktop");
-            ui.selectable_value(
-                &mut state.kind,
-                SearchRegionKind::Monitor,
-                "Selected Monitor",
-            );
-            ui.selectable_value(&mut state.kind, SearchRegionKind::Rectangle, "Rectangle");
-            ui.selectable_value(&mut state.kind, SearchRegionKind::Window, "Window");
-            ui.selectable_value(
-                &mut state.kind,
-                SearchRegionKind::ClientArea,
-                "Window Client Area",
-            );
-        });
-    match state.kind {
-        SearchRegionKind::Desktop => {
-            ui.label("Searches the complete virtual desktop across all connected monitors.");
-        }
-        SearchRegionKind::Monitor => {
-            if ui.button("Refresh").clicked() {
-                state.refresh_monitors();
-            }
-            match &state.monitors {
-                Ok(monitors) => {
-                    let selected = monitors
-                        .iter()
-                        .find(|m| m.index == state.monitor_index)
-                        .map(|m| m.label())
-                        .unwrap_or_else(|| {
-                            format!("Monitor {} — unavailable", state.monitor_index)
-                        });
-                    egui::ComboBox::from_label("Monitor")
-                        .selected_text(selected)
-                        .show_ui(ui, |ui| {
-                            for m in monitors {
-                                ui.selectable_value(&mut state.monitor_index, m.index, m.label());
-                            }
-                        });
-                    if !monitors.iter().any(|m| m.index == state.monitor_index) {
-                        ui.colored_label(egui::Color32::YELLOW, format!("Stored monitor {} is currently unavailable; it has been preserved.", state.monitor_index));
+    if let Some(region_request) = super::image_search_controls::show_search_region_fields(ui, state)
+    {
+        use super::image_search_controls::SearchRegionRequest as R;
+        out = Some(match region_request {
+            R::SelectRectangle => ImageEditorRequest::SelectRegion,
+            R::PreviewRegion => match state.kind {
+                SearchRegionKind::Monitor => ImageEditorRequest::HighlightMonitor,
+                SearchRegionKind::Window | SearchRegionKind::ClientArea => {
+                    ImageEditorRequest::HighlightWindow {
+                        client_area: state.kind == SearchRegionKind::ClientArea,
                     }
                 }
-                Err(error) => {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        format!("Monitor information unavailable: {error}"),
-                    );
-                }
+                _ => ImageEditorRequest::PreviewRegion,
+            },
+            R::PickWindow => ImageEditorRequest::PickWindow {
+                client_area: state.kind == SearchRegionKind::ClientArea,
+            },
+            R::RefreshMonitors => {
+                state.refresh_monitors();
+                ImageEditorRequest::IdentifyMonitors
             }
-            ui.horizontal_wrapped(|ui| {
-                request(
-                    ui,
-                    "Highlight Selected",
-                    ImageEditorRequest::HighlightMonitor,
-                    &mut out,
-                );
-                request(
-                    ui,
-                    "Identify All Monitors",
-                    ImageEditorRequest::IdentifyMonitors,
-                    &mut out,
-                );
-            });
-        }
-        SearchRegionKind::Rectangle => {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("X");
-                ui.add(egui::DragValue::new(&mut state.rectangle.x));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut state.rectangle.y));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Width");
-                ui.add(egui::DragValue::new(&mut state.rectangle.width));
-                ui.label("Height");
-                ui.add(egui::DragValue::new(&mut state.rectangle.height));
-            });
-            if state.rectangle.is_empty() {
-                ui.colored_label(egui::Color32::RED, "Width and height must be positive.");
-            }
-            ui.horizontal_wrapped(|ui| {
-                request(
-                    ui,
-                    "Pick Region",
-                    ImageEditorRequest::PickRectangle,
-                    &mut out,
-                );
-                request(
-                    ui,
-                    "Preview Region",
-                    ImageEditorRequest::PreviewRectangle,
-                    &mut out,
-                );
-            });
-        }
-        SearchRegionKind::Window | SearchRegionKind::ClientArea => {
-            let client = state.kind == SearchRegionKind::ClientArea;
-            if client {
-                ui.label("Searches only the window client area; title bars, borders, and other non-client chrome are excluded.");
-            }
-            let matcher = if client {
-                &mut state.client_matcher
-            } else {
-                &mut state.window_matcher
-            };
-            if super::action_editor::matcher_ui(ui, matcher) {
-                out = Some(ImageEditorRequest::PickWindow {
-                    client_area: client,
-                });
-            }
-            ui.horizontal_wrapped(|ui| {
-                request(
-                    ui,
-                    "Pick Window",
-                    ImageEditorRequest::PickWindow {
-                        client_area: client,
-                    },
-                    &mut out,
-                );
-                request(
-                    ui,
-                    if client {
-                        "Highlight Client Area"
-                    } else {
-                        "Highlight Window"
-                    },
-                    ImageEditorRequest::HighlightWindow {
-                        client_area: client,
-                    },
-                    &mut out,
-                );
-            });
-        }
+            R::IdentifyMonitors => ImageEditorRequest::IdentifyMonitors,
+        });
     }
     ui.separator();
     ui.heading("Related actions");
@@ -449,7 +234,6 @@ pub(super) fn show(
             out = Some(ImageEditorRequest::AddActivateWindowBefore);
         }
     }
-    state.pending_request = out;
     out
 }
 
@@ -487,7 +271,7 @@ mod tests {
                 matcher: MkWindowMatcher::default(),
             },
         ] {
-            let s = ImageSearchEditorState::from_payload(&payload(region.clone()));
+            let s = ImageSearchEditorState::from_region(&region);
             assert_eq!(
                 SearchRegionKind::from_region(&s.selected_region()),
                 SearchRegionKind::from_region(&region)
@@ -496,7 +280,7 @@ mod tests {
     }
     #[test]
     fn drafts_survive_switches_and_matchers_are_independent() {
-        let mut s = ImageSearchEditorState::from_payload(&payload(SearchRegion::Desktop));
+        let mut s = ImageSearchEditorState::from_region(&SearchRegion::Desktop);
         s.rectangle = ScreenRect::new(-9, 8, 7, 6);
         s.window_matcher.title = Some("whole".into());
         s.client_matcher.title = Some("client".into());
@@ -515,8 +299,8 @@ mod tests {
     #[test]
     fn transient_state_is_not_serialized_with_payload() {
         let p = payload(SearchRegion::Desktop);
-        let mut s = ImageSearchEditorState::from_payload(&p);
-        s.pending_request = Some(ImageEditorRequest::CaptureRectangle);
+        let mut s = ImageSearchEditorState::from_region(&p.region);
+        s.monitors = Err("transient discovery failure".into());
         let json = serde_json::to_string(&p).unwrap();
         assert!(
             !json.contains("pending_request")
@@ -527,9 +311,9 @@ mod tests {
 
     #[test]
     fn validation_preserves_invalid_rectangle_and_missing_monitor_index() {
-        let mut s = ImageSearchEditorState::from_payload(&payload(SearchRegion::Rectangle {
+        let mut s = ImageSearchEditorState::from_region(&SearchRegion::Rectangle {
             rect: ScreenRect::new(-10, -20, 0, 30),
-        }));
+        });
         assert!(s.validation_error().unwrap().contains("positive"));
         assert_eq!(s.rectangle, ScreenRect::new(-10, -20, 0, 30));
 
@@ -551,8 +335,7 @@ mod tests {
             bounds: ScreenRect::new(x, -40, 800, 600),
             primary,
         };
-        let mut s =
-            ImageSearchEditorState::from_payload(&payload(SearchRegion::Monitor { index: 42 }));
+        let mut s = ImageSearchEditorState::from_region(&SearchRegion::Monitor { index: 42 });
         s.monitors = Ok(vec![descriptor(7, -800, false), descriptor(42, 0, true)]);
         assert_eq!(s.monitor_index, 42);
         assert_eq!(
