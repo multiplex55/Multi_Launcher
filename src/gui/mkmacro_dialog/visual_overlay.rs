@@ -285,23 +285,31 @@ fn apply_command(controller: &mut VisualOverlayController, command: VisualOverla
             operation_id,
             purpose,
             virtual_desktop,
-        } => controller.begin_rectangle_pick_with_id(operation_id, purpose, virtual_desktop),
+        } => {
+            controller.begin_rectangle_pick_with_id(operation_id, purpose, virtual_desktop);
+        }
         VisualOverlayCommand::PreviewRectangle { operation_id, rect } => {
             controller.preview_rectangle_with_id(operation_id, rect)
         }
         VisualOverlayCommand::HighlightMonitor {
             operation_id,
             monitor,
-        } => controller.highlight_monitor_with_id(operation_id, monitor),
+        } => {
+            controller.highlight_monitor_with_id(operation_id, monitor);
+        }
         VisualOverlayCommand::IdentifyMonitors {
             operation_id,
             monitors,
-        } => controller.identify_monitors_with_id(operation_id, monitors),
+        } => {
+            controller.identify_monitors_with_id(operation_id, monitors);
+        }
         VisualOverlayCommand::HighlightWindow {
             operation_id,
             rect,
             area_kind,
-        } => controller.highlight_window_with_id(operation_id, rect, area_kind),
+        } => {
+            controller.highlight_window_with_id(operation_id, rect, area_kind);
+        }
         VisualOverlayCommand::Cancel {
             expected_operation_id,
         } => {
