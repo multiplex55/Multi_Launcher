@@ -56,6 +56,43 @@ enum ClipboardImagePasteOutcome {
     Handled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NotePasteRequest {
+    has_native_paste: bool,
+    has_keyboard_shortcut: bool,
+}
+
+fn is_note_paste_shortcut(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key {
+            key: Key::V,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } if !modifiers.alt
+            && (modifiers.command || (!cfg!(target_os = "macos") && modifiers.ctrl))
+    )
+}
+
+fn detect_note_paste_request(events: &[egui::Event]) -> Option<NotePasteRequest> {
+    let request = NotePasteRequest {
+        has_native_paste: events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Paste(_))),
+        has_keyboard_shortcut: events.iter().any(is_note_paste_shortcut),
+    };
+    (request.has_native_paste || request.has_keyboard_shortcut).then_some(request)
+}
+
+fn consume_note_paste_request(events: &mut Vec<egui::Event>, request: NotePasteRequest) {
+    events.retain(|event| {
+        !(request.has_native_paste && matches!(event, egui::Event::Paste(_)))
+            && !(request.has_keyboard_shortcut && is_note_paste_shortcut(event))
+    });
+}
+
 fn rgba_image_from_clipboard_data(
     width: usize,
     height: usize,
@@ -2091,9 +2128,13 @@ impl NotePanel {
         }
         match self.view_mode {
             NoteViewMode::Edit => {
-                self.intercept_clipboard_image_paste(ctx, app);
-                let resp =
-                    self.render_bounded_editor(ui, app, text_id_source.clone(), available_size);
+                let resp = self.render_bounded_editor(
+                    ui,
+                    app,
+                    ctx,
+                    text_id_source.clone(),
+                    available_size,
+                );
                 self.handle_editor_response(resp, ctx, app, true);
             }
             NoteViewMode::Preview => {
@@ -2116,10 +2157,16 @@ impl NotePanel {
         }
     }
 
-    fn intercept_clipboard_image_paste(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+    fn intercept_clipboard_image_paste(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        editor_id: egui::Id,
+    ) {
         self.intercept_clipboard_image_paste_with(
             ctx,
             app,
+            editor_id,
             || {
                 let mut clipboard = Clipboard::new()
                     .map_err(|error| format!("could not open the clipboard: {error}"))?;
@@ -2141,6 +2188,7 @@ impl NotePanel {
         &mut self,
         ctx: &egui::Context,
         app: &mut LauncherApp,
+        editor_id: egui::Id,
         mut lookup: Lookup,
         mut save: Save,
     ) -> ClipboardImagePasteOutcome
@@ -2153,16 +2201,12 @@ impl NotePanel {
         if self.view_mode != NoteViewMode::Edit {
             return ClipboardImagePasteOutcome::NotHandled;
         }
-        let Some(editor_id) = self.last_textedit_id else {
-            return ClipboardImagePasteOutcome::NotHandled;
-        };
-        let eligible = ctx.memory(|memory| memory.has_focus(editor_id))
-            && ctx.input(|input| {
-                input.key_pressed(Key::V) && input.modifiers == egui::Modifiers::CTRL
-            });
-        if !eligible {
+        if !ctx.memory(|memory| memory.has_focus(editor_id)) {
             return ClipboardImagePasteOutcome::NotHandled;
         }
+        let Some(request) = ctx.input(|input| detect_note_paste_request(&input.events)) else {
+            return ClipboardImagePasteOutcome::NotHandled;
+        };
 
         let data = match lookup() {
             Ok(Some(data)) => data,
@@ -2176,24 +2220,27 @@ impl NotePanel {
         let image = match rgba_image_from_clipboard_data(data.width, data.height, data.bytes) {
             Ok(image) => image,
             Err(error) => {
-                ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V));
-                app.report_error("clipboard image paste", error);
+                ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
+                app.report_error(
+                    "clipboard image paste",
+                    format!("invalid clipboard RGBA image data: {error}"),
+                );
                 return ClipboardImagePasteOutcome::Handled;
             }
         };
         let filename = match save(&image) {
             Ok(filename) => filename,
             Err(error) => {
-                ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V));
+                ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
                 app.report_error(
                     "clipboard image paste",
-                    format!("Failed to save clipboard image: {error}"),
+                    format!("could not persist clipboard image asset or PNG: {error}"),
                 );
                 return ClipboardImagePasteOutcome::Handled;
             }
         };
         let markdown = note_image_markdown(&filename);
-        ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V));
+        ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
         self.insert_text_at_cursor_or_selection(ctx, editor_id, &markdown);
         ClipboardImagePasteOutcome::Handled
     }
@@ -2487,6 +2534,7 @@ impl NotePanel {
         &mut self,
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
+        ctx: &egui::Context,
         id_source: impl std::hash::Hash + Clone,
         available_size: egui::Vec2,
     ) -> egui::Response {
@@ -2500,6 +2548,10 @@ impl NotePanel {
                 ui.set_width(available_size.x);
                 ui.set_min_width(available_size.x);
                 ui.set_max_width(available_size.x);
+                // TextEdit hashes its explicit id source in the current Ui namespace.
+                // Calculate it here so paste handling uses the exact same namespace.
+                let editor_id = ui.make_persistent_id(egui::Id::new(id_source.clone()));
+                self.intercept_clipboard_image_paste(ctx, app, editor_id);
                 self.render_editor(ui, app, id_source.clone(), Some(available_size))
             })
             .inner
@@ -2929,7 +2981,7 @@ impl NotePanel {
                 |ui| {
                     ui.set_width(editor_width);
                     let editor_size = egui::vec2(editor_width, total_height);
-                    self.render_bounded_editor(ui, app, editor_id_source, editor_size)
+                    self.render_bounded_editor(ui, app, ctx, editor_id_source, editor_size)
                 },
             );
             #[cfg(test)]
@@ -4395,6 +4447,51 @@ mod tests {
     }
 
     #[test]
+    fn note_paste_detection_accepts_native_keyboard_and_combined_events() {
+        let paste = egui::Event::Paste("clipboard text".into());
+        let key = egui::Event::Key {
+            key: Key::V,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        };
+
+        assert_eq!(
+            detect_note_paste_request(std::slice::from_ref(&paste)),
+            Some(NotePasteRequest {
+                has_native_paste: true,
+                has_keyboard_shortcut: false,
+            })
+        );
+        assert!(detect_note_paste_request(std::slice::from_ref(&key)).is_some());
+
+        let mut events = vec![paste, egui::Event::Text("unrelated".into()), key];
+        let request = detect_note_paste_request(&events).unwrap();
+        consume_note_paste_request(&mut events, request);
+        assert_eq!(events, vec![egui::Event::Text("unrelated".into())]);
+    }
+
+    #[test]
+    fn note_paste_detection_rejects_alt_and_repeated_v() {
+        let key_event = |modifiers, repeat| egui::Event::Key {
+            key: Key::V,
+            physical_key: None,
+            pressed: true,
+            repeat,
+            modifiers,
+        };
+        assert!(
+            detect_note_paste_request(&[key_event(
+                egui::Modifiers::CTRL | egui::Modifiers::ALT,
+                false,
+            )])
+            .is_none()
+        );
+        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::CTRL, true)]).is_none());
+    }
+
+    #[test]
     fn clipboard_rgba_validation_and_markdown_are_independent() {
         let image = rgba_image_from_clipboard_data(1, 2, vec![255; 8]).unwrap();
         assert_eq!(image.dimensions(), (1, 2));
@@ -4420,6 +4517,7 @@ mod tests {
         let outcome = panel.intercept_clipboard_image_paste_with(
             &ctx,
             &mut app,
+            id,
             || {
                 Ok::<_, String>(Some(ClipboardRgbaData {
                     width: 1,
@@ -4457,6 +4555,7 @@ mod tests {
         let outcome = panel.intercept_clipboard_image_paste_with(
             &ctx,
             &mut app,
+            id,
             || Ok::<_, String>(None),
             |_| {
                 saves.set(saves.get() + 1);
@@ -4491,6 +4590,7 @@ mod tests {
             let outcome = panel.intercept_clipboard_image_paste_with(
                 &ctx,
                 &mut app,
+                editor_id,
                 || {
                     lookups.set(lookups.get() + 1);
                     Ok::<_, String>(None)
