@@ -164,15 +164,14 @@ pub fn show_search_region_fields(
         }
         SearchRegionKind::Rectangle => {
             ui.horizontal(|ui| {
-                for (l, v) in [
-                    ("X", &mut state.rectangle.x),
-                    ("Y", &mut state.rectangle.y),
-                    ("W", &mut state.rectangle.width),
-                    ("H", &mut state.rectangle.height),
-                ] {
-                    ui.label(l);
-                    ui.add(egui::DragValue::new(v));
-                }
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut state.rectangle.x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut state.rectangle.y));
+                ui.label("W");
+                ui.add(egui::DragValue::new(&mut state.rectangle.width));
+                ui.label("H");
+                ui.add(egui::DragValue::new(&mut state.rectangle.height));
             });
             if ui.button("Select Region").clicked() {
                 out = Some(SearchRegionRequest::SelectRectangle);

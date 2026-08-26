@@ -234,7 +234,6 @@ pub(super) fn show(
             out = Some(ImageEditorRequest::AddActivateWindowBefore);
         }
     }
-    state.pending_request = out;
     out
 }
 
