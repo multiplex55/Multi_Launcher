@@ -88,13 +88,26 @@ pub enum WindowAreaKind {
     ClientArea,
 }
 
+/// Explicit phases of a rectangle interaction. An initially-held button is
+/// deliberately consumed by `AwaitingInitialRelease`; that release only arms
+/// the picker and can never confirm the GUI-launch click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RectangleInteractionPhase {
+    Starting,
+    AwaitingInitialRelease,
+    Armed,
+    Dragging { start: MkPoint, current: MkPoint },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisualOverlayState {
     Idle,
     PickingRectangle {
-        start: Option<MkPoint>,
-        current: Option<MkPoint>,
+        operation_id: OperationId,
         purpose: RectanglePurpose,
+        virtual_desktop: ScreenRect,
+        pointer: MkPoint,
+        phase: RectangleInteractionPhase,
     },
     PreviewingRectangle {
         rect: ScreenRect,
@@ -446,6 +459,8 @@ pub(crate) fn overlay_is_mouse_transparent(visual: &OverlayVisual) -> bool {
 /// Isolates native windows, input, painting and resource ownership from the
 /// deterministic state machine.
 pub trait OverlayRenderer: Send {
+    /// Returns the physical button state without inventing an edge.
+    fn left_button_down(&mut self) -> Result<bool, VisualOverlayError>;
     fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError>;
     fn show(
         &mut self,
@@ -578,6 +593,7 @@ impl VisualOverlayController {
                 self.state = VisualOverlayState::Idle;
                 self.operation_id = None;
                 self.virtual_desktop = None;
+                self.picker_pointer = None;
                 self.events.push_back(VisualOverlayEvent::Error {
                     operation_id: id,
                     error,
@@ -613,6 +629,17 @@ impl VisualOverlayController {
             });
             return id;
         }
+        let left_down = match self.renderer.left_button_down() {
+            Ok(left_down) => left_down,
+            Err(error) => {
+                let id = self.replace_with_id(requested_id);
+                self.events.push_back(VisualOverlayEvent::Error {
+                    operation_id: id,
+                    error,
+                });
+                return id;
+            }
+        };
         let pointer = match self.renderer.cursor_position() {
             Ok(pointer) => pointer,
             Err(error) => {
@@ -628,9 +655,15 @@ impl VisualOverlayController {
         let id = self.start_with_id(
             requested_id,
             VisualOverlayState::PickingRectangle {
-                start: None,
-                current: None,
+                operation_id: requested_id,
                 purpose,
+                virtual_desktop,
+                pointer,
+                phase: if left_down {
+                    RectangleInteractionPhase::AwaitingInitialRelease
+                } else {
+                    RectangleInteractionPhase::Armed
+                },
             },
             OverlayVisual::RectanglePicker {
                 virtual_desktop,
@@ -836,63 +869,74 @@ impl VisualOverlayController {
         if self.operation_id != Some(input.operation_id) {
             return;
         }
+        if matches!(input.kind, OverlayInputKind::Escape) {
+            self.cancel();
+            return;
+        }
+        let VisualOverlayState::PickingRectangle { pointer, phase, .. } = &mut self.state else {
+            return;
+        };
         match input.kind {
-            OverlayInputKind::Escape => self.cancel(),
-            OverlayInputKind::LeftPressed(point) => {
-                let VisualOverlayState::PickingRectangle { start, current, .. } = &mut self.state
-                else {
-                    return;
-                };
-                *start = Some(point);
-                *current = Some(point);
-                self.picker_pointer = Some(point);
-                self.repaint_picker();
-            }
             OverlayInputKind::PointerMoved(point) => {
-                let VisualOverlayState::PickingRectangle { start, current, .. } = &mut self.state
-                else {
-                    return;
-                };
-                if start.is_some() {
-                    *current = Some(point);
+                *pointer = point;
+                if let RectangleInteractionPhase::Dragging { current, .. } = phase {
+                    *current = point;
                 }
-                self.picker_pointer = Some(point);
                 self.repaint_picker();
             }
-            OverlayInputKind::LeftReleased(point) => {
-                let VisualOverlayState::PickingRectangle {
-                    start: Some(_),
-                    current,
-                    ..
-                } = &mut self.state
-                else {
-                    return;
+            OverlayInputKind::LeftPressed(point)
+                if matches!(phase, RectangleInteractionPhase::Armed) =>
+            {
+                *pointer = point;
+                *phase = RectangleInteractionPhase::Dragging {
+                    start: point,
+                    current: point,
                 };
-                *current = Some(point);
-                self.picker_pointer = Some(point);
-                // Publish the final pointer position through the same repaint
-                // path as press/move before confirmation tears the windows down.
                 self.repaint_picker();
-                self.confirm_picker();
             }
-            OverlayInputKind::Enter => self.confirm_picker(),
+            OverlayInputKind::LeftReleased(point) => match *phase {
+                RectangleInteractionPhase::AwaitingInitialRelease => {
+                    *pointer = point;
+                    *phase = RectangleInteractionPhase::Armed;
+                    self.repaint_picker();
+                }
+                RectangleInteractionPhase::Dragging { start, .. } => {
+                    *pointer = point;
+                    *phase = RectangleInteractionPhase::Dragging {
+                        start,
+                        current: point,
+                    };
+                    // Paint the actual release coordinate before native resources are destroyed.
+                    self.repaint_picker();
+                    self.confirm_picker();
+                }
+                _ => {}
+            },
+            // Mouse release is authoritative for interactive selection.
+            OverlayInputKind::Enter
+            | OverlayInputKind::LeftPressed(_)
+            | OverlayInputKind::Escape => {}
         }
     }
     fn repaint_picker(&mut self) {
-        let (start, current) = match &self.state {
-            VisualOverlayState::PickingRectangle { start, current, .. } => (*start, *current),
+        let (virtual_desktop, pointer, selection) = match &self.state {
+            VisualOverlayState::PickingRectangle {
+                virtual_desktop,
+                pointer,
+                phase,
+                ..
+            } => {
+                let selection = match phase {
+                    RectangleInteractionPhase::Dragging { start, current } => {
+                        normalized_rect(*start, *current).ok()
+                    }
+                    _ => None,
+                };
+                (*virtual_desktop, *pointer, selection)
+            }
             _ => return,
         };
-        let selection = start
-            .zip(current)
-            .and_then(|(a, b)| normalized_rect(a, b).ok())
-            .filter(|r| !r.is_empty());
-        let pointer = self
-            .picker_pointer
-            .or(current)
-            .or(start)
-            .unwrap_or(MkPoint { x: 0, y: 0 });
-        if let (Some(id), Some(virtual_desktop)) = (self.operation_id, self.virtual_desktop) {
+        if let Some(id) = self.operation_id {
             if let Err(error) = self.renderer.repaint(
                 id,
                 &OverlayVisual::RectanglePicker {
@@ -907,6 +951,8 @@ impl VisualOverlayController {
                 self.renderer.close();
                 self.operation_id = None;
                 self.state = VisualOverlayState::Idle;
+                self.virtual_desktop = None;
+                self.picker_pointer = None;
                 self.events.push_back(VisualOverlayEvent::Error {
                     operation_id: id,
                     error,
@@ -917,10 +963,10 @@ impl VisualOverlayController {
     fn confirm_picker(&mut self) {
         let (start, current, purpose) = match self.state {
             VisualOverlayState::PickingRectangle {
-                start: Some(a),
-                current: Some(b),
+                phase: RectangleInteractionPhase::Dragging { start, current },
                 purpose,
-            } => (a, b, purpose),
+                ..
+            } => (start, current, purpose),
             _ => return,
         };
         match normalized_rect(start, current) {
@@ -929,6 +975,7 @@ impl VisualOverlayController {
                 self.renderer.close();
                 self.state = VisualOverlayState::Idle;
                 self.virtual_desktop = None;
+                self.picker_pointer = None;
                 self.events
                     .push_back(VisualOverlayEvent::RectangleConfirmed {
                         operation_id: id,
@@ -936,7 +983,13 @@ impl VisualOverlayController {
                         rect,
                     });
             }
-            _ => {} // Keep the picker visible: the user can retry or cancel.
+            // Empty drags are retries: discard the drag and re-arm without emitting.
+            _ => {
+                if let VisualOverlayState::PickingRectangle { phase, .. } = &mut self.state {
+                    *phase = RectangleInteractionPhase::Armed;
+                }
+                self.repaint_picker();
+            }
         }
     }
 }
@@ -990,6 +1043,9 @@ use native::NativeOverlayRenderer;
 struct NativeOverlayRenderer;
 #[cfg(not(windows))]
 impl OverlayRenderer for NativeOverlayRenderer {
+    fn left_button_down(&mut self) -> Result<bool, VisualOverlayError> {
+        Ok(false)
+    }
     fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
         Err(VisualOverlayError::unsupported())
     }
@@ -1037,6 +1093,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeData {
+        left_down: bool,
         inputs: Vec<OverlayInput>,
         calls: Vec<RecordedCall>,
         show_error: Option<VisualOverlayError>,
@@ -1044,6 +1101,9 @@ mod tests {
     }
     struct FakeRenderer(Arc<Mutex<FakeData>>);
     impl OverlayRenderer for FakeRenderer {
+        fn left_button_down(&mut self) -> Result<bool, VisualOverlayError> {
+            Ok(self.0.lock().unwrap().left_down)
+        }
         fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
             Ok(point(40, 50))
         }
@@ -1853,5 +1913,93 @@ mod tests {
             assert!(advance_and_drain(&mut controller).is_empty());
             assert_eq!(close_count(&fake), 1);
         }
+    }
+
+    #[test]
+    fn held_launch_click_is_consumed_before_picker_arms() {
+        let (mut c, fake, _) = controller();
+        fake.lock().unwrap().left_down = true;
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(-100, -100, 200, 200),
+        );
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::AwaitingInitialRelease,
+                ..
+            }
+        ));
+        fake.lock().unwrap().inputs = vec![OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::LeftReleased(point(40, 50)),
+        }];
+        assert!(advance_and_drain(&mut c).is_empty());
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::Armed,
+                ..
+            }
+        ));
+        queue_drag(&fake, id, point(-80, -60), point(70, 90));
+        assert_eq!(
+            advance_and_drain(&mut c),
+            vec![VisualOverlayEvent::RectangleConfirmed {
+                operation_id: id,
+                purpose: RectanglePurpose::SearchRegion,
+                rect: ScreenRect::new(-80, -60, 150, 150),
+            }]
+        );
+    }
+
+    #[test]
+    fn picker_without_launch_click_is_armed_and_never_times_out() {
+        let (mut c, fake, now) = controller();
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(0, 0, 100, 100),
+        );
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::Armed,
+                ..
+            }
+        ));
+        *now.lock().unwrap() = PASSIVE_OVERLAY_DURATION * 100;
+        fake.lock().unwrap().inputs = vec![
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftReleased(point(10, 10)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Enter,
+            },
+        ];
+        assert!(advance_and_drain(&mut c).is_empty());
+        assert_eq!(c.operation_id(), Some(id));
+    }
+
+    #[test]
+    fn empty_release_rearms_picker_for_a_retry() {
+        let (mut c, fake, _) = controller();
+        let id = c.begin_rectangle_pick(
+            RectanglePurpose::SearchRegion,
+            ScreenRect::new(0, 0, 100, 100),
+        );
+        queue_drag(&fake, id, point(12, 12), point(12, 12));
+        assert!(advance_and_drain(&mut c).is_empty());
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingRectangle {
+                phase: RectangleInteractionPhase::Armed,
+                ..
+            }
+        ));
+        queue_drag(&fake, id, point(10, 10), point(30, 40));
+        assert!(matches!(advance_and_drain(&mut c).as_slice(),
+            [VisualOverlayEvent::RectangleConfirmed { rect, .. }] if *rect == ScreenRect::new(10, 10, 20, 30)));
     }
 }
