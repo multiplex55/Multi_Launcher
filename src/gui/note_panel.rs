@@ -4429,66 +4429,118 @@ mod tests {
         }
     }
 
-    fn begin_ctrl_v_frame(ctx: &egui::Context, editor_id: egui::Id) {
-        let mut input = egui::RawInput {
-            time: Some(123.456),
-            modifiers: egui::Modifiers::CTRL,
-            ..Default::default()
-        };
-        input.events.push(egui::Event::Key {
-            key: Key::V,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL,
-        });
-        ctx.begin_frame(input);
-        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+    #[derive(Default)]
+    struct PasteInputBuilder {
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    }
+
+    impl PasteInputBuilder {
+        fn native(mut self, text: &str) -> Self {
+            self.events.push(egui::Event::Paste(text.into()));
+            self
+        }
+
+        fn key(mut self, modifiers: egui::Modifiers) -> Self {
+            self.modifiers = modifiers;
+            self.events.push(egui::Event::Key {
+                key: Key::V,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+            self
+        }
+
+        fn unrelated(mut self, text: &str) -> Self {
+            self.events.push(egui::Event::Text(text.into()));
+            self
+        }
+
+        fn begin(self, ctx: &egui::Context, focused: egui::Id) {
+            ctx.begin_frame(egui::RawInput {
+                time: Some(123.456),
+                modifiers: self.modifiers,
+                events: self.events,
+                ..Default::default()
+            });
+            ctx.memory_mut(|memory| memory.request_focus(focused));
+        }
+    }
+
+    fn key_event(modifiers: egui::Modifiers) -> egui::Event {
+        PasteInputBuilder::default()
+            .key(modifiers)
+            .events
+            .pop()
+            .unwrap()
+    }
+
+    fn input_events(ctx: &egui::Context) -> Vec<egui::Event> {
+        ctx.input(|input| input.events.clone())
+    }
+
+    fn store_cursor(ctx: &egui::Context, id: egui::Id, primary: usize, secondary: usize) {
+        use egui::text::{CCursor, CCursorRange};
+        let mut state = egui::widgets::text_edit::TextEditState::default();
+        state.cursor.set_char_range(Some(CCursorRange {
+            primary: CCursor::new(primary),
+            secondary: CCursor::new(secondary),
+        }));
+        state.store(ctx, id);
     }
 
     #[test]
-    fn note_paste_detection_accepts_native_keyboard_and_combined_events() {
+    fn paste_request_detection_accepts_native_ctrl_command_and_deduplicates_combined_input() {
         let paste = egui::Event::Paste("clipboard text".into());
-        let key = egui::Event::Key {
-            key: Key::V,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
-        };
-
+        let ctrl = key_event(egui::Modifiers::CTRL);
+        let command = key_event(egui::Modifiers::COMMAND);
         assert_eq!(
-            detect_note_paste_request(std::slice::from_ref(&paste)),
-            Some(NotePasteRequest {
+            detect_note_paste_request(&[paste.clone()]).unwrap(),
+            NotePasteRequest {
                 has_native_paste: true,
-                has_keyboard_shortcut: false,
-            })
+                has_keyboard_shortcut: false
+            }
         );
-        assert!(detect_note_paste_request(std::slice::from_ref(&key)).is_some());
+        assert!(detect_note_paste_request(&[ctrl.clone()]).is_some());
+        assert!(detect_note_paste_request(&[command]).is_some());
 
-        let mut events = vec![paste, egui::Event::Text("unrelated".into()), key];
+        let mut events = vec![
+            egui::Event::Text("before".into()),
+            paste,
+            egui::Event::Text("middle".into()),
+            ctrl,
+            egui::Event::Text("after".into()),
+        ];
         let request = detect_note_paste_request(&events).unwrap();
+        assert_eq!(
+            request,
+            NotePasteRequest {
+                has_native_paste: true,
+                has_keyboard_shortcut: true
+            }
+        );
         consume_note_paste_request(&mut events, request);
-        assert_eq!(events, vec![egui::Event::Text("unrelated".into())]);
+        assert_eq!(
+            events,
+            vec![
+                egui::Event::Text("before".into()),
+                egui::Event::Text("middle".into()),
+                egui::Event::Text("after".into())
+            ]
+        );
     }
 
     #[test]
-    fn note_paste_detection_rejects_alt_and_repeated_v() {
-        let key_event = |modifiers, repeat| egui::Event::Key {
-            key: Key::V,
-            physical_key: None,
-            pressed: true,
-            repeat,
-            modifiers,
-        };
-        assert!(
-            detect_note_paste_request(&[key_event(
-                egui::Modifiers::CTRL | egui::Modifiers::ALT,
-                false,
-            )])
-            .is_none()
-        );
-        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::CTRL, true)]).is_none());
+    fn paste_request_detection_rejects_plain_alt_and_repeated_v() {
+        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::NONE)]).is_none());
+        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::ALT)]).is_none());
+        let mut repeated = key_event(egui::Modifiers::CTRL);
+        if let egui::Event::Key { repeat, .. } = &mut repeated {
+            *repeat = true;
+        }
+        assert!(detect_note_paste_request(&[repeated]).is_none());
     }
 
     #[test]
@@ -4504,104 +4556,348 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_image_paste_replaces_unicode_selection_and_marks_dirty() {
+    fn image_paste_replaces_real_unicode_selection_consumes_input_and_marks_dirty() {
         let ctx = egui::Context::default();
-        let id = egui::Id::new("clipboard-image-editor");
-        begin_ctrl_v_frame(&ctx, id);
+        let id = egui::Id::new("note-editor-multiline-stable");
+        PasteInputBuilder::default()
+            .unrelated("before")
+            .native("clipboard text")
+            .unrelated("after")
+            .begin(&ctx, id);
+        store_cursor(&ctx, id, 2, 1);
         let mut app = new_app(&ctx);
         let mut panel = NotePanel::from_note(empty_note("α猫ω"));
         panel.view_mode = NoteViewMode::Edit;
-        panel.last_textedit_id = Some(id);
-        panel.pending_selection = Some((1, 2));
-
+        let saves = std::cell::Cell::new(0);
         let outcome = panel.intercept_clipboard_image_paste_with(
             &ctx,
             &mut app,
             id,
             || {
                 Ok::<_, String>(Some(ClipboardRgbaData {
-                    width: 1,
+                    width: 2,
                     height: 1,
-                    bytes: vec![1, 2, 3, 255],
+                    bytes: vec![1, 2, 3, 255, 5, 6, 7, 128],
                 }))
             },
-            |_| Ok::<_, String>("note-image-20260825-162145.123.png".into()),
+            |image| {
+                saves.set(saves.get() + 1);
+                assert_eq!(image.dimensions(), (2, 1));
+                assert_eq!(image.as_raw(), &vec![1, 2, 3, 255, 5, 6, 7, 128]);
+                Ok::<_, String>("note-image-20260825-162145.123.png".into())
+            },
         );
-
-        assert_eq!(outcome, ClipboardImagePasteOutcome::Handled);
         let markdown = note_image_markdown("note-image-20260825-162145.123.png");
+        assert_eq!(outcome, ClipboardImagePasteOutcome::Handled);
+        assert_eq!(saves.get(), 1);
         assert_eq!(panel.note.content, format!("α{markdown}ω"));
-        assert!(panel.pending_selection.is_none());
-        assert!(panel.fast_derived_dirty);
-        assert!(panel.heavy_recompute_requested);
+        assert_eq!(
+            input_events(&ctx),
+            vec![
+                egui::Event::Text("before".into()),
+                egui::Event::Text("after".into())
+            ]
+        );
+        assert!(panel.fast_derived_dirty && panel.heavy_recompute_requested);
         assert_eq!(panel.last_edit_at_secs, Some(123.456));
-        let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
-        let range = state.cursor.char_range().unwrap();
+        assert!(panel.pending_selection.is_none());
+        let range = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap();
         assert_eq!(range.primary.index, 1 + markdown.chars().count());
         assert_eq!(range.primary.index, range.secondary.index);
         let _ = ctx.end_frame();
     }
 
     #[test]
-    fn clipboard_no_image_leaves_shortcut_and_state_untouched() {
+    fn image_paste_at_caret_inserts_in_middle_and_native_text_never_reaches_editor() {
         let ctx = egui::Context::default();
-        let id = egui::Id::new("clipboard-text-editor");
-        begin_ctrl_v_frame(&ctx, id);
+        let id = egui::Id::new("caret-editor");
+        PasteInputBuilder::default()
+            .native("text that must not appear")
+            .key(egui::Modifiers::CTRL)
+            .begin(&ctx, id);
+        store_cursor(&ctx, id, 1, 1);
         let mut app = new_app(&ctx);
-        let mut panel = NotePanel::from_note(empty_note("unchanged"));
+        let mut panel = NotePanel::from_note(empty_note("ab"));
         panel.view_mode = NoteViewMode::Edit;
-        panel.last_textedit_id = Some(id);
+        let lookups = std::cell::Cell::new(0);
         let saves = std::cell::Cell::new(0);
         let outcome = panel.intercept_clipboard_image_paste_with(
             &ctx,
             &mut app,
             id,
-            || Ok::<_, String>(None),
+            || {
+                lookups.set(lookups.get() + 1);
+                Ok::<_, String>(Some(ClipboardRgbaData {
+                    width: 1,
+                    height: 1,
+                    bytes: vec![9, 8, 7, 255],
+                }))
+            },
             |_| {
                 saves.set(saves.get() + 1);
-                Ok::<_, String>(String::new())
+                Ok::<_, String>("note-image-20260826-010203.004.png".into())
             },
         );
-        assert_eq!(outcome, ClipboardImagePasteOutcome::NotHandled);
-        assert_eq!(panel.note.content, "unchanged");
-        assert_eq!(saves.get(), 0);
-        assert!(ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V)));
+        let markdown = note_image_markdown("note-image-20260826-010203.004.png");
+        assert_eq!(outcome, ClipboardImagePasteOutcome::Handled);
+        assert_eq!((lookups.get(), saves.get()), (1, 1));
+        assert_eq!(panel.note.content, format!("a{markdown}b"));
+        assert!(input_events(&ctx).is_empty());
         let _ = ctx.end_frame();
     }
 
     #[test]
-    fn clipboard_lookup_is_gated_by_mode_and_exact_focus() {
-        for (index, mode) in [
-            NoteViewMode::Preview,
-            NoteViewMode::Split,
-            NoteViewMode::Edit,
-        ]
-        .into_iter()
-        .enumerate()
-        {
+    fn text_only_paste_is_completely_untouched_and_egui_can_process_it() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("text-editor");
+        PasteInputBuilder::default()
+            .native("ordinary text")
+            .begin(&ctx, id);
+        store_cursor(&ctx, id, 1, 1);
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("ab"));
+        panel.view_mode = NoteViewMode::Edit;
+        panel.pending_selection = Some((1, 1));
+        let before_state = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+            .unwrap()
+            .cursor
+            .char_range();
+        let before = (
+            panel.note.content.clone(),
+            panel.pending_selection,
+            panel.fast_derived_dirty,
+            panel.heavy_recompute_requested,
+            panel.last_edit_at_secs,
+        );
+        let outcome = panel.intercept_clipboard_image_paste_with(
+            &ctx,
+            &mut app,
+            id,
+            || Ok::<_, String>(None),
+            |_| -> Result<String, String> { panic!("save must not run") },
+        );
+        assert_eq!(outcome, ClipboardImagePasteOutcome::NotHandled);
+        assert_eq!(
+            input_events(&ctx),
+            vec![egui::Event::Paste("ordinary text".into())]
+        );
+        assert_eq!(
+            (
+                panel.note.content.clone(),
+                panel.pending_selection,
+                panel.fast_derived_dirty,
+                panel.heavy_recompute_requested,
+                panel.last_edit_at_secs
+            ),
+            before
+        );
+        assert_eq!(
+            egui::widgets::text_edit::TextEditState::load(&ctx, id)
+                .unwrap()
+                .cursor
+                .char_range(),
+            before_state
+        );
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            ui.add(egui::TextEdit::multiline(&mut panel.note.content).id(id));
+        });
+        assert_eq!(panel.note.content, "aordinary textb");
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn clipboard_lookup_is_excluded_by_each_non_editor_focus_or_view_mode() {
+        for (index, mode, focus_editor) in [
+            (0, NoteViewMode::Edit, false),
+            (1, NoteViewMode::Preview, true),
+            (2, NoteViewMode::Split, true),
+            (3, NoteViewMode::Edit, false),
+        ] {
             let ctx = egui::Context::default();
-            let editor_id = egui::Id::new(("editor", index));
-            begin_ctrl_v_frame(&ctx, egui::Id::new("different-widget"));
+            let id = egui::Id::new(("editor", index));
+            let focused = if focus_editor {
+                id
+            } else {
+                egui::Id::new(("toolbar-or-link-dialog", index))
+            };
+            PasteInputBuilder::default()
+                .unrelated("x")
+                .native("ordinary text")
+                .key(egui::Modifiers::COMMAND)
+                .begin(&ctx, focused);
+            let original = input_events(&ctx);
             let mut app = new_app(&ctx);
             let mut panel = NotePanel::from_note(empty_note("unchanged"));
             panel.view_mode = mode;
-            panel.last_textedit_id = Some(editor_id);
             let lookups = std::cell::Cell::new(0);
+            let saves = std::cell::Cell::new(0);
             let outcome = panel.intercept_clipboard_image_paste_with(
                 &ctx,
                 &mut app,
-                editor_id,
+                id,
                 || {
                     lookups.set(lookups.get() + 1);
                     Ok::<_, String>(None)
                 },
-                |_| Ok::<_, String>(String::new()),
+                |_| {
+                    saves.set(saves.get() + 1);
+                    Ok::<_, String>(String::new())
+                },
             );
             assert_eq!(outcome, ClipboardImagePasteOutcome::NotHandled);
-            assert_eq!(lookups.get(), 0);
-            assert!(ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, Key::V)));
+            assert_eq!((lookups.get(), saves.get()), (0, 0));
+            assert_eq!(input_events(&ctx), original);
+            assert_eq!(panel.note.content, "unchanged");
             let _ = ctx.end_frame();
         }
+    }
+
+    #[test]
+    fn image_decode_and_save_failures_preserve_state_but_consume_image_paste() {
+        for save_fails in [false, true] {
+            let ctx = egui::Context::default();
+            let id = egui::Id::new(("failure-editor", save_fails));
+            PasteInputBuilder::default()
+                .native("fallback text")
+                .key(egui::Modifiers::CTRL)
+                .begin(&ctx, id);
+            store_cursor(&ctx, id, 2, 1);
+            let mut app = new_app(&ctx);
+            app.show_inline_errors = true;
+            let mut panel = NotePanel::from_note(empty_note("α猫ω"));
+            panel.view_mode = NoteViewMode::Edit;
+            panel.pending_selection = Some((1, 2));
+            let outcome = panel.intercept_clipboard_image_paste_with(
+                &ctx,
+                &mut app,
+                id,
+                || {
+                    Ok::<_, String>(Some(ClipboardRgbaData {
+                        width: 1,
+                        height: 1,
+                        bytes: if save_fails {
+                            vec![1, 2, 3, 4]
+                        } else {
+                            vec![1, 2, 3]
+                        },
+                    }))
+                },
+                |_| {
+                    if save_fails {
+                        Err::<String, String>("disk full".into())
+                    } else {
+                        Ok::<_, String>("unused.png".into())
+                    }
+                },
+            );
+            assert_eq!(outcome, ClipboardImagePasteOutcome::Handled);
+            assert!(input_events(&ctx).is_empty());
+            assert_eq!(panel.note.content, "α猫ω");
+            assert_eq!(panel.pending_selection, Some((1, 2)));
+            assert!(!panel.fast_derived_dirty && !panel.heavy_recompute_requested);
+            assert_eq!(panel.last_edit_at_secs, None);
+            let range = egui::widgets::text_edit::TextEditState::load(&ctx, id)
+                .unwrap()
+                .cursor
+                .char_range()
+                .unwrap();
+            assert_eq!((range.primary.index, range.secondary.index), (2, 1));
+            let error = app.error.as_deref().unwrap();
+            assert!(
+                error.contains(if save_fails {
+                    "persist clipboard image"
+                } else {
+                    "invalid clipboard RGBA"
+                }),
+                "{error}"
+            );
+            let _ = ctx.end_frame();
+        }
+    }
+
+    #[test]
+    fn clipboard_read_failure_reports_error_without_consuming_text_paste() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("read-failure-editor");
+        PasteInputBuilder::default()
+            .native("ordinary text")
+            .begin(&ctx, id);
+        let mut app = new_app(&ctx);
+        app.show_inline_errors = true;
+        let mut panel = NotePanel::from_note(empty_note("unchanged"));
+        panel.view_mode = NoteViewMode::Edit;
+        let outcome = panel.intercept_clipboard_image_paste_with(
+            &ctx,
+            &mut app,
+            id,
+            || Err::<Option<ClipboardRgbaData>, _>("could not open the clipboard"),
+            |_| Ok::<_, String>(String::new()),
+        );
+        assert_eq!(outcome, ClipboardImagePasteOutcome::NotHandled);
+        assert_eq!(
+            input_events(&ctx),
+            vec![egui::Event::Paste("ordinary text".into())]
+        );
+        assert_eq!(panel.note.content, "unchanged");
+        assert!(
+            app.error
+                .as_deref()
+                .unwrap()
+                .contains("could not open the clipboard")
+        );
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn image_paste_can_use_real_transactional_writer_in_an_injected_directory() {
+        use crate::plugins::note::save_note_image_asset_in_dir_at;
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("writer-integration-editor");
+        PasteInputBuilder::default()
+            .native("ignored")
+            .begin(&ctx, id);
+        store_cursor(&ctx, id, 0, 0);
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note(""));
+        panel.view_mode = NoteViewMode::Edit;
+        let temp = tempdir().unwrap();
+        let assets = temp.path().join("assets");
+        let timestamp = Local
+            .with_ymd_and_hms(2026, 8, 26, 1, 2, 3)
+            .single()
+            .unwrap()
+            + chrono::Duration::milliseconds(4);
+        let outcome = panel.intercept_clipboard_image_paste_with(
+            &ctx,
+            &mut app,
+            id,
+            || {
+                Ok::<_, String>(Some(ClipboardRgbaData {
+                    width: 2,
+                    height: 1,
+                    bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                }))
+            },
+            |image| save_note_image_asset_in_dir_at(image, &assets, timestamp),
+        );
+        assert_eq!(outcome, ClipboardImagePasteOutcome::Handled);
+        let filename = "note-image-20260826-010203.004.png";
+        assert_eq!(panel.note.content, note_image_markdown(filename));
+        let decoded = image::open(assets.join(filename)).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(fs::read_dir(&assets).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("staging")
+        }));
+        let _ = ctx.end_frame();
     }
 
     #[test]
