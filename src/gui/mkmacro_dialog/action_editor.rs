@@ -2417,6 +2417,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut pick_request = None;
     let mut image_request = None;
     let mut condition_image_request = None;
+    // Execute after egui releases the mutable draft borrow held by `step`.
+    let mut region_preview_request = None;
     let image_assets = d
         .selected_macro()
         .map(|m| m.image_assets.clone())
@@ -2447,8 +2449,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         R::RefreshMonitors => region_state.refresh_monitors(),
                         R::IdentifyMonitors => {},
                         R::PreviewRegion => {
-                            let region = region_state.selected_region();
-                            state.preview_region(region);
+                            region_preview_request = Some(region_state.selected_region());
                         }
                     }
                 }
@@ -2463,8 +2464,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     Some(SelectRegion) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::VisualRegion),
                     Some(PreviewRegion) | Some(HighlightMonitor) | Some(HighlightWindow { .. }) => {
-                        let region = state.image_search.as_ref().unwrap().selected_region();
-                        state.preview_region(region);
+                        region_preview_request =
+                            Some(state.image_search.as_ref().unwrap().selected_region());
                     }
                     Some(IdentifyMonitors) => {
                         let image = state.image_search.as_mut().unwrap();
@@ -2574,6 +2575,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             });
           });
         });
+    if let Some(region) = region_preview_request {
+        d.action_editor.preview_region(region);
+    }
     if (workflow_active || importing) && image_request.is_some() {
         d.action_editor.capture_message = Some(
             if importing {
@@ -2610,7 +2614,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             d.action_editor.capture_message = Some(format!("Reference image: {error:#}"));
         }
     }
-    if let Some(request) = condition_image_request
+    if let Some(ref request) = condition_image_request
         && let Some(purpose) = request.operation.rectangle_purpose()
     {
         let macro_id = d.selected_macro_id.unwrap_or(0);
@@ -2618,7 +2622,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             d.action_editor.capture_message =
                 Some("Finish or cancel the active authoring operation first".into());
         } else {
-            let destination = d.action_editor.condition_destination(macro_id, request);
+            let destination = d
+                .action_editor
+                .condition_destination(macro_id, request.clone());
             d.action_editor.pending_condition_rectangle = Some(destination);
             if let Err(error) = d
                 .action_editor
@@ -2629,7 +2635,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
         }
     }
-    if let Some(request) = condition_image_request
+    if let Some(ref request) = condition_image_request
         && matches!(
             request.operation,
             super::condition_editor::ConditionImageOperation::PreviewRectangle
