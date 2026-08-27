@@ -359,6 +359,65 @@ fn deleting_last_macro_clears_editor_requests_and_persists_empty_document() {
     let (reopened, _) = MkMacroStore::open(dir.path()).unwrap();
     assert!(reopened.snapshot().macros.is_empty());
 }
+
+#[test]
+fn duplicate_save_reload_keeps_independent_notification_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let store = Arc::new(store);
+    let mut dialog = MkMacroDialog::new(Arc::clone(&store));
+    dialog.create_macro();
+    insert(
+        &mut dialog,
+        MkAction::Notify(MkNotifyPayload {
+            title: "Original".into(),
+            description: "${files_copied} to ${destination}".into(),
+            kind: MkNotificationKind::Warning,
+            duration: MkNotificationDuration::Long,
+            show_symbol: false,
+        }),
+    );
+    insert(
+        &mut dialog,
+        MkAction::PlaySound(MkPlaySoundPayload {
+            sound: "ReminderStart.wav".into(),
+        }),
+    );
+    let original_id = dialog.selected_macro_id.unwrap();
+    dialog.duplicate_selected_macro();
+    let duplicate_id = dialog.selected_macro_id.unwrap();
+    if let MkAction::Notify(payload) = &mut dialog.selected_macro_mut().unwrap().steps[0].action {
+        payload.title = "Duplicate".into();
+    } else {
+        panic!("notify payload dropped")
+    }
+    dialog.save().unwrap();
+    drop(dialog);
+    let (reopened, _) = MkMacroStore::open(dir.path()).unwrap();
+    let document = reopened.snapshot();
+    let original = document
+        .macros
+        .iter()
+        .find(|m| m.id == original_id)
+        .unwrap();
+    let duplicate = document
+        .macros
+        .iter()
+        .find(|m| m.id == duplicate_id)
+        .unwrap();
+    assert!(
+        matches!(&original.steps[0].action, MkAction::Notify(p) if p.title == "Original" && p.kind == MkNotificationKind::Warning && p.duration == MkNotificationDuration::Long && !p.show_symbol)
+    );
+    assert!(
+        matches!(&duplicate.steps[0].action, MkAction::Notify(p) if p.title == "Duplicate" && p.description == "${files_copied} to ${destination}")
+    );
+    assert!(
+        matches!(&original.steps[1].action, MkAction::PlaySound(p) if p.sound == "ReminderStart.wav")
+    );
+    assert!(
+        matches!(&duplicate.steps[1].action, MkAction::PlaySound(p) if p.sound == "ReminderStart.wav")
+    );
+}
 use std::{
     sync::Arc,
     thread,

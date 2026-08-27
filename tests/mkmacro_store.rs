@@ -223,6 +223,100 @@ fn schema_seven_new_actions_survive_store_round_trips() {
     drop(store);
     let (reloaded, _) = MkMacroStore::open(dir.path()).unwrap();
     assert_eq!(*reloaded.snapshot(), first);
+
+    let structural = serde_json::to_value(reloaded.snapshot().as_ref()).unwrap();
+    assert_eq!(structural["schema_version"], 7);
+    assert_eq!(
+        structural["macros"][0]["steps"][0]["action"]["type"],
+        "notify"
+    );
+    assert_eq!(
+        structural["macros"][0]["steps"][0]["action"]["data"]["kind"],
+        "success"
+    );
+    assert_eq!(
+        structural["macros"][0]["steps"][0]["action"]["data"]["duration"],
+        "long"
+    );
+    assert_eq!(
+        structural["macros"][0]["steps"][1]["action"]["type"],
+        "play_sound"
+    );
+    assert_eq!(
+        structural["macros"][0]["steps"][1]["action"]["data"]["sound"],
+        "Alarm.wav"
+    );
+}
+
+#[test]
+fn schema_seven_notification_sequence_preserves_order_and_payloads() {
+    let dir = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let actions = vec![
+        MkAction::SetVariable {
+            name: "files_copied".into(),
+            value: MkValue::Number(42.0),
+        },
+        MkAction::SetVariable {
+            name: "destination".into(),
+            value: MkValue::String(r"D:\Backup".into()),
+        },
+        MkAction::Notify(MkNotifyPayload {
+            title: "Backup complete".into(),
+            description: r"Copied ${files_copied} files to ${destination}".into(),
+            kind: MkNotificationKind::Success,
+            duration: MkNotificationDuration::Long,
+            show_symbol: false,
+        }),
+        MkAction::PlaySound(MkPlaySoundPayload {
+            sound: "ReminderStart.wav".into(),
+        }),
+        MkAction::Text(MkTextPayload {
+            text: "observable".into(),
+            mode: MkTextMode::Type,
+        }),
+    ];
+    let steps = actions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, action)| MkStep {
+            id: i as u64 + 1,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        })
+        .collect();
+    store
+        .save(MkMacroDocument {
+            schema_version: 7,
+            settings: Default::default(),
+            macros: vec![MkMacro {
+                id: 77,
+                name: "backup".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps,
+                image_assets: vec![],
+            }],
+        })
+        .unwrap();
+    drop(store);
+    let (reopened, _) = MkMacroStore::open(dir.path()).unwrap();
+    let snapshot = reopened.snapshot();
+    assert_eq!(snapshot.schema_version, 7);
+    assert_eq!(
+        snapshot.macros[0]
+            .steps
+            .iter()
+            .map(|s| &s.action)
+            .collect::<Vec<_>>(),
+        actions.iter().collect::<Vec<_>>()
+    );
 }
 
 #[test]
