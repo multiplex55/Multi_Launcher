@@ -242,6 +242,7 @@ pub(crate) struct ServiceTestObserver {
     pub shutdowns: AtomicUsize,
     pub joins: AtomicUsize,
     pub worker_ids: Mutex<Vec<thread::ThreadId>>,
+    inputs: Mutex<Vec<OverlayInput>>,
     changed: Condvar,
 }
 
@@ -265,6 +266,54 @@ impl ServiceTestObserver {
             );
         }
     }
+
+    pub fn confirm_rectangle(&self, operation_id: OperationId, from: MkPoint, to: MkPoint) {
+        self.inputs.lock().unwrap().extend([
+            OverlayInput {
+                operation_id,
+                kind: OverlayInputKind::LeftPressed(from),
+            },
+            OverlayInput {
+                operation_id,
+                kind: OverlayInputKind::LeftReleased(to),
+            },
+        ]);
+    }
+
+    pub fn cancel_rectangle(&self, operation_id: OperationId) {
+        self.inputs.lock().unwrap().push(OverlayInput {
+            operation_id,
+            kind: OverlayInputKind::Escape,
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ServiceTestRenderer(pub Arc<ServiceTestObserver>);
+
+#[cfg(test)]
+impl OverlayRenderer for ServiceTestRenderer {
+    fn left_button_down(&mut self) -> Result<bool, VisualOverlayError> {
+        Ok(false)
+    }
+    fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
+        Ok(MkPoint { x: 0, y: 0 })
+    }
+    fn show(
+        &mut self,
+        _: OperationId,
+        _: &OverlayVisual,
+        _: bool,
+    ) -> Result<(), VisualOverlayError> {
+        Ok(())
+    }
+    fn repaint(&mut self, _: OperationId, _: &OverlayVisual) -> Result<(), VisualOverlayError> {
+        Ok(())
+    }
+    fn poll_input(&mut self) -> Result<Vec<OverlayInput>, VisualOverlayError> {
+        Ok(std::mem::take(&mut *self.0.inputs.lock().unwrap()))
+    }
+    fn close(&mut self) {}
 }
 
 impl NativeVisualOverlayService {
