@@ -2882,7 +2882,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::visual_overlay::{OperationId, VisualOverlayCommand, VisualOverlayEvent};
+    use super::super::visual_overlay::{
+        OperationId, RectanglePurpose, VisualOverlayCommand, VisualOverlayEvent,
+    };
     use super::*;
     use image::RgbaImage;
     use std::sync::atomic::Ordering;
@@ -3381,7 +3383,7 @@ mod tests {
             assert_eq!(operation.rectangle_purpose(), None);
         }
     }
-    use image::{GenericImageView, Rgba, RgbaImage};
+    use image::{GenericImageView, Rgba};
     use std::sync::mpsc;
 
     #[derive(Default)]
