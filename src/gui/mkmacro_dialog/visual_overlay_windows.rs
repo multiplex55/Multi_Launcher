@@ -1,6 +1,10 @@
 //! Win32 color-key overlay renderer.  There is deliberately one popup per
 //! physical monitor: a single virtual-desktop popup would cover monitor gaps.
 use super::*;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
 use windows::{
     Win32::{
         Foundation::{
@@ -19,8 +23,9 @@ use windows::{
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
-                HWND_TOPMOST, LWA_COLORKEY, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
-                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW,
+                GetWindowRect, HWND_TOPMOST, IsWindow, IsWindowVisible, LWA_COLORKEY, MSG,
+                PM_REMOVE, PeekMessageW, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
+                RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW,
                 SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                 TranslateMessage, WM_ERASEBKGND, WM_NCCREATE, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
                 WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
@@ -41,11 +46,15 @@ struct WindowPaintState {
     frame: Vec<OverlayFramePrimitive>,
     hint: Option<String>,
     solid: Option<COLORREF>,
+    operation_id: OperationId,
+    description: &'static str,
+    paint_count: AtomicUsize,
 }
 struct OverlayWindow {
     hwnd: HWND,
     // The pointee address stays stable while wndproc reads it through GWLP_USERDATA.
     state: Box<WindowPaintState>,
+    created_at: Instant,
 }
 
 pub(super) struct NativeOverlayRenderer {
@@ -95,6 +104,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             let mut ps = PAINTSTRUCT::default();
             let dc = unsafe { BeginPaint(hwnd, &mut ps) };
             unsafe { paint_frame(dc, &*state) };
+            let count = unsafe { &*state }
+                .paint_count
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            tracing::debug!(operation_id = unsafe { &*state }.operation_id, ?hwnd,
+                edge = unsafe { &*state }.description, rect = ?unsafe { &*state }.bounds,
+                paint_count = count, "painted overlay window");
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
             };
@@ -249,6 +265,7 @@ impl NativeOverlayRenderer {
         &mut self,
         module: windows::Win32::Foundation::HMODULE,
         class: PCWSTR,
+        operation_id: OperationId,
         visual: &OverlayVisual,
     ) -> Result<(), VisualOverlayError> {
         let physical = match displays() {
@@ -259,12 +276,18 @@ impl NativeOverlayRenderer {
             return self.fail("Rectangle picker cannot use the passive preview path");
         };
         for spec in plan {
-            let (bounds, hint, solid, failure, badge) = match spec {
-                PassiveWindowSpec::Edge { edge, rect } => (
+            let (bounds, target, hint, solid, description, badge) = match spec {
+                PassiveWindowSpec::Edge { edge, target, rect } => (
                     rect,
+                    target,
                     None,
                     Some(OUTLINE_COLOR),
-                    format!("Could not create {edge} preview edge window for target {rect:?}"),
+                    match edge {
+                        OutlineEdge::Top => "top",
+                        OutlineEdge::Bottom => "bottom",
+                        OutlineEdge::Left => "left",
+                        OutlineEdge::Right => "right",
+                    },
                     false,
                 ),
                 PassiveWindowSpec::Badge { monitor, index } => {
@@ -276,13 +299,7 @@ impl NativeOverlayRenderer {
                         width,
                         42,
                     );
-                    (
-                        bounds,
-                        Some(text),
-                        None,
-                        format!("Could not create monitor-identification badge for {monitor:?}"),
-                        true,
-                    )
+                    (bounds, monitor, Some(text), None, "monitor badge", true)
                 }
             };
             let mut state = Box::new(WindowPaintState {
@@ -290,7 +307,12 @@ impl NativeOverlayRenderer {
                 frame: vec![],
                 hint,
                 solid,
+                operation_id,
+                description,
+                paint_count: AtomicUsize::new(0),
             });
+            let width = match i32::try_from(bounds.width) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} width exceeds Win32 range")) };
+            let height = match i32::try_from(bounds.height) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} height exceeds Win32 range")) };
             let hwnd = match unsafe {
                 CreateWindowExW(
                     WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -299,8 +321,8 @@ impl NativeOverlayRenderer {
                     WS_POPUP,
                     bounds.x,
                     bounds.y,
-                    bounds.width as i32,
-                    bounds.height as i32,
+                    width,
+                    height,
                     None,
                     None,
                     module,
@@ -308,10 +330,14 @@ impl NativeOverlayRenderer {
                 )
             } {
                 Ok(hwnd) => hwnd,
-                Err(e) => return self.fail(format!("{failure}: {e}")),
+                Err(e) => return self.fail(format!("operation {operation_id} visual {visual:?} target {target:?} {description} badge={badge} requested {bounds:?}: CreateWindowExW failed: {e}; GetLastError={}", unsafe { GetLastError().0 })),
             };
-            let window = OverlayWindow { hwnd, state };
-            tracing::debug!(?hwnd, ?bounds, badge, "created passive overlay window");
+            let window = OverlayWindow {
+                hwnd,
+                state,
+                created_at: Instant::now(),
+            };
+            tracing::debug!(operation_id, visual=?visual, target=?target, requested=?bounds, ?hwnd, edge=description, badge, "created passive overlay window");
             if badge {
                 self.passive_badges.push(window);
             } else {
@@ -323,8 +349,8 @@ impl NativeOverlayRenderer {
                     HWND_TOPMOST,
                     bounds.x,
                     bounds.y,
-                    bounds.width as i32,
-                    bounds.height as i32,
+                    width,
+                    height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
             } {
@@ -333,16 +359,46 @@ impl NativeOverlayRenderer {
                 } else {
                     "passive preview edge"
                 };
-                return self.fail(format!("Could not position {what} at {bounds:?}: {e}"));
+                return self.fail(format!("operation {operation_id} visual {visual:?} target {target:?} {description} badge={badge} HWND={hwnd:?} requested={bounds:?}: SetWindowPos failed ({what}): {e}; GetLastError={}", unsafe { GetLastError().0 }));
             }
-            if !unsafe { InvalidateRect(hwnd, None, false) }.as_bool()
-                || !unsafe { UpdateWindow(hwnd) }.as_bool()
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            if !unsafe { InvalidateRect(hwnd, None, false) }.as_bool() {
+                return self.fail(format!("operation {operation_id} visual {visual:?} {description} HWND={hwnd:?} requested={bounds:?}: InvalidateRect failed; GetLastError={}", unsafe { GetLastError().0 }));
+            }
+            if !unsafe { UpdateWindow(hwnd) }.as_bool()
+                && !unsafe { RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW) }
+                    .as_bool()
             {
-                return self.fail(format!(
-                    "Could not perform initial painting for passive preview at {bounds:?}: {}",
-                    unsafe { GetLastError().0 }
-                ));
+                return self.fail(format!("operation {operation_id} visual {visual:?} {description} HWND={hwnd:?} requested={bounds:?}: synchronous UpdateWindow/RedrawWindow failed; GetLastError={}", unsafe { GetLastError().0 }));
             }
+            if !unsafe { IsWindow(hwnd) }.as_bool() {
+                return self.fail(format!("operation {operation_id} visual {visual:?} {description} badge={badge} HWND={hwnd:?} requested={bounds:?}: IsWindow invariant failed; GetLastError={}", unsafe { GetLastError().0 }));
+            }
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                return self.fail(format!("operation {operation_id} visual {visual:?} {description} badge={badge} HWND={hwnd:?} requested={bounds:?}: IsWindowVisible invariant failed; GetLastError={}", unsafe { GetLastError().0 }));
+            }
+            let mut actual = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut actual) }.is_err() {
+                return self.fail(format!("operation {operation_id} visual {visual:?} {description} badge={badge} HWND={hwnd:?} requested={bounds:?}: GetWindowRect failed; GetLastError={}", unsafe { GetLastError().0 }));
+            }
+            let requested = (
+                i64::from(bounds.x),
+                i64::from(bounds.y),
+                i64::from(bounds.x) + i64::from(bounds.width),
+                i64::from(bounds.y) + i64::from(bounds.height),
+            );
+            let got = (
+                i64::from(actual.left),
+                i64::from(actual.top),
+                i64::from(actual.right),
+                i64::from(actual.bottom),
+            );
+            if requested != got {
+                return self.fail(format!("operation {operation_id} visual {visual:?} target={target:?} {description} badge={badge} HWND={hwnd:?}: GetWindowRect mismatch; requested={requested:?}, actual={got:?}"));
+            }
+            tracing::debug!(operation_id, visual=?visual, target=?target, requested=?bounds, actual=?got, ?hwnd, edge=description, badge, "verified passive overlay window visible");
         }
         Ok(())
     }
@@ -391,9 +447,9 @@ impl OverlayRenderer for NativeOverlayRenderer {
             }));
         }
         if visual.passive() {
-            self.show_passive(module, class, visual)?;
             self.operation_id = Some(operation_id);
             self.visual = Some(visual.clone());
+            self.show_passive(module, class, operation_id, visual)?;
             return Ok(());
         }
         let monitor_bounds = match visual {
@@ -422,6 +478,9 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 frame: frame.clone(),
                 hint: None,
                 solid: None,
+                operation_id,
+                description: "interactive",
+                paint_count: AtomicUsize::new(0),
             });
             let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             if overlay_is_mouse_transparent(visual) {
@@ -447,7 +506,11 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 Ok(hwnd) => hwnd,
                 Err(e) => return self.fail(format!("overlay window creation failed: {e}")),
             };
-            self.windows.push(OverlayWindow { hwnd, state });
+            self.windows.push(OverlayWindow {
+                hwnd,
+                state,
+                created_at: Instant::now(),
+            });
             if let Err(e) =
                 unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
             {
@@ -490,6 +553,9 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 frame: vec![],
                 hint: Some(tooltip.text.clone()),
                 solid: None,
+                operation_id,
+                description: "tooltip",
+                paint_count: AtomicUsize::new(0),
             });
             let hwnd = unsafe {
                 CreateWindowExW(
@@ -508,7 +574,11 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 )
             }
             .map_err(|e| platform(format!("tooltip window creation failed: {e}")))?;
-            self.tooltip = Some(OverlayWindow { hwnd, state });
+            self.tooltip = Some(OverlayWindow {
+                hwnd,
+                state,
+                created_at: Instant::now(),
+            });
             unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
                 .map_err(|e| platform(format!("tooltip layered configuration failed: {e}")))?;
             unsafe {
@@ -663,6 +733,11 @@ impl OverlayRenderer for NativeOverlayRenderer {
             .drain(..)
             .chain(self.passive_badges.drain(..))
         {
+            let destroyed_at = Instant::now();
+            tracing::debug!(operation_id=?self.operation_id, hwnd=?window.hwnd,
+                edge=window.state.description, created_at=?window.created_at,
+                destruction_time=?destroyed_at, lifetime=?destroyed_at.duration_since(window.created_at),
+                paint_count=window.state.paint_count.load(Ordering::Relaxed), "destroying passive overlay window");
             unsafe {
                 SetWindowLongPtrW(window.hwnd, GWLP_USERDATA, 0);
                 let _ = DestroyWindow(window.hwnd);
