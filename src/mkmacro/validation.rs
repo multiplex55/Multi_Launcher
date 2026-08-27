@@ -577,27 +577,21 @@ pub fn validate_document_with_context(
                             "Visual change threshold must be greater than 0 and at most 100 percent",
                         );
                     }
-                    if p.timeout_ms == 0 {
-                        push(
-                            &mut out,
-                            m.id,
-                            sid,
-                            "invalid_visual_change_timeout",
-                            "Visual change timeout must be greater than zero",
-                        );
-                    }
-                    if p.poll_interval_ms == 0 || p.poll_interval_ms > p.timeout_ms {
+                    if p.poll_interval_ms == 0
+                        || (p.timeout_ms > 0 && p.poll_interval_ms > p.timeout_ms)
+                    {
                         push(
                             &mut out,
                             m.id,
                             sid,
                             "invalid_visual_change_poll",
-                            "Visual change poll interval must be greater than zero and no longer than the timeout",
+                            "Visual change poll interval must be greater than zero and no longer than a finite timeout",
                         );
                     }
                     if p.consecutive_changed_frames.unwrap_or(1) == 0
-                        || u64::from(p.consecutive_changed_frames.unwrap_or(1))
-                            > p.timeout_ms / p.poll_interval_ms.max(1) + 1
+                        || (p.timeout_ms > 0
+                            && u64::from(p.consecutive_changed_frames.unwrap_or(1))
+                                > p.timeout_ms / p.poll_interval_ms.max(1) + 1)
                     {
                         push(
                             &mut out,
@@ -677,14 +671,109 @@ pub fn validate_document_with_context(
     out
 }
 fn wait(w: &MkWaitOptions, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
-    if w.timeout_ms == 0 || w.poll_interval_ms == 0 || w.poll_interval_ms > w.timeout_ms {
+    if w.poll_interval_ms == 0 || (w.timeout_ms > 0 && w.poll_interval_ms > w.timeout_ms) {
         push(
             o,
             m,
             s,
             "invalid_wait",
-            "Timeout and polling interval must be positive, and polling cannot exceed timeout",
+            "Polling interval must be positive and cannot exceed a finite timeout",
         )
+    }
+}
+
+#[cfg(test)]
+mod optional_wait_validation_tests {
+    use super::*;
+
+    fn wait_codes(timeout_ms: u64, poll_interval_ms: u64) -> Vec<&'static str> {
+        let mut diagnostics = Vec::new();
+        wait(
+            &MkWaitOptions {
+                timeout_ms,
+                poll_interval_ms,
+            },
+            1,
+            Some(1),
+            &mut diagnostics,
+        );
+        diagnostics.into_iter().map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn optional_timeout_wait_rules() {
+        assert!(wait_codes(0, 1).is_empty());
+        assert!(wait_codes(0, u64::MAX).is_empty());
+        assert_eq!(wait_codes(0, 0), ["invalid_wait"]);
+        assert_eq!(wait_codes(10, 0), ["invalid_wait"]);
+        assert_eq!(wait_codes(10, 11), ["invalid_wait"]);
+        assert!(wait_codes(10, 10).is_empty());
+    }
+
+    fn visual_codes(payload: WaitForVisualChange) -> Vec<&'static str> {
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                id: 1,
+                name: "visual wait".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: MkPlayback::default(),
+                steps: vec![MkStep {
+                    id: 1,
+                    enabled: true,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: MkErrorPolicy::default(),
+                    action: MkAction::WaitForVisualChange(payload),
+                }],
+                image_assets: vec![],
+            }],
+            ..MkMacroDocument::default()
+        };
+        validate_document(&document, None)
+            .into_iter()
+            .map(|d| d.code)
+            .collect()
+    }
+
+    #[test]
+    fn visual_settling_is_only_bounded_by_finite_timeouts() {
+        let indefinite = WaitForVisualChange {
+            timeout_ms: 0,
+            poll_interval_ms: u64::MAX,
+            consecutive_changed_frames: Some(u32::MAX),
+            ..WaitForVisualChange::default()
+        };
+        assert!(visual_codes(indefinite).is_empty());
+
+        let finite = WaitForVisualChange {
+            timeout_ms: 100,
+            poll_interval_ms: 50,
+            consecutive_changed_frames: Some(4),
+            ..WaitForVisualChange::default()
+        };
+        assert!(visual_codes(finite).contains(&"impossible_visual_change_settling"));
+
+        for payload in [
+            WaitForVisualChange {
+                timeout_ms: 0,
+                poll_interval_ms: 0,
+                ..WaitForVisualChange::default()
+            },
+            WaitForVisualChange {
+                timeout_ms: 0,
+                consecutive_changed_frames: Some(0),
+                ..WaitForVisualChange::default()
+            },
+            WaitForVisualChange {
+                timeout_ms: 0,
+                change_threshold_percent: f64::NAN,
+                ..WaitForVisualChange::default()
+            },
+        ] {
+            assert!(!visual_codes(payload).is_empty());
+        }
     }
 }
 fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {

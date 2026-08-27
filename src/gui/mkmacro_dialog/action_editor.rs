@@ -1850,13 +1850,19 @@ fn action_ui(
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
             if let Some(w) = &mut p.wait {
-                ui.horizontal(|ui| {
-                    ui.label("Timeout (ms)");
-                    ui.add(egui::DragValue::new(&mut w.timeout_ms).clamp_range(0..=86_400_000));
-                    ui.label("Poll (ms)");
-                    ui.add(
-                        egui::DragValue::new(&mut w.poll_interval_ms).clamp_range(1..=86_400_000),
-                    );
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Timeout (ms)");
+                        ui.add(egui::DragValue::new(&mut w.timeout_ms).clamp_range(0..=86_400_000));
+                    });
+                    ui.small("0 = wait forever");
+                    ui.horizontal(|ui| {
+                        ui.label("Poll (ms)");
+                        ui.add(
+                            egui::DragValue::new(&mut w.poll_interval_ms)
+                                .clamp_range(1..=86_400_000),
+                        );
+                    });
                 });
             }
         }
@@ -1991,13 +1997,19 @@ fn action_ui(
                     }
                 }
             }
-            ui.horizontal(|ui| {
-                ui.label("Timeout (ms)");
-                ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
-                ui.label("Poll (ms)");
-                ui.add(
-                    egui::DragValue::new(&mut wait.poll_interval_ms).clamp_range(1..=86_400_000),
-                );
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Timeout (ms)");
+                    ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
+                });
+                ui.small("0 = wait forever");
+                ui.horizontal(|ui| {
+                    ui.label("Poll (ms)");
+                    ui.add(
+                        egui::DragValue::new(&mut wait.poll_interval_ms)
+                            .clamp_range(1..=86_400_000),
+                    );
+                });
             });
         }
         MkAction::LauncherCommand { command, args } => {
@@ -2038,11 +2050,18 @@ fn action_ui(
                     p.per_pixel_tolerance = None;
                 }
             });
-            ui.horizontal(|ui| {
-                ui.label("Timeout (ms)");
-                ui.add(egui::DragValue::new(&mut p.timeout_ms).clamp_range(1..=86_400_000));
-                ui.label("Poll (ms)");
-                ui.add(egui::DragValue::new(&mut p.poll_interval_ms).clamp_range(1..=86_400_000));
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Timeout (ms)");
+                    ui.add(egui::DragValue::new(&mut p.timeout_ms).clamp_range(0..=86_400_000));
+                });
+                ui.small("0 = wait forever");
+                ui.horizontal(|ui| {
+                    ui.label("Poll (ms)");
+                    ui.add(
+                        egui::DragValue::new(&mut p.poll_interval_ms).clamp_range(1..=86_400_000),
+                    );
+                });
             });
             ui.horizontal(|ui| {
                 ui.label("Consecutive changed frames");
