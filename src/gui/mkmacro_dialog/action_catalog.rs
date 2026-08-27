@@ -8,6 +8,7 @@ pub enum ActionCategory {
     KeyboardText,
     Mouse,
     Timing,
+    Notifications,
     Windows,
     ProgramsLauncher,
     Logic,
@@ -21,6 +22,7 @@ impl ActionCategory {
             Self::KeyboardText => "Keyboard & Text",
             Self::Mouse => "Mouse",
             Self::Timing => "Timing",
+            Self::Notifications => "Notifications",
             Self::Windows => "Windows",
             Self::ProgramsLauncher => "Programs & Launcher",
             Self::Logic => "Logic",
@@ -43,6 +45,9 @@ pub const PALETTE_CATEGORY_ORDER: &[ActionCategory] = &[
     ActionCategory::KeyboardText,
     ActionCategory::Mouse,
     ActionCategory::Timing,
+    // Notifications are workflow actions, not screen-inspection actions. Keep
+    // their product position explicitly between Timing and Programs/Windows.
+    ActionCategory::Notifications,
     ActionCategory::Visual,
     ActionCategory::Windows,
     ActionCategory::ProgramsLauncher,
@@ -85,6 +90,8 @@ pub enum EditorKind {
     Repeat,
     Variable,
     PromptInput,
+    Notify,
+    PlaySound,
     General,
     DirectInsert,
 }
@@ -361,6 +368,22 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             &["wait"],
             Timing,
             MkAction::Delay { milliseconds: 1000 }
+        ),
+        d!(
+            Notifications,
+            "Notify",
+            "Display a silent Windows notification",
+            &["notification", "toast", "message", "alert"],
+            Notify,
+            MkAction::Notify(MkNotifyPayload::default())
+        ),
+        d!(
+            Notifications,
+            "Play Sound",
+            "Start sound playback and continue the macro",
+            &["audio", "sound", "alarm", "reminder"],
+            PlaySound,
+            MkAction::PlaySound(MkPlaySoundPayload::default())
         ),
         d!(
             Timing,
@@ -793,7 +816,8 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
             EditorKind::Keyboard
         }
         MkAction::Text(_) => EditorKind::Text,
-        MkAction::Notify(_) | MkAction::PlaySound(_) => EditorKind::General,
+        MkAction::Notify(_) => EditorKind::Notify,
+        MkAction::PlaySound(_) => EditorKind::PlaySound,
         MkAction::MouseMove(_) => EditorKind::MouseMove,
         MkAction::MouseDrag(_) => EditorKind::MouseDrag,
         MkAction::MouseClick(_) => EditorKind::MouseClick,
@@ -880,7 +904,9 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Condition
         | EditorKind::Repeat
         | EditorKind::Variable
-        | EditorKind::PromptInput => Some(EditorCompleteness {
+        | EditorKind::PromptInput
+        | EditorKind::Notify
+        | EditorKind::PlaySound => Some(EditorCompleteness {
             has_primary_control: true,
             intentionally_disabled: false,
             placeholder_copy: None,
@@ -983,6 +1009,8 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         | EditorKind::Repeat
         | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::PromptInput => Some(EditorContract::Configurable { field_count: 5 }),
+        EditorKind::Notify => Some(EditorContract::Configurable { field_count: 5 }),
+        EditorKind::PlaySound => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => {
             Some(EditorContract::Configurable { field_count: 2 })
         }
@@ -1048,7 +1076,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::KeyPress(_) => "Key Press",
         MkAction::Hotkey(_) => "Hotkey",
         MkAction::Text(_) => "Text",
-        MkAction::Notify(_) => "Show Notification",
+        MkAction::Notify(_) => "Notify",
         MkAction::PlaySound(_) => "Play Sound",
         MkAction::MouseMove(_) => "Mouse Move",
         MkAction::MouseDrag(_) => "Mouse Drag",
@@ -1149,14 +1177,15 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             },
             p.text.chars().count()
         ),
-        MkAction::Notify(p) => {
-            let symbol = if p.show_symbol {
-                format!("{} ", p.kind.symbol())
+        MkAction::Notify(p) => format!(
+            "{} · {}",
+            p.kind.label(),
+            if p.title.trim().is_empty() {
+                "Untitled notification"
             } else {
-                String::new()
-            };
-            format!("{symbol}{} · {:?} · {:?}", p.title, p.kind, p.duration)
-        }
+                &p.title
+            }
+        ),
         MkAction::PlaySound(p) => p.sound.clone(),
         MkAction::MouseClick(p) => format!(
             "{} ×{} @ {}",
@@ -1687,23 +1716,80 @@ mod paste_tests {
     }
 
     #[test]
-    fn notification_and_sound_actions_have_catalog_fallback_presentation() {
+    fn notification_and_sound_actions_have_dedicated_catalog_presentation() {
         let notify = MkAction::Notify(MkNotifyPayload {
             title: "Build complete".into(),
             kind: MkNotificationKind::Success,
             duration: MkNotificationDuration::Long,
             ..MkNotifyPayload::default()
         });
-        assert_eq!(editor_for_action(&notify), EditorKind::General);
-        assert_eq!(action_name(&notify), "Show Notification");
-        assert_eq!(action_details(&notify), "✓ Build complete · Success · Long");
+        assert_eq!(editor_for_action(&notify), EditorKind::Notify);
+        assert_eq!(action_name(&notify), "Notify");
+        assert_eq!(action_details(&notify), "Success · Build complete");
 
         let sound = MkAction::PlaySound(MkPlaySoundPayload {
             sound: "ReminderStart.wav".into(),
         });
-        assert_eq!(editor_for_action(&sound), EditorKind::General);
+        assert_eq!(editor_for_action(&sound), EditorKind::PlaySound);
         assert_eq!(action_name(&sound), "Play Sound");
         assert_eq!(action_details(&sound), "ReminderStart.wav");
+    }
+
+    #[test]
+    fn notifications_category_and_descriptors_are_explicit_and_searchable() {
+        assert_eq!(
+            PALETTE_CATEGORY_ORDER
+                .iter()
+                .filter(|c| **c == ActionCategory::Notifications)
+                .count(),
+            1
+        );
+        let rows: Vec<_> = descriptors()
+            .into_iter()
+            .filter(|d| d.category == ActionCategory::Notifications)
+            .collect();
+        assert_eq!(
+            rows.iter().map(|d| d.name).collect::<Vec<_>>(),
+            ["Notify", "Play Sound"]
+        );
+        assert!(
+            matches!((rows[0].make_default)(), MkAction::Notify(p) if p == MkNotifyPayload::default())
+        );
+        assert!(
+            matches!((rows[1].make_default)(), MkAction::PlaySound(p) if p == MkPlaySoundPayload::default())
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|d| matches(d, "toast"))
+                .map(|d| d.name)
+                .collect::<Vec<_>>(),
+            ["Notify"]
+        );
+        // Category labels are intentionally searchable, so "notification"
+        // returns every action in Notifications. Still assert that the Notify
+        // descriptor requested by this search term is present.
+        let notification_matches = rows
+            .iter()
+            .filter(|d| matches(d, "notification"))
+            .map(|d| d.name)
+            .collect::<Vec<_>>();
+        assert_eq!(notification_matches, ["Notify", "Play Sound"]);
+        assert!(notification_matches.contains(&"Notify"));
+        assert_eq!(
+            rows.iter()
+                .filter(|d| matches(d, "audio"))
+                .map(|d| d.name)
+                .collect::<Vec<_>>(),
+            ["Play Sound"]
+        );
+        assert_eq!(
+            rows[0].runtime == RuntimeAvailability::Supported,
+            crate::mkmacro::executor::has_runtime_support(&(rows[0].make_default)())
+        );
+        assert_eq!(
+            rows[1].runtime == RuntimeAvailability::Supported,
+            crate::mkmacro::executor::has_runtime_support(&(rows[1].make_default)())
+        );
     }
 
     #[test]

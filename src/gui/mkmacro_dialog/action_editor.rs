@@ -9,6 +9,10 @@ use super::{
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
+use std::sync::Arc;
+
+type NotificationPreview = Arc<dyn Fn(&ResolvedNotification) -> Result<(), String> + Send + Sync>;
+type SoundPreview = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct ActionEditorState {
     pub draft: Option<MkStep>,
@@ -38,6 +42,30 @@ pub struct ActionEditorState {
     overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
     pending_visual_region: Option<PendingVisualRegionOperation>,
     picker: NativePositionPicker,
+    notification_preview: NotificationPreview,
+    sound_preview: SoundPreview,
+}
+
+#[derive(Clone)]
+enum PreviewRequest {
+    Notification(ResolvedNotification),
+    Sound(String),
+}
+
+fn production_notification_preview(notification: &ResolvedNotification) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::mkmacro::NotificationBackend;
+        crate::mkmacro::notifications::WindowsNotificationBackend::new()
+            .notify(notification)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = notification;
+        crate::mkmacro::notifications::initialize_desktop_notifications()
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,6 +291,8 @@ impl ActionEditorState {
             overlay_diagnostic: None,
             pending_visual_region: None,
             picker: Default::default(),
+            notification_preview: Arc::new(production_notification_preview),
+            sound_preview: Arc::new(crate::sound::play_sound),
         }
     }
     fn cancel_owned_passive_overlay(&mut self) {
@@ -1504,18 +1534,22 @@ fn action_ui(
     step: &mut MkStep,
     capture: &mut bool,
     image_assets: &[MkImageAsset],
+    draft_generation: u64,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
     Option<super::launcher_action_picker::PickerPurpose>,
     Option<ImageAuthoringRequest>,
     Option<super::condition_editor::ConditionImageRequest>,
+    Option<PreviewRequest>,
 ) {
     let mut pick = None;
     let mut window_pick = None;
     let mut launcher_pick = None;
     let image_request = None;
     let mut condition_image_request = None;
+    let mut preview_request = None;
+    let draft_id = step.id;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
@@ -1544,6 +1578,73 @@ fn action_ui(
             });
             if p.mode == MkTextMode::Paste {
                 ui.small("Temporarily replaces clipboard text during playback and attempts to restore it. Non-text clipboard contents cannot be preserved.");
+            }
+        }
+        MkAction::Notify(p) => {
+            ui.heading("Notify");
+            ui.label("Title");
+            ui.text_edit_singleline(&mut p.title);
+            if p.title.trim().is_empty() {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "Notification title cannot be empty",
+                );
+            }
+            ui.label("Description");
+            ui.add(egui::TextEdit::multiline(&mut p.description).desired_rows(4));
+            egui::ComboBox::from_id_source(("notify_kind", draft_id, draft_generation))
+                .selected_text(p.kind.label())
+                .show_ui(ui, |ui| {
+                    for (kind, label) in [
+                        (MkNotificationKind::Information, "Information"),
+                        (MkNotificationKind::Success, "Success"),
+                        (MkNotificationKind::Warning, "Warning"),
+                        (MkNotificationKind::Error, "Error"),
+                    ] {
+                        ui.selectable_value(&mut p.kind, kind, label);
+                    }
+                });
+            egui::ComboBox::from_id_source(("notify_duration", draft_id, draft_generation))
+                .selected_text(match p.duration {
+                    MkNotificationDuration::Short => "Short",
+                    MkNotificationDuration::Long => "Long",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut p.duration, MkNotificationDuration::Short, "Short");
+                    ui.selectable_value(&mut p.duration, MkNotificationDuration::Long, "Long");
+                });
+            ui.checkbox(&mut p.show_symbol, "Show symbol");
+            if ui.button("Preview Notification").clicked() {
+                preview_request = Some(PreviewRequest::Notification(ResolvedNotification {
+                    title: p.title.clone(),
+                    description: p.description.clone(),
+                    kind: p.kind,
+                    duration: p.duration,
+                    show_symbol: p.show_symbol,
+                }));
+            }
+        }
+        MkAction::PlaySound(p) => {
+            ui.heading("Play Sound");
+            egui::ComboBox::from_id_source(("play_sound", draft_id, draft_generation))
+                .selected_text(&p.sound)
+                .show_ui(ui, |ui| {
+                    for name in crate::sound::SOUND_NAMES
+                        .iter()
+                        .copied()
+                        .filter(|name| *name != "None")
+                    {
+                        ui.selectable_value(&mut p.sound, name.to_owned(), name);
+                    }
+                });
+            if !play_sound_is_supported(&p.sound) {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Unsupported sound: {}", p.sound),
+                );
+            }
+            if ui.button("Preview Sound").clicked() && play_sound_is_supported(&p.sound) {
+                preview_request = Some(PreviewRequest::Sound(p.sound.clone()));
             }
         }
         MkAction::MouseMove(p) => {
@@ -2245,7 +2346,21 @@ fn action_ui(
         launcher_pick,
         image_request,
         condition_image_request,
+        preview_request,
     )
+}
+
+fn play_sound_is_supported(sound: &str) -> bool {
+    sound != "None" && crate::sound::SOUND_NAMES.contains(&sound)
+}
+
+fn dispatch_preview(state: &mut ActionEditorState, request: PreviewRequest) {
+    match request {
+        PreviewRequest::Notification(notification) => {
+            state.capture_message = (state.notification_preview)(&notification).err();
+        }
+        PreviewRequest::Sound(sound) => (state.sound_preview)(&sound),
+    }
 }
 
 fn apply_scroll_direction(
@@ -2570,6 +2685,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut image_request = None;
     let mut wait_visual_region_request = false;
     let mut condition_image_request = None;
+    let mut preview_request = None;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
     let image_assets = d
@@ -2584,13 +2700,17 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .show(ctx, |ui| {
           egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let state = &mut d.action_editor;
+            let draft_generation = state.draft_generation;
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
-            let (position, mut window, launcher, image, condition_image)=action_ui(ui, step, &mut state.capture_keys, &image_assets);
+            let action_before = step.action.clone();
+            let (position, mut window, launcher, image, condition_image, preview)=action_ui(ui, step, &mut state.capture_keys, &image_assets, draft_generation);
+            if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
             image_request = image;
             condition_image_request = condition_image;
+            preview_request = preview;
             if matches!(step.action, MkAction::WaitForVisualChange(_)) {
                 ui.separator(); ui.heading("Region");
                 let region_state = state.image_search.as_mut().expect("visual change requires region state");
@@ -2720,6 +2840,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             ui.separator();
             ui.horizontal(|ui| {
                 let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
+                    && !matches!(&step.action, MkAction::Notify(p) if p.title.trim().is_empty())
+                    && !matches!(&step.action, MkAction::PlaySound(p) if !play_sound_is_supported(&p.sound))
                     && image_output_names_valid(&step.action)
                     && !matches!(
                         super::action_catalog::draft_validation_contract(&step.action),
@@ -2731,6 +2853,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             });
           });
         });
+    if let Some(request) = preview_request {
+        dispatch_preview(&mut d.action_editor, request);
+    }
     if let Some(region) = region_preview_request {
         d.action_editor.preview_region(region);
     }

@@ -388,6 +388,15 @@ pub enum MkNotificationKind {
     Error,
 }
 impl MkNotificationKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Information => "Information",
+            Self::Success => "Success",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+        }
+    }
+
     pub fn symbol(self) -> &'static str {
         match self {
             Self::Information => "ℹ",
