@@ -28,6 +28,11 @@ siphasher = "0.3"
 urlencoding = "2"
 url = "2"
 windows = { version = "0.58", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Foundation",
+    "Win32_Foundation",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
