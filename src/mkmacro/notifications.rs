@@ -42,8 +42,9 @@ mod platform {
         Win32::{
             System::Com::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-                IPersistFile,
+                CoUninitialize, IPersistFile,
             },
+            System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
             UI::Shell::{IShellLinkW, ShellLink},
         },
         core::{HSTRING, Interface, PCWSTR},
@@ -64,6 +65,13 @@ mod platform {
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
             .ok()
             .map_err(|e| diagnostic("COM initialization", e))?;
+        struct ComGuard;
+        impl Drop for ComGuard {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        let _com = ComGuard;
         let executable = std::env::current_exe().map_err(|e| diagnostic("executable path", e))?;
         let programs = dirs_next::data_dir()
             .ok_or_else(|| {
@@ -124,7 +132,18 @@ mod platform {
     impl NotificationBackend for WindowsNotificationBackend {
         fn notify(&self, notification: &ResolvedNotification) -> ExecResult {
             self.initialization.clone()?;
-            ::windows::core::initialize_sta().map_err(|e| diagnostic("WinRT initialization", e))?;
+            // WinRT initialization is per-thread. Balance every successful
+            // initialization (including S_FALSE/already initialized) after the
+            // synchronous Show call has returned.
+            struct WinRtGuard;
+            impl Drop for WinRtGuard {
+                fn drop(&mut self) {
+                    unsafe { RoUninitialize() };
+                }
+            }
+            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
+                .map_err(|e| diagnostic("WinRT initialization", e))?;
+            let _winrt = WinRtGuard;
             let document = XmlDocument::new().map_err(|e| diagnostic("XML creation", e))?;
             document
                 .LoadXml(&HSTRING::from(toast_xml(notification)))
