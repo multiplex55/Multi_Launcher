@@ -36,6 +36,23 @@ impl ActionCategory {
         !matches!(self, Self::UiAutomation)
     }
 }
+
+/// Product-defined order for action-palette headings. This is deliberately
+/// independent of the order in which descriptors are declared.
+pub const PALETTE_CATEGORY_ORDER: &[ActionCategory] = &[
+    ActionCategory::KeyboardText,
+    ActionCategory::Mouse,
+    ActionCategory::Timing,
+    ActionCategory::Visual,
+    ActionCategory::Windows,
+    ActionCategory::ProgramsLauncher,
+    ActionCategory::Variables,
+    ActionCategory::Logic,
+    // Retain disabled categories in the model so enabling one is an explicit,
+    // ordering-aware product decision. Availability still controls rendering.
+    ActionCategory::UiAutomation,
+];
+
 pub struct ActionDescriptor {
     pub category: ActionCategory,
     pub availability: ActionAvailability,
@@ -985,6 +1002,36 @@ pub fn is_available_in_palette(descriptor: &ActionDescriptor) -> bool {
 pub fn visible_descriptors() -> impl Iterator<Item = ActionDescriptor> {
     descriptors().into_iter().filter(is_available_in_palette)
 }
+
+/// Builds the palette's filtered heading/row model without depending on egui.
+///
+/// Categories omitted from `PALETTE_CATEGORY_ORDER` are appended in enum order.
+/// That deterministic fallback prevents a newly enabled category from silently
+/// disappearing; the catalog coverage test additionally requires product code
+/// to assign every visible category an intentional position in the constant.
+pub fn group_visible_descriptors(query: &str) -> Vec<(ActionCategory, Vec<ActionDescriptor>)> {
+    let mut groups: Vec<(ActionCategory, Vec<ActionDescriptor>)> = Vec::new();
+
+    for descriptor in visible_descriptors().filter(|descriptor| matches(descriptor, query)) {
+        if let Some((_, rows)) = groups
+            .iter_mut()
+            .find(|(category, _)| *category == descriptor.category)
+        {
+            rows.push(descriptor);
+        } else {
+            groups.push((descriptor.category, vec![descriptor]));
+        }
+    }
+
+    groups.sort_by_key(|(category, _)| {
+        PALETTE_CATEGORY_ORDER
+            .iter()
+            .position(|ordered| ordered == category)
+            .map_or((1, *category as usize), |position| (0, position))
+    });
+    groups
+}
+
 pub fn matches(d: &ActionDescriptor, q: &str) -> bool {
     let q = q.to_lowercase();
     q.is_empty()
@@ -1434,6 +1481,163 @@ fn format_image_details(
         }
     }
     parts.join(" · ")
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn source_visual_descriptors_are_not_contiguous() {
+        let categories: Vec<_> = descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.category)
+            .collect();
+        let visual_indices: Vec<_> = categories
+            .iter()
+            .enumerate()
+            .filter_map(|(index, category)| (*category == ActionCategory::Visual).then_some(index))
+            .collect();
+
+        assert!(visual_indices.windows(2).any(|indices| {
+            categories[indices[0] + 1..indices[1]]
+                .iter()
+                .any(|category| *category != ActionCategory::Visual)
+        }));
+    }
+
+    #[test]
+    fn empty_query_has_one_complete_visual_group() {
+        let groups = group_visible_descriptors("");
+        let visual_groups: Vec<_> = groups
+            .iter()
+            .filter(|(category, _)| *category == ActionCategory::Visual)
+            .collect();
+        assert_eq!(visual_groups.len(), 1);
+
+        let expected: Vec<_> = visible_descriptors()
+            .filter(|descriptor| descriptor.category == ActionCategory::Visual)
+            .map(|descriptor| descriptor.name)
+            .collect();
+        let actual: Vec<_> = visual_groups[0]
+            .1
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn image_search_emits_only_nonempty_matching_groups() {
+        let groups = group_visible_descriptors("ImAgE");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, ActionCategory::Visual);
+        assert!(!groups[0].1.is_empty());
+        assert!(
+            groups[0]
+                .1
+                .iter()
+                .all(|descriptor| matches(descriptor, "image"))
+        );
+        for expected in [
+            "Wait for Image",
+            "Wait for Image to Disappear",
+            "Find Image",
+            "Click Image",
+        ] {
+            assert!(
+                groups[0]
+                    .1
+                    .iter()
+                    .any(|descriptor| descriptor.name == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn search_preserves_description_category_and_keyword_fields() {
+        let description = group_visible_descriptors("percentage of PIXELS");
+        assert!(description.iter().any(|(_, rows)| {
+            rows.iter()
+                .any(|descriptor| descriptor.name == "Wait for Visual Change")
+        }));
+
+        let category = group_visible_descriptors("keyboard & TEXT");
+        assert!(!category.is_empty());
+        assert!(category.iter().all(|(kind, rows)| {
+            *kind == ActionCategory::KeyboardText
+                && rows
+                    .iter()
+                    .all(|descriptor| matches(descriptor, "keyboard & text"))
+        }));
+
+        let keyword = group_visible_descriptors("CLIPBOARD");
+        assert!(keyword.iter().any(|(_, rows)| {
+            rows.iter()
+                .any(|descriptor| descriptor.name == "Capture Screenshot")
+        }));
+    }
+
+    #[test]
+    fn groups_are_unique_nonempty_ordered_and_stable() {
+        let first = group_visible_descriptors("");
+        let second = group_visible_descriptors("");
+        let categories: Vec<_> = first.iter().map(|(category, _)| *category).collect();
+        let unique: BTreeSet<_> = categories.iter().copied().collect();
+
+        assert!(first.iter().all(|(_, rows)| !rows.is_empty()));
+        assert_eq!(unique.len(), categories.len());
+        let expected_order: Vec<_> = PALETTE_CATEGORY_ORDER
+            .iter()
+            .copied()
+            .filter(|category| categories.contains(category))
+            .collect();
+        assert_eq!(categories, expected_order);
+        assert_eq!(
+            first
+                .iter()
+                .map(|(category, rows)| (
+                    *category,
+                    rows.iter().map(|row| row.name).collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|(category, rows)| (
+                    *category,
+                    rows.iter().map(|row| row.name).collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn disabled_ui_automation_has_neither_rows_nor_heading() {
+        assert!(
+            descriptors()
+                .iter()
+                .any(|descriptor| descriptor.category == ActionCategory::UiAutomation)
+        );
+        assert!(
+            group_visible_descriptors("")
+                .iter()
+                .all(|(category, _)| *category != ActionCategory::UiAutomation)
+        );
+    }
+
+    #[test]
+    fn every_visible_category_has_an_explicit_product_position() {
+        let visible_categories: BTreeSet<_> = visible_descriptors()
+            .map(|descriptor| descriptor.category)
+            .collect();
+        for category in visible_categories {
+            assert!(
+                PALETTE_CATEGORY_ORDER.contains(&category),
+                "visible category {category:?} is missing from PALETTE_CATEGORY_ORDER"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1940,38 +2144,37 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
             egui::ScrollArea::vertical()
                 .max_height(430.0)
                 .show(ui, |ui| {
-                    let mut last = None;
                     let query = d.action_search.clone();
-                    for x in visible_descriptors().filter(|x| matches(x, &query)) {
-                        if last != Some(x.category) {
-                            ui.heading(x.category.label());
-                            last = Some(x.category)
-                        }
-                        let blocked = d.action_editor.draft.is_some();
-                        let action = (x.make_default)();
-                        let context_error = if matches!(x.editor, EditorKind::DirectInsert) {
-                            d.selected_macro().and_then(|m| {
-                                validate_direct_context(m, insertion_position(d), &action).err()
-                            })
-                        } else {
-                            None
-                        };
-                        let response = ui
-                            .add_enabled(
-                                !blocked && context_error.is_none(),
-                                egui::Button::new(x.name),
-                            )
-                            .on_hover_text(x.description);
-                        let response = if blocked {
-                            response
-                                .on_disabled_hover_text("Apply or cancel the current action first.")
-                        } else if let Some(reason) = context_error {
-                            response.on_disabled_hover_text(reason)
-                        } else {
-                            response
-                        };
-                        if response.clicked() {
-                            select_descriptor(d, &x);
+                    for (category, descriptors) in group_visible_descriptors(&query) {
+                        ui.heading(category.label());
+                        for x in descriptors {
+                            let blocked = d.action_editor.draft.is_some();
+                            let action = (x.make_default)();
+                            let context_error = if matches!(x.editor, EditorKind::DirectInsert) {
+                                d.selected_macro().and_then(|m| {
+                                    validate_direct_context(m, insertion_position(d), &action).err()
+                                })
+                            } else {
+                                None
+                            };
+                            let response = ui
+                                .add_enabled(
+                                    !blocked && context_error.is_none(),
+                                    egui::Button::new(x.name),
+                                )
+                                .on_hover_text(x.description);
+                            let response = if blocked {
+                                response.on_disabled_hover_text(
+                                    "Apply or cancel the current action first.",
+                                )
+                            } else if let Some(reason) = context_error {
+                                response.on_disabled_hover_text(reason)
+                            } else {
+                                response
+                            };
+                            if response.clicked() {
+                                select_descriptor(d, &x);
+                            }
                         }
                     }
                 });
