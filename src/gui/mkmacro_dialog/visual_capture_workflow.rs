@@ -63,6 +63,20 @@ impl SharedVisualOverlayController {
             editor_events: Mutex::new(VecDeque::new()),
         }))
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> TestOverlayServiceFixture {
+        let observer = Arc::new(super::visual_overlay::ServiceTestObserver::default());
+        let service = NativeVisualOverlayService::start_with_observer(
+            VisualOverlayController::default,
+            observer.clone(),
+        )
+        .expect("test overlay worker must start");
+        TestOverlayServiceFixture {
+            controller: Self::from_service(service),
+            observer,
+        }
+    }
     fn allocate(&self) -> OperationId {
         loop {
             let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
@@ -240,6 +254,12 @@ impl SharedVisualOverlayController {
         });
         position.and_then(|index| queue.remove(index))
     }
+}
+
+#[cfg(test)]
+pub(crate) struct TestOverlayServiceFixture {
+    pub controller: SharedVisualOverlayController,
+    pub observer: Arc<super::visual_overlay::ServiceTestObserver>,
 }
 impl Drop for SharedOverlayClient {
     fn drop(&mut self) {
@@ -523,7 +543,65 @@ impl Drop for VisualCaptureWorkflow {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+
+    struct Desktop;
+    impl ScreenCaptureBackend for Desktop {
+        fn virtual_desktop(&self) -> crate::mkmacro::ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(-10, -10, 100, 100))
+        }
+        fn region_bounds(
+            &self,
+            _: &crate::mkmacro::SearchRegion,
+        ) -> crate::mkmacro::ExecResult<ScreenRect> {
+            self.virtual_desktop()
+        }
+        fn capture_rect(
+            &self,
+            rect: ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> crate::mkmacro::ExecResult<RgbaImage> {
+            Ok(RgbaImage::new(rect.width, rect.height))
+        }
+    }
+
+    #[test]
+    fn cloned_clients_cancel_operations_without_terminating_the_shared_service() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let dialog = fixture.controller.clone();
+        let editor = dialog.clone();
+        let mut adapter = VisualOverlayRectangleAdapter::new(dialog.clone(), Arc::new(Desktop));
+
+        let first = editor.preview_rectangle(ScreenRect::new(1, 2, 3, 4));
+        editor.cancel_operation(first);
+        fixture.observer.wait_for_commands(2);
+        let second = adapter.begin(RectanglePurpose::SearchRegion).unwrap();
+        fixture.observer.wait_for_commands(3);
+        assert_ne!(first, second);
+        assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.worker_ids.lock().unwrap().len(), 1);
+        assert!(
+            matches!(fixture.observer.commands.lock().unwrap()[1], VisualOverlayCommand::Cancel { expected_operation_id: Some(id) } if id == first)
+        );
+        assert!(
+            matches!(fixture.observer.commands.lock().unwrap()[2], VisualOverlayCommand::BeginRectanglePick { operation_id, .. } if operation_id == second)
+        );
+        assert!(!dialog.poll().iter().any(|event| matches!(event, VisualOverlayEvent::Error { error, .. } if error.message.contains("shut down"))));
+
+        drop(editor);
+        drop(adapter);
+        let third = dialog.preview_rectangle(ScreenRect::new(5, 6, 7, 8));
+        fixture.observer.wait_for_commands(4);
+        assert!(
+            matches!(fixture.observer.commands.lock().unwrap()[3], VisualOverlayCommand::PreviewRectangle { operation_id, .. } if operation_id == third)
+        );
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+        drop(dialog);
+        drop(fixture.controller);
+        assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 1);
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Call {
