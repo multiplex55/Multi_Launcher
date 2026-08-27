@@ -23,6 +23,7 @@ pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
 mod multi_manager_actions;
+mod note_clipboard;
 mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;

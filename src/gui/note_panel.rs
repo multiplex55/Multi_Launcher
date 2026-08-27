@@ -18,7 +18,6 @@ use crate::plugins::note::{
 use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
 use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
-use arboard::Clipboard;
 use chrono::{DateTime, Local, TimeZone};
 use eframe::egui::{self, Color32, FontId, Key, RichText, popup};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -44,10 +43,10 @@ const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
 
 #[derive(Debug)]
-struct ClipboardRgbaData {
-    width: usize,
-    height: usize,
-    bytes: Vec<u8>,
+pub(super) struct ClipboardRgbaData {
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2675,21 +2674,7 @@ impl NotePanel {
             text_id_source,
             available_size,
             move || native_edge,
-            || {
-                let mut clipboard = Clipboard::new().map_err(|error| {
-                    tracing::warn!(stage = "clipboard_open", error = %error, "note image paste failed");
-                    format!("could not open the clipboard: {error}")
-                })?;
-                match clipboard.get_image() {
-                    Ok(image) => Ok(Some(ClipboardRgbaData {
-                        width: image.width,
-                        height: image.height,
-                        bytes: image.bytes.into_owned(),
-                    })),
-                    Err(arboard::Error::ContentNotAvailable) => Ok(None),
-                    Err(error) => Err(format!("could not read a clipboard image: {error}")),
-                }
-            },
+            crate::gui::note_clipboard::read_clipboard_image,
             save_note_image_asset,
         )
     }
