@@ -24,6 +24,7 @@ use crate::mkmacro::{
 };
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
+use visual_capture_workflow::SharedVisualOverlayController;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirtyDecision {
@@ -42,6 +43,8 @@ pub struct MkMacroDialog {
     pub open: bool,
     pub store: Arc<MkMacroStore>,
     pub authoring_context: MkMacroAuthoringContext,
+    /// Authoritative client keeping the dialog-wide native overlay service alive.
+    pub(crate) visual_overlay: SharedVisualOverlayController,
     pub draft: MkMacroDocument,
     baseline: Arc<MkMacroDocument>,
     pub dirty: bool,
@@ -345,7 +348,7 @@ mod tests {
         {
             *count = 9;
         }
-        let mut editor = std::mem::take(&mut d.action_editor);
+        let mut editor = d.take_action_editor();
         editor.apply(&mut d).unwrap();
         d.action_editor = editor;
         assert!(matches!(
@@ -380,7 +383,7 @@ mod tests {
         d.selection.ids = [ids[0], ids[2]].into_iter().collect();
         let before = serde_json::to_vec(d.selected_macro().unwrap()).unwrap();
         action_catalog::select_descriptor(&mut d, &catalog_descriptor("If"));
-        let mut editor = std::mem::take(&mut d.action_editor);
+        let mut editor = d.take_action_editor();
         assert!(editor.apply(&mut d).is_none());
         d.action_editor = editor;
         assert_eq!(
@@ -643,7 +646,7 @@ mod tests {
         ));
         assert_eq!(d.action_editor.draft.as_ref().unwrap().action, original);
 
-        let mut editor = std::mem::take(&mut d.action_editor);
+        let mut editor = d.take_action_editor();
         assert!(editor.apply(&mut d).is_some());
         d.action_editor = editor;
         assert_eq!(d.selected_macro().unwrap().steps.len(), 1);
@@ -678,7 +681,7 @@ mod tests {
             );
 
             assert!(action_catalog::select_descriptor(&mut d, &descriptor));
-            let mut editor = std::mem::take(&mut d.action_editor);
+            let mut editor = d.take_action_editor();
             assert!(editor.apply(&mut d).is_some());
             d.action_editor = editor;
             assert_eq!(
@@ -701,7 +704,7 @@ mod tests {
                 &mut d,
                 &catalog_descriptor("Delay")
             ));
-            let mut editor = std::mem::take(&mut d.action_editor);
+            let mut editor = d.take_action_editor();
             assert!(editor.apply(&mut d).is_some());
             d.action_editor = editor;
             assert!(d.action_catalog_visible);
@@ -1021,7 +1024,7 @@ mod tests {
                 && draft_contract == action_catalog::DraftValidationContract::CommitReady
             {
                 assert!(dialog.action_editor.draft.is_some());
-                let mut editor = std::mem::take(&mut dialog.action_editor);
+                let mut editor = dialog.take_action_editor();
                 assert!(editor.apply(&mut dialog).is_some());
                 dialog.action_editor = editor;
             }
@@ -1374,6 +1377,20 @@ mod tests {
     }
 }
 impl MkMacroDialog {
+    /// Returns an operation client for constructing dialog-scoped visual tools.
+    pub fn visual_overlay_controller(&self) -> SharedVisualOverlayController {
+        self.visual_overlay.clone()
+    }
+
+    /// Temporarily moves the editor out while preserving its required shared
+    /// visual-overlay client in the replacement state.
+    pub fn take_action_editor(&mut self) -> action_editor::ActionEditorState {
+        std::mem::replace(
+            &mut self.action_editor,
+            action_editor::ActionEditorState::new(self.visual_overlay.clone()),
+        )
+    }
+
     pub fn new(store: Arc<MkMacroStore>) -> Self {
         Self::new_with_authoring_context(store, MkMacroAuthoringContext::default())
     }
@@ -1382,12 +1399,15 @@ impl MkMacroDialog {
         authoring_context: MkMacroAuthoringContext,
     ) -> Self {
         let baseline = store.snapshot();
+        let visual_overlay = SharedVisualOverlayController::default();
         Self {
             open: false,
             draft: (*baseline).clone(),
             baseline,
             store,
             authoring_context,
+            action_editor: action_editor::ActionEditorState::new(visual_overlay.clone()),
+            visual_overlay,
             dirty: false,
             conflict: false,
             selected_macro_id: None,
@@ -1403,7 +1423,6 @@ impl MkMacroDialog {
             action_search: String::new(),
             structural_insertion: None,
             uia_editor: Default::default(),
-            action_editor: Default::default(),
             window_picker: Default::default(),
             launcher_action_picker: Default::default(),
             command_error: None,

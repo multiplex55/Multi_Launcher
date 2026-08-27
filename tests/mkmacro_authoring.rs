@@ -212,7 +212,7 @@ fn prompt_input_authoring_apply_and_cancel_are_transactional() {
         dialog.action_editor.editor,
         Some(action_catalog::EditorKind::PromptInput)
     );
-    let mut editor = std::mem::take(&mut dialog.action_editor);
+    let mut editor = dialog.take_action_editor();
     editor
         .apply(&mut dialog)
         .expect("valid prompt draft applies");
@@ -420,7 +420,7 @@ impl RecorderControllerView for FakeRecorderView {
 }
 
 fn insert(dialog: &mut MkMacroDialog, action: MkAction) -> u64 {
-    let mut editor = ActionEditorState::default();
+    let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
     editor.begin_new(action);
     editor
         .apply(dialog)
@@ -613,7 +613,7 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
         .find(|s| s.id == click)
         .unwrap()
         .clone();
-    let mut editor = ActionEditorState::default();
+    let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
     editor.begin_edit(&original);
     if let Some(step) = &mut editor.draft {
         if let MkAction::MouseClick(payload) = &mut step.action {

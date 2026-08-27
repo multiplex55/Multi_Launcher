@@ -10,7 +10,6 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
 
-#[derive(Default)]
 pub struct ActionEditorState {
     pub draft: Option<MkStep>,
     /// `None` means insert a new row; otherwise replace this stable step id.
@@ -30,7 +29,8 @@ pub struct ActionEditorState {
     pub add_smooth_move: bool,
     pub add_activate_before: bool,
     pub image_authoring: super::image_authoring_job::ImageAuthoringJob,
-    /// Sole owner of native visual-overlay resources for this editor draft.
+    /// Cloneable operation client borrowed from the dialog-wide visual-overlay service.
+    /// The editor owns only the operation IDs it starts, not the native service itself.
     pub visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
     /// Installed by the owning launcher integration because it alone owns the
     /// launcher and dialog native-window visibility boundary.
@@ -241,6 +241,35 @@ fn dispatch_region_preview(
 }
 
 impl ActionEditorState {
+    pub fn new(
+        visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
+    ) -> Self {
+        Self {
+            draft: None,
+            editing_id: None,
+            insertion: None,
+            capture_keys: false,
+            capture_message: None,
+            editor: None,
+            position_capture: None,
+            draft_generation: 0,
+            draft_changed: false,
+            image_search: None,
+            add_smooth_move: false,
+            add_activate_before: false,
+            image_authoring: Default::default(),
+            visual_overlay,
+            visual_capture: None,
+            overlay_diagnostic: None,
+            pending_visual_region: None,
+            picker: Default::default(),
+        }
+    }
+    fn cancel_owned_passive_overlay(&mut self) {
+        if let Some((operation_id, _)) = self.overlay_diagnostic.take() {
+            self.visual_overlay.cancel_operation(operation_id);
+        }
+    }
     fn preview_region(&mut self, region: SearchRegion) {
         let monitors = if matches!(region, SearchRegion::Desktop | SearchRegion::Monitor { .. }) {
             crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string())
@@ -494,7 +523,7 @@ impl ActionEditorState {
         if self.draft.is_some() {
             return;
         }
-        self.visual_overlay.cancel();
+        self.cancel_owned_passive_overlay();
         self.pending_visual_region = None;
         self.image_authoring = Default::default();
         self.stop_position_capture();
@@ -528,7 +557,7 @@ impl ActionEditorState {
         });
     }
     pub fn begin_edit(&mut self, step: &MkStep) {
-        self.visual_overlay.cancel();
+        self.cancel_owned_passive_overlay();
         self.pending_visual_region = None;
         self.image_authoring = Default::default();
         self.stop_position_capture();
@@ -560,7 +589,7 @@ impl ActionEditorState {
                 workflow.tick();
             }
         }
-        self.visual_overlay.shutdown();
+        self.cancel_owned_passive_overlay();
         self.stop_position_capture();
         self.draft = None;
         self.editing_id = None;
@@ -721,7 +750,7 @@ impl ActionEditorState {
                 workflow.tick();
             }
         }
-        self.visual_overlay.shutdown();
+        self.cancel_owned_passive_overlay();
         self.stop_position_capture();
         self.sync_image_region_to_draft();
         let mut step = self.draft.take()?;
@@ -979,7 +1008,7 @@ impl Drop for ActionEditorState {
                 workflow.tick();
             }
         }
-        self.visual_overlay.shutdown();
+        self.cancel_owned_passive_overlay();
     }
 }
 
@@ -2825,7 +2854,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 }
             }
         }
-        let mut state = std::mem::take(&mut d.action_editor);
+        let mut state = d.take_action_editor();
         let smooth = state.add_smooth_move;
         let activate = state.add_activate_before;
         let shortcut_payload = state.draft.as_ref().and_then(image_payload).cloned();
@@ -2855,6 +2884,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    fn test_editor() -> ActionEditorState {
+        ActionEditorState::new(
+            super::super::visual_capture_workflow::SharedVisualOverlayController::new(
+                super::super::visual_overlay::VisualOverlayController::default(),
+            ),
+        )
+    }
 
     #[derive(Debug, PartialEq)]
     enum PreviewCall {
@@ -3137,7 +3174,7 @@ mod tests {
         use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
         let a = ScreenRect::new(1, 2, 30, 40);
         let b = ScreenRect::new(50, 60, 70, 80);
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         let mut payload = WaitForVisualChange::default();
         payload.region = SearchRegion::Rectangle { rect: a };
         editor.begin_edit(&step(MkAction::WaitForVisualChange(payload)));
@@ -3174,7 +3211,7 @@ mod tests {
         use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
         let original = ScreenRect::new(1, 2, 3, 4);
         let selected = ScreenRect::new(8, 9, 10, 11);
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         let mut payload = WaitForVisualChange::default();
         payload.region = SearchRegion::Rectangle { rect: original };
         editor.begin_edit(&step(MkAction::WaitForVisualChange(payload.clone())));
@@ -3372,7 +3409,7 @@ mod tests {
         let region = SearchRegion::Rectangle {
             rect: ScreenRect::new(3, 4, 5, 6),
         };
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         editor.draft_generation = 7;
         editor.draft = Some(step(MkAction::ImageFind(image_payload(1, region.clone()))));
         let executor = HeldExecutor::default();
@@ -3405,7 +3442,7 @@ mod tests {
         let region = SearchRegion::Rectangle {
             rect: ScreenRect::new(8, 9, 10, 11),
         };
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         editor.draft_generation = 1;
         editor.draft = Some(step(MkAction::ImageFind(image_payload(41, region.clone()))));
         let executor = HeldExecutor::default();
@@ -3434,7 +3471,7 @@ mod tests {
         ActionEditorState,
         mpsc::Sender<super::super::image_authoring_job::ImageAuthoringCompletion>,
     ) {
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         editor.draft_generation = token.draft_generation;
         editor.draft = Some(step(MkAction::ImageFind(image_payload(9, region))));
         let (sender, completion) = mpsc::channel();
@@ -3556,7 +3593,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         editor.begin_edit(&step(MkAction::ImageFind(image_payload(
             4,
             original_region.clone(),
@@ -3615,7 +3652,7 @@ mod tests {
         use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
 
         let region = SearchRegion::Monitor { index: 2 };
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         editor.begin_edit(&step(MkAction::ImageClick(image_payload(4, region))));
         let generation = editor.draft_generation;
         let before_draft = serde_json::to_vec(editor.draft.as_ref().unwrap()).unwrap();
@@ -3704,7 +3741,7 @@ mod tests {
                 super::super::window_picker::MatcherPath::VisualRegion,
             ),
         ] {
-            let mut editor = ActionEditorState::default();
+            let mut editor = test_editor();
             editor.begin_edit(&step(action));
             let request = super::super::window_picker::MatcherEditRequest {
                 destination: super::super::window_picker::MatcherDestination::Action {
@@ -3771,7 +3808,7 @@ mod tests {
             MkAction::ImageFind(payload.clone()),
             MkAction::ImageClick(payload.clone()),
         ] {
-            let mut editor = ActionEditorState::default();
+            let mut editor = test_editor();
             editor.begin_edit(&step(action));
             let image = editor.image_search.as_ref().expect("shared image editor");
             assert_eq!(
@@ -3844,7 +3881,7 @@ mod tests {
                         },
                     },
                 };
-                let mut editor = ActionEditorState::default();
+                let mut editor = test_editor();
                 editor.begin_edit(&step(action));
                 let before_cancel = editor.draft.as_ref().unwrap().action.clone();
                 // Cancellation never calls apply_window_matcher.
@@ -3881,7 +3918,7 @@ mod tests {
 
     #[test]
     fn capture_is_frame_driven_armed_and_one_shot() {
-        let mut e = ActionEditorState::default();
+        let mut e = test_editor();
         e.begin_edit(&step(MkAction::MouseMove(MkMouseMovePayload {
             target: MkCoordinateTarget::Screen {
                 point: MkPoint { x: 1, y: 2 },
@@ -3930,7 +3967,7 @@ mod tests {
             button: MkMouseButton::Left,
             clicks: 1,
         }));
-        let mut e = ActionEditorState::default();
+        let mut e = test_editor();
         e.begin_edit(&source);
         e.draft_generation = 1;
         e.position_capture = Some(capture(PositionCaptureSlot::ClickTarget));
@@ -3951,7 +3988,7 @@ mod tests {
             color: "#112233".into(),
             tolerance: 0,
         });
-        let mut editor = ActionEditorState::default();
+        let mut editor = test_editor();
         editor.begin_edit(&source);
         editor.draft_generation = 1;
         let mut pending = capture(PositionCaptureSlot::PixelColor);
@@ -3985,7 +4022,7 @@ mod tests {
             button: MkMouseButton::X2,
             duration_ms: 10,
         };
-        let mut e = ActionEditorState::default();
+        let mut e = test_editor();
         e.begin_edit(&step(MkAction::MouseDrag(drag)));
         e.draft_generation = 1;
         let mut c = capture(PositionCaptureSlot::DragFrom);
@@ -4011,7 +4048,7 @@ mod tests {
     }
     #[test]
     fn capture_chooses_press_hotkey_down_and_up() {
-        let mut e = ActionEditorState::default();
+        let mut e = test_editor();
         e.begin_edit(&step(MkAction::KeyPress(MkKey::Enter)));
         assert!(e.set_captured_keys(vec![MkKey::Character("A".into())]));
         assert!(matches!(
@@ -4040,7 +4077,7 @@ mod tests {
     fn cancel_does_not_touch_source() {
         let source = step(MkAction::Delay { milliseconds: 12 });
         let bytes = serde_json::to_vec(&source).unwrap();
-        let mut e = ActionEditorState::default();
+        let mut e = test_editor();
         e.begin_edit(&source);
         if let Some(MkStep {
             action: MkAction::Delay { milliseconds },
@@ -4203,7 +4240,7 @@ mod tests {
                     not_found_policy: MkImageNotFoundPolicy::Fail,
                     outputs: MkImageOutputs::default(),
                 };
-                let mut editor = ActionEditorState::default();
+                let mut editor = test_editor();
                 editor.begin_edit(&step(MkAction::ImageClick(payload)));
                 editor.visual_capture = Some(workflow);
                 assert_eq!(
@@ -4479,7 +4516,7 @@ mod tests {
 
         #[test]
         fn wait_visual_change_picker_requires_live_compatible_draft() {
-            let mut editor = ActionEditorState::default();
+            let mut editor = test_editor();
             editor.begin_new(MkAction::WaitForVisualChange(WaitForVisualChange::default()));
             let generation = editor.draft_generation;
             let request = MatcherEditRequest {

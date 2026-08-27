@@ -253,7 +253,7 @@ fn production_visual_capture_dependencies(
     VisualCaptureDependencies {
         overlay: Box::new(
             mkmacro_dialog::visual_capture_workflow::VisualOverlayRectangleAdapter::new(
-                dialog.action_editor.visual_overlay.clone(),
+                dialog.visual_overlay.clone(),
                 Arc::clone(&screen_backend),
             ),
         ),

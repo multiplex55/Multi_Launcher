@@ -15,7 +15,7 @@ use image::RgbaImage;
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 /// Cloneable command client for the thread which exclusively owns native overlays.
@@ -26,7 +26,6 @@ struct SharedOverlayClient {
     service: Mutex<Option<NativeVisualOverlayService>>,
     next_id: AtomicU64,
     active_id: AtomicU64,
-    shutdown: AtomicBool,
     editor_events: Mutex<VecDeque<VisualOverlayEvent>>,
 }
 impl Default for SharedVisualOverlayController {
@@ -37,7 +36,6 @@ impl Default for SharedVisualOverlayController {
                 service: Mutex::new(None),
                 next_id: AtomicU64::new(1),
                 active_id: AtomicU64::new(0),
-                shutdown: AtomicBool::new(true),
                 editor_events: Mutex::new(VecDeque::from([VisualOverlayEvent::Error {
                     operation_id: 1,
                     error: VisualOverlayError {
@@ -62,7 +60,6 @@ impl SharedVisualOverlayController {
             service: Mutex::new(Some(service)),
             next_id: AtomicU64::new(1),
             active_id: AtomicU64::new(0),
-            shutdown: AtomicBool::new(false),
             editor_events: Mutex::new(VecDeque::new()),
         }))
     }
@@ -205,15 +202,6 @@ impl SharedVisualOverlayController {
     pub fn cancel(&self) {
         if let Some(id) = self.operation_id() {
             self.cancel_operation(id);
-        }
-    }
-    pub fn shutdown(&self) {
-        if self.0.shutdown.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.0.active_id.store(0, Ordering::Release);
-        if let Some(mut service) = self.0.service.lock().unwrap().take() {
-            service.shutdown_and_join();
         }
     }
     fn receive_into_editor(&self) {
