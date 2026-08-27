@@ -2884,8 +2884,43 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 mod tests {
     use super::super::visual_overlay::{OperationId, VisualOverlayCommand, VisualOverlayEvent};
     use super::*;
+    use image::RgbaImage;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+
+    struct TestDesktop;
+    impl ScreenCaptureBackend for TestDesktop {
+        fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(-100, -100, 1000, 1000))
+        }
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+            self.virtual_desktop()
+        }
+        fn capture_rect(&self, rect: ScreenRect, _: &dyn Fn() -> bool) -> ExecResult<RgbaImage> {
+            Ok(RgbaImage::new(rect.width, rect.height))
+        }
+    }
+    struct TestAssets;
+    impl super::super::visual_capture_workflow::AssetStoreAdapter for TestAssets {
+        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
+            Ok(91)
+        }
+    }
+
+    fn install_real_service_workflow(editor: &mut ActionEditorState) {
+        use super::super::visual_capture_workflow::{
+            ScreenCaptureAdapter, VisualCaptureWorkflow, VisualOverlayRectangleAdapter,
+        };
+        let desktop: Arc<dyn ScreenCaptureBackend> = Arc::new(TestDesktop);
+        editor.visual_capture = Some(VisualCaptureWorkflow::new(
+            Box::new(VisualOverlayRectangleAdapter::new(
+                editor.visual_overlay.clone(),
+                desktop.clone(),
+            )),
+            Box::new(ScreenCaptureAdapter(desktop)),
+            Box::new(TestAssets),
+        ));
+    }
 
     fn test_editor() -> ActionEditorState {
         ActionEditorState::new(
@@ -2957,6 +2992,89 @@ mod tests {
         );
         assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
         assert!(!dialog.visual_overlay_controller().poll().iter().any(|e| matches!(e, VisualOverlayEvent::Error { error, .. } if error.message.contains("shut down"))));
+    }
+
+    fn assert_plain_transaction_then_reference_capture(apply: bool, image: MkAction) {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        // This ordinary action never owns an overlay. On the pre-ownership-fix baseline,
+        // applying/cancelling it dropped the service-owning editor and the assertion below
+        // observed `visual overlay service is shut down` instead of BeginRectanglePick.
+        dialog
+            .action_editor
+            .begin_new(MkAction::Delay { milliseconds: 5 });
+        let mut plain = dialog.take_action_editor();
+        if apply {
+            assert!(plain.apply(&mut dialog).is_some());
+        } else {
+            plain.cancel();
+        }
+        dialog.action_editor = plain;
+
+        dialog.action_editor.begin_new(image);
+        install_real_service_workflow(&mut dialog.action_editor);
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog
+            .action_editor
+            .request_rectangle_selection(
+                macro_id,
+                RectanglePurpose::ReferenceImageCapture,
+                VisualRegionDestination::ImageActionReferenceAsset,
+            )
+            .unwrap();
+        let operation_id = dialog
+            .action_editor
+            .visual_capture
+            .as_ref()
+            .and_then(|w| match w.state() {
+                super::super::visual_capture_workflow::WorkflowState::Selecting {
+                    operation_id,
+                    ..
+                } => Some(*operation_id),
+                _ => None,
+            })
+            .unwrap();
+        fixture.observer.wait_for_commands(1);
+        assert!(matches!(fixture.observer.commands.lock().unwrap().last(),
+            Some(VisualOverlayCommand::BeginRectanglePick { operation_id: id, purpose: RectanglePurpose::ReferenceImageCapture, .. }) if *id == operation_id));
+        assert_ne!(operation_id, 0);
+        assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+        assert!(!dialog.visual_overlay_controller().poll().iter().any(|event|
+            matches!(event, VisualOverlayEvent::Error { error, .. } if error.message.contains("visual overlay service is shut down"))));
+
+        let original = dialog.action_editor.draft.clone();
+        fixture.observer.cancel_rectangle(operation_id);
+        for _ in 0..100 {
+            dialog.action_editor.tick_visual_capture(Some(macro_id));
+            if !dialog
+                .action_editor
+                .visual_capture
+                .as_ref()
+                .unwrap()
+                .active()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(dialog.action_editor.draft, original);
+        assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn apply_then_capture_uses_the_original_dialog_worker() {
+        assert_plain_transaction_then_reference_capture(true, image_action());
+    }
+
+    #[test]
+    fn cancel_then_capture_uses_the_original_dialog_worker() {
+        let MkAction::ImageFind(payload) = image_action() else {
+            unreachable!()
+        };
+        assert_plain_transaction_then_reference_capture(false, MkAction::ImageClick(payload));
     }
 
     #[test]

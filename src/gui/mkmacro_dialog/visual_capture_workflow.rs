@@ -68,7 +68,14 @@ impl SharedVisualOverlayController {
     pub(crate) fn test_fixture() -> TestOverlayServiceFixture {
         let observer = Arc::new(super::visual_overlay::ServiceTestObserver::default());
         let service = NativeVisualOverlayService::start_with_observer(
-            VisualOverlayController::default,
+            {
+                let observer = observer.clone();
+                move || {
+                    VisualOverlayController::new(Box::new(
+                        super::visual_overlay::ServiceTestRenderer(observer),
+                    ))
+                }
+            },
             observer.clone(),
         )
         .expect("test overlay worker must start");
