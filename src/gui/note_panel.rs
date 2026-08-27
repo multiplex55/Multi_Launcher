@@ -57,6 +57,18 @@ enum ClipboardImagePasteOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextInsertionKind {
+    ReplacedSelection,
+    InsertedAtCaret,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextInsertionOutcome {
+    kind: TextInsertionKind,
+    resulting_char_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NotePasteRequest {
     has_native_paste: bool,
     has_keyboard_shortcut: bool,
@@ -2215,6 +2227,12 @@ impl NotePanel {
             let Some(request) = ctx.input(|input| detect_note_paste_request(&input.events)) else {
                 return ClipboardImagePasteOutcome::NotHandled;
             };
+            tracing::trace!(
+                ?editor_id,
+                has_native_paste = request.has_native_paste,
+                has_keyboard_shortcut = request.has_keyboard_shortcut,
+                "note image paste request detected"
+            );
             #[cfg(test)]
             {
                 self.last_paste_request = Some(request);
@@ -2222,17 +2240,31 @@ impl NotePanel {
 
             let data = match lookup() {
                 Ok(Some(data)) => data,
-                Ok(None) => return ClipboardImagePasteOutcome::NotHandled,
+                Ok(None) => {
+                    tracing::trace!(
+                        ?editor_id,
+                        "clipboard contains no image; leaving paste request for TextEdit"
+                    );
+                    return ClipboardImagePasteOutcome::NotHandled;
+                }
                 Err(error) => {
+                    tracing::warn!(stage = "clipboard_read", error = %error, "note image paste failed");
                     app.report_error("clipboard image paste", error);
                     return ClipboardImagePasteOutcome::NotHandled;
                 }
             };
 
+            tracing::debug!(
+                width = data.width,
+                height = data.height,
+                "clipboard image received"
+            );
+
             let image = match rgba_image_from_clipboard_data(data.width, data.height, data.bytes) {
                 Ok(image) => image,
                 Err(error) => {
                     ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
+                    tracing::warn!(stage = "rgba_validation", error = %error, "note image paste failed");
                     app.report_error(
                         "clipboard image paste",
                         format!("invalid clipboard RGBA image data: {error}"),
@@ -2244,6 +2276,7 @@ impl NotePanel {
                 Ok(filename) => filename,
                 Err(error) => {
                     ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
+                    tracing::warn!(stage = "asset_save", error = %error, "note image paste failed");
                     app.report_error(
                         "clipboard image paste",
                         format!("could not persist clipboard image asset or PNG: {error}"),
@@ -2251,9 +2284,16 @@ impl NotePanel {
                     return ClipboardImagePasteOutcome::Handled;
                 }
             };
+            tracing::debug!(asset_path = %filename, "note image asset saved");
             let markdown = note_image_markdown(&filename);
             ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
-            self.insert_text_at_cursor_or_selection(ctx, editor_id, &markdown);
+            let insertion = self.insert_text_at_cursor_or_selection(ctx, editor_id, &markdown);
+            tracing::trace!(
+                ?editor_id,
+                insertion_kind = ?insertion.kind,
+                resulting_char_index = insertion.resulting_char_index,
+                "note image markdown inserted"
+            );
             ClipboardImagePasteOutcome::Handled
         })();
         #[cfg(test)]
@@ -3884,7 +3924,7 @@ impl NotePanel {
         ctx: &egui::Context,
         id: egui::Id,
         insert: &str,
-    ) {
+    ) -> TextInsertionOutcome {
         let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
         if let Some((start, end)) = self.resolve_selection(ctx, id) {
             let (start_byte, end_byte) = char_range_to_byte_range(&self.note.content, start, end);
@@ -3896,7 +3936,10 @@ impl NotePanel {
             state.store(ctx, id);
             self.pending_selection = None;
             self.mark_content_changed(ctx.input(|i| i.time));
-            return;
+            return TextInsertionOutcome {
+                kind: TextInsertionKind::ReplacedSelection,
+                resulting_char_index: cursor,
+            };
         }
 
         let idx = state
@@ -3912,6 +3955,10 @@ impl NotePanel {
         state.store(ctx, id);
         self.pending_selection = None;
         self.mark_content_changed(ctx.input(|i| i.time));
+        TextInsertionOutcome {
+            kind: TextInsertionKind::InsertedAtCaret,
+            resulting_char_index: cursor,
+        }
     }
 
     pub fn set_link_new_name(&mut self, name: impl Into<String>) {
@@ -6729,10 +6776,17 @@ More text.
         let mut panel = NotePanel::from_note(empty_note("alpha\nβeta 😀\ngamma"));
         panel.pending_selection = Some((6, 99));
 
-        panel.insert_text_at_cursor_or_selection(&ctx, id, "replacement");
+        let outcome = panel.insert_text_at_cursor_or_selection(&ctx, id, "replacement");
 
         assert_eq!(panel.note.content, "alpha\nreplacement");
         assert!(panel.pending_selection.is_none());
+        assert_eq!(
+            outcome,
+            TextInsertionOutcome {
+                kind: TextInsertionKind::ReplacedSelection,
+                resulting_char_index: 17,
+            }
+        );
     }
 
     #[test]
@@ -6752,7 +6806,7 @@ More text.
         assert!(!panel.heavy_recompute_requested);
         assert_eq!(panel.last_edit_at_secs, None);
 
-        panel.insert_text_at_cursor_or_selection(&ctx, id, TIMESTAMP);
+        let outcome = panel.insert_text_at_cursor_or_selection(&ctx, id, TIMESTAMP);
 
         assert_eq!(panel.note.content, "Hello 20260808-202512.347world");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
@@ -6762,6 +6816,13 @@ More text.
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
         assert_eq!(panel.last_edit_at_secs, Some(42.25));
+        assert_eq!(
+            outcome,
+            TextInsertionOutcome {
+                kind: TextInsertionKind::InsertedAtCaret,
+                resulting_char_index: 6 + TIMESTAMP.chars().count(),
+            }
+        );
         let _ = ctx.end_frame();
     }
 
