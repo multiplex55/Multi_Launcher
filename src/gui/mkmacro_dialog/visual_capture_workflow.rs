@@ -18,69 +18,110 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+type OverlayServiceFactory =
+    Arc<dyn Fn() -> Result<NativeVisualOverlayService, std::io::Error> + Send + Sync>;
+
 /// Cloneable command client for the thread which exclusively owns native overlays.
 /// GUI calls only enqueue work or drain already-produced semantic events.
 #[derive(Clone)]
 pub struct SharedVisualOverlayController(Arc<SharedOverlayClient>);
 struct SharedOverlayClient {
-    service: Mutex<Option<NativeVisualOverlayService>>,
+    /// This mutex is the serialization boundary for starts, retirement, and
+    /// terminal shutdown.  In particular, shutdown cannot race a replacement
+    /// worker into existence.
+    service: Mutex<OverlayServiceState>,
+    factory: OverlayServiceFactory,
     next_id: AtomicU64,
     active_id: AtomicU64,
     editor_events: Mutex<VecDeque<VisualOverlayEvent>>,
 }
+struct OverlayServiceState {
+    service: Option<NativeVisualOverlayService>,
+    terminal_shutdown: bool,
+}
 impl Default for SharedVisualOverlayController {
     fn default() -> Self {
-        match NativeVisualOverlayService::start() {
-            Ok(service) => Self::from_service(service),
-            Err(error) => Self(Arc::new(SharedOverlayClient {
-                service: Mutex::new(None),
-                next_id: AtomicU64::new(1),
-                active_id: AtomicU64::new(0),
-                editor_events: Mutex::new(VecDeque::from([VisualOverlayEvent::Error {
-                    operation_id: 1,
-                    error: VisualOverlayError {
-                        kind: OverlayErrorKind::Platform,
-                        message: format!("failed to start visual overlay worker: {error}"),
-                    },
-                }])),
-            })),
-        }
+        Self::from_factory(Arc::new(NativeVisualOverlayService::start), true)
     }
 }
 impl SharedVisualOverlayController {
-    /// Test-oriented constructor; production uses `default`, constructing native state on the worker.
+    /// Legacy one-shot test constructor.  Because the controller is consumed by
+    /// generation one, this constructor cannot validate worker restart.
     pub fn new(controller: VisualOverlayController) -> Self {
-        match NativeVisualOverlayService::start_with(move || controller) {
-            Ok(service) => Self::from_service(service),
-            Err(_) => Self::default(),
-        }
+        let controller = Arc::new(Mutex::new(Some(controller)));
+        Self::from_factory(
+            Arc::new(move || {
+                let controller = controller.lock().unwrap().take().ok_or_else(|| {
+                    std::io::Error::other("one-shot overlay controller was already consumed")
+                })?;
+                NativeVisualOverlayService::start_with(move || controller)
+            }),
+            true,
+        )
     }
-    fn from_service(service: NativeVisualOverlayService) -> Self {
+    fn from_factory(factory: OverlayServiceFactory, eager_start: bool) -> Self {
+        let service = eager_start.then(|| factory()).and_then(Result::ok);
         Self(Arc::new(SharedOverlayClient {
-            service: Mutex::new(Some(service)),
+            service: Mutex::new(OverlayServiceState {
+                service,
+                terminal_shutdown: false,
+            }),
+            factory,
             next_id: AtomicU64::new(1),
             active_id: AtomicU64::new(0),
             editor_events: Mutex::new(VecDeque::new()),
         }))
     }
 
+    /// Restart-capable constructor for deterministic unit tests.  The closure
+    /// is invoked once per generation and may inject a startup failure.
+    #[cfg(test)]
+    pub(crate) fn new_with_controller_factory<F>(factory: F) -> Self
+    where
+        F: Fn() -> Result<VisualOverlayController, std::io::Error> + Send + Sync + 'static,
+    {
+        let factory = Arc::new(factory);
+        Self::from_factory(
+            Arc::new(move || {
+                let controller = factory()?;
+                NativeVisualOverlayService::start_with(move || controller)
+            }),
+            false,
+        )
+    }
+
+    /// Explicitly and permanently shuts down the shared native owner.
+    #[cfg(test)]
+    pub(crate) fn terminal_shutdown_for_test(&self) {
+        let mut state = self.0.service.lock().unwrap();
+        state.terminal_shutdown = true;
+        self.0.active_id.store(0, Ordering::Release);
+        if let Some(mut service) = state.service.take() {
+            service.shutdown_and_join();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fixture() -> TestOverlayServiceFixture {
         let observer = Arc::new(super::visual_overlay::ServiceTestObserver::default());
-        let service = NativeVisualOverlayService::start_with_observer(
-            {
-                let observer = observer.clone();
-                move || {
-                    VisualOverlayController::new(Box::new(
-                        super::visual_overlay::ServiceTestRenderer(observer),
-                    ))
-                }
-            },
-            observer.clone(),
-        )
-        .expect("test overlay worker must start");
+        let factory: OverlayServiceFactory = Arc::new({
+            let observer = observer.clone();
+            move || {
+                NativeVisualOverlayService::start_with_observer(
+                    {
+                        let observer = observer.clone();
+                        move || {
+                            VisualOverlayController::new(Box::new(
+                                super::visual_overlay::ServiceTestRenderer(observer),
+                            ))
+                        }
+                    },
+                    observer.clone(),
+                )
+            }
+        });
         TestOverlayServiceFixture {
-            controller: Self::from_service(service),
+            controller: Self::from_factory(factory, true),
             observer,
         }
     }
@@ -92,31 +133,103 @@ impl SharedVisualOverlayController {
             }
         }
     }
-    fn send_start(&self, id: OperationId, command: VisualOverlayCommand) -> OperationId {
-        self.0.active_id.store(id, Ordering::Release);
-        let sent = self
-            .0
-            .service
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|s| s.commands.send(command).is_ok());
-        if !sent {
-            self.0
+    fn send_with_recovery(&self, id: OperationId, command: VisualOverlayCommand) -> OperationId {
+        let mut buffered = Vec::new();
+        let failure = {
+            let mut state = self.0.service.lock().unwrap();
+            if state.terminal_shutdown {
+                Some("Visual overlay owner has shut down".to_owned())
+            } else {
+                let dead = state
+                    .service
+                    .as_ref()
+                    .is_some_and(|service| service.is_finished());
+                if dead {
+                    let mut retired = state.service.take().unwrap();
+                    buffered.extend(retired.cleanup_finished());
+                    self.0.active_id.store(0, Ordering::Release);
+                }
+                if state.service.is_none() {
+                    match (self.0.factory)() {
+                        Ok(service) => state.service = Some(service),
+                        Err(error) => {
+                            let prefix = if dead {
+                                "Visual overlay worker terminated and could not be restarted"
+                            } else {
+                                "Could not start visual overlay worker"
+                            };
+                            return self.finish_dispatch(
+                                id,
+                                buffered,
+                                Some(format!("{prefix}: {error}")),
+                            );
+                        }
+                    }
+                }
+                if state
+                    .service
+                    .as_ref()
+                    .unwrap()
+                    .commands
+                    .send(command.clone())
+                    .is_ok()
+                {
+                    self.0.active_id.store(id, Ordering::Release);
+                    None
+                } else {
+                    // The receiver can close between is_finished and send. Retire
+                    // that generation and retry this same request (and id) once.
+                    let mut retired = state.service.take().unwrap();
+                    retired.shutdown_and_join();
+                    self.0.active_id.store(0, Ordering::Release);
+                    match (self.0.factory)() {
+                        Err(error) => Some(format!(
+                            "Visual overlay worker terminated and could not be restarted: {error}"
+                        )),
+                        Ok(service) => {
+                            state.service = Some(service);
+                            if state
+                                .service
+                                .as_ref()
+                                .unwrap()
+                                .commands
+                                .send(command)
+                                .is_ok()
+                            {
+                                self.0.active_id.store(id, Ordering::Release);
+                                None
+                            } else {
+                                let mut rejected = state.service.take().unwrap();
+                                rejected.shutdown_and_join();
+                                Some("Visual overlay replacement rejected the command".into())
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        self.finish_dispatch(id, buffered, failure)
+    }
+    fn finish_dispatch(
+        &self,
+        id: OperationId,
+        buffered: Vec<VisualOverlayEvent>,
+        failure: Option<String>,
+    ) -> OperationId {
+        let mut events = self.0.editor_events.lock().unwrap();
+        events.extend(buffered);
+        if let Some(message) = failure {
+            let _ = self
+                .0
                 .active_id
-                .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
-                .ok();
-            self.0
-                .editor_events
-                .lock()
-                .unwrap()
-                .push_back(VisualOverlayEvent::Error {
-                    operation_id: id,
-                    error: VisualOverlayError {
-                        kind: OverlayErrorKind::Platform,
-                        message: "visual overlay service is shut down".into(),
-                    },
-                });
+                .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
+            events.push_back(VisualOverlayEvent::Error {
+                operation_id: id,
+                error: VisualOverlayError {
+                    kind: OverlayErrorKind::Platform,
+                    message,
+                },
+            });
         }
         id
     }
@@ -126,7 +239,7 @@ impl SharedVisualOverlayController {
         virtual_desktop: ScreenRect,
     ) -> OperationId {
         let id = self.allocate();
-        self.send_start(
+        self.send_with_recovery(
             id,
             VisualOverlayCommand::BeginRectanglePick {
                 operation_id: id,
@@ -137,7 +250,7 @@ impl SharedVisualOverlayController {
     }
     pub fn preview_rectangle(&self, rect: ScreenRect) -> OperationId {
         let id = self.allocate();
-        self.send_start(
+        self.send_with_recovery(
             id,
             VisualOverlayCommand::PreviewRectangle {
                 operation_id: id,
@@ -147,7 +260,7 @@ impl SharedVisualOverlayController {
     }
     pub fn highlight_monitor(&self, monitor: crate::mkmacro::MonitorDescriptor) -> OperationId {
         let id = self.allocate();
-        self.send_start(
+        self.send_with_recovery(
             id,
             VisualOverlayCommand::HighlightMonitor {
                 operation_id: id,
@@ -160,7 +273,7 @@ impl SharedVisualOverlayController {
         monitors: Vec<crate::mkmacro::MonitorDescriptor>,
     ) -> OperationId {
         let id = self.allocate();
-        self.send_start(
+        self.send_with_recovery(
             id,
             VisualOverlayCommand::IdentifyMonitors {
                 operation_id: id,
@@ -170,7 +283,7 @@ impl SharedVisualOverlayController {
     }
     pub fn preview_desktop(&self, monitors: Vec<crate::mkmacro::MonitorDescriptor>) -> OperationId {
         let id = self.allocate();
-        self.send_start(
+        self.send_with_recovery(
             id,
             VisualOverlayCommand::PreviewDesktop {
                 operation_id: id,
@@ -184,7 +297,7 @@ impl SharedVisualOverlayController {
         area_kind: super::visual_overlay::WindowAreaKind,
     ) -> OperationId {
         let id = self.allocate();
-        self.send_start(
+        self.send_with_recovery(
             id,
             VisualOverlayCommand::HighlightWindow {
                 operation_id: id,
@@ -211,7 +324,7 @@ impl SharedVisualOverlayController {
             )
             .is_ok()
         {
-            if let Some(service) = self.0.service.lock().unwrap().as_ref() {
+            if let Some(service) = self.0.service.lock().unwrap().service.as_ref() {
                 let _ = service.commands.send(VisualOverlayCommand::Cancel {
                     expected_operation_id: Some(expected_operation_id),
                 });
@@ -227,7 +340,7 @@ impl SharedVisualOverlayController {
     }
     fn receive_into_editor(&self) {
         let mut incoming = vec![];
-        if let Some(service) = self.0.service.lock().unwrap().as_ref() {
+        if let Some(service) = self.0.service.lock().unwrap().service.as_ref() {
             incoming.extend(service.events.try_iter());
         }
         for event in &incoming {
@@ -270,7 +383,9 @@ pub(crate) struct TestOverlayServiceFixture {
 }
 impl Drop for SharedOverlayClient {
     fn drop(&mut self) {
-        if let Some(mut service) = self.service.get_mut().unwrap().take() {
+        let state = self.service.get_mut().unwrap();
+        state.terminal_shutdown = true;
+        if let Some(mut service) = state.service.take() {
             service.shutdown_and_join();
         }
     }
