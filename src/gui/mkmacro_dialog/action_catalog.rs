@@ -1758,15 +1758,23 @@ mod paste_tests {
         assert!(
             matches!((rows[1].make_default)(), MkAction::PlaySound(p) if p == MkPlaySoundPayload::default())
         );
-        for query in ["toast", "notification"] {
-            assert_eq!(
-                rows.iter()
-                    .filter(|d| matches(d, query))
-                    .map(|d| d.name)
-                    .collect::<Vec<_>>(),
-                ["Notify"]
-            );
-        }
+        assert_eq!(
+            rows.iter()
+                .filter(|d| matches(d, "toast"))
+                .map(|d| d.name)
+                .collect::<Vec<_>>(),
+            ["Notify"]
+        );
+        // Category labels are intentionally searchable, so "notification"
+        // returns every action in Notifications. Still assert that the Notify
+        // descriptor requested by this search term is present.
+        let notification_matches = rows
+            .iter()
+            .filter(|d| matches(d, "notification"))
+            .map(|d| d.name)
+            .collect::<Vec<_>>();
+        assert_eq!(notification_matches, ["Notify", "Play Sound"]);
+        assert!(notification_matches.contains(&"Notify"));
         assert_eq!(
             rows.iter()
                 .filter(|d| matches(d, "audio"))
