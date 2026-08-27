@@ -101,11 +101,13 @@ impl NativePasteDetector {
 
 #[cfg(target_os = "windows")]
 fn native_paste_key_state() -> (bool, bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_V};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_V,
+    };
     // SAFETY: GetAsyncKeyState only observes process-global keyboard state and
     // accepts the two valid virtual-key constants supplied here.
     unsafe {
-        let down = |key| (GetAsyncKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+        let down = |key: VIRTUAL_KEY| (GetAsyncKeyState(key.0 as i32) as u16 & 0x8000) != 0;
         (down(VK_CONTROL), down(VK_V))
     }
 }
