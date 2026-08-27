@@ -2854,8 +2854,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 }
             }
         }
-        let replacement = ActionEditorState::new(d.visual_overlay.clone());
-        let mut state = std::mem::replace(&mut d.action_editor, replacement);
+        let mut state = d.take_action_editor();
         let smooth = state.add_smooth_move;
         let activate = state.add_activate_before;
         let shortcut_payload = state.draft.as_ref().and_then(image_payload).cloned();

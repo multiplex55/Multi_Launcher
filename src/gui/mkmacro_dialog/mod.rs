@@ -348,7 +348,7 @@ mod tests {
         {
             *count = 9;
         }
-        let mut editor = std::mem::take(&mut d.action_editor);
+        let mut editor = d.take_action_editor();
         editor.apply(&mut d).unwrap();
         d.action_editor = editor;
         assert!(matches!(
@@ -383,7 +383,7 @@ mod tests {
         d.selection.ids = [ids[0], ids[2]].into_iter().collect();
         let before = serde_json::to_vec(d.selected_macro().unwrap()).unwrap();
         action_catalog::select_descriptor(&mut d, &catalog_descriptor("If"));
-        let mut editor = std::mem::take(&mut d.action_editor);
+        let mut editor = d.take_action_editor();
         assert!(editor.apply(&mut d).is_none());
         d.action_editor = editor;
         assert_eq!(
@@ -646,7 +646,7 @@ mod tests {
         ));
         assert_eq!(d.action_editor.draft.as_ref().unwrap().action, original);
 
-        let mut editor = std::mem::take(&mut d.action_editor);
+        let mut editor = d.take_action_editor();
         assert!(editor.apply(&mut d).is_some());
         d.action_editor = editor;
         assert_eq!(d.selected_macro().unwrap().steps.len(), 1);
@@ -681,7 +681,7 @@ mod tests {
             );
 
             assert!(action_catalog::select_descriptor(&mut d, &descriptor));
-            let mut editor = std::mem::take(&mut d.action_editor);
+            let mut editor = d.take_action_editor();
             assert!(editor.apply(&mut d).is_some());
             d.action_editor = editor;
             assert_eq!(
@@ -704,7 +704,7 @@ mod tests {
                 &mut d,
                 &catalog_descriptor("Delay")
             ));
-            let mut editor = std::mem::take(&mut d.action_editor);
+            let mut editor = d.take_action_editor();
             assert!(editor.apply(&mut d).is_some());
             d.action_editor = editor;
             assert!(d.action_catalog_visible);
@@ -1024,7 +1024,7 @@ mod tests {
                 && draft_contract == action_catalog::DraftValidationContract::CommitReady
             {
                 assert!(dialog.action_editor.draft.is_some());
-                let mut editor = std::mem::take(&mut dialog.action_editor);
+                let mut editor = dialog.take_action_editor();
                 assert!(editor.apply(&mut dialog).is_some());
                 dialog.action_editor = editor;
             }
@@ -1377,6 +1377,15 @@ mod tests {
     }
 }
 impl MkMacroDialog {
+    /// Temporarily moves the editor out while preserving its required shared
+    /// visual-overlay client in the replacement state.
+    pub(crate) fn take_action_editor(&mut self) -> action_editor::ActionEditorState {
+        std::mem::replace(
+            &mut self.action_editor,
+            action_editor::ActionEditorState::new(self.visual_overlay.clone()),
+        )
+    }
+
     pub fn new(store: Arc<MkMacroStore>) -> Self {
         Self::new_with_authoring_context(store, MkMacroAuthoringContext::default())
     }
