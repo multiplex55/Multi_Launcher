@@ -419,7 +419,7 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
         migrate_v4_to_v5(&mut value)?;
     }
     let mut doc: MkMacroDocument = match version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 => serde_json::from_value(value)
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 => serde_json::from_value(value)
             .context("mkmacros.json does not match the macro schema")?,
         _ => unreachable!(),
     };

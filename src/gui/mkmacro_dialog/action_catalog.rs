@@ -793,6 +793,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
             EditorKind::Keyboard
         }
         MkAction::Text(_) => EditorKind::Text,
+        MkAction::Notify(_) | MkAction::PlaySound(_) => EditorKind::General,
         MkAction::MouseMove(_) => EditorKind::MouseMove,
         MkAction::MouseDrag(_) => EditorKind::MouseDrag,
         MkAction::MouseClick(_) => EditorKind::MouseClick,
@@ -1047,6 +1048,8 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::KeyPress(_) => "Key Press",
         MkAction::Hotkey(_) => "Hotkey",
         MkAction::Text(_) => "Text",
+        MkAction::Notify(_) => "Show Notification",
+        MkAction::PlaySound(_) => "Play Sound",
         MkAction::MouseMove(_) => "Mouse Move",
         MkAction::MouseDrag(_) => "Mouse Drag",
         MkAction::MouseClick(_) => "Mouse Click",
@@ -1146,6 +1149,15 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             },
             p.text.chars().count()
         ),
+        MkAction::Notify(p) => {
+            let symbol = if p.show_symbol {
+                format!("{} ", p.kind.symbol())
+            } else {
+                String::new()
+            };
+            format!("{symbol}{} · {:?} · {:?}", p.title, p.kind, p.duration)
+        }
+        MkAction::PlaySound(p) => p.sound.clone(),
         MkAction::MouseClick(p) => format!(
             "{} ×{} @ {}",
             mouse(&p.button),
@@ -1672,6 +1684,26 @@ mod paste_tests {
         assert!(details.contains("Horizontal Left"));
         assert!(details.contains("2 notch(es)"));
         assert!(details.contains("-240 wheel units"));
+    }
+
+    #[test]
+    fn notification_and_sound_actions_have_catalog_fallback_presentation() {
+        let notify = MkAction::Notify(MkNotifyPayload {
+            title: "Build complete".into(),
+            kind: MkNotificationKind::Success,
+            duration: MkNotificationDuration::Long,
+            ..MkNotifyPayload::default()
+        });
+        assert_eq!(editor_for_action(&notify), EditorKind::General);
+        assert_eq!(action_name(&notify), "Show Notification");
+        assert_eq!(action_details(&notify), "✓ Build complete · Success · Long");
+
+        let sound = MkAction::PlaySound(MkPlaySoundPayload {
+            sound: "ReminderStart.wav".into(),
+        });
+        assert_eq!(editor_for_action(&sound), EditorKind::General);
+        assert_eq!(action_name(&sound), "Play Sound");
+        assert_eq!(action_details(&sound), "ReminderStart.wav");
     }
 
     #[test]

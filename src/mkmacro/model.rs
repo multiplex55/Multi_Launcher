@@ -6,11 +6,9 @@ use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-// Capture Screenshot is an additive action variant and does not alter the
-// representation of existing documents, so it intentionally remains in the
-// current schema generation. Bumping this value would rewrite every loaded
-// document and break stable migration/round-trip guarantees.
-pub const SCHEMA_VERSION: u32 = 6;
+// Schema 7 introduces action tags that schema-6 builds do not know how to
+// deserialize, so documents containing them must not claim schema-6 compatibility.
+pub const SCHEMA_VERSION: u32 = 7;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -371,6 +369,77 @@ pub struct MkTextPayload {
     pub text: String,
     pub mode: MkTextMode,
 }
+fn notification_title() -> String {
+    "Macro Notification".into()
+}
+fn notification_description() -> String {
+    "Macro completed".into()
+}
+fn notification_sound() -> String {
+    "ReminderStart.wav".into()
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkNotificationKind {
+    #[default]
+    Information,
+    Success,
+    Warning,
+    Error,
+}
+impl MkNotificationKind {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Information => "ℹ",
+            Self::Success => "✓",
+            Self::Warning => "⚠",
+            Self::Error => "✕",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkNotificationDuration {
+    #[default]
+    Short,
+    Long,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkNotifyPayload {
+    #[serde(default = "notification_title")]
+    pub title: String,
+    #[serde(default = "notification_description")]
+    pub description: String,
+    #[serde(default)]
+    pub kind: MkNotificationKind,
+    #[serde(default)]
+    pub duration: MkNotificationDuration,
+    #[serde(default = "yes")]
+    pub show_symbol: bool,
+}
+impl Default for MkNotifyPayload {
+    fn default() -> Self {
+        Self {
+            title: notification_title(),
+            description: notification_description(),
+            kind: MkNotificationKind::Information,
+            duration: MkNotificationDuration::Short,
+            show_symbol: true,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkPlaySoundPayload {
+    #[serde(default = "notification_sound")]
+    pub sound: String,
+}
+impl Default for MkPlaySoundPayload {
+    fn default() -> Self {
+        Self {
+            sound: notification_sound(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMousePayload {
     pub target: MkCoordinateTarget,
@@ -639,6 +708,8 @@ pub enum MkAction {
     KeyPress(MkKey),
     Hotkey(Vec<MkKey>),
     Text(MkTextPayload),
+    Notify(MkNotifyPayload),
+    PlaySound(MkPlaySoundPayload),
     MouseMove(MkMouseMovePayload),
     MouseDrag(MkMouseDragPayload),
     MouseClick(MkMousePayload),
@@ -980,5 +1051,57 @@ mod mouse_scroll_serialization_tests {
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains(r#""axis":"horizontal""#));
         assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+    }
+}
+
+#[cfg(test)]
+mod notification_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn notification_enums_have_stable_values_and_round_trip() {
+        for (kind, expected) in [
+            (MkNotificationKind::Information, "information"),
+            (MkNotificationKind::Success, "success"),
+            (MkNotificationKind::Warning, "warning"),
+            (MkNotificationKind::Error, "error"),
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+            assert_eq!(
+                serde_json::from_str::<MkNotificationKind>(&json).unwrap(),
+                kind
+            );
+        }
+        for duration in [MkNotificationDuration::Short, MkNotificationDuration::Long] {
+            let json = serde_json::to_string(&duration).unwrap();
+            assert_eq!(
+                serde_json::from_str::<MkNotificationDuration>(&json).unwrap(),
+                duration
+            );
+        }
+        let omitted: MkNotifyPayload = serde_json::from_str("{}").unwrap();
+        assert_eq!(omitted, MkNotifyPayload::default());
+    }
+
+    #[test]
+    fn new_actions_have_stable_tags_and_round_trip_losslessly() {
+        let actions = [
+            MkAction::Notify(MkNotifyPayload {
+                title: "Finished ${job}".into(),
+                description: "Everything worked".into(),
+                kind: MkNotificationKind::Success,
+                duration: MkNotificationDuration::Long,
+                show_symbol: false,
+            }),
+            MkAction::PlaySound(MkPlaySoundPayload {
+                sound: "Alarm03.wav".into(),
+            }),
+        ];
+        for (action, tag) in actions.into_iter().zip(["notify", "play_sound"]) {
+            let json = serde_json::to_string(&action).unwrap();
+            assert!(json.contains(&format!(r#""type":"{tag}""#)));
+            assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+        }
     }
 }

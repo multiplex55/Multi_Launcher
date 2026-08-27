@@ -44,6 +44,40 @@ fn push(
         message: msg.into(),
     })
 }
+fn interpolation_syntax(template: &str) -> Result<(), &'static str> {
+    let mut cursor = 0;
+    while cursor < template.len() {
+        let rest = &template[cursor..];
+        let prefix = if rest.starts_with("$${") {
+            Some((3, "escaped "))
+        } else if rest.starts_with("${") {
+            Some((2, ""))
+        } else {
+            None
+        };
+        if let Some((offset, escaped)) = prefix {
+            let start = cursor + offset;
+            let Some(end) = template[start..].find('}').map(|end| start + end) else {
+                return Err(if escaped.is_empty() {
+                    "unclosed interpolation placeholder"
+                } else {
+                    "unclosed escaped interpolation placeholder"
+                });
+            };
+            if end == start {
+                return Err(if escaped.is_empty() {
+                    "empty interpolation placeholder"
+                } else {
+                    "empty escaped interpolation placeholder"
+                });
+            }
+            cursor = end + 1;
+        } else {
+            cursor += rest.chars().next().unwrap().len_utf8();
+        }
+    }
+    Ok(())
+}
 fn image_outputs(p: &MkImagePayload, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
     let slots = [
         ("found", "invalid_image_output_found", &p.outputs.found),
@@ -154,6 +188,53 @@ pub fn validate_document_with_context(
                 )
             }
             match &s.action {
+                MkAction::Notify(payload) => {
+                    // Windows notifications require a title; diagnose this before delivery.
+                    if payload.title.trim().is_empty() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "empty_notify_title",
+                            "Notification title cannot be empty",
+                        );
+                    }
+                    for (field, value, code) in [
+                        (
+                            "notify.title",
+                            &payload.title,
+                            "invalid_notify_title_interpolation",
+                        ),
+                        (
+                            "notify.description",
+                            &payload.description,
+                            "invalid_notify_description_interpolation",
+                        ),
+                    ] {
+                        if let Err(reason) = interpolation_syntax(value) {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                code,
+                                format!("Malformed interpolation in {field}: {reason}"),
+                            );
+                        }
+                    }
+                }
+                MkAction::PlaySound(payload) => {
+                    if payload.sound == "None"
+                        || !crate::sound::SOUND_NAMES.contains(&payload.sound.as_str())
+                    {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_play_sound",
+                            format!("Unknown macro sound name '{}'", payload.sound),
+                        );
+                    }
+                }
                 MkAction::If(c) => {
                     condition(c, m.id, sid, asset_root, &mut out);
                     stack.push(("if", false))
@@ -935,5 +1016,82 @@ mod reference_image_tests {
         assert!(validate(4, Some(&root)).is_empty());
         assert!(!usable_image_dimensions(0, 1));
         assert!(!usable_image_dimensions(1, 0));
+    }
+}
+
+#[cfg(test)]
+mod notification_action_tests {
+    use super::*;
+
+    fn diagnostics(action: MkAction) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    id: 1,
+                    name: "test".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    playback: MkPlayback::default(),
+                    steps: vec![MkStep {
+                        id: 1,
+                        enabled: true,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: MkErrorPolicy::default(),
+                        action,
+                    }],
+                    image_assets: vec![],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn only_exact_playable_macro_sound_names_validate() {
+        for sound in crate::sound::SOUND_NAMES {
+            let found = diagnostics(MkAction::PlaySound(MkPlaySoundPayload {
+                sound: (*sound).into(),
+            }));
+            assert_eq!(found.is_empty(), *sound != "None", "{sound}");
+        }
+        for sound in ["", "Unknown.wav", "sounds/Alarm.wav", "alarm.wav"] {
+            let found = diagnostics(MkAction::PlaySound(MkPlaySoundPayload {
+                sound: sound.into(),
+            }));
+            assert_eq!(found.len(), 1, "{sound}");
+            assert_eq!(found[0].code, "invalid_play_sound");
+        }
+    }
+
+    #[test]
+    fn notification_interpolation_diagnostics_identify_the_field() {
+        let found = diagnostics(MkAction::Notify(MkNotifyPayload {
+            title: "${".into(),
+            description: "${}".into(),
+            ..MkNotifyPayload::default()
+        }));
+        assert!(
+            found
+                .iter()
+                .any(|d| d.code == "invalid_notify_title_interpolation"
+                    && d.message.contains("notify.title"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|d| d.code == "invalid_notify_description_interpolation"
+                    && d.message.contains("notify.description"))
+        );
+        assert!(
+            diagnostics(MkAction::Notify(MkNotifyPayload {
+                title: "Done ${job}".into(),
+                description: "Result $${literal}".into(),
+                ..MkNotifyPayload::default()
+            }))
+            .is_empty()
+        );
     }
 }
