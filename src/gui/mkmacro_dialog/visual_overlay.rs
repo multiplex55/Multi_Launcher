@@ -614,8 +614,15 @@ impl fmt::Display for OutlineEdge {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PassiveWindowSpec {
-    Edge { edge: OutlineEdge, rect: ScreenRect },
-    Badge { monitor: ScreenRect, index: usize },
+    Edge {
+        edge: OutlineEdge,
+        target: ScreenRect,
+        rect: ScreenRect,
+    },
+    Badge {
+        monitor: ScreenRect,
+        index: usize,
+    },
 }
 
 /// Decomposes an outline without doing arithmetic in the signed coordinate
@@ -689,7 +696,7 @@ pub(crate) fn passive_overlay_plan(
         for (edge, edge_rect) in outline_edge_rects(target) {
             for display in displays {
                 if let Some(rect) = rect_intersection(edge_rect, *display) {
-                    plan.push(PassiveWindowSpec::Edge { edge, rect });
+                    plan.push(PassiveWindowSpec::Edge { edge, target, rect });
                 }
             }
         }
@@ -700,7 +707,7 @@ pub(crate) fn passive_overlay_plan(
             .map(|(monitor, index)| PassiveWindowSpec::Badge { monitor, index }),
     );
     plan.sort_by_key(|spec| match spec {
-        PassiveWindowSpec::Edge { edge, rect } => (0, rect.x, rect.y, *edge as i32, 0),
+        PassiveWindowSpec::Edge { edge, rect, .. } => (0, rect.x, rect.y, *edge as i32, 0),
         PassiveWindowSpec::Badge { monitor, index } => (1, monitor.x, monitor.y, 0, *index as i32),
     });
     Some(plan)
@@ -883,6 +890,8 @@ impl VisualOverlayController {
     }
     fn replace_with_id(&mut self, new_id: OperationId) -> OperationId {
         if let Some(id) = self.operation_id.take() {
+            tracing::debug!(outgoing_operation_id = id, incoming_operation_id = new_id,
+                state = ?self.state, "replacing visual overlay operation");
             self.renderer.close();
             // Nothing produced by the replaced operation may be observed after
             // its replacement.  Keep one useful cancellation notification,
@@ -920,6 +929,10 @@ impl VisualOverlayController {
         visual: OverlayVisual,
     ) -> OperationId {
         self.shut_down = false;
+        let started_at = self.clock.now();
+        let expires_at = passive_expiry(&state);
+        tracing::debug!(operation_id = id, visual = ?visual, ?started_at, ?expires_at,
+            state = ?self.state, "starting visual overlay operation");
         match self.renderer.show(id, &visual, visual.passive()) {
             Ok(()) => {
                 self.operation_id = Some(id);
@@ -1204,6 +1217,8 @@ impl VisualOverlayController {
         };
         if expired {
             if let Some(id) = self.operation_id.take() {
+                tracing::debug!(operation_id = id, state = ?self.state, now = ?self.clock.now(),
+                    "passive visual overlay expired; closing operation");
                 self.renderer.close();
                 self.state = VisualOverlayState::Idle;
                 self.events
@@ -1346,6 +1361,17 @@ impl VisualOverlayController {
                 self.repaint_picker();
             }
         }
+    }
+}
+
+fn passive_expiry(state: &VisualOverlayState) -> Option<Duration> {
+    match state {
+        VisualOverlayState::PreviewingRectangle { expires_at, .. }
+        | VisualOverlayState::HighlightingMonitor { expires_at, .. }
+        | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
+        | VisualOverlayState::PreviewingDesktop { expires_at, .. }
+        | VisualOverlayState::HighlightingWindow { expires_at, .. } => Some(*expires_at),
+        _ => None,
     }
 }
 
@@ -1767,7 +1793,7 @@ mod tests {
                 &displays,
             )
             .unwrap();
-            assert!(plan.iter().any(|s| matches!(s, PassiveWindowSpec::Edge { edge: OutlineEdge::Top, rect: r } if *r == ScreenRect::new(-50, 5, 30, 3))));
+            assert!(plan.iter().any(|s| matches!(s, PassiveWindowSpec::Edge { edge: OutlineEdge::Top, rect: r, .. } if *r == ScreenRect::new(-50, 5, 30, 3))));
         }
         assert!(
             passive_overlay_plan(
