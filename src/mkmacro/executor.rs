@@ -2,11 +2,11 @@
 use super::{
     CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan,
     MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey,
-    MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkPlayback, MkPoint, MkProcessPayload,
-    MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
-    MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
-    PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, SearchRegion,
-    interpolate,
+    MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration, MkNotificationKind,
+    MkPlayback, MkPoint, MkProcessPayload, MkPromptInputPayload, MkScreenshotFormat, MkTextPayload,
+    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
+    MkWindowPayload, MkWindowState, PromptBackend, PromptRequest, PromptResponse, RuntimeVariables,
+    ScreenCaptureBackend, SearchRegion, interpolate,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -64,6 +64,23 @@ impl fmt::Display for ExecutionDiagnostic {
 }
 impl std::error::Error for ExecutionDiagnostic {}
 pub type ExecResult<T = ()> = Result<T, ExecutionDiagnostic>;
+
+/// A notification after all runtime-variable interpolation has completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNotification {
+    pub title: String,
+    pub description: String,
+    pub kind: MkNotificationKind,
+    pub duration: MkNotificationDuration,
+    pub show_symbol: bool,
+}
+
+pub trait NotificationBackend: Send + Sync {
+    fn notify(&self, notification: &ResolvedNotification) -> ExecResult;
+}
+pub trait SoundBackend: Send + Sync {
+    fn play(&self, sound: &str) -> ExecResult;
+}
 
 pub trait InputBackend: Send + Sync {
     /// Reports the physical Escape key state so playback can be cancelled.
@@ -171,6 +188,8 @@ pub trait ScreenshotFileSystem: Send + Sync {
 }
 #[derive(Clone)]
 pub struct Backends {
+    pub notification: Arc<dyn NotificationBackend>,
+    pub sound: Arc<dyn SoundBackend>,
     pub input: Arc<dyn InputBackend>,
     pub window: Arc<dyn WindowBackend>,
     pub screen: Arc<dyn ScreenBackend>,
@@ -199,6 +218,10 @@ impl Backends {
             backend: "clipboard",
         });
         Self {
+            notification: Arc::new(Unsupported {
+                backend: "notification",
+            }),
+            sound: Arc::new(Unsupported { backend: "sound" }),
             input,
             window,
             screen,
@@ -234,6 +257,57 @@ fn unsupported_context<T>(backend: &'static str, action: &'static str) -> ExecRe
 }
 fn unsupported<T>() -> ExecResult<T> {
     unsupported_context("automation", "unknown")
+}
+impl NotificationBackend for Unsupported {
+    fn notify(&self, _: &ResolvedNotification) -> ExecResult {
+        unsupported_context(self.backend, "show toast")
+    }
+}
+impl SoundBackend for Unsupported {
+    fn play(&self, _: &str) -> ExecResult {
+        unsupported_context(self.backend, "play sound")
+    }
+}
+
+/// Production adapter for the application's asynchronous embedded sounds.
+pub struct ProductionSoundBackend;
+impl SoundBackend for ProductionSoundBackend {
+    fn play(&self, sound: &str) -> ExecResult {
+        if !crate::sound::SOUND_NAMES.contains(&sound) {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                format!("unknown sound: {sound}"),
+            )
+            .context("backend", "sound")
+            .context("sound", sound));
+        }
+        crate::sound::play_sound(sound);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sound_backend_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_sound_is_rejected_before_dispatch() {
+        let error = ProductionSoundBackend
+            .play("not-a-real-sound.wav")
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(
+            error.context.get("sound").map(String::as_str),
+            Some("not-a-real-sound.wav")
+        );
+    }
+
+    #[test]
+    fn production_dispatch_does_not_join_playback_thread() {
+        let started = Instant::now();
+        ProductionSoundBackend.play("Alarm.wav").unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
 impl InputBackend for Unsupported {
     fn key_down(&self, _: &MkKey) -> ExecResult {
@@ -380,6 +454,8 @@ pub fn production_backends() -> Backends {
             super::input::LiveInputOptIn::production(),
         ));
         Backends {
+            notification: Arc::new(super::notifications::WindowsNotificationBackend::new()),
+            sound: Arc::new(ProductionSoundBackend),
             virtual_desktop: Arc::new(super::virtual_desktops::WindowsVirtualDesktopBackend(
                 input.clone(),
             )),
@@ -398,6 +474,7 @@ pub fn production_backends() -> Backends {
     #[cfg(not(windows))]
     {
         Backends {
+            sound: Arc::new(ProductionSoundBackend),
             prompt: super::prompt::production_prompt_broker(),
             clipboard: Arc::new(ProductionClipboard),
             ..unsupported
@@ -1977,14 +2054,14 @@ impl Executor {
                 Ok(())
             }
             MkAction::PromptInput(p) => self.prompt_input(p, v),
-            MkAction::PlaySound(p) => {
-                crate::sound::play_sound(&p.sound);
-                Ok(())
-            }
-            MkAction::Notify(_) => Err(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidTarget,
-                "notification delivery is unavailable in this runtime",
-            )),
+            MkAction::PlaySound(p) => self.backends.sound.play(&p.sound),
+            MkAction::Notify(p) => self.backends.notification.notify(&ResolvedNotification {
+                title: interpolate(&p.title, v)?,
+                description: interpolate(&p.description, v)?,
+                kind: p.kind,
+                duration: p.duration,
+                show_symbol: p.show_symbol,
+            }),
             MkAction::ImageFind(p) => self.wait_image(macro_id, p, v).map(|_| ()),
             MkAction::ImageClick(p) => {
                 let pt = self.wait_image(macro_id, p, v)?.ok_or_else(|| {
@@ -2497,8 +2574,8 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::UiToggle(_)
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
-        | MkAction::UiWait(_)
-        | MkAction::Notify(_) => false,
+        | MkAction::UiWait(_) => false,
+        MkAction::Notify(_) => cfg!(windows),
         MkAction::KeyDown(_)
         | MkAction::KeyUp(_)
         | MkAction::KeyPress(_)
@@ -2657,6 +2734,8 @@ pub mod fake {
         SetState(MkWindowMatcher, MkWindowState),
     }
     pub struct FakeBackend {
+        pub notifications: Mutex<Vec<ResolvedNotification>>,
+        pub sounds: Mutex<Vec<String>>,
         pub events: Mutex<Vec<String>>,
         pub failures: Mutex<HashMap<String, ExecutionDiagnostic>>,
         pub conditions: Mutex<HashMap<String, bool>>,
@@ -2672,6 +2751,8 @@ pub mod fake {
     impl Default for FakeBackend {
         fn default() -> Self {
             Self {
+                notifications: Mutex::new(Vec::new()),
+                sounds: Mutex::new(Vec::new()),
                 events: Mutex::new(Vec::new()),
                 failures: Mutex::new(HashMap::new()),
                 conditions: Mutex::new(HashMap::new()),
@@ -2690,6 +2771,12 @@ pub mod fake {
         pub fn events(&self) -> Vec<String> {
             self.events.lock().unwrap().clone()
         }
+        pub fn notifications(&self) -> Vec<ResolvedNotification> {
+            self.notifications.lock().unwrap().clone()
+        }
+        pub fn sounds(&self) -> Vec<String> {
+            self.sounds.lock().unwrap().clone()
+        }
         pub fn fail(&self, name: &str, d: ExecutionDiagnostic) {
             self.failures.lock().unwrap().insert(name.into(), d);
         }
@@ -2703,6 +2790,8 @@ pub mod fake {
         }
         pub fn backends(self: Arc<Self>) -> Backends {
             Backends {
+                notification: self.clone(),
+                sound: self.clone(),
                 input: self.clone(),
                 window: self.clone(),
                 screen: self.clone(),
@@ -2730,6 +2819,21 @@ pub mod fake {
                 .entry(asset_id)
                 .or_default()
                 .push_back(result);
+        }
+    }
+    impl NotificationBackend for FakeBackend {
+        fn notify(&self, notification: &ResolvedNotification) -> ExecResult {
+            self.notifications
+                .lock()
+                .unwrap()
+                .push(notification.clone());
+            self.event("notification".into())
+        }
+    }
+    impl SoundBackend for FakeBackend {
+        fn play(&self, sound: &str) -> ExecResult {
+            self.sounds.lock().unwrap().push(sound.to_owned());
+            self.event("sound".into())
         }
     }
     impl InputBackend for FakeBackend {
