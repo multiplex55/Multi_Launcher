@@ -86,6 +86,135 @@ fn matcher() -> MkWindowMatcher {
     }
 }
 
+fn notification_sequence(policy: MkErrorPolicy) -> MkMacro {
+    let mut notify = s(
+        3,
+        MkAction::Notify(MkNotifyPayload {
+            title: "Backup".into(),
+            description: r"Copied ${files_copied} files to ${destination}".into(),
+            kind: MkNotificationKind::Success,
+            duration: MkNotificationDuration::Long,
+            show_symbol: false,
+        }),
+    );
+    notify.on_error = policy;
+    MkMacro {
+        id: 700,
+        name: "notification sequence".into(),
+        description: String::new(),
+        enabled: true,
+        hotkey: None,
+        playback: Default::default(),
+        steps: vec![
+            s(
+                1,
+                MkAction::SetVariable {
+                    name: "files_copied".into(),
+                    value: MkValue::Number(42.0),
+                },
+            ),
+            s(
+                2,
+                MkAction::SetVariable {
+                    name: "destination".into(),
+                    value: MkValue::String(r"D:\Backup".into()),
+                },
+            ),
+            notify,
+            s(
+                4,
+                MkAction::PlaySound(MkPlaySoundPayload {
+                    sound: "ReminderStart.wav".into(),
+                }),
+            ),
+            s(
+                5,
+                MkAction::Text(MkTextPayload {
+                    text: "final".into(),
+                    mode: MkTextMode::Type,
+                }),
+            ),
+        ],
+        image_assets: vec![],
+    }
+}
+
+fn run_notification_sequence(
+    policy: MkErrorPolicy,
+    fail: bool,
+) -> (RuntimeSnapshot, Arc<FakeBackend>) {
+    let dir = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let continues = matches!(&policy, MkErrorPolicy::Continue);
+    store
+        .save(MkMacroDocument {
+            schema_version: 7,
+            settings: Default::default(),
+            macros: vec![notification_sequence(policy)],
+        })
+        .unwrap();
+    drop(store);
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    compile(&store.snapshot().macros[0]).unwrap();
+    let fake = Arc::new(FakeBackend::default());
+    if fail {
+        fake.fail(
+            "notification",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "fake notification failure"),
+        );
+    }
+    let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
+    assert_eq!(
+        runtime.command(RuntimeCommand::Run(700)),
+        CommandResult::Accepted
+    );
+    let terminal = if fail && !continues {
+        RuntimeState::Failed
+    } else {
+        RuntimeState::Completed
+    };
+    (wait(&runtime, terminal), fake)
+}
+
+#[test]
+fn reopened_notification_and_sound_execute_silently_in_order() {
+    let (snapshot, fake) = run_notification_sequence(MkErrorPolicy::Stop, false);
+    assert!(snapshot.latest_failure.is_none());
+    let notifications = fake.notifications();
+    assert_eq!(notifications.len(), 1);
+    assert!(notifications[0].description.contains("42"));
+    assert!(notifications[0].description.contains(r"D:\Backup"));
+    assert_eq!(fake.sounds(), ["ReminderStart.wav"]);
+    assert_eq!(fake.events(), ["notification", "sound", "text:final"]);
+}
+
+#[test]
+fn notification_error_policies_gate_sound_and_following_action() {
+    let (_, stop) = run_notification_sequence(MkErrorPolicy::Stop, true);
+    assert_eq!(stop.notifications().len(), 1);
+    assert!(stop.sounds().is_empty());
+    assert_eq!(stop.events(), ["notification"]);
+
+    let (_, keep_going) = run_notification_sequence(MkErrorPolicy::Continue, true);
+    assert_eq!(keep_going.notifications().len(), 1);
+    assert_eq!(keep_going.sounds(), ["ReminderStart.wav"]);
+    assert_eq!(keep_going.events(), ["notification", "sound", "text:final"]);
+
+    let (_, retry) = run_notification_sequence(
+        MkErrorPolicy::Retry(MkRetry {
+            attempts: 3,
+            delay_ms: 0,
+        }),
+        true,
+    );
+    assert_eq!(retry.notifications().len(), 3);
+    assert!(retry.sounds().is_empty());
+    assert_eq!(
+        retry.events(),
+        ["notification", "notification", "notification"]
+    );
+}
+
 #[test]
 fn image_find_result_drives_following_mouse_move_without_platform_effects() {
     let d = tempdir().unwrap();
