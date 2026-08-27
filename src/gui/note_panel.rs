@@ -70,8 +70,51 @@ struct TextInsertionOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NotePasteRequest {
-    has_native_paste: bool,
-    has_keyboard_shortcut: bool,
+    has_egui_paste: bool,
+    has_egui_shortcut: bool,
+    has_windows_shortcut: bool,
+}
+
+/// Stateful edge detector for the native Windows paste chord.
+///
+/// The policy is a V rising edge while Ctrl is already down. Pressing Ctrl after
+/// V is held is therefore not a new chord. Sampling must happen every frame,
+/// including while the editor is unfocused, so a held V cannot become an edge
+/// merely because focus moved to the editor.
+#[derive(Default, Debug)]
+struct NativePasteDetector {
+    v_was_down: bool,
+}
+
+impl NativePasteDetector {
+    fn update(&mut self, ctrl_down: bool, v_down: bool) -> bool {
+        let edge = ctrl_down && v_down && !self.v_was_down;
+        self.v_was_down = v_down;
+        edge
+    }
+
+    fn sample(&mut self) -> bool {
+        let (ctrl_down, v_down) = native_paste_key_state();
+        self.update(ctrl_down, v_down)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_paste_key_state() -> (bool, bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_V,
+    };
+    // SAFETY: GetAsyncKeyState only observes process-global keyboard state and
+    // accepts the two valid virtual-key constants supplied here.
+    unsafe {
+        let down = |key: VIRTUAL_KEY| (GetAsyncKeyState(key.0 as i32) as u16 & 0x8000) != 0;
+        (down(VK_CONTROL), down(VK_V))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_paste_key_state() -> (bool, bool) {
+    (false, false)
 }
 
 fn is_note_paste_shortcut(event: &egui::Event) -> bool {
@@ -88,20 +131,25 @@ fn is_note_paste_shortcut(event: &egui::Event) -> bool {
     )
 }
 
-fn detect_note_paste_request(events: &[egui::Event]) -> Option<NotePasteRequest> {
+fn detect_note_paste_request(
+    events: &[egui::Event],
+    has_windows_shortcut: bool,
+) -> Option<NotePasteRequest> {
     let request = NotePasteRequest {
-        has_native_paste: events
+        has_egui_paste: events
             .iter()
             .any(|event| matches!(event, egui::Event::Paste(_))),
-        has_keyboard_shortcut: events.iter().any(is_note_paste_shortcut),
+        has_egui_shortcut: events.iter().any(is_note_paste_shortcut),
+        has_windows_shortcut,
     };
-    (request.has_native_paste || request.has_keyboard_shortcut).then_some(request)
+    (request.has_egui_paste || request.has_egui_shortcut || request.has_windows_shortcut)
+        .then_some(request)
 }
 
 fn consume_note_paste_request(events: &mut Vec<egui::Event>, request: NotePasteRequest) {
     events.retain(|event| {
-        !(request.has_native_paste && matches!(event, egui::Event::Paste(_)))
-            && !(request.has_keyboard_shortcut && is_note_paste_shortcut(event))
+        !(request.has_egui_paste && matches!(event, egui::Event::Paste(_)))
+            && !(request.has_egui_shortcut && is_note_paste_shortcut(event))
     });
 }
 
@@ -685,6 +733,7 @@ pub struct NotePanel {
     pending_plain_link_conversion: Option<PendingPlainLinkConversion>,
     new_alias: String,
     alias_rename_inputs: HashMap<String, String>,
+    native_paste_detector: NativePasteDetector,
 
     // Focus management: avoid requesting focus on an ID that does not correspond to
     // an existing widget in the current frame. This prevents AccessKit from seeing
@@ -982,6 +1031,7 @@ impl NotePanel {
             pending_plain_link_conversion: None,
             new_alias: String::new(),
             alias_rename_inputs: HashMap::new(),
+            native_paste_detector: NativePasteDetector::default(),
             focus_textedit_next_frame: false,
             last_textedit_id: None,
             derived: NoteDerivedView::default(),
@@ -2180,6 +2230,9 @@ impl NotePanel {
                 self.handle_editor_response(resp, ctx, app, true);
             }
             NoteViewMode::Preview => {
+                // Keep the native edge detector synchronized even though Preview
+                // never performs clipboard inspection.
+                let _ = self.native_paste_detector.sample();
                 egui::ScrollArea::vertical()
                     .id_source(scroll_id_source)
                     .max_height(available_size.y)
@@ -2199,15 +2252,17 @@ impl NotePanel {
         }
     }
 
-    fn intercept_clipboard_image_paste_with<Lookup, Save, LookupError, SaveError>(
+    fn intercept_clipboard_image_paste_with<Native, Lookup, Save, LookupError, SaveError>(
         &mut self,
         ctx: &egui::Context,
         app: &mut LauncherApp,
         editor_id: egui::Id,
+        mut native_edge: Native,
         mut lookup: Lookup,
         mut save: Save,
     ) -> ClipboardImagePasteOutcome
     where
+        Native: FnMut() -> bool,
         Lookup: FnMut() -> Result<Option<ClipboardRgbaData>, LookupError>,
         Save: FnMut(&RgbaImage) -> Result<String, SaveError>,
         LookupError: std::fmt::Display,
@@ -2218,19 +2273,32 @@ impl NotePanel {
             self.last_paste_interceptor_id = Some(editor_id);
         }
         let outcome = (|| {
+            // Always sample to keep the detector synchronized across focus and
+            // mode changes; clipboard access remains gated below.
+            let has_windows_shortcut = native_edge();
+            if has_windows_shortcut {
+                tracing::trace!(?editor_id, "native Ctrl+V rising edge detected");
+            }
             if !matches!(self.view_mode, NoteViewMode::Edit | NoteViewMode::Split) {
                 return ClipboardImagePasteOutcome::NotHandled;
             }
             if !ctx.memory(|memory| memory.has_focus(editor_id)) {
                 return ClipboardImagePasteOutcome::NotHandled;
             }
-            let Some(request) = ctx.input(|input| detect_note_paste_request(&input.events)) else {
+            tracing::trace!(
+                ?editor_id,
+                "exact note editor has focus; inspecting clipboard request"
+            );
+            let Some(request) =
+                ctx.input(|input| detect_note_paste_request(&input.events, has_windows_shortcut))
+            else {
                 return ClipboardImagePasteOutcome::NotHandled;
             };
             tracing::trace!(
                 ?editor_id,
-                has_native_paste = request.has_native_paste,
-                has_keyboard_shortcut = request.has_keyboard_shortcut,
+                has_egui_paste = request.has_egui_paste,
+                has_egui_shortcut = request.has_egui_shortcut,
+                has_windows_shortcut = request.has_windows_shortcut,
                 "note image paste request detected"
             );
             #[cfg(test)]
@@ -2248,7 +2316,7 @@ impl NotePanel {
                     return ClipboardImagePasteOutcome::NotHandled;
                 }
                 Err(error) => {
-                    tracing::warn!(stage = "clipboard_read", error = %error, "note image paste failed");
+                    tracing::warn!(stage = "clipboard_image_read_decode", error = %error, "note image paste failed");
                     app.report_error("clipboard image paste", error);
                     return ClipboardImagePasteOutcome::NotHandled;
                 }
@@ -2276,7 +2344,7 @@ impl NotePanel {
                 Ok(filename) => filename,
                 Err(error) => {
                     ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
-                    tracing::warn!(stage = "asset_save", error = %error, "note image paste failed");
+                    tracing::warn!(stage = "png_asset_saving", error = %error, "note image paste failed");
                     app.report_error(
                         "clipboard image paste",
                         format!("could not persist clipboard image asset or PNG: {error}"),
@@ -2284,7 +2352,7 @@ impl NotePanel {
                     return ClipboardImagePasteOutcome::Handled;
                 }
             };
-            tracing::debug!(asset_path = %filename, "note image asset saved");
+            tracing::debug!(asset_path = %format!("assets/{filename}"), "note image asset saved");
             let markdown = note_image_markdown(&filename);
             ctx.input_mut(|input| consume_note_paste_request(&mut input.events, request));
             let insertion = self.insert_text_at_cursor_or_selection(ctx, editor_id, &markdown);
@@ -2599,15 +2667,19 @@ impl NotePanel {
         text_id_source: impl std::hash::Hash,
         available_size: egui::Vec2,
     ) -> egui::Response {
+        let native_edge = self.native_paste_detector.sample();
         self.render_bounded_editor_with_paste(
             ui,
             app,
             ctx,
             text_id_source,
             available_size,
+            move || native_edge,
             || {
-                let mut clipboard = Clipboard::new()
-                    .map_err(|error| format!("could not open the clipboard: {error}"))?;
+                let mut clipboard = Clipboard::new().map_err(|error| {
+                    tracing::warn!(stage = "clipboard_open", error = %error, "note image paste failed");
+                    format!("could not open the clipboard: {error}")
+                })?;
                 match clipboard.get_image() {
                     Ok(image) => Ok(Some(ClipboardRgbaData {
                         width: image.width,
@@ -2622,17 +2694,19 @@ impl NotePanel {
         )
     }
 
-    fn render_bounded_editor_with_paste<Lookup, Save, LookupError, SaveError>(
+    fn render_bounded_editor_with_paste<Native, Lookup, Save, LookupError, SaveError>(
         &mut self,
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
         ctx: &egui::Context,
         text_id_source: impl std::hash::Hash,
         available_size: egui::Vec2,
+        mut native_edge: Native,
         mut lookup: Lookup,
         mut save: Save,
     ) -> egui::Response
     where
+        Native: FnMut() -> bool,
         Lookup: FnMut() -> Result<Option<ClipboardRgbaData>, LookupError>,
         Save: FnMut(&RgbaImage) -> Result<String, SaveError>,
         LookupError: std::fmt::Display,
@@ -2659,6 +2733,7 @@ impl NotePanel {
                     ctx,
                     app,
                     editor_id,
+                    &mut native_edge,
                     &mut lookup,
                     &mut save,
                 );
@@ -4593,6 +4668,7 @@ mod tests {
                     ctx,
                     source,
                     size,
+                    || false,
                     || Ok::<_, String>(None),
                     |_| -> Result<String, String> { panic!("frame-one saver must not run") },
                 );
@@ -4637,6 +4713,7 @@ mod tests {
                     ctx,
                     source,
                     size,
+                    || false,
                     || {
                         lookups.set(lookups.get() + 1);
                         Ok::<_, String>(Some(ClipboardRgbaData {
@@ -4670,8 +4747,9 @@ mod tests {
         assert_eq!(
             panel.last_paste_request,
             Some(NotePasteRequest {
-                has_native_paste: true,
-                has_keyboard_shortcut: true,
+                has_egui_paste: true,
+                has_egui_shortcut: true,
+                has_windows_shortcut: false,
             })
         );
         assert!(ctx.memory(|memory| memory.has_focus(second_id)));
@@ -4710,6 +4788,7 @@ mod tests {
                     ctx,
                     source,
                     size,
+                    || false,
                     || Ok::<_, String>(None),
                     |_| -> Result<String, String> { panic!("saver must not run") },
                 );
@@ -4739,6 +4818,7 @@ mod tests {
                         ctx,
                         source,
                         size,
+                        || false,
                         || {
                             lookups.set(lookups.get() + 1);
                             Ok::<_, String>(None)
@@ -4914,14 +4994,15 @@ mod tests {
         let ctrl = key_event(egui::Modifiers::CTRL);
         let command = key_event(egui::Modifiers::COMMAND);
         assert_eq!(
-            detect_note_paste_request(&[paste.clone()]).unwrap(),
+            detect_note_paste_request(&[paste.clone()], false).unwrap(),
             NotePasteRequest {
-                has_native_paste: true,
-                has_keyboard_shortcut: false
+                has_egui_paste: true,
+                has_egui_shortcut: false,
+                has_windows_shortcut: false
             }
         );
-        assert!(detect_note_paste_request(&[ctrl.clone()]).is_some());
-        assert!(detect_note_paste_request(&[command]).is_some());
+        assert!(detect_note_paste_request(&[ctrl.clone()], false).is_some());
+        assert!(detect_note_paste_request(&[command], false).is_some());
 
         let mut events = vec![
             egui::Event::Text("before".into()),
@@ -4930,12 +5011,13 @@ mod tests {
             ctrl,
             egui::Event::Text("after".into()),
         ];
-        let request = detect_note_paste_request(&events).unwrap();
+        let request = detect_note_paste_request(&events, false).unwrap();
         assert_eq!(
             request,
             NotePasteRequest {
-                has_native_paste: true,
-                has_keyboard_shortcut: true
+                has_egui_paste: true,
+                has_egui_shortcut: true,
+                has_windows_shortcut: false
             }
         );
         consume_note_paste_request(&mut events, request);
@@ -4951,13 +5033,58 @@ mod tests {
 
     #[test]
     fn paste_request_detection_rejects_plain_alt_and_repeated_v() {
-        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::NONE)]).is_none());
-        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::ALT)]).is_none());
+        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::NONE)], false).is_none());
+        assert!(detect_note_paste_request(&[key_event(egui::Modifiers::ALT)], false).is_none());
         let mut repeated = key_event(egui::Modifiers::CTRL);
         if let egui::Event::Key { repeat, .. } = &mut repeated {
             *repeat = true;
         }
-        assert!(detect_note_paste_request(&[repeated]).is_none());
+        assert!(detect_note_paste_request(&[repeated], false).is_none());
+    }
+
+    #[test]
+    fn native_detector_uses_v_rising_edges_and_requires_ctrl_already_down() {
+        let mut detector = NativePasteDetector::default();
+        // Initial press, held frames, release, and a second press yield two edges.
+        assert!(!detector.update(true, false));
+        assert!(detector.update(true, true));
+        assert!(!detector.update(true, true));
+        assert!(!detector.update(true, false));
+        assert!(detector.update(true, true));
+
+        // V without Ctrl still updates/rearms state. Our explicit chord policy is
+        // that adding Ctrl while V remains held is not a paste edge.
+        assert!(!detector.update(false, false));
+        assert!(!detector.update(false, true));
+        assert!(!detector.update(true, true));
+        assert!(!detector.update(false, false));
+        assert!(detector.update(true, true));
+    }
+
+    #[test]
+    fn merged_native_and_egui_request_is_single_and_consumes_only_egui_sources() {
+        let paste = egui::Event::Paste("hello".into());
+        let key = key_event(egui::Modifiers::CTRL);
+        let mut events = vec![paste, key];
+        let request = detect_note_paste_request(&events, true).unwrap();
+        assert_eq!(
+            request,
+            NotePasteRequest {
+                has_egui_paste: true,
+                has_egui_shortcut: true,
+                has_windows_shortcut: true,
+            }
+        );
+        consume_note_paste_request(&mut events, request);
+        assert!(events.is_empty());
+        assert_eq!(
+            detect_note_paste_request(&[], true),
+            Some(NotePasteRequest {
+                has_egui_paste: false,
+                has_egui_shortcut: false,
+                has_windows_shortcut: true,
+            })
+        );
     }
 
     #[test]
@@ -4990,6 +5117,7 @@ mod tests {
             &ctx,
             &mut app,
             id,
+            || false,
             || {
                 Ok::<_, String>(Some(ClipboardRgbaData {
                     width: 2,
@@ -5046,6 +5174,7 @@ mod tests {
             &ctx,
             &mut app,
             id,
+            || false,
             || {
                 lookups.set(lookups.get() + 1);
                 Ok::<_, String>(Some(ClipboardRgbaData {
@@ -5094,6 +5223,7 @@ mod tests {
             &ctx,
             &mut app,
             id,
+            || false,
             || Ok::<_, String>(None),
             |_| -> Result<String, String> { panic!("save must not run") },
         );
@@ -5155,6 +5285,7 @@ mod tests {
                 &ctx,
                 &mut app,
                 id,
+                || false,
                 || {
                     lookups.set(lookups.get() + 1);
                     Ok::<_, String>(None)
@@ -5190,6 +5321,7 @@ mod tests {
                     ctx,
                     source,
                     size,
+                    || false,
                     || Ok::<_, String>(None),
                     |_| -> Result<String, String> { panic!("frame-one saver must not run") },
                 );
@@ -5217,6 +5349,7 @@ mod tests {
                         ctx,
                         source,
                         size,
+                        || false,
                         || {
                             lookups.set(lookups.get() + 1);
                             Ok::<_, String>(Some(ClipboardRgbaData {
@@ -5243,8 +5376,9 @@ mod tests {
         assert_eq!(
             panel.last_paste_request,
             Some(NotePasteRequest {
-                has_native_paste: false,
-                has_keyboard_shortcut: true,
+                has_egui_paste: false,
+                has_egui_shortcut: true,
+                has_windows_shortcut: false,
             })
         );
         assert_eq!(
@@ -5272,6 +5406,7 @@ mod tests {
                 &ctx,
                 &mut app,
                 id,
+                || false,
                 || {
                     Ok::<_, String>(Some(ClipboardRgbaData {
                         width: 1,
@@ -5331,6 +5466,7 @@ mod tests {
             &ctx,
             &mut app,
             id,
+            || false,
             || Err::<Option<ClipboardRgbaData>, _>("could not open the clipboard"),
             |_| Ok::<_, String>(String::new()),
         );
@@ -5372,6 +5508,7 @@ mod tests {
             &ctx,
             &mut app,
             id,
+            || false,
             || {
                 Ok::<_, String>(Some(ClipboardRgbaData {
                     width: 2,
