@@ -664,6 +664,7 @@ pub struct NotePanel {
     backlink_tab: BacklinkTab,
     backlink_page: usize,
     pending_selection: Option<(usize, usize)>,
+    pending_cursor_position: Option<usize>,
     link_dialog_open: bool,
     link_text: String,
     link_url: String,
@@ -953,6 +954,7 @@ impl NotePanel {
             backlink_tab: BacklinkTab::LinkedTodos,
             backlink_page: 0,
             pending_selection: None,
+            pending_cursor_position: None,
             link_dialog_open: false,
             link_text: String::new(),
             link_url: String::new(),
@@ -1377,7 +1379,16 @@ impl NotePanel {
 
     #[cfg(test)]
     pub(crate) fn test_set_view_mode(&mut self, view_mode: NoteViewMode) {
-        self.view_mode = view_mode;
+        self.set_view_mode(view_mode);
+    }
+
+    fn set_view_mode(&mut self, view_mode: NoteViewMode) {
+        if self.view_mode != view_mode {
+            self.view_mode = view_mode;
+            // Edit and Split live in different Ui namespaces. Until the new
+            // editor renders there is no valid ID for that variant.
+            self.last_textedit_id = None;
+        }
     }
 
     #[cfg(test)]
@@ -1528,7 +1539,6 @@ impl NotePanel {
         // the closure environment - keep IDs based on an owned clone instead.
         let slug = self.note.slug.clone();
         let window_id = egui::Id::new(("note_panel_window", self.note.slug.clone()));
-        let content_id = egui::Id::new(("note_content", slug.clone()));
         let scroll_id_source = ("note_scroll", slug.clone());
         let text_id_source = ("note_text", slug);
 
@@ -1606,10 +1616,11 @@ impl NotePanel {
                     ui.text_edit_singleline(&mut self.link_url);
                     ui.horizontal(|ui| {
                         if ui.button("Insert").clicked() {
-                            let id = self.last_textedit_id.unwrap_or(content_id);
-                            self.insert_link(ctx, id);
-                            // Return focus to the editor after insertion.
-                            self.focus_textedit_next_frame = true;
+                            if let Some(id) = self.last_textedit_id {
+                                self.insert_link(ctx, id);
+                                // Return focus to the editor after insertion.
+                                self.focus_textedit_next_frame = true;
+                            }
                         }
                         if ui.button("Cancel").clicked() {
                             self.link_text.clear();
@@ -1634,11 +1645,15 @@ impl NotePanel {
                         ui.colored_label(Color32::YELLOW, "Name is required");
                     }
                     ui.horizontal(|ui| {
-                        let id = self.last_textedit_id.unwrap_or(content_id);
-                        let confirm = ui.add_enabled(!is_empty, egui::Button::new("Link"));
+                        let confirm = ui.add_enabled(
+                            !is_empty && self.last_textedit_id.is_some(),
+                            egui::Button::new("Link"),
+                        );
                         if confirm.clicked() {
-                            self.insert_or_create_note_link(ctx, id, app);
-                            self.focus_textedit_next_frame = true;
+                            if let Some(id) = self.last_textedit_id {
+                                self.insert_or_create_note_link(ctx, id, app);
+                                self.focus_textedit_next_frame = true;
+                            }
                         }
                         if ui.button("Cancel").clicked() {
                             self.link_new_name.clear();
@@ -1837,24 +1852,26 @@ impl NotePanel {
             if !app.note_settings.rich_markdown_enabled
                 && matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
             {
-                self.view_mode = NoteViewMode::Edit;
+                self.set_view_mode(NoteViewMode::Edit);
             }
             if !app.note_settings.can_use_split() && matches!(self.view_mode, NoteViewMode::Split) {
-                self.view_mode = if app.note_settings.rich_markdown_enabled {
+                let view_mode = if app.note_settings.rich_markdown_enabled {
                     NoteViewMode::Preview
                 } else {
                     NoteViewMode::Edit
                 };
+                self.set_view_mode(view_mode);
             }
             if matches!(self.view_mode, NoteViewMode::Preview | NoteViewMode::Split)
                 && ui.button("Edit").clicked()
             {
-                self.view_mode = NoteViewMode::Edit;
+                self.set_view_mode(NoteViewMode::Edit);
                 self.focus_textedit_next_frame = true;
             }
             if !matches!(self.view_mode, NoteViewMode::Preview) && ui.button("Render").clicked() {
-                self.view_mode = NoteViewMode::Preview;
-                if let Some(id) = self.last_textedit_id {
+                let previous_editor_id = self.last_textedit_id;
+                self.set_view_mode(NoteViewMode::Preview);
+                if let Some(id) = previous_editor_id {
                     ui.ctx().memory_mut(|m| m.surrender_focus(id));
                 }
             }
@@ -1862,7 +1879,7 @@ impl NotePanel {
                 && !matches!(self.view_mode, NoteViewMode::Split)
                 && ui.button("Split").clicked()
             {
-                self.view_mode = NoteViewMode::Split;
+                self.set_view_mode(NoteViewMode::Split);
             }
             if ui.button(self.details_toggle_label()).clicked() {
                 self.set_show_metadata(app, !self.show_metadata);
@@ -2267,16 +2284,19 @@ impl NotePanel {
     }
 
     fn move_editor_cursor_to(&mut self, char_index: usize, ctx: &egui::Context) {
-        let id = self
-            .last_textedit_id
-            .unwrap_or_else(|| egui::Id::new(("note_text", self.note.slug.clone())));
-        let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(char_index),
-            )));
-        state.store(ctx, id);
+        if let Some(id) = self.last_textedit_id {
+            let mut state =
+                egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(char_index),
+                )));
+            state.store(ctx, id);
+            self.pending_cursor_position = None;
+        } else {
+            self.pending_cursor_position = Some(char_index);
+        }
         self.pending_selection = None;
         self.focus_textedit_next_frame = true;
     }
@@ -2535,7 +2555,7 @@ impl NotePanel {
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
         ctx: &egui::Context,
-        id_source: impl std::hash::Hash + Clone,
+        text_id_source: impl std::hash::Hash,
         available_size: egui::Vec2,
     ) -> egui::Response {
         let available_size = egui::vec2(available_size.x.max(0.0), available_size.y.max(0.0));
@@ -2548,11 +2568,9 @@ impl NotePanel {
                 ui.set_width(available_size.x);
                 ui.set_min_width(available_size.x);
                 ui.set_max_width(available_size.x);
-                // TextEdit hashes its explicit id source in the current Ui namespace.
-                // Calculate it here so paste handling uses the exact same namespace.
-                let editor_id = ui.make_persistent_id(egui::Id::new(id_source.clone()));
+                let editor_id = ui.make_persistent_id(text_id_source);
                 self.intercept_clipboard_image_paste(ctx, app, editor_id);
-                self.render_editor(ui, app, id_source.clone(), Some(available_size))
+                self.render_editor(ui, app, editor_id, Some(available_size))
             })
             .inner
     }
@@ -2561,12 +2579,12 @@ impl NotePanel {
         &mut self,
         ui: &mut egui::Ui,
         app: &LauncherApp,
-        text_id_source: impl std::hash::Hash,
+        editor_id: egui::Id,
         desired_size: Option<egui::Vec2>,
     ) -> egui::Response {
         let desired_width = desired_size.map_or(f32::INFINITY, |size| size.x);
         let text_edit = egui::TextEdit::multiline(&mut self.note.content)
-            .id_source(text_id_source)
+            .id(editor_id)
             .desired_width(desired_width)
             .font(FontId::monospace(app.note_font_size))
             .frame(true)
@@ -2576,6 +2594,7 @@ impl NotePanel {
         } else {
             ui.add(text_edit.desired_rows(10))
         };
+        debug_assert_eq!(response.id, editor_id);
         #[cfg(test)]
         {
             self.last_editor_rect = Some(response.rect);
@@ -3047,6 +3066,17 @@ impl NotePanel {
         }
         let first_edit_frame = self.last_textedit_id.is_none();
         self.last_textedit_id = Some(resp.id);
+        if let Some(char_index) = self.pending_cursor_position {
+            let mut pending_state =
+                egui::widgets::text_edit::TextEditState::load(ctx, resp.id).unwrap_or_default();
+            pending_state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(char_index),
+                )));
+            pending_state.store(ctx, resp.id);
+            self.pending_cursor_position = None;
+        }
         if self.focus_textedit_next_frame || (request_initial_focus && first_edit_frame) {
             resp.request_focus();
             self.focus_textedit_next_frame = false;
@@ -4427,6 +4457,100 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn render_editor_uses_the_supplied_explicit_id() {
+        let ctx = egui::Context::default();
+        let app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        let editor_id = egui::Id::new("explicit-note-editor");
+        let mut response_id = None;
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                response_id = Some(panel.render_editor(ui, &app, editor_id, None).id);
+            });
+        });
+
+        assert_eq!(response_id, Some(editor_id));
+    }
+
+    #[test]
+    fn edit_and_split_editor_sources_produce_distinct_stable_final_ids() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("body"));
+        panel.note.slug = "same-slug".into();
+        let mut first = None;
+        let mut second = None;
+
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let size = egui::vec2(300.0, 120.0);
+                    let edit = panel.render_bounded_editor(
+                        ui,
+                        &mut app,
+                        ctx,
+                        ("note_text", "same-slug"),
+                        size,
+                    );
+                    let split = panel.render_bounded_editor(
+                        ui,
+                        &mut app,
+                        ctx,
+                        ("note_split_text", "same-slug"),
+                        size,
+                    );
+                    if first.is_none() {
+                        first = Some((edit.id, split.id));
+                    } else {
+                        second = Some((edit.id, split.id));
+                    }
+                });
+            });
+        }
+
+        assert_eq!(first, second);
+        let (edit_id, split_id) = first.unwrap();
+        assert_ne!(edit_id, split_id);
+    }
+
+    #[test]
+    fn pending_cursor_and_later_insertions_use_the_rendered_editor_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("abcdef"));
+        panel.move_editor_cursor_to(3, &ctx);
+        assert!(panel.last_textedit_id.is_none());
+        assert_eq!(panel.pending_cursor_position, Some(3));
+        let editor_id = egui::Id::new("actual-rendered-editor");
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response = panel.render_editor(ui, &app, editor_id, None);
+                panel.handle_editor_response(response, ctx, &mut app, false);
+            });
+        });
+
+        assert_eq!(panel.last_textedit_id, Some(editor_id));
+        assert!(panel.pending_cursor_position.is_none());
+        let cursor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap();
+        assert_eq!(cursor.primary.index, 3);
+
+        panel.insert_text_at_cursor_or_selection(&ctx, panel.last_textedit_id.unwrap(), "!");
+        assert_eq!(panel.note.content, "abc!def");
+        let cursor = egui::widgets::text_edit::TextEditState::load(&ctx, editor_id)
+            .unwrap()
+            .cursor
+            .char_range()
+            .unwrap();
+        assert_eq!(cursor.primary.index, 4);
     }
 
     #[derive(Default)]
