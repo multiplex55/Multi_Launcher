@@ -163,3 +163,79 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
     }));
     assert_eq!(fs::read(&legacy_path).unwrap(), legacy_contents);
 }
+
+#[test]
+fn schema_six_is_normalized_without_changing_actions() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let original_actions = serde_json::json!([
+        {"type":"delay","data":{"milliseconds":42}},
+        {"type":"text","data":{"text":"unchanged","mode":"type"}}
+    ]);
+    fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 6,
+            "macros": [{
+                "id": 1, "name": "legacy", "steps": [
+                    {"id": 1, "action": original_actions[0]},
+                    {"id": 2, "action": original_actions[1]}
+                ]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    assert_eq!(store.snapshot().schema_version, 7);
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let saved_actions: Vec<_> = saved["macros"][0]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["action"].clone())
+        .collect();
+    assert_eq!(saved_actions, original_actions.as_array().unwrap().clone());
+}
+
+#[test]
+fn schema_seven_new_actions_survive_store_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 7,
+            "macros": [{"id": 1, "name": "new", "steps": [
+                {"id": 1, "action": {"type": "notify", "data": {
+                    "title": "Ready", "description": "Done", "kind": "success",
+                    "duration": "long", "show_symbol": false
+                }}},
+                {"id": 2, "action": {"type": "play_sound", "data": {"sound": "Alarm.wav"}}}
+            ]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    let first = (*store.snapshot()).clone();
+    store.save(first.clone()).unwrap();
+    drop(store);
+    let (reloaded, _) = MkMacroStore::open(dir.path()).unwrap();
+    assert_eq!(*reloaded.snapshot(), first);
+}
+
+#[test]
+fn schema_newer_than_seven_is_rejected() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join(MKMACROS_FILE),
+        r#"{"schema_version":8,"macros":[]}"#,
+    )
+    .unwrap();
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(
+        matches!(disposition, LoadDisposition::NeedsUserRecovery { error } if error.contains("newer than supported version 7"))
+    );
+    assert!(store.snapshot().macros.is_empty());
+}

@@ -1977,6 +1977,14 @@ impl Executor {
                 Ok(())
             }
             MkAction::PromptInput(p) => self.prompt_input(p, v),
+            MkAction::PlaySound(p) => {
+                crate::sound::play_sound(&p.sound);
+                Ok(())
+            }
+            MkAction::Notify(_) => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "notification delivery is unavailable in this runtime",
+            )),
             MkAction::ImageFind(p) => self.wait_image(macro_id, p, v).map(|_| ()),
             MkAction::ImageClick(p) => {
                 let pt = self.wait_image(macro_id, p, v)?.ok_or_else(|| {
@@ -2489,7 +2497,8 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::UiToggle(_)
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
-        | MkAction::UiWait(_) => false,
+        | MkAction::UiWait(_)
+        | MkAction::Notify(_) => false,
         MkAction::KeyDown(_)
         | MkAction::KeyUp(_)
         | MkAction::KeyPress(_)
@@ -2513,6 +2522,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
         | MkAction::PromptInput(_)
+        | MkAction::PlaySound(_)
         | MkAction::If(_)
         | MkAction::Else
         | MkAction::EndIf
@@ -2565,6 +2575,8 @@ fn action_name(a: &MkAction) -> &'static str {
         MkAction::Process(_) | MkAction::LauncherCommand { .. } => "launcher",
         MkAction::WaitUntil { .. } => "condition_evaluator",
         MkAction::PromptInput(_) => "prompt",
+        MkAction::Notify(_) => "notification",
+        MkAction::PlaySound(_) => "sound",
         _ => "runtime",
     }
 }
