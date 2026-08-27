@@ -5084,8 +5084,7 @@ mod tests {
         for (index, mode, focus_editor) in [
             (0, NoteViewMode::Edit, false),
             (1, NoteViewMode::Preview, true),
-            (2, NoteViewMode::Split, true),
-            (3, NoteViewMode::Edit, false),
+            (2, NoteViewMode::Edit, false),
         ] {
             let ctx = egui::Context::default();
             let id = egui::Id::new(("editor", index));
@@ -5124,6 +5123,87 @@ mod tests {
             assert_eq!(panel.note.content, "unchanged");
             let _ = ctx.end_frame();
         }
+    }
+
+    #[test]
+    fn focused_split_editor_routes_keyboard_image_paste() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("ab"));
+        panel.view_mode = NoteViewMode::Split;
+        let source = "render-path-split-editor";
+        let size = egui::vec2(320.0, 140.0);
+        let mut first_id = None;
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response = panel.render_bounded_editor_with_paste(
+                    ui,
+                    &mut app,
+                    ctx,
+                    source,
+                    size,
+                    || Ok::<_, String>(None),
+                    |_| -> Result<String, String> { panic!("frame-one saver must not run") },
+                );
+                first_id = Some(response.id);
+                response.request_focus();
+                store_cursor(ctx, response.id, 1, 1);
+                panel.handle_editor_response(response, ctx, &mut app, false);
+            });
+        });
+
+        let lookups = std::cell::Cell::new(0);
+        let saves = std::cell::Cell::new(0);
+        let mut second_id = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![key_event(egui::Modifiers::COMMAND)],
+                modifiers: egui::Modifiers::COMMAND,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = panel.render_bounded_editor_with_paste(
+                        ui,
+                        &mut app,
+                        ctx,
+                        source,
+                        size,
+                        || {
+                            lookups.set(lookups.get() + 1);
+                            Ok::<_, String>(Some(ClipboardRgbaData {
+                                width: 1,
+                                height: 1,
+                                bytes: vec![10, 20, 30, 255],
+                            }))
+                        },
+                        |image| {
+                            saves.set(saves.get() + 1);
+                            assert_eq!(image.as_raw(), &vec![10, 20, 30, 255]);
+                            Ok::<_, String>("split-image.png".into())
+                        },
+                    );
+                    second_id = Some(response.id);
+                    panel.handle_editor_response(response, ctx, &mut app, false);
+                });
+            },
+        );
+
+        assert_eq!((lookups.get(), saves.get()), (1, 1));
+        assert_eq!(first_id, second_id);
+        assert_eq!(panel.last_paste_interceptor_id, second_id);
+        assert_eq!(
+            panel.last_paste_request,
+            Some(NotePasteRequest {
+                has_native_paste: false,
+                has_keyboard_shortcut: true,
+            })
+        );
+        assert_eq!(
+            panel.note.content,
+            format!("a{}b", note_image_markdown("split-image.png"))
+        );
     }
 
     #[test]
