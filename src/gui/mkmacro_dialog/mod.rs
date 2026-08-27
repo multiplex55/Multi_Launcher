@@ -1377,9 +1377,14 @@ mod tests {
     }
 }
 impl MkMacroDialog {
+    /// Returns an operation client for constructing dialog-scoped visual tools.
+    pub fn visual_overlay_controller(&self) -> SharedVisualOverlayController {
+        self.visual_overlay.clone()
+    }
+
     /// Temporarily moves the editor out while preserving its required shared
     /// visual-overlay client in the replacement state.
-    pub(crate) fn take_action_editor(&mut self) -> action_editor::ActionEditorState {
+    pub fn take_action_editor(&mut self) -> action_editor::ActionEditorState {
         std::mem::replace(
             &mut self.action_editor,
             action_editor::ActionEditorState::new(self.visual_overlay.clone()),
