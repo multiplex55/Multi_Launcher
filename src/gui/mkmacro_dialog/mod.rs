@@ -1399,7 +1399,9 @@ impl MkMacroDialog {
         authoring_context: MkMacroAuthoringContext,
     ) -> Self {
         let baseline = store.snapshot();
-        let visual_overlay = SharedVisualOverlayController::default();
+        // The dialog is the sole production ownership boundary for the native
+        // visual-overlay worker; every authoring surface receives a clone.
+        let visual_overlay = SharedVisualOverlayController::new_dialog_owner();
         Self {
             open: false,
             draft: (*baseline).clone(),
