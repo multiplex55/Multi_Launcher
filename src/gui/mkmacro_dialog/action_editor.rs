@@ -2882,8 +2882,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::visual_overlay::{OperationId, VisualOverlayCommand, VisualOverlayEvent};
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
 
     fn test_editor() -> ActionEditorState {
         ActionEditorState::new(
@@ -2891,6 +2893,134 @@ mod tests {
                 super::super::visual_overlay::VisualOverlayController::default(),
             ),
         )
+    }
+
+    fn image_action() -> MkAction {
+        MkAction::ImageFind(MkImagePayload {
+            asset_id: 1,
+            region: SearchRegion::Rectangle {
+                rect: ScreenRect::new(1, 2, 30, 40),
+            },
+            wait: MkWaitOptions::default(),
+            tolerance: 0,
+            alpha: AlphaPolicy::Ignore,
+            return_point: ReturnPoint::TopLeft,
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            outputs: MkImageOutputs::default(),
+        })
+    }
+
+    fn shared_dialog() -> (
+        tempfile::TempDir,
+        MkMacroDialog,
+        super::super::visual_capture_workflow::TestOverlayServiceFixture,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let fixture =
+            super::super::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+        let mut dialog = MkMacroDialog::new(Arc::new(store));
+        dialog.visual_overlay = fixture.controller.clone();
+        dialog.action_editor = ActionEditorState::new(dialog.visual_overlay.clone());
+        dialog.create_macro();
+        (dir, dialog, fixture)
+    }
+
+    fn begin_owned_preview(editor: &mut ActionEditorState) -> OperationId {
+        editor.begin_new(image_action());
+        editor.preview_region(SearchRegion::Rectangle {
+            rect: ScreenRect::new(4, 5, 6, 7),
+        });
+        editor.visual_overlay.operation_id().unwrap()
+    }
+
+    fn assert_transaction_reuses_service(apply: bool) {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
+        let owned = begin_owned_preview(&mut editor);
+        fixture.observer.wait_for_commands(1);
+        if apply {
+            assert!(editor.apply(&mut dialog).is_some());
+        } else {
+            editor.cancel();
+        }
+        fixture.observer.wait_for_commands(2);
+        assert!(
+            matches!(fixture.observer.commands.lock().unwrap()[1], VisualOverlayCommand::Cancel { expected_operation_id: Some(id) } if id == owned)
+        );
+        let fresh = dialog
+            .visual_overlay_controller()
+            .preview_rectangle(ScreenRect::new(8, 9, 10, 11));
+        fixture.observer.wait_for_commands(3);
+        assert!(
+            matches!(fixture.observer.commands.lock().unwrap()[2], VisualOverlayCommand::PreviewRectangle { operation_id, .. } if operation_id == fresh)
+        );
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+        assert!(!dialog.visual_overlay_controller().poll().iter().any(|e| matches!(e, VisualOverlayEvent::Error { error, .. } if error.message.contains("shut down"))));
+    }
+
+    #[test]
+    fn cancel_cleans_up_only_its_operation_and_leaves_dialog_service_reusable() {
+        assert_transaction_reuses_service(false);
+    }
+
+    #[test]
+    fn apply_cleans_up_only_its_operation_and_leaves_dialog_service_reusable() {
+        assert_transaction_reuses_service(true);
+    }
+
+    #[test]
+    fn dropping_editor_cancels_at_most_once_and_final_dialog_handle_owns_join() {
+        let (_dir, dialog, fixture) = shared_dialog();
+        let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
+        let owned = begin_owned_preview(&mut editor);
+        fixture.observer.wait_for_commands(1);
+        drop(editor);
+        fixture.observer.wait_for_commands(2);
+        let cancel_count = fixture.observer.commands.lock().unwrap().iter().filter(|c| matches!(c, VisualOverlayCommand::Cancel { expected_operation_id: Some(id) } if *id == owned)).count();
+        assert_eq!(cancel_count, 1);
+        dialog
+            .visual_overlay_controller()
+            .preview_rectangle(ScreenRect::new(9, 9, 2, 2));
+        fixture.observer.wait_for_commands(3);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+        drop(dialog);
+        drop(fixture.controller);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn repeated_action_transactions_never_poison_shared_overlay_client() {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        for (index, apply) in [true, false, true, false].into_iter().enumerate() {
+            let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
+            let _ = begin_owned_preview(&mut editor);
+            if index == 2 {
+                editor.begin_edit(&MkStep {
+                    id: 55,
+                    enabled: true,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: Default::default(),
+                    action: MkAction::ImageClick(match image_action() {
+                        MkAction::ImageFind(p) => p,
+                        _ => unreachable!(),
+                    }),
+                });
+            }
+            if apply {
+                let _ = editor.apply(&mut dialog);
+            } else {
+                editor.cancel();
+            }
+            let id = dialog
+                .visual_overlay_controller()
+                .preview_rectangle(ScreenRect::new(index as i32, 0, 2, 2));
+            fixture.observer.wait_for_commands((index + 1) * 3);
+            assert_eq!(dialog.visual_overlay_controller().operation_id(), Some(id));
+            assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
     }
 
     #[derive(Debug, PartialEq)]

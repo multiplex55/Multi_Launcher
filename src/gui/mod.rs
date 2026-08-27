@@ -3228,6 +3228,30 @@ mod tests {
         }
         fn cancel(&mut self, _expected_operation_id: u64) {}
     }
+    struct SharedHostOverlay {
+        controller: mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController,
+        operation: Option<u64>,
+    }
+    impl mkmacro_dialog::visual_capture_workflow::RectangleOverlay for SharedHostOverlay {
+        fn begin(
+            &mut self,
+            purpose: mkmacro_dialog::visual_overlay::RectanglePurpose,
+        ) -> Result<u64, String> {
+            let id = self
+                .controller
+                .begin_rectangle_pick(purpose, crate::mkmacro::ScreenRect::new(0, 0, 100, 100));
+            self.operation = Some(id);
+            Ok(id)
+        }
+        fn poll(&mut self) -> mkmacro_dialog::visual_capture_workflow::SelectionEvent {
+            mkmacro_dialog::visual_capture_workflow::SelectionEvent::Pending
+        }
+        fn cancel(&mut self, expected: u64) {
+            if self.operation.take() == Some(expected) {
+                self.controller.cancel_operation(expected);
+            }
+        }
+    }
     struct HostCapture(Arc<Mutex<HostCaptureLog>>);
     impl mkmacro_dialog::visual_capture_workflow::CaptureAdapter for HostCapture {
         fn capture_rect(&mut self, rect: crate::mkmacro::ScreenRect) -> Result<RgbaImage, String> {
@@ -3295,6 +3319,59 @@ mod tests {
                 .unwrap()
                 .active()
         );
+    }
+
+    #[test]
+    fn installed_workflow_and_action_editor_reuse_dialog_overlay_worker() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let fixture =
+            mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        app.mkmacro_dialog.action_editor = mkmacro_dialog::action_editor::ActionEditorState::new(
+            app.mkmacro_dialog.visual_overlay_controller(),
+        );
+        let log = Arc::new(Mutex::new(HostCaptureLog::default()));
+        install_visual_capture(
+            &mut app.mkmacro_dialog,
+            VisualCaptureDependencies {
+                overlay: Box::new(SharedHostOverlay {
+                    controller: fixture.controller.clone(),
+                    operation: None,
+                }),
+                capture: Box::new(HostCapture(log.clone())),
+                assets: Box::new(HostAssets(log)),
+            },
+        );
+
+        let editor_id = app
+            .mkmacro_dialog
+            .action_editor
+            .visual_overlay
+            .preview_rectangle(crate::mkmacro::ScreenRect::new(1, 1, 5, 5));
+        fixture.observer.wait_for_commands(1);
+        app.mkmacro_dialog
+            .action_editor
+            .begin_new(host_image_action());
+        app.mkmacro_dialog
+            .action_editor
+            .request_rectangle_selection(
+                9,
+                mkmacro_dialog::visual_overlay::RectanglePurpose::SearchRegion,
+                mkmacro_dialog::action_editor::VisualRegionDestination::ImageActionSearchRegion,
+            )
+            .unwrap();
+        fixture.observer.wait_for_commands(2);
+        let commands = fixture.observer.commands.lock().unwrap();
+        assert!(
+            matches!(commands[0], mkmacro_dialog::visual_overlay::VisualOverlayCommand::PreviewRectangle { operation_id, .. } if operation_id == editor_id)
+        );
+        assert!(matches!(
+            commands[1],
+            mkmacro_dialog::visual_overlay::VisualOverlayCommand::BeginRectanglePick { .. }
+        ));
+        assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.worker_ids.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -4,6 +4,11 @@
 //! native implementation is responsible for converting window-client input to
 //! desktop coordinates before returning an [`OverlayInput`].
 use crate::mkmacro::{MkPoint, MonitorDescriptor, ScreenRect};
+#[cfg(test)]
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::{
     collections::VecDeque,
     fmt,
@@ -185,7 +190,7 @@ pub enum VisualOverlayEvent {
 }
 
 /// Messages are the only way native overlay work crosses onto its owning thread.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum VisualOverlayCommand {
     BeginRectanglePick {
         operation_id: OperationId,
@@ -225,6 +230,41 @@ pub(crate) struct NativeVisualOverlayService {
     pub commands: Sender<VisualOverlayCommand>,
     pub events: Receiver<VisualOverlayEvent>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    observer: Option<Arc<ServiceTestObserver>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ServiceTestObserver {
+    pub commands: Mutex<Vec<VisualOverlayCommand>>,
+    pub starts: AtomicUsize,
+    pub shutdowns: AtomicUsize,
+    pub joins: AtomicUsize,
+    pub worker_ids: Mutex<Vec<thread::ThreadId>>,
+    changed: Condvar,
+}
+
+#[cfg(test)]
+impl ServiceTestObserver {
+    pub fn wait_for_commands(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut commands = self.commands.lock().unwrap();
+        while commands.len() < count {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "overlay worker received only {} of {count} expected commands: {commands:?}",
+                commands.len()
+            );
+            let (next, result) = self.changed.wait_timeout(commands, remaining).unwrap();
+            commands = next;
+            assert!(
+                !result.timed_out() || commands.len() >= count,
+                "timed out waiting for overlay command {count}; received: {commands:?}"
+            );
+        }
+    }
 }
 
 impl NativeVisualOverlayService {
@@ -239,6 +279,21 @@ impl NativeVisualOverlayService {
         Self::start_with_wait_interval(factory, Duration::from_millis(12))
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_with_observer<F>(
+        factory: F,
+        observer: Arc<ServiceTestObserver>,
+    ) -> Result<Self, std::io::Error>
+    where
+        F: FnOnce() -> VisualOverlayController + Send + 'static,
+    {
+        Self::start_with_wait_interval_and_observer(
+            factory,
+            Duration::from_millis(12),
+            Some(observer),
+        )
+    }
+
     /// Test hook for running the real service loop with a deterministic controller and
     /// a nonblocking wait. Production deliberately uses a modest blocking interval.
     pub(crate) fn start_with_wait_interval<F>(
@@ -248,11 +303,40 @@ impl NativeVisualOverlayService {
     where
         F: FnOnce() -> VisualOverlayController + Send + 'static,
     {
-        let (command_tx, command_rx) = mpsc::channel();
+        #[cfg(test)]
+        {
+            Self::start_with_wait_interval_and_observer(factory, active_wait, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::start_with_wait_interval_and_observer(factory, active_wait)
+        }
+    }
+
+    fn start_with_wait_interval_and_observer<F>(
+        factory: F,
+        active_wait: Duration,
+        #[cfg(test)] observer: Option<Arc<ServiceTestObserver>>,
+    ) -> Result<Self, std::io::Error>
+    where
+        F: FnOnce() -> VisualOverlayController + Send + 'static,
+    {
+        let (command_tx, command_rx) = mpsc::channel::<VisualOverlayCommand>();
         let (event_tx, event_rx) = mpsc::channel();
+        #[cfg(test)]
+        let worker_observer = observer.clone();
         let worker = thread::Builder::new()
             .name("native-visual-overlay".into())
             .spawn(move || {
+                #[cfg(test)]
+                if let Some(observer) = &worker_observer {
+                    observer.starts.fetch_add(1, Ordering::SeqCst);
+                    observer
+                        .worker_ids
+                        .lock()
+                        .unwrap()
+                        .push(thread::current().id());
+                }
                 let mut controller = factory();
                 let mut running = true;
                 while running {
@@ -276,10 +360,22 @@ impl NativeVisualOverlayService {
                         }
                     };
                     if let Some(command) = first {
+                        #[cfg(test)]
+                        if let Some(observer) = &worker_observer {
+                            observer.commands.lock().unwrap().push(command.clone());
+                            observer.changed.notify_all();
+                        }
                         running = apply_command(&mut controller, command);
                         while running {
                             match command_rx.try_recv() {
-                                Ok(command) => running = apply_command(&mut controller, command),
+                                Ok(command) => {
+                                    #[cfg(test)]
+                                    if let Some(observer) = &worker_observer {
+                                        observer.commands.lock().unwrap().push(command.clone());
+                                        observer.changed.notify_all();
+                                    }
+                                    running = apply_command(&mut controller, command)
+                                }
                                 Err(mpsc::TryRecvError::Empty) => break,
                                 Err(mpsc::TryRecvError::Disconnected) => {
                                     running = false;
@@ -296,11 +392,18 @@ impl NativeVisualOverlayService {
                     }
                 }
                 controller.shutdown();
+                #[cfg(test)]
+                if let Some(observer) = &worker_observer {
+                    observer.shutdowns.fetch_add(1, Ordering::SeqCst);
+                    observer.changed.notify_all();
+                }
             })?;
         Ok(Self {
             commands: command_tx,
             events: event_rx,
             worker: Some(worker),
+            #[cfg(test)]
+            observer,
         })
     }
 
@@ -308,6 +411,10 @@ impl NativeVisualOverlayService {
         if let Some(worker) = self.worker.take() {
             let _ = self.commands.send(VisualOverlayCommand::Shutdown);
             let _ = worker.join();
+            #[cfg(test)]
+            if let Some(observer) = &self.observer {
+                observer.joins.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 }
