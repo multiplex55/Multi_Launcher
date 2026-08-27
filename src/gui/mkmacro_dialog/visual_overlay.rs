@@ -238,6 +238,7 @@ pub(crate) struct NativeVisualOverlayService {
 #[derive(Default)]
 pub(crate) struct ServiceTestObserver {
     pub commands: Mutex<Vec<VisualOverlayCommand>>,
+    pub generation_commands: Mutex<Vec<(usize, VisualOverlayCommand)>>,
     pub starts: AtomicUsize,
     pub shutdowns: AtomicUsize,
     pub joins: AtomicUsize,
@@ -378,14 +379,17 @@ impl NativeVisualOverlayService {
             .name("native-visual-overlay".into())
             .spawn(move || {
                 #[cfg(test)]
-                if let Some(observer) = &worker_observer {
-                    observer.starts.fetch_add(1, Ordering::SeqCst);
+                let generation = if let Some(observer) = &worker_observer {
+                    let generation = observer.starts.fetch_add(1, Ordering::SeqCst) + 1;
                     observer
                         .worker_ids
                         .lock()
                         .unwrap()
                         .push(thread::current().id());
-                }
+                    generation
+                } else {
+                    0
+                };
                 let mut controller = factory();
                 let mut running = true;
                 while running {
@@ -412,6 +416,11 @@ impl NativeVisualOverlayService {
                         #[cfg(test)]
                         if let Some(observer) = &worker_observer {
                             observer.commands.lock().unwrap().push(command.clone());
+                            observer
+                                .generation_commands
+                                .lock()
+                                .unwrap()
+                                .push((generation, command.clone()));
                             observer.changed.notify_all();
                         }
                         running = apply_command(&mut controller, command);
@@ -421,6 +430,11 @@ impl NativeVisualOverlayService {
                                     #[cfg(test)]
                                     if let Some(observer) = &worker_observer {
                                         observer.commands.lock().unwrap().push(command.clone());
+                                        observer
+                                            .generation_commands
+                                            .lock()
+                                            .unwrap()
+                                            .push((generation, command.clone()));
                                         observer.changed.notify_all();
                                     }
                                     running = apply_command(&mut controller, command)
@@ -465,6 +479,29 @@ impl NativeVisualOverlayService {
                 observer.joins.fetch_add(1, Ordering::SeqCst);
             }
         }
+    }
+
+    /// Reports whether the owner thread has stopped without waiting for it.
+    pub fn is_finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// Retires a worker which is already known to have stopped.  Events are
+    /// drained before the handle is joined so callers can preserve diagnostics
+    /// produced immediately before termination.  Calling this repeatedly is
+    /// harmless; a handle is recorded as joined exactly once.
+    pub fn cleanup_finished(&mut self) -> Vec<VisualOverlayEvent> {
+        let events: Vec<_> = self.events.try_iter().collect();
+        if self.is_finished() {
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+                #[cfg(test)]
+                if let Some(observer) = &self.observer {
+                    observer.joins.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        events
     }
 }
 
