@@ -587,9 +587,123 @@ pub enum OverlayVisual {
     },
 }
 impl OverlayVisual {
-    fn passive(&self) -> bool {
+    pub(crate) fn passive(&self) -> bool {
         !matches!(self, Self::RectanglePicker { .. })
     }
+}
+
+/// The four independently-owned windows which make up a passive outline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OutlineEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl fmt::Display for OutlineEdge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PassiveWindowSpec {
+    Edge { edge: OutlineEdge, rect: ScreenRect },
+    Badge { monitor: ScreenRect, index: usize },
+}
+
+/// Decomposes an outline without doing arithmetic in the signed coordinate
+/// type. Overlap at the corners is intentional and prevents holes for tiny
+/// (even one-pixel) targets.
+pub(crate) fn outline_edge_rects(rect: ScreenRect) -> [(OutlineEdge, ScreenRect); 4] {
+    let horizontal = rect.height.min(RECTANGLE_OUTLINE_WIDTH as u32).max(1);
+    let vertical = rect.width.min(RECTANGLE_OUTLINE_WIDTH as u32).max(1);
+    let bottom = (rect.bottom() - i64::from(horizontal))
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    let right =
+        (rect.right() - i64::from(vertical)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    [
+        (
+            OutlineEdge::Top,
+            ScreenRect::new(rect.x, rect.y, rect.width.max(1), horizontal),
+        ),
+        (
+            OutlineEdge::Bottom,
+            ScreenRect::new(rect.x, bottom, rect.width.max(1), horizontal),
+        ),
+        (
+            OutlineEdge::Left,
+            ScreenRect::new(rect.x, rect.y, vertical, rect.height.max(1)),
+        ),
+        (
+            OutlineEdge::Right,
+            ScreenRect::new(right, rect.y, vertical, rect.height.max(1)),
+        ),
+    ]
+}
+
+fn rect_intersection(a: ScreenRect, b: ScreenRect) -> Option<ScreenRect> {
+    let left = i64::from(a.x).max(i64::from(b.x));
+    let top = i64::from(a.y).max(i64::from(b.y));
+    let right = a.right().min(b.right());
+    let bottom = a.bottom().min(b.bottom());
+    (left < right && top < bottom).then(|| {
+        ScreenRect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
+    })
+}
+
+/// Produces small, platform-neutral passive windows. Edge pixels are clipped
+/// independently to real displays, so no popup bridges a virtual-desktop gap.
+pub(crate) fn passive_overlay_plan(
+    visual: &OverlayVisual,
+    displays: &[ScreenRect],
+) -> Option<Vec<PassiveWindowSpec>> {
+    if !visual.passive() {
+        return None;
+    }
+    let (targets, badges): (Vec<_>, Vec<_>) = match visual {
+        OverlayVisual::RectanglePreview(r) | OverlayVisual::Window { rect: r, .. } => {
+            (vec![*r], vec![])
+        }
+        OverlayVisual::Monitor(d) => (vec![d.bounds], vec![]),
+        OverlayVisual::Desktop(ds) => (ds.iter().map(|d| d.bounds).collect(), vec![]),
+        OverlayVisual::Monitors(ds) => (
+            ds.iter().map(|d| d.bounds).collect(),
+            ds.iter().map(|d| (d.bounds, d.index)).collect(),
+        ),
+        OverlayVisual::RectanglePicker { .. } => unreachable!(),
+    };
+    let mut plan = Vec::new();
+    for target in targets {
+        for (edge, edge_rect) in outline_edge_rects(target) {
+            for display in displays {
+                if let Some(rect) = rect_intersection(edge_rect, *display) {
+                    plan.push(PassiveWindowSpec::Edge { edge, rect });
+                }
+            }
+        }
+    }
+    plan.extend(
+        badges
+            .into_iter()
+            .map(|(monitor, index)| PassiveWindowSpec::Badge { monitor, index }),
+    );
+    plan.sort_by_key(|spec| match spec {
+        PassiveWindowSpec::Edge { edge, rect } => (0, rect.x, rect.y, *edge as i32, 0),
+        PassiveWindowSpec::Badge { monitor, index } => (1, monitor.x, monitor.y, 0, *index as i32),
+    });
+    Some(plan)
 }
 
 /// Platform-neutral description of the pixels a native overlay must produce.
@@ -1563,6 +1677,112 @@ mod tests {
             bounds,
             primary: index == 1,
         }
+    }
+
+    #[test]
+    fn passive_outline_geometry_is_exact_for_normal_negative_and_tiny_rectangles() {
+        assert_eq!(
+            outline_edge_rects(ScreenRect::new(10, 20, 100, 50)),
+            [
+                (OutlineEdge::Top, ScreenRect::new(10, 20, 100, 3)),
+                (OutlineEdge::Bottom, ScreenRect::new(10, 67, 100, 3)),
+                (OutlineEdge::Left, ScreenRect::new(10, 20, 3, 50)),
+                (OutlineEdge::Right, ScreenRect::new(107, 20, 3, 50)),
+            ]
+        );
+        let negative = outline_edge_rects(ScreenRect::new(-20, -10, 8, 7));
+        assert_eq!(negative[1].1, ScreenRect::new(-20, -6, 8, 3));
+        let tiny = outline_edge_rects(ScreenRect::new(-2, -3, 2, 1));
+        assert!(tiny.iter().all(|(_, r)| r.width > 0 && r.height > 0));
+        assert_eq!(tiny[3].1, ScreenRect::new(-2, -3, 2, 1));
+    }
+
+    #[test]
+    fn passive_plan_clips_cross_monitor_edges_and_never_bridges_a_gap() {
+        let displays = [
+            ScreenRect::new(0, 0, 100, 100),
+            ScreenRect::new(200, 0, 100, 100),
+        ];
+        let plan = passive_overlay_plan(
+            &OverlayVisual::RectanglePreview(ScreenRect::new(50, 20, 200, 60)),
+            &displays,
+        )
+        .unwrap();
+        let edges: Vec<_> = plan
+            .iter()
+            .filter_map(|s| match s {
+                PassiveWindowSpec::Edge { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            edges
+                .iter()
+                .all(|r| r.right() <= 100 || i64::from(r.x) >= 200)
+        );
+        assert!(edges.iter().any(|r| *r == ScreenRect::new(50, 20, 50, 3)));
+        assert!(edges.iter().any(|r| *r == ScreenRect::new(200, 20, 50, 3)));
+    }
+
+    #[test]
+    fn passive_variants_have_the_required_outline_and_badge_semantics() {
+        let a = monitor(2, ScreenRect::new(-100, 0, 100, 80));
+        let b = monitor(1, ScreenRect::new(0, 0, 120, 80));
+        let displays = [a.bounds, b.bounds];
+        let desktop = passive_overlay_plan(
+            &OverlayVisual::Desktop(vec![b.clone(), a.clone()]),
+            &displays,
+        )
+        .unwrap();
+        assert_eq!(
+            desktop
+                .iter()
+                .filter(|s| matches!(s, PassiveWindowSpec::Edge { .. }))
+                .count(),
+            8
+        );
+        assert!(
+            !desktop
+                .iter()
+                .any(|s| matches!(s, PassiveWindowSpec::Badge { .. }))
+        );
+        let selected = passive_overlay_plan(&OverlayVisual::Monitor(a.clone()), &displays).unwrap();
+        assert_eq!(selected.len(), 4);
+        let identified =
+            passive_overlay_plan(&OverlayVisual::Monitors(vec![a, b]), &displays).unwrap();
+        assert_eq!(
+            identified
+                .iter()
+                .filter(|s| matches!(s, PassiveWindowSpec::Badge { .. }))
+                .count(),
+            2
+        );
+        for kind in [WindowAreaKind::WholeWindow, WindowAreaKind::ClientArea] {
+            let rect = ScreenRect::new(-50, 5, 30, 20);
+            let plan = passive_overlay_plan(
+                &OverlayVisual::Window {
+                    rect,
+                    area_kind: kind,
+                },
+                &displays,
+            )
+            .unwrap();
+            assert!(plan.iter().any(|s| matches!(s, PassiveWindowSpec::Edge { edge: OutlineEdge::Top, rect: r } if *r == ScreenRect::new(-50, 5, 30, 3))));
+        }
+        assert!(
+            passive_overlay_plan(
+                &OverlayVisual::RectanglePicker {
+                    virtual_desktop: displays[0],
+                    selection: None,
+                    tooltip: RectangleTooltip {
+                        text: String::new(),
+                        pointer: point(0, 0)
+                    },
+                },
+                &displays
+            )
+            .is_none()
+        );
     }
 
     #[test]
