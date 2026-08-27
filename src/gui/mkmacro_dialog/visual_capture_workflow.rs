@@ -39,12 +39,13 @@ struct OverlayServiceState {
     service: Option<NativeVisualOverlayService>,
     terminal_shutdown: bool,
 }
-impl Default for SharedVisualOverlayController {
-    fn default() -> Self {
+impl SharedVisualOverlayController {
+    /// Creates the production owner.  This is deliberately visible only to the
+    /// containing dialog module so action/condition editors cannot accidentally
+    /// grow their own native worker.
+    pub(super) fn new_dialog_owner() -> Self {
         Self::from_factory(Arc::new(NativeVisualOverlayService::start), true)
     }
-}
-impl SharedVisualOverlayController {
     /// Legacy one-shot test constructor.  Because the controller is consumed by
     /// generation one, this constructor cannot validate worker restart.
     pub fn new(controller: VisualOverlayController) -> Self {
@@ -166,14 +167,19 @@ impl SharedVisualOverlayController {
                         }
                     }
                 }
-                if state
-                    .service
-                    .as_ref()
-                    .unwrap()
-                    .commands
-                    .send(command.clone())
-                    .is_ok()
-                {
+                let service = state.service.as_ref().unwrap();
+                let previous = self.0.active_id.load(Ordering::Acquire);
+                // Replacement is part of dispatch, rather than a convention imposed
+                // on individual editors.  Consequently active and passive operations
+                // have identical ordering and the old operation is cancelled once.
+                let replacement_sent = previous == 0
+                    || service
+                        .commands
+                        .send(VisualOverlayCommand::Cancel {
+                            expected_operation_id: Some(previous),
+                        })
+                        .is_ok();
+                if replacement_sent && service.commands.send(command.clone()).is_ok() {
                     self.0.active_id.store(id, Ordering::Release);
                     None
                 } else {
@@ -714,12 +720,89 @@ mod tests {
         drop(editor);
         drop(adapter);
         let third = dialog.preview_rectangle(ScreenRect::new(5, 6, 7, 8));
-        fixture.observer.wait_for_commands(4);
+        fixture.observer.wait_for_commands(5);
         assert!(
-            matches!(fixture.observer.commands.lock().unwrap()[3], VisualOverlayCommand::PreviewRectangle { operation_id, .. } if operation_id == third)
+            matches!(fixture.observer.commands.lock().unwrap()[3], VisualOverlayCommand::Cancel { expected_operation_id: Some(id) } if id == second)
+        );
+        assert!(
+            matches!(fixture.observer.commands.lock().unwrap()[4], VisualOverlayCommand::PreviewRectangle { operation_id, .. } if operation_id == third)
         );
         assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
         drop(dialog);
+        drop(fixture.controller);
+        assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn one_service_orders_every_operation_type_and_replaces_each_predecessor_once() {
+        use super::super::visual_overlay::WindowAreaKind;
+        use crate::mkmacro::MonitorDescriptor;
+
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let owner = fixture.controller.clone();
+        let signed = ScreenRect::new(-1_920, -240, 1_280, 1_024);
+        let monitor = MonitorDescriptor {
+            index: 7,
+            bounds: signed,
+            primary: false,
+        };
+        let ids = [
+            owner.begin_rectangle_pick(RectanglePurpose::ReferenceImageCapture, signed),
+            owner.begin_rectangle_pick(RectanglePurpose::SearchRegion, signed),
+            owner.preview_rectangle(signed),
+            owner.highlight_monitor(monitor.clone()),
+            owner.identify_monitors(vec![monitor.clone()]),
+            owner.preview_desktop(vec![monitor.clone()]),
+            owner.highlight_window(signed, WindowAreaKind::ClientArea),
+        ];
+        fixture.observer.wait_for_commands(13);
+
+        let commands = fixture.observer.commands.lock().unwrap();
+        for (index, id) in ids.iter().copied().enumerate().skip(1) {
+            assert!(
+                matches!(commands[index * 2 - 1], VisualOverlayCommand::Cancel { expected_operation_id: Some(old) } if old == ids[index - 1])
+            );
+            assert_eq!(commands.iter().filter(|command| matches!(command, VisualOverlayCommand::Cancel { expected_operation_id: Some(old) } if *old == ids[index - 1])).count(), 1);
+            let command_id = match &commands[index * 2] {
+                VisualOverlayCommand::BeginRectanglePick { operation_id, .. }
+                | VisualOverlayCommand::PreviewRectangle { operation_id, .. }
+                | VisualOverlayCommand::HighlightMonitor { operation_id, .. }
+                | VisualOverlayCommand::IdentifyMonitors { operation_id, .. }
+                | VisualOverlayCommand::PreviewDesktop { operation_id, .. }
+                | VisualOverlayCommand::HighlightWindow { operation_id, .. } => *operation_id,
+                other => panic!("unexpected operation command: {other:?}"),
+            };
+            assert_eq!(command_id, id);
+        }
+        assert!(
+            matches!(commands[0], VisualOverlayCommand::BeginRectanglePick { operation_id, purpose: RectanglePurpose::ReferenceImageCapture, virtual_desktop } if operation_id == ids[0] && virtual_desktop == signed)
+        );
+        assert!(
+            matches!(commands[2], VisualOverlayCommand::BeginRectanglePick { operation_id, purpose: RectanglePurpose::SearchRegion, virtual_desktop } if operation_id == ids[1] && virtual_desktop == signed)
+        );
+        assert!(
+            matches!(&commands[8], VisualOverlayCommand::IdentifyMonitors { monitors, .. } if monitors == &vec![monitor.clone()])
+        );
+        assert!(
+            matches!(&commands[10], VisualOverlayCommand::PreviewDesktop { monitors, .. } if monitors == &vec![monitor.clone()])
+        );
+        assert!(
+            matches!(commands[12], VisualOverlayCommand::HighlightWindow { rect, area_kind: WindowAreaKind::ClientArea, .. } if rect == signed)
+        );
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            ids.len()
+        );
+        assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 0);
+        drop(commands);
+        drop(owner);
+        assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 0);
         drop(fixture.controller);
         assert_eq!(fixture.observer.shutdowns.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 1);
