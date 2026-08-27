@@ -1264,10 +1264,10 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             format!("{summary} · {destination}")
         }
         MkAction::WaitForVisualChange(p) => format!(
-            "{} changes ≥ {}% · timeout {} ms",
+            "{} changes ≥ {}% · {}",
             region_summary(&p.region),
             p.change_threshold_percent,
-            p.timeout_ms
+            format_wait_timeout(p.timeout_ms)
         ),
         MkAction::UiSetValue { value, .. } => {
             format!("Unavailable UI Automation action (set value to {value})")
@@ -1470,17 +1470,24 @@ fn format_wait_until(
         if !matches!(search.region, SearchRegion::Desktop) {
             parts.push(condition_region_summary(&search.region));
         }
-        parts.push(format!("timeout {} ms", wait.timeout_ms));
+        parts.push(format_wait_timeout(wait.timeout_ms));
         if wait.poll_interval_ms != 100 {
             parts.push(format!("poll every {} ms", wait.poll_interval_ms));
         }
         parts.join(" · ")
     } else {
         format!(
-            "{} · timeout {} ms",
+            "{} · {}",
             condition_summary(c, preferred, assets),
-            wait.timeout_ms
+            format_wait_timeout(wait.timeout_ms)
         )
+    }
+}
+fn format_wait_timeout(timeout_ms: u64) -> String {
+    if timeout_ms == 0 {
+        "wait forever".into()
+    } else {
+        format!("timeout {timeout_ms} ms")
     }
 }
 fn format_image_details(

@@ -5,6 +5,7 @@ use super::{
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 // Schema 7 introduces action tags that schema-6 builds do not know how to
 // deserialize, so documents containing them must not claim schema-6 compatibility.
@@ -272,6 +273,18 @@ pub enum MkUiPattern {
 pub struct MkWaitOptions {
     pub timeout_ms: u64,
     pub poll_interval_ms: u64,
+}
+impl MkWaitOptions {
+    /// Returns the finite timeout, or `None` when this wait has no timeout
+    /// deadline. `None` still polls until success or an external abort.
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        timeout_duration(self.timeout_ms)
+    }
+}
+
+/// Canonical conversion used by every wait payload: zero means no deadline.
+fn timeout_duration(timeout_ms: u64) -> Option<Duration> {
+    (timeout_ms != 0).then(|| Duration::from_millis(timeout_ms))
 }
 impl Default for MkWaitOptions {
     fn default() -> Self {
@@ -709,6 +722,12 @@ impl Default for WaitForVisualChange {
         }
     }
 }
+impl WaitForVisualChange {
+    /// Returns the finite timeout, or `None` for an indefinitely polling wait.
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        timeout_duration(self.timeout_ms)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MkAction {
@@ -1112,5 +1131,35 @@ mod notification_serialization_tests {
             assert!(json.contains(&format!(r#""type":"{tag}""#)));
             assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
         }
+    }
+}
+
+#[cfg(test)]
+mod wait_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn timeout_duration_distinguishes_indefinite_and_finite_waits() {
+        assert_eq!(
+            MkWaitOptions {
+                timeout_ms: 0,
+                poll_interval_ms: 25,
+            }
+            .timeout_duration(),
+            None
+        );
+        assert_eq!(
+            MkWaitOptions {
+                timeout_ms: 1_234,
+                poll_interval_ms: 25,
+            }
+            .timeout_duration(),
+            Some(Duration::from_millis(1_234))
+        );
+        let visual = WaitForVisualChange {
+            timeout_ms: 0,
+            ..WaitForVisualChange::default()
+        };
+        assert_eq!(visual.timeout_duration(), None);
     }
 }

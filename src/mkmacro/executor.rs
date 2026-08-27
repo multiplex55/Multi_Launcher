@@ -1730,7 +1730,7 @@ impl Executor {
         // visual state at action entry rather than against the previous poll.
         let baseline = capture()?;
         let started = Instant::now();
-        let timeout = Duration::from_millis(p.timeout_ms);
+        let timeout = p.timeout_duration();
         let required = p.consecutive_changed_frames.unwrap_or(1).max(1);
         let mut consecutive = 0u32;
         loop {
@@ -1757,17 +1757,21 @@ impl Executor {
                 return Ok(());
             }
             let elapsed = started.elapsed();
-            if elapsed >= timeout {
-                return Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::Timeout,
-                    "timed out waiting for visual change",
-                )
-                .context("timeout_ms", p.timeout_ms.to_string())
-                .context("threshold_percent", p.change_threshold_percent.to_string()));
-            }
-            self.wait(
-                Duration::from_millis(p.poll_interval_ms).min(timeout.saturating_sub(elapsed)),
-            )?;
+            let sleep = match timeout {
+                Some(timeout) if elapsed >= timeout => {
+                    return Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::Timeout,
+                        "timed out waiting for visual change",
+                    )
+                    .context("timeout_ms", p.timeout_ms.to_string())
+                    .context("threshold_percent", p.change_threshold_percent.to_string()));
+                }
+                Some(timeout) => {
+                    Duration::from_millis(p.poll_interval_ms).min(timeout.saturating_sub(elapsed))
+                }
+                None => Duration::from_millis(p.poll_interval_ms),
+            };
+            self.wait(sleep)?;
         }
     }
     pub fn execute(&self, plan: &MkExecutionPlan, observe: &dyn Fn(ExecutionEvent)) -> ExecResult {
@@ -2442,6 +2446,7 @@ impl Executor {
         v: &mut RuntimeVariables,
     ) -> ExecResult {
         let started = Instant::now();
+        let timeout = o.timeout_duration();
         let mut polls = 0u64;
         loop {
             self.control.checkpoint()?;
@@ -2450,7 +2455,7 @@ impl Executor {
                 return Ok(());
             }
             let elapsed = started.elapsed();
-            if elapsed >= Duration::from_millis(o.timeout_ms) {
+            if timeout.is_some_and(|timeout| elapsed >= timeout) {
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::Timeout,
                     format!("condition timed out after {} ms", o.timeout_ms),
@@ -2459,10 +2464,10 @@ impl Executor {
                 .context("poll_interval_ms", o.poll_interval_ms.to_string())
                 .context("polls", polls.to_string()));
             }
-            self.wait(
-                Duration::from_millis(o.poll_interval_ms.max(1))
-                    .min(Duration::from_millis(o.timeout_ms).saturating_sub(elapsed)),
-            )?;
+            let sleep = timeout.map_or(Duration::from_millis(o.poll_interval_ms), |timeout| {
+                Duration::from_millis(o.poll_interval_ms).min(timeout.saturating_sub(elapsed))
+            });
+            self.wait(sleep)?;
         }
     }
     fn wait_until(
@@ -2471,18 +2476,23 @@ impl Executor {
         mut poll: impl FnMut() -> ExecResult<bool>,
     ) -> ExecResult {
         let start = Instant::now();
+        let timeout = o.timeout_duration();
         loop {
             self.control.checkpoint()?;
             if poll()? {
                 return Ok(());
             }
-            if start.elapsed() >= Duration::from_millis(o.timeout_ms) {
+            let elapsed = start.elapsed();
+            if timeout.is_some_and(|timeout| elapsed >= timeout) {
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::Timeout,
                     format!("condition timed out after {} ms", o.timeout_ms),
                 ));
             }
-            self.wait(Duration::from_millis(o.poll_interval_ms.max(1)))?
+            let sleep = timeout.map_or(Duration::from_millis(o.poll_interval_ms), |timeout| {
+                Duration::from_millis(o.poll_interval_ms).min(timeout.saturating_sub(elapsed))
+            });
+            self.wait(sleep)?
         }
     }
     fn condition(
@@ -3050,6 +3060,7 @@ pub mod fake {
         pub events: Mutex<Vec<String>>,
         pub failures: Mutex<HashMap<String, ExecutionDiagnostic>>,
         pub conditions: Mutex<HashMap<String, bool>>,
+        pub condition_results: Mutex<HashMap<String, VecDeque<bool>>>,
         pub cursor: Mutex<MkPoint>,
         pub prompt_responses: Mutex<Vec<PromptResponse>>,
         pub processes: Mutex<Vec<MkProcessPayload>>,
@@ -3067,6 +3078,7 @@ pub mod fake {
                 events: Mutex::new(Vec::new()),
                 failures: Mutex::new(HashMap::new()),
                 conditions: Mutex::new(HashMap::new()),
+                condition_results: Mutex::new(HashMap::new()),
                 cursor: Mutex::new(MkPoint { x: 0, y: 0 }),
                 prompt_responses: Mutex::new(Vec::new()),
                 processes: Mutex::new(Vec::new()),
@@ -3130,6 +3142,12 @@ pub mod fake {
                 .entry(asset_id)
                 .or_default()
                 .push_back(result);
+        }
+        pub fn script_condition(&self, name: &str, results: impl IntoIterator<Item = bool>) {
+            self.condition_results
+                .lock()
+                .unwrap()
+                .insert(name.into(), results.into_iter().collect());
         }
     }
     impl NotificationBackend for FakeBackend {
@@ -3214,6 +3232,15 @@ pub mod fake {
                 .lock()
                 .unwrap()
                 .push(WindowCall::Exists(matcher.clone()));
+            if let Some(result) = self
+                .condition_results
+                .lock()
+                .unwrap()
+                .get_mut("window_exists")
+                .and_then(VecDeque::pop_front)
+            {
+                return Ok(result);
+            }
             Ok(*self
                 .conditions
                 .lock()
@@ -3890,6 +3917,52 @@ mod phase_d_tests {
             Some("true")
         );
         assert!(e.context.contains_key("poll_interval_ms"));
+    }
+
+    #[test]
+    fn indefinite_wait_until_polls_until_success() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.backends(), control);
+        let mut polls = 0;
+        executor
+            .wait_until(
+                &MkWaitOptions {
+                    timeout_ms: 0,
+                    poll_interval_ms: 1,
+                },
+                || {
+                    polls += 1;
+                    Ok(polls == 4)
+                },
+            )
+            .unwrap();
+        assert_eq!(polls, 4);
+    }
+
+    #[test]
+    fn window_wait_inherits_indefinite_condition_polling() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_condition("window_exists", [false, false, false, true]);
+        run(
+            vec![s(
+                1,
+                MkAction::WindowWait(MkWindowPayload {
+                    matcher: MkWindowMatcher {
+                        title: Some("eventual".into()),
+                        ..MkWindowMatcher::default()
+                    },
+                    wait: Some(MkWaitOptions {
+                        timeout_ms: 0,
+                        poll_interval_ms: 1,
+                    }),
+                }),
+            )],
+            fake.clone(),
+        )
+        .unwrap();
+        assert_eq!(fake.window_calls.lock().unwrap().len(), 4);
     }
 
     #[test]
