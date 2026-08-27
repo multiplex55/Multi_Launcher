@@ -3361,13 +3361,19 @@ mod tests {
                 mkmacro_dialog::action_editor::VisualRegionDestination::ImageActionSearchRegion,
             )
             .unwrap();
-        fixture.observer.wait_for_commands(2);
+        fixture.observer.wait_for_commands(3);
         let commands = fixture.observer.commands.lock().unwrap();
         assert!(
             matches!(commands[0], mkmacro_dialog::visual_overlay::VisualOverlayCommand::PreviewRectangle { operation_id, .. } if operation_id == editor_id)
         );
         assert!(matches!(
             commands[1],
+            mkmacro_dialog::visual_overlay::VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(operation_id)
+            } if operation_id == editor_id
+        ));
+        assert!(matches!(
+            commands[2],
             mkmacro_dialog::visual_overlay::VisualOverlayCommand::BeginRectanglePick { .. }
         ));
         assert_eq!(fixture.observer.starts.load(Ordering::SeqCst), 1);
