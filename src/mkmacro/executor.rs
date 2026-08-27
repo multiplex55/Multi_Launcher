@@ -3,10 +3,11 @@ use super::{
     CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan,
     MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey,
     MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration, MkNotificationKind,
-    MkPlayback, MkPoint, MkProcessPayload, MkPromptInputPayload, MkScreenshotFormat, MkTextPayload,
-    MkUiPayload, MkValue, MkWaitOptions, MkWindowMatcher, MkWindowMoveResizePayload,
-    MkWindowPayload, MkWindowState, PromptBackend, PromptRequest, PromptResponse, RuntimeVariables,
-    ScreenCaptureBackend, SearchRegion, interpolate,
+    MkNotifyPayload, MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload,
+    MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
+    MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
+    PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, SearchRegion,
+    interpolate,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -2054,14 +2055,14 @@ impl Executor {
                 Ok(())
             }
             MkAction::PromptInput(p) => self.prompt_input(p, v),
-            MkAction::PlaySound(p) => self.backends.sound.play(&p.sound),
-            MkAction::Notify(p) => self.backends.notification.notify(&ResolvedNotification {
-                title: interpolate(&p.title, v)?,
-                description: interpolate(&p.description, v)?,
-                kind: p.kind,
-                duration: p.duration,
-                show_symbol: p.show_symbol,
-            }),
+            MkAction::PlaySound(p) => {
+                validate_macro_sound(p)?;
+                self.backends.sound.play(&p.sound)
+            }
+            MkAction::Notify(p) => {
+                let resolved = resolve_notification(p, v)?;
+                self.backends.notification.notify(&resolved)
+            }
             MkAction::ImageFind(p) => self.wait_image(macro_id, p, v).map(|_| ()),
             MkAction::ImageClick(p) => {
                 let pt = self.wait_image(macro_id, p, v)?.ok_or_else(|| {
@@ -2560,6 +2561,316 @@ impl Executor {
             }
             MkCondition::Not { condition } => Ok(!self.condition(macro_id, condition, v)?),
         }
+    }
+}
+
+fn validate_macro_sound(payload: &MkPlaySoundPayload) -> ExecResult {
+    if payload.sound == "None" || !crate::sound::SOUND_NAMES.contains(&payload.sound.as_str()) {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            format!("unknown macro sound name '{}'", payload.sound),
+        )
+        .context("field", "play_sound.sound")
+        .context("sound", &payload.sound));
+    }
+    Ok(())
+}
+
+fn resolve_notification(
+    payload: &MkNotifyPayload,
+    variables: &RuntimeVariables,
+) -> ExecResult<ResolvedNotification> {
+    let title = interpolate(&payload.title, variables)
+        .map_err(|error| error.context("field", "notify.title"))?;
+    let description = interpolate(&payload.description, variables)
+        .map_err(|error| error.context("field", "notify.description"))?;
+    Ok(ResolvedNotification {
+        title,
+        description,
+        kind: payload.kind,
+        duration: payload.duration,
+        show_symbol: payload.show_symbol,
+    })
+}
+
+#[cfg(test)]
+mod notification_sound_tests {
+    use super::{fake::FakeBackend, *};
+    use crate::mkmacro::{
+        MkErrorPolicy, MkMacro, MkNotifyPayload, MkPlaySoundPayload, MkRetry, MkStep, MkTextMode,
+        compile,
+    };
+    use std::sync::mpsc;
+
+    struct SchedulingSoundBackend(Mutex<mpsc::Sender<String>>);
+    impl SoundBackend for SchedulingSoundBackend {
+        fn play(&self, sound: &str) -> ExecResult {
+            self.0.lock().unwrap().send(sound.into()).unwrap();
+            Ok(())
+        }
+    }
+
+    fn step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        }
+    }
+
+    fn notification(title: &str, description: &str) -> MkAction {
+        MkAction::Notify(MkNotifyPayload {
+            title: title.into(),
+            description: description.into(),
+            ..MkNotifyPayload::default()
+        })
+    }
+
+    fn execute(steps: Vec<MkStep>, fake: Arc<FakeBackend>) -> ExecResult {
+        let plan = compile(&MkMacro {
+            id: 42,
+            name: "notification and sound".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            playback: MkPlayback::default(),
+            steps,
+            image_assets: vec![],
+        })
+        .unwrap();
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        Executor::new(fake.backends(), control).execute(&plan, &|_| {})
+    }
+
+    #[test]
+    fn notification_interpolates_each_string_and_preserves_cosmetics() {
+        let fake = Arc::new(FakeBackend::default());
+        execute(
+            vec![
+                step(
+                    1,
+                    MkAction::SetVariable {
+                        name: "name".into(),
+                        value: MkValue::String("Fred".into()),
+                    },
+                ),
+                step(
+                    2,
+                    MkAction::SetVariable {
+                        name: "path".into(),
+                        value: MkValue::String(r"D:\Backup".into()),
+                    },
+                ),
+                step(
+                    3,
+                    MkAction::SetVariable {
+                        name: "job".into(),
+                        value: MkValue::String("daily".into()),
+                    },
+                ),
+                step(
+                    4,
+                    MkAction::Notify(MkNotifyPayload {
+                        title: "${job}: ${path}".into(),
+                        description: "Hello ${name}; ${job} at ${path}".into(),
+                        kind: MkNotificationKind::Warning,
+                        duration: MkNotificationDuration::Long,
+                        show_symbol: false,
+                    }),
+                ),
+            ],
+            fake.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            fake.notifications(),
+            vec![ResolvedNotification {
+                title: r"daily: D:\Backup".into(),
+                description: r"Hello Fred; daily at D:\Backup".into(),
+                kind: MkNotificationKind::Warning,
+                duration: MkNotificationDuration::Long,
+                show_symbol: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn notification_interpolation_failure_names_field_without_delivery() {
+        for (action, field) in [
+            (notification("${missing}", "ok"), "notify.title"),
+            (notification("ok", "${missing}"), "notify.description"),
+        ] {
+            let fake = Arc::new(FakeBackend::default());
+            let mut guard = InputCleanupGuard::new(fake.clone());
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let error = Executor::new(fake.clone().backends(), control)
+                .action(
+                    42,
+                    &action,
+                    &MkPlayback::default(),
+                    &mut RuntimeVariables::new(),
+                    &mut guard,
+                )
+                .unwrap_err();
+            assert_eq!(error.context.get("field").map(String::as_str), Some(field));
+            assert!(fake.notifications().is_empty());
+        }
+    }
+
+    #[test]
+    fn notification_failure_obeys_stop_continue_and_retry() {
+        for (policy, expected_attempts, should_continue) in [
+            (MkErrorPolicy::Stop, 1, false),
+            (MkErrorPolicy::Continue, 1, true),
+            (
+                MkErrorPolicy::Retry(MkRetry {
+                    attempts: 3,
+                    delay_ms: 0,
+                }),
+                3,
+                false,
+            ),
+        ] {
+            let fake = Arc::new(FakeBackend::default());
+            fake.fail(
+                "notification",
+                ExecutionDiagnostic::new(DiagnosticKind::Backend, "toast failed"),
+            );
+            let mut first = step(1, notification("title", "description"));
+            first.on_error = policy;
+            let result = execute(
+                vec![
+                    first,
+                    step(
+                        2,
+                        MkAction::Text(MkTextPayload {
+                            text: "next".into(),
+                            mode: MkTextMode::Type,
+                        }),
+                    ),
+                ],
+                fake.clone(),
+            );
+            assert_eq!(fake.notifications().len(), expected_attempts);
+            assert_eq!(
+                fake.events().iter().any(|event| event == "text:next"),
+                should_continue
+            );
+            assert_eq!(result.is_ok(), should_continue);
+        }
+    }
+
+    #[test]
+    fn sound_is_exactly_once_and_invalid_names_never_reach_backend() {
+        let fake = Arc::new(FakeBackend::default());
+        execute(
+            vec![step(
+                1,
+                MkAction::PlaySound(MkPlaySoundPayload {
+                    sound: "ReminderStart.wav".into(),
+                }),
+            )],
+            fake.clone(),
+        )
+        .unwrap();
+        assert_eq!(fake.sounds(), vec!["ReminderStart.wav"]);
+
+        let invalid = MkAction::PlaySound(MkPlaySoundPayload {
+            sound: "reminderstart.wav".into(),
+        });
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let error = Executor::new(fake.clone().backends(), control)
+            .action(
+                42,
+                &invalid,
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(fake.sounds(), vec!["ReminderStart.wav"]);
+    }
+
+    #[test]
+    fn successful_sound_with_retry_policy_is_not_duplicated_and_next_step_runs() {
+        let fake = Arc::new(FakeBackend::default());
+        let mut sound = step(
+            1,
+            MkAction::PlaySound(MkPlaySoundPayload {
+                sound: "ReminderStart.wav".into(),
+            }),
+        );
+        sound.on_error = MkErrorPolicy::Retry(MkRetry {
+            attempts: 5,
+            delay_ms: 0,
+        });
+        execute(
+            vec![
+                sound,
+                step(
+                    2,
+                    MkAction::Text(MkTextPayload {
+                        text: "after".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+            ],
+            fake.clone(),
+        )
+        .unwrap();
+        assert_eq!(fake.sounds(), vec!["ReminderStart.wav"]);
+        assert_eq!(fake.events(), vec!["sound", "text:after"]);
+    }
+
+    #[test]
+    fn sound_delivery_is_fire_and_forget() {
+        let fake = Arc::new(FakeBackend::default());
+        let (scheduled_tx, scheduled_rx) = mpsc::channel();
+        let mut backends = fake.clone().backends();
+        backends.sound = Arc::new(SchedulingSoundBackend(Mutex::new(scheduled_tx)));
+        let plan = compile(&MkMacro {
+            id: 43,
+            name: "async sound".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            playback: MkPlayback::default(),
+            steps: vec![
+                step(
+                    1,
+                    MkAction::PlaySound(MkPlaySoundPayload {
+                        sound: "ReminderStart.wav".into(),
+                    }),
+                ),
+                step(
+                    2,
+                    MkAction::Text(MkTextPayload {
+                        text: "following step".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+            ],
+            image_assets: vec![],
+        })
+        .unwrap();
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        Executor::new(backends, control)
+            .execute(&plan, &|_| {})
+            .unwrap();
+
+        // Receiving the scheduled work is independent from playback completion;
+        // execution has already advanced to the following backend call.
+        assert_eq!(scheduled_rx.try_recv().unwrap(), "ReminderStart.wav");
+        assert_eq!(fake.events(), vec!["text:following step"]);
     }
 }
 /// Testable declaration that every action has deliberate executor handling.
