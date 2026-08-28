@@ -909,6 +909,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.sync_image_region_to_draft();
         let mut step = self.draft.take()?;
+        normalize_optional_outputs(&mut step.action);
         let edit = self.editing_id.take();
         let intent = self.insertion.take().unwrap_or_else(|| match edit {
             Some(step_id) => InsertionIntent::EditExisting { step_id },
@@ -1182,6 +1183,20 @@ impl ActionEditorState {
         };
         self.capture_keys = false;
         true
+    }
+}
+
+fn normalize_optional_outputs(action: &mut MkAction) {
+    match action {
+        MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => payload.outputs.normalize(),
+        MkAction::FindPixel(payload) => payload.outputs.normalize(),
+        MkAction::CaptureScreenshot(payload) => {
+            payload.path_output = payload.path_output.take().and_then(|name| {
+                let name = name.trim();
+                (!name.is_empty()).then(|| name.to_owned())
+            });
+        }
+        _ => {}
     }
 }
 
@@ -3625,6 +3640,48 @@ mod tests {
             not_found_policy: MkImageNotFoundPolicy::Fail,
             outputs: MkImageOutputs::default(),
         })
+    }
+
+    #[test]
+    fn optional_outputs_normalize_at_apply_boundary_and_survive_persistence() {
+        for (input, expected) in [
+            ("point", Some("point")),
+            ("  point  ", Some("point")),
+            ("", None),
+            ("   ", None),
+        ] {
+            let mut action = image_action();
+            let MkAction::ImageFind(payload) = &mut action else {
+                unreachable!()
+            };
+            payload.outputs = MkImageOutputs {
+                found: Some(" found ".into()),
+                point: Some(input.into()),
+                x: Some(" x ".into()),
+                y: Some(" y ".into()),
+            };
+            normalize_optional_outputs(&mut action);
+            let saved = serde_json::to_vec(&action).unwrap();
+            let loaded: MkAction = serde_json::from_slice(&saved).unwrap();
+            let MkAction::ImageFind(payload) = loaded else {
+                unreachable!()
+            };
+            assert_eq!(payload.outputs.point.as_deref(), expected);
+            assert_eq!(payload.outputs.found.as_deref(), Some("found"));
+            assert_eq!(payload.outputs.x.as_deref(), Some("x"));
+            assert_eq!(payload.outputs.y.as_deref(), Some("y"));
+        }
+
+        let mut screenshot = screenshot_action(SearchRegion::Desktop);
+        let MkAction::CaptureScreenshot(payload) = &mut screenshot else {
+            unreachable!()
+        };
+        payload.path_output = Some(" saved_path ".into());
+        normalize_optional_outputs(&mut screenshot);
+        let MkAction::CaptureScreenshot(payload) = screenshot else {
+            unreachable!()
+        };
+        assert_eq!(payload.path_output.as_deref(), Some("saved_path"));
     }
 
     fn screenshot_action(region: SearchRegion) -> MkAction {

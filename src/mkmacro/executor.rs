@@ -817,11 +817,45 @@ impl Drop for RunActivityGuard<'_> {
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {
     StepStarted(u64),
+    /// Kept as a single-field event for observers that only track lifecycle.
     StepFinished(u64),
+    /// Optional structured metadata emitted immediately before `StepFinished`.
+    StepOutcome(u64, StepOutcome),
     StepSkipped(u64),
     StepFailed(u64, ExecutionDiagnostic),
     Paused,
     Resumed,
+}
+
+/// Structured, per-step result data for successful actions. This is deliberately
+/// separate from `RuntimeVariables`, whose lifetime is only one playback run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepOutcome {
+    pub last_image_found: Option<bool>,
+}
+
+impl StepOutcome {
+    fn for_action(action: &MkAction, variables: &RuntimeVariables) -> Self {
+        let key = match action {
+            MkAction::ImageFind(_) | MkAction::ImageClick(_) => Some("last_image_found"),
+            MkAction::FindPixel(_) => Some("last_pixel_found"),
+            _ => None,
+        };
+        Self {
+            last_image_found: key.and_then(|key| match variables.get(key) {
+                Some(MkValue::Boolean(found)) => Some(*found),
+                _ => None,
+            }),
+        }
+    }
+
+    pub fn detail(&self) -> Option<&'static str> {
+        match self.last_image_found {
+            Some(true) => Some("Success — image found."),
+            Some(false) => Some("Success — image not found; continued."),
+            None => None,
+        }
+    }
 }
 
 pub struct InputCleanupGuard {
@@ -1871,6 +1905,10 @@ impl Executor {
                     return Err(e);
                 }
             } else {
+                let outcome = StepOutcome::for_action(&step.action, &vars);
+                if outcome.last_image_found.is_some() {
+                    observe(ExecutionEvent::StepOutcome(step.id, outcome));
+                }
                 observe(ExecutionEvent::StepFinished(step.id))
             }
             pc = match (&step.action, &ins.jump) {
@@ -3069,6 +3107,7 @@ pub mod fake {
         pub window_calls: Mutex<Vec<WindowCall>>,
         pub virtual_desktop_calls: Mutex<Vec<super::super::MkVirtualDesktopAction>>,
         pub image_results: Mutex<HashMap<u64, VecDeque<ExecResult<Option<MkPoint>>>>>,
+        pub resolved_variables: Mutex<Vec<RuntimeVariables>>,
     }
     impl Default for FakeBackend {
         fn default() -> Self {
@@ -3087,6 +3126,7 @@ pub mod fake {
                 window_calls: Mutex::new(Vec::new()),
                 virtual_desktop_calls: Mutex::new(Vec::new()),
                 image_results: Mutex::new(HashMap::new()),
+                resolved_variables: Mutex::new(Vec::new()),
             }
         }
     }
@@ -3291,15 +3331,33 @@ pub mod fake {
     }
     impl ScreenBackend for FakeBackend {
         fn resolve(&self, t: &MkCoordinateTarget, v: &RuntimeVariables) -> ExecResult<MkPoint> {
+            self.resolved_variables.lock().unwrap().push(v.clone());
             match t {
                 MkCoordinateTarget::Screen { point }
                 | MkCoordinateTarget::ActiveWindow { point } => Ok(*point),
                 MkCoordinateTarget::Variable { name } => match v.get(name) {
                     Some(MkValue::Point(p)) => Ok(*p),
-                    _ => Err(ExecutionDiagnostic::new(
-                        DiagnosticKind::InvalidTarget,
-                        "point variable is missing",
-                    )),
+                    Some(value) => Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::TypeMismatch,
+                        format!(
+                            "Variable '{name}' contains {}; coordinate target requires Point",
+                            match value {
+                                MkValue::String(_) => "String",
+                                MkValue::Number(_) => "Number",
+                                MkValue::Boolean(_) => "Boolean",
+                                MkValue::Point(_) => "Point",
+                                MkValue::Null => "Null",
+                            }
+                        ),
+                    )
+                    .context("variable", name)
+                    .context("expected", "Point")),
+                    None => Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::TargetNotFound,
+                        format!("point variable '{name}' is missing"),
+                    )
+                    .context("variable", name)
+                    .context("expected", "Point")),
                 },
                 MkCoordinateTarget::Image { asset_id, offset } => {
                     match v.get(&super::super::screen::image_result_variable(*asset_id)) {
@@ -4334,5 +4392,100 @@ mod phase_d_tests {
         assert_eq!(vars.get("hit"), Some(&MkValue::Boolean(false)));
         assert!(!vars.contains_key("pixel"));
         assert!(!vars.contains_key("__pixel.12"));
+    }
+
+    fn variable_move() -> MkAction {
+        MkAction::MouseMove(super::super::MkMouseMovePayload {
+            target: MkCoordinateTarget::Variable {
+                name: "point".into(),
+            },
+            duration_ms: 0,
+        })
+    }
+
+    #[test]
+    fn compiled_image_output_flows_to_following_mouse_move_in_one_execution() {
+        let fake = Arc::new(FakeBackend::default());
+        let point = MkPoint { x: 500, y: 300 };
+        fake.script_image(10, Ok(Some(point)));
+        let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
+        payload.outputs = MkImageOutputs {
+            point: Some("point".into()),
+            ..Default::default()
+        };
+
+        run(
+            vec![s(1, MkAction::ImageFind(payload)), s(2, variable_move())],
+            fake.clone(),
+        )
+        .unwrap();
+
+        let snapshots = fake.resolved_variables.lock().unwrap();
+        assert_eq!(snapshots[0].get("point"), Some(&MkValue::Point(point)));
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| **event == "move:500,300")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn continued_image_miss_nulls_stale_output_and_following_move_reports_type_mismatch() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_image(10, Ok(None));
+        let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
+        payload.outputs = MkImageOutputs {
+            point: Some("point".into()),
+            ..Default::default()
+        };
+        let error = run(
+            vec![
+                s(
+                    1,
+                    MkAction::SetVariable {
+                        name: "point".into(),
+                        value: MkValue::Point(MkPoint { x: 1, y: 2 }),
+                    },
+                ),
+                s(2, MkAction::ImageFind(payload)),
+                s(3, variable_move()),
+            ],
+            fake.clone(),
+        )
+        .unwrap_err();
+
+        let snapshots = fake.resolved_variables.lock().unwrap();
+        assert_eq!(snapshots[0].get("point"), Some(&MkValue::Null));
+        assert_eq!(error.kind, DiagnosticKind::TypeMismatch);
+        assert_eq!(
+            error.context.get("expected").map(String::as_str),
+            Some("Point")
+        );
+        assert!(!fake.events().iter().any(|event| event.starts_with("move:")));
+    }
+
+    #[test]
+    fn separate_executor_invocations_do_not_share_runtime_outputs_or_mutate_plan() {
+        let fake = Arc::new(FakeBackend::default());
+        let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
+        payload.outputs = MkImageOutputs {
+            point: Some("point".into()),
+            ..Default::default()
+        };
+        let configured = vec![
+            s(1, MkAction::ImageFind(payload.clone())),
+            s(2, variable_move()),
+        ];
+
+        fake.script_image(10, Ok(Some(MkPoint { x: 500, y: 300 })));
+        run(configured.clone(), fake.clone()).unwrap();
+        fake.script_image(10, Ok(Some(MkPoint { x: 500, y: 300 })));
+        run(vec![configured[0].clone()], fake.clone()).unwrap();
+        let error = run(vec![configured[1].clone()], fake).unwrap_err();
+
+        assert_eq!(error.kind, DiagnosticKind::TargetNotFound);
+        assert_eq!(configured[0].action, MkAction::ImageFind(payload));
     }
 }

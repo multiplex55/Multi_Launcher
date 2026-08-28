@@ -346,7 +346,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 crate::mkmacro::StepState::Skipped => ("–", "Skipped", eframe::egui::Color32::GRAY),
                                 crate::mkmacro::StepState::Failed => ("✕", "Failed", eframe::egui::Color32::RED),
                             };
-                            let response = ui.colored_label(color, label).on_hover_text(full);
+                            let detail = runtime.as_ref()
+                                .and_then(|run| run.step_outcomes.get(&s.id))
+                                .and_then(crate::mkmacro::StepOutcome::detail)
+                                .unwrap_or(full);
+                            let response = ui.colored_label(color, label).on_hover_text(detail);
                             if let Some(run) = runtime.as_ref()
                                 && let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id })
                             {
