@@ -1108,24 +1108,45 @@ mod tests {
         reaches_threshold.put_pixel(1, 0, image::Rgba([255, 0, 0, 255]));
         let capture = Arc::new(VisualChangeCapture {
             regions: Mutex::new(vec![]),
-            frames: Mutex::new([baseline, below_threshold, reaches_threshold].into()),
+            frames: Mutex::new(
+                [
+                    baseline,
+                    below_threshold.clone(),
+                    below_threshold.clone(),
+                    below_threshold.clone(),
+                    below_threshold,
+                    reaches_threshold,
+                ]
+                .into(),
+            ),
         });
         let fake = Arc::new(FakeBackend::default());
         let mut backends = fake.backends();
         backends.screenshot_capture = capture.clone();
         let action = MkAction::WaitForVisualChange(super::super::WaitForVisualChange {
             region: region.clone(),
-            timeout_ms: 1_000,
-            poll_interval_ms: 1,
+            timeout_ms: 0,
+            poll_interval_ms: 37,
             change_threshold_percent: 50.0,
             per_pixel_tolerance: Some(0),
             consecutive_changed_frames: Some(1),
         });
-        run_screenshot(backends, &action, &mut RuntimeVariables::new()).unwrap();
-        assert_eq!(
-            *capture.regions.lock().unwrap(),
-            [region.clone(), region.clone(), region]
-        );
+        let waiter = Arc::new(RecordingWaiter::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::with_waiter(backends.clone(), control, waiter.clone());
+        let mut guard = InputCleanupGuard::new(backends.input.clone());
+        executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(*capture.regions.lock().unwrap(), vec![region; 6]);
+        assert_eq!(waiter.sleeps(), vec![Duration::from_millis(37); 4]);
         assert!(capture.frames.lock().unwrap().is_empty());
     }
 
@@ -1647,6 +1668,90 @@ impl Drop for InputCleanupGuard {
 pub struct Executor {
     backends: Backends,
     control: Arc<RunControl>,
+    waiter: Arc<dyn ExecutorWaiter>,
+}
+
+/// Clock and interruptible-sleep boundary used by polling actions.  Keeping the
+/// clock and sleep on the same boundary makes deadline tests deterministic.
+trait ExecutorWaiter: Send + Sync {
+    fn now(&self) -> Duration;
+    fn wait(
+        &self,
+        duration: Duration,
+        control: &RunControl,
+        input: &dyn InputBackend,
+    ) -> ExecResult;
+}
+
+struct SystemExecutorWaiter {
+    epoch: Instant,
+}
+impl Default for SystemExecutorWaiter {
+    fn default() -> Self {
+        Self {
+            epoch: Instant::now(),
+        }
+    }
+}
+impl ExecutorWaiter for SystemExecutorWaiter {
+    fn now(&self) -> Duration {
+        self.epoch.elapsed()
+    }
+    fn wait(
+        &self,
+        duration: Duration,
+        control: &RunControl,
+        input: &dyn InputBackend,
+    ) -> ExecResult {
+        let mut remaining = duration;
+        while !remaining.is_zero() {
+            if input.escape_pressed() {
+                control.stop();
+            }
+            let slice = remaining.min(Duration::from_millis(10));
+            control.wait(slice)?;
+            remaining = remaining.saturating_sub(slice);
+        }
+        Ok(())
+    }
+}
+#[cfg(test)]
+#[derive(Default)]
+struct RecordingWaiter {
+    now: Mutex<Duration>,
+    sleeps: Mutex<Vec<Duration>>,
+    stop_after: Mutex<Option<usize>>,
+}
+#[cfg(test)]
+impl RecordingWaiter {
+    fn stop_after(cycles: usize) -> Self {
+        Self {
+            stop_after: Mutex::new(Some(cycles)),
+            ..Self::default()
+        }
+    }
+    fn sleeps(&self) -> Vec<Duration> {
+        self.sleeps.lock().unwrap().clone()
+    }
+}
+#[cfg(test)]
+impl ExecutorWaiter for RecordingWaiter {
+    fn now(&self) -> Duration {
+        *self.now.lock().unwrap()
+    }
+    fn wait(&self, duration: Duration, control: &RunControl, _: &dyn InputBackend) -> ExecResult {
+        control.checkpoint()?;
+        let count = {
+            let mut sleeps = self.sleeps.lock().unwrap();
+            sleeps.push(duration);
+            sleeps.len()
+        };
+        *self.now.lock().unwrap() += duration;
+        if *self.stop_after.lock().unwrap() == Some(count) {
+            control.stop();
+        }
+        control.checkpoint()
+    }
 }
 
 /// Scales playback pacing using ceiling division. Thus a non-zero duration remains
@@ -1700,7 +1805,23 @@ fn sample_offset(max: u32) -> i64 {
 impl Executor {
     const MAX_CONTROL_TRANSITIONS: u64 = 100_000;
     pub fn new(backends: Backends, control: Arc<RunControl>) -> Self {
-        Self { backends, control }
+        Self {
+            backends,
+            control,
+            waiter: Arc::new(SystemExecutorWaiter::default()),
+        }
+    }
+    #[cfg(test)]
+    fn with_waiter(
+        backends: Backends,
+        control: Arc<RunControl>,
+        waiter: Arc<dyn ExecutorWaiter>,
+    ) -> Self {
+        Self {
+            backends,
+            control,
+            waiter,
+        }
     }
     fn prompt_input(
         &self,
@@ -1738,16 +1859,10 @@ impl Executor {
         }
     }
     fn wait(&self, duration: Duration) -> ExecResult {
-        let mut remaining = duration;
-        while !remaining.is_zero() {
-            if self.backends.input.escape_pressed() {
-                self.control.stop();
-            }
-            let slice = remaining.min(Duration::from_millis(10));
-            self.control.wait(slice)?;
-            remaining = remaining.saturating_sub(slice);
-        }
-        Ok(())
+        self.control.checkpoint()?;
+        self.waiter
+            .wait(duration, &self.control, self.backends.input.as_ref())?;
+        self.control.checkpoint()
     }
 
     fn wait_for_visual_change(&self, p: &super::WaitForVisualChange) -> ExecResult {
@@ -1763,7 +1878,7 @@ impl Executor {
         // This frame is never replaced: every poll is measured against the
         // visual state at action entry rather than against the previous poll.
         let baseline = capture()?;
-        let started = Instant::now();
+        let started = self.waiter.now();
         let timeout = p.timeout_duration();
         let required = p.consecutive_changed_frames.unwrap_or(1).max(1);
         let mut consecutive = 0u32;
@@ -1790,7 +1905,7 @@ impl Executor {
             if consecutive >= required {
                 return Ok(());
             }
-            let elapsed = started.elapsed();
+            let elapsed = self.waiter.now().saturating_sub(started);
             let sleep = match timeout {
                 Some(timeout) if elapsed >= timeout => {
                     return Err(ExecutionDiagnostic::new(
@@ -2483,7 +2598,7 @@ impl Executor {
         o: &MkWaitOptions,
         v: &mut RuntimeVariables,
     ) -> ExecResult {
-        let started = Instant::now();
+        let started = self.waiter.now();
         let timeout = o.timeout_duration();
         let mut polls = 0u64;
         loop {
@@ -2492,7 +2607,7 @@ impl Executor {
             if self.condition(macro_id, condition, v)? {
                 return Ok(());
             }
-            let elapsed = started.elapsed();
+            let elapsed = self.waiter.now().saturating_sub(started);
             if timeout.is_some_and(|timeout| elapsed >= timeout) {
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::Timeout,
@@ -2513,14 +2628,14 @@ impl Executor {
         o: &MkWaitOptions,
         mut poll: impl FnMut() -> ExecResult<bool>,
     ) -> ExecResult {
-        let start = Instant::now();
+        let start = self.waiter.now();
         let timeout = o.timeout_duration();
         loop {
             self.control.checkpoint()?;
             if poll()? {
                 return Ok(());
             }
-            let elapsed = start.elapsed();
+            let elapsed = self.waiter.now().saturating_sub(start);
             if timeout.is_some_and(|timeout| elapsed >= timeout) {
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::Timeout,
@@ -3722,6 +3837,159 @@ mod phase_d_tests {
         let c = Arc::new(RunControl::default());
         c.reset();
         Executor::new(fake.backends(), c).execute(&plan(steps), &|_| {})
+    }
+
+    fn run_recorded(
+        action: &MkAction,
+        fake: Arc<FakeBackend>,
+        waiter: Arc<RecordingWaiter>,
+    ) -> ExecResult {
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::with_waiter(fake.clone().backends(), control, waiter);
+        let mut guard = InputCleanupGuard::new(fake);
+        executor.action(
+            9,
+            action,
+            &MkPlayback::default(),
+            &mut RuntimeVariables::new(),
+            &mut guard,
+        )
+    }
+
+    fn window_condition() -> MkCondition {
+        MkCondition::WindowExists {
+            matcher: MkWindowMatcher {
+                title: Some("eventual".into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn indefinite_wait_until_records_every_unsuccessful_poll_only() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_condition("window_exists", [false, false, false, true]);
+        let waiter = Arc::new(RecordingWaiter::default());
+        run_recorded(
+            &MkAction::WaitUntil {
+                condition: window_condition(),
+                wait: MkWaitOptions {
+                    timeout_ms: 0,
+                    poll_interval_ms: 10,
+                },
+            },
+            fake.clone(),
+            waiter.clone(),
+        )
+        .unwrap();
+        assert_eq!(fake.window_calls.lock().unwrap().len(), 4);
+        assert_eq!(waiter.sleeps(), vec![Duration::from_millis(10); 3]);
+    }
+
+    #[test]
+    fn indefinite_wait_is_interruptible_at_the_wait_boundary() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_condition("window_exists", [false, false, false]);
+        let waiter = Arc::new(RecordingWaiter::stop_after(2));
+        let error = run_recorded(
+            &MkAction::WaitUntil {
+                condition: window_condition(),
+                wait: MkWaitOptions {
+                    timeout_ms: 0,
+                    poll_interval_ms: 17,
+                },
+            },
+            fake.clone(),
+            waiter.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(fake.window_calls.lock().unwrap().len(), 2);
+        assert_eq!(waiter.sleeps(), vec![Duration::from_millis(17); 2]);
+    }
+
+    fn image_condition(found: bool) -> MkCondition {
+        MkCondition::ImageSearch {
+            search: crate::mkmacro::MkImageSearchCondition {
+                asset_id: 42,
+                region: SearchRegion::Desktop,
+                tolerance: 3,
+                alpha: crate::mkmacro::AlphaPolicy::Ignore,
+                return_point: crate::mkmacro::ReturnPoint::Center,
+            },
+            found,
+        }
+    }
+
+    #[test]
+    fn image_appearance_and_disappearance_poll_through_wait_until() {
+        for (found, results) in [
+            (true, vec![None, None, Some(MkPoint { x: 4, y: 5 })]),
+            (
+                false,
+                vec![
+                    Some(MkPoint { x: 1, y: 1 }),
+                    Some(MkPoint { x: 2, y: 2 }),
+                    None,
+                ],
+            ),
+        ] {
+            let fake = Arc::new(FakeBackend::default());
+            for result in results {
+                fake.script_image(42, Ok(result));
+            }
+            let waiter = Arc::new(RecordingWaiter::default());
+            run_recorded(
+                &MkAction::WaitUntil {
+                    condition: image_condition(found),
+                    wait: MkWaitOptions {
+                        timeout_ms: 0,
+                        poll_interval_ms: 23,
+                    },
+                },
+                fake,
+                waiter.clone(),
+            )
+            .unwrap();
+            assert_eq!(waiter.sleeps(), vec![Duration::from_millis(23); 2]);
+        }
+    }
+
+    #[test]
+    fn finite_wait_caps_final_sleep_and_preserves_timeout_context() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_condition("window_exists", [false, false, false]);
+        let waiter = Arc::new(RecordingWaiter::default());
+        let error = run_recorded(
+            &MkAction::WaitUntil {
+                condition: window_condition(),
+                wait: MkWaitOptions {
+                    timeout_ms: 25,
+                    poll_interval_ms: 10,
+                },
+            },
+            fake,
+            waiter.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Timeout);
+        assert_eq!(
+            error.context.get("timeout_ms").map(String::as_str),
+            Some("25")
+        );
+        assert_eq!(
+            error.context.get("poll_interval_ms").map(String::as_str),
+            Some("10")
+        );
+        assert_eq!(
+            waiter.sleeps(),
+            [
+                Duration::from_millis(10),
+                Duration::from_millis(10),
+                Duration::from_millis(5)
+            ]
+        );
     }
 
     #[test]
