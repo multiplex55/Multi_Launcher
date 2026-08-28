@@ -7,7 +7,7 @@ use crate::mkmacro::{MkPoint, MonitorDescriptor, ScreenRect};
 #[cfg(test)]
 use std::sync::{
     Arc, Condvar, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::{
     collections::VecDeque,
@@ -280,11 +280,28 @@ pub(crate) struct ServiceTestObserver {
     pub joins: AtomicUsize,
     pub worker_ids: Mutex<Vec<thread::ThreadId>>,
     inputs: Mutex<Vec<OverlayInput>>,
+    left_down: AtomicBool,
+    cursor: Mutex<MkPoint>,
     changed: Condvar,
 }
 
 #[cfg(test)]
 impl ServiceTestObserver {
+    pub fn set_left_button_down(&self, down: bool) {
+        self.left_down.store(down, Ordering::SeqCst);
+    }
+
+    pub fn set_cursor(&self, point: MkPoint) {
+        *self.cursor.lock().unwrap() = point;
+    }
+
+    pub fn emit(&self, operation_id: OperationId, kind: OverlayInputKind) {
+        self.inputs
+            .lock()
+            .unwrap()
+            .push(OverlayInput { operation_id, kind });
+    }
+
     pub fn wait_for_commands(&self, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut commands = self.commands.lock().unwrap();
@@ -331,10 +348,10 @@ pub(crate) struct ServiceTestRenderer(pub Arc<ServiceTestObserver>);
 #[cfg(test)]
 impl OverlayRenderer for ServiceTestRenderer {
     fn left_button_down(&mut self) -> Result<bool, VisualOverlayError> {
-        Ok(false)
+        Ok(self.0.left_down.load(Ordering::SeqCst))
     }
     fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
-        Ok(MkPoint { x: 0, y: 0 })
+        Ok(*self.0.cursor.lock().unwrap())
     }
     fn show(
         &mut self,
@@ -1811,6 +1828,50 @@ mod tests {
         );
         assert_eq!(c.state(), &VisualOverlayState::Idle);
         assert!(advance_and_drain(&mut c).is_empty());
+    }
+
+    #[test]
+    fn point_picker_held_launch_button_must_release_before_next_click() {
+        let (mut c, data, _) = controller();
+        data.lock().unwrap().left_down = true;
+        let id = c.begin_point_pick(point_request());
+
+        for _ in 0..3 {
+            assert!(advance_and_drain(&mut c).is_empty());
+            assert!(matches!(
+                c.state(),
+                VisualOverlayState::PickingPoint {
+                    phase: PointInteractionPhase::AwaitingInitialRelease,
+                    ..
+                }
+            ));
+        }
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::LeftReleased(point(12, 34)),
+        });
+        assert!(advance_and_drain(&mut c).is_empty());
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingPoint {
+                phase: PointInteractionPhase::Armed,
+                ..
+            }
+        ));
+
+        data.lock().unwrap().cursor = point(-320, 650);
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::LeftPressed(point(-320, 650)),
+        });
+        assert_eq!(
+            advance_and_drain(&mut c),
+            vec![VisualOverlayEvent::PointConfirmed {
+                operation_id: id,
+                request: point_request(),
+                point: point(-320, 650),
+            }]
+        );
     }
 
     #[test]
