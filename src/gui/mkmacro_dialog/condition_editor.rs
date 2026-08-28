@@ -204,7 +204,7 @@ pub(super) fn first_window_picker_path(condition: &MkCondition) -> Option<Vec<us
 /// Edits a condition tree using only assets from the active macro.  The same
 /// catalog is threaded through every recursive child, so nested conditions do
 /// not lose their authoring context.
-pub fn condition_ui_with_assets(
+pub(super) fn condition_ui_with_assets(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
     context: &TargetEditorContext<'_>,

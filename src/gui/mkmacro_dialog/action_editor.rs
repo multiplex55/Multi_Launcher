@@ -1705,7 +1705,6 @@ fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
     capture: &mut bool,
-    image_assets: &[MkImageAsset],
     image_context: super::image_asset_picker::ImageAssetUiContext<'_>,
     draft_generation: u64,
 ) -> (
@@ -2861,7 +2860,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 assets: &image_assets,
                 store: &d.store,
             };
-            let (position, mut window, launcher, image, condition_image, preview)=action_ui(ui, step, &mut state.capture_keys, &image_assets, image_context, draft_generation);
+            let (position, mut window, launcher, image, condition_image, preview)=action_ui(ui, step, &mut state.capture_keys, image_context, draft_generation);
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
             image_request = image;
