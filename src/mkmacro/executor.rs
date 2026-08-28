@@ -3737,7 +3737,8 @@ pub mod fake {
 mod phase_d_tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
-        MkErrorPolicy, MkMacro, MkPlayback, MkRetry, MkStep, MkTextMode, compile,
+        MkErrorPolicy, MkLauncherCommandPayload, MkMacro, MkPlayback, MkRetry, MkStep, MkTextMode,
+        compile,
     };
 
     fn s(id: u64, action: MkAction) -> MkStep {

@@ -303,7 +303,7 @@ fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
         true
     ));
     assert!(
-        matches!(dialog.action_editor.draft.as_ref().unwrap().action, MkAction::LauncherCommand { ref command, .. } if command == "notes:dialog")
+        matches!(&dialog.action_editor.draft.as_ref().unwrap().action, MkAction::LauncherCommand(payload) if payload.query == "notes:dialog")
     );
     dialog.action_editor.cancel();
     dialog

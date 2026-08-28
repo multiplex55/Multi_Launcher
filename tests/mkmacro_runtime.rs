@@ -727,10 +727,10 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
                     ),
                     s(
                         7,
-                        MkAction::LauncherCommand {
-                            command: "help".into(),
-                            args: None,
-                        },
+                        MkAction::LauncherCommand(MkLauncherCommandPayload {
+                            query: "help".into(),
+                            legacy_resolved_action: None,
+                        }),
                     ),
                 ],
                 image_assets: vec![],
