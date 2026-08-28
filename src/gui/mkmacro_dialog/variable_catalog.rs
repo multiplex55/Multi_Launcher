@@ -695,6 +695,190 @@ mod tests {
         );
     }
 
+    fn mouse_move(id: u64) -> MkStep {
+        step(
+            id,
+            MkAction::MouseMove(crate::mkmacro::MkMouseMovePayload {
+                target: crate::mkmacro::MkCoordinateTarget::Variable { name: "p".into() },
+                duration_ms: 0,
+            }),
+        )
+    }
+
+    #[test]
+    fn mouse_move_catalog_uses_real_ordered_action_outputs() {
+        let steps = vec![
+            set_value(101, "p", MkValue::Point(MkPoint { x: 10, y: 20 })),
+            step(
+                102,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    variable: "text".into(),
+                    ..Default::default()
+                }),
+            ),
+            step(
+                103,
+                image(MkImageOutputs {
+                    found: Some("was_found".into()),
+                    point: Some("found_point".into()),
+                    x: None,
+                    y: None,
+                }),
+            ),
+            mouse_move(104),
+        ];
+
+        let catalog = VariableCatalog::before_step(&steps, 3);
+        let effective = catalog.effective_variables();
+        assert_eq!(
+            effective
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p", "text", "was_found", "found_point"]
+        );
+        let descriptor = |name| effective.iter().find(|item| item.name == name).unwrap();
+        for (name, value_type, producer) in [
+            ("p", VariableValueType::Point, 101),
+            ("text", VariableValueType::String, 102),
+            ("was_found", VariableValueType::Boolean, 103),
+            ("found_point", VariableValueType::Point, 103),
+        ] {
+            assert_eq!(descriptor(name).value_type, value_type);
+            assert_eq!(descriptor(name).source_step_id, producer);
+        }
+        assert_eq!(descriptor("p").source_step_number, 1);
+        assert_eq!(descriptor("text").source_step_number, 2);
+        assert_eq!(descriptor("found_point").source_step_number, 3);
+        assert_eq!(
+            descriptor("p").availability,
+            VariableAvailability::DefinitelyAvailable
+        );
+        assert!(descriptor("p").uncertainty_reasons.is_empty());
+        assert_eq!(
+            descriptor("found_point").availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(
+            descriptor("found_point").uncertainty_reasons,
+            vec![VariableUncertaintyReason::MayBeNullIfNotFound]
+        );
+        assert!(
+            descriptor("found_point")
+                .help_text
+                .unwrap()
+                .contains("Null")
+        );
+
+        // This is the filtering operation used by a Point consumer. Nullable
+        // values remain useful suggestions and retain their warning metadata.
+        let points: Vec<_> = catalog
+            .effective_variables_of_type(VariableValueType::Point)
+            .collect();
+        assert_eq!(
+            points
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p", "found_point"]
+        );
+        assert_eq!(points[1].warning_marker(), Some("⚠"));
+    }
+
+    #[test]
+    fn conditional_nullable_output_is_single_effective_descriptor() {
+        let steps = vec![
+            step(201, MkAction::If(empty_condition())),
+            step(
+                202,
+                image(MkImageOutputs {
+                    found: None,
+                    point: Some("maybe_point".into()),
+                    x: None,
+                    y: None,
+                }),
+            ),
+            step(203, MkAction::EndIf),
+            mouse_move(204),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, 3);
+        assert_eq!(catalog.effective_variables().len(), 1);
+        let descriptor = &catalog.effective_variables()[0];
+        assert_eq!(
+            (descriptor.name.as_str(), descriptor.value_type),
+            ("maybe_point", VariableValueType::Point)
+        );
+        assert_eq!(descriptor.source_step_id, 202);
+        assert_eq!(
+            descriptor.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(
+            descriptor.uncertainty_reasons,
+            vec![
+                VariableUncertaintyReason::ProducedInside(MkBlockKind::If),
+                VariableUncertaintyReason::MayBeNullIfNotFound,
+            ]
+        );
+        assert_eq!(
+            format!(
+                "{} · {:?} · conditional",
+                descriptor.name, descriptor.value_type
+            ),
+            "maybe_point · Point · conditional"
+        );
+    }
+
+    #[test]
+    fn latest_same_name_output_owns_all_effective_metadata() {
+        let steps = vec![
+            step(
+                301,
+                image(MkImageOutputs {
+                    found: None,
+                    point: Some("result".into()),
+                    x: None,
+                    y: None,
+                }),
+            ),
+            step(302, MkAction::If(empty_condition())),
+            step(
+                303,
+                image(MkImageOutputs {
+                    found: Some("result".into()),
+                    point: None,
+                    x: None,
+                    y: None,
+                }),
+            ),
+            step(304, MkAction::EndIf),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+        assert_eq!(
+            catalog
+                .history()
+                .iter()
+                .filter(|item| item.name == "result")
+                .count(),
+            2
+        );
+        assert_eq!(catalog.effective_variables().len(), 1);
+        let result = &catalog.effective_variables()[0];
+        assert_eq!(result.value_type, VariableValueType::Boolean);
+        assert_eq!(result.source_step_id, 303);
+        assert_eq!(result.source_step_number, 3);
+        assert_eq!(result.source_action_label, "Find Image");
+        assert_eq!(
+            result.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(
+            result.uncertainty_reasons,
+            vec![VariableUncertaintyReason::ProducedInside(MkBlockKind::If)]
+        );
+        assert_eq!(result.help_text, Some("Produced inside If"));
+    }
+
     #[test]
     fn effective_names_are_case_sensitive_ignore_future_steps_and_have_stable_order() {
         let steps = vec![

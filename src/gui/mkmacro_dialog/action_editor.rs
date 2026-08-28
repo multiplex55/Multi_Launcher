@@ -3669,6 +3669,82 @@ mod tests {
     }
 
     #[test]
+    fn mouse_move_editor_uses_the_catalog_point_filter() {
+        let marker = |id, action| MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        };
+        let steps = vec![
+            variable_step(401, "p", MkValue::Point(MkPoint { x: 1, y: 2 })),
+            marker(
+                402,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    variable: "text".into(),
+                    ..Default::default()
+                }),
+            ),
+            marker(
+                403,
+                MkAction::ImageFind(MkImagePayload {
+                    asset_id: 1,
+                    wait: MkWaitOptions::default(),
+                    region: SearchRegion::Desktop,
+                    tolerance: 0,
+                    alpha: AlphaPolicy::Compare,
+                    return_point: ReturnPoint::Center,
+                    not_found_policy: MkImageNotFoundPolicy::Continue,
+                    outputs: MkImageOutputs {
+                        found: Some("was_found".into()),
+                        point: Some("found_point".into()),
+                        x: None,
+                        y: None,
+                    },
+                }),
+            ),
+            marker(
+                404,
+                MkAction::MouseMove(MkMouseMovePayload {
+                    target: MkCoordinateTarget::Variable { name: "p".into() },
+                    duration_ms: 0,
+                }),
+            ),
+        ];
+        let pure_catalog = VariableCatalog::before_step(&steps, 3);
+        let pure = VariablePickerModel::new(&pure_catalog, |kind| kind == VariableValueType::Point);
+
+        let mut editor = test_editor();
+        editor.begin_edit(&steps[3]);
+        editor.refresh_variable_catalog(&steps);
+        let integrated = VariablePickerModel::new(&editor.variable_catalog, |kind| {
+            kind == VariableValueType::Point
+        });
+
+        assert_eq!(integrated, pure);
+        assert_eq!(
+            integrated
+                .suggestions
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p", "found_point"]
+        );
+        assert_eq!(
+            integrated.suggestions[1].availability,
+            super::super::variable_catalog::VariableAvailability::PossiblyUnavailable
+        );
+        assert!(
+            integrated.suggestions[1]
+                .help_text
+                .unwrap()
+                .contains("Null")
+        );
+    }
+
+    #[test]
     fn variable_picker_details_distinguish_nullable_and_structural_warnings() {
         use super::super::variable_catalog::{VariableAvailability, VariableUncertaintyReason};
         let marker = |id, action| MkStep {
