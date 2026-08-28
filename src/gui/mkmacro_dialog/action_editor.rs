@@ -2,6 +2,7 @@
 //!
 //! The editor owns a complete `MkStep` clone.  No document field is borrowed by
 //! the modal, which makes closing/cancelling it a genuinely lossless operation.
+pub use super::image_authoring_destination::ConditionOperationDestination;
 use super::{
     MkMacroDialog,
     key_capture::{CapturedChord, captured_chord, key_name},
@@ -73,15 +74,6 @@ pub enum InsertionIntent {
     Plain { after_step_id: Option<u64> },
     Wrap { step_ids: Vec<u64> },
     EditExisting { step_id: u64 },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConditionOperationDestination {
-    pub macro_id: u64,
-    pub step_id: Option<u64>,
-    pub draft_generation: u64,
-    pub path: super::condition_editor::ConditionPath,
-    pub operation: super::condition_editor::ConditionImageOperation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -424,7 +416,51 @@ impl ActionEditorState {
             .ok_or_else(|| anyhow::anyhow!("no image-action draft is open"))?
             .asset_id;
         self.image_authoring
-            .start_with_executor(store, token, previous, path, executor)
+            .start_with_executor(
+                store,
+                token,
+                super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
+                previous,
+                path,
+                executor,
+            )
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn start_condition_import_from_selected_path(
+        &mut self,
+        store: Arc<MkMacroStore>,
+        destination: ConditionOperationDestination,
+        path: std::path::PathBuf,
+    ) -> anyhow::Result<()> {
+        let previous = self
+            .draft
+            .as_ref()
+            .and_then(|step| match &step.action {
+                MkAction::If(c)
+                | MkAction::WhileStart { condition: c }
+                | MkAction::WaitUntil { condition: c, .. } => {
+                    super::condition_editor::resolve_condition(c, &destination.path)
+                }
+                _ => None,
+            })
+            .and_then(|c| match c {
+                MkCondition::ImageSearch { search, .. } => Some(search.asset_id),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("the selected image condition no longer exists"))?;
+        let token = super::image_authoring_job::DraftToken {
+            macro_id: destination.macro_id,
+            draft_generation: destination.draft_generation,
+        };
+        self.image_authoring
+            .start(
+                store,
+                token,
+                super::image_authoring_job::ImageAuthoringDestination::ConditionImage(destination),
+                previous,
+                path,
+            )
             .map_err(anyhow::Error::msg)
     }
     /// Starts the one user-drawn desktop rectangle operation owned by the action
@@ -835,42 +871,87 @@ impl ActionEditorState {
     }
 
     fn poll_image_authoring(&mut self, current_macro_id: Option<u64>) {
-        let Some((active_token, previous_asset_id, completion)) = self.image_authoring.try_take()
+        let Some((active_token, active_destination, previous_asset_id, source, completion)) =
+            self.image_authoring.try_take()
         else {
             return;
         };
         // The receiver itself identifies the active job; this extra comparison makes
         // it impossible for a queued completion to retire a subsequently started job.
-        if completion.token != active_token {
-            self.image_authoring = Default::default();
+        if completion.token != active_token || completion.destination != active_destination {
             return;
         }
         self.image_authoring = Default::default();
-        let current = current_macro_id == Some(completion.token.macro_id)
-            && self.draft_generation == completion.token.draft_generation
-            && self.draft.as_ref().is_some_and(|step| {
-                matches!(
-                    step.action,
-                    MkAction::ImageFind(_) | MkAction::ImageClick(_)
-                )
-            });
-        if !current {
-            return;
-        }
         match completion.result {
             Ok(staged) => {
-                if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
-                    payload.asset_id = staged.asset_id;
+                let applied = match &active_destination {
+                    super::image_authoring_job::ImageAuthoringDestination::ImageActionReference => {
+                        if current_macro_id != Some(active_token.macro_id)
+                            || self.draft_generation != active_token.draft_generation
+                        {
+                            false
+                        } else if let Some(payload) =
+                            self.draft.as_mut().and_then(image_payload_mut)
+                        {
+                            if payload.asset_id != previous_asset_id {
+                                false
+                            } else {
+                                payload.asset_id = staged.asset_id;
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    super::image_authoring_job::ImageAuthoringDestination::ConditionImage(
+                        destination,
+                    ) => {
+                        if !matches!(
+                            destination.operation,
+                            super::condition_editor::ConditionImageOperation::ImportPng
+                        ) {
+                            false
+                        } else if current_macro_id != Some(destination.macro_id)
+                            || self.draft_generation != destination.draft_generation
+                            || self.editing_id != destination.step_id
+                        {
+                            false
+                        } else {
+                            let node =
+                                self.draft.as_mut().and_then(|step| match &mut step.action {
+                                    MkAction::If(c)
+                                    | MkAction::WhileStart { condition: c }
+                                    | MkAction::WaitUntil { condition: c, .. } => {
+                                        super::condition_editor::resolve_condition_mut(
+                                            c,
+                                            &destination.path,
+                                        )
+                                    }
+                                    _ => None,
+                                });
+                            match node {
+                                Some(MkCondition::ImageSearch { search, .. })
+                                    if search.asset_id == previous_asset_id =>
+                                {
+                                    search.asset_id = staged.asset_id;
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                    }
+                };
+                if applied {
+                    self.draft_changed = true;
                     self.capture_message = None;
                 }
             }
             Err(error) => {
-                if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
-                    // Normally unchanged; restoring the snapshot also makes the failure
-                    // invariant explicit for deterministic/fake-runner tests.
-                    payload.asset_id = previous_asset_id;
-                }
-                self.capture_message = Some(error);
+                let name = source
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("selected PNG");
+                self.capture_message = Some(format!("{error} ({name}, {active_destination:?})"));
             }
         }
     }
@@ -2922,6 +3003,32 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         }
     }
     if let Some(ref request) = condition_image_request
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::ImportPng
+        )
+    {
+        if workflow_active || importing {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else {
+            let destination = d
+                .action_editor
+                .condition_destination(d.selected_macro_id.unwrap_or(0), request.clone());
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .pick_file()
+                && let Err(error) = d.action_editor.start_condition_import_from_selected_path(
+                    d.store.clone(),
+                    destination,
+                    path,
+                )
+            {
+                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
+            }
+        }
+    }
+    if let Some(ref request) = condition_image_request
         && let Some(purpose) = request.operation.rectangle_purpose()
     {
         let macro_id = d.selected_macro_id.unwrap_or(0);
@@ -3871,6 +3978,8 @@ mod tests {
         let (sender, completion) = mpsc::channel();
         editor.image_authoring = super::super::image_authoring_job::ImageAuthoringJob::Importing {
             token,
+            destination:
+                super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
             previous_asset_id: 9,
             source: "chosen.png".into(),
             completion,
@@ -3892,6 +4001,7 @@ mod tests {
         sender
             .send(ImageAuthoringCompletion {
                 token,
+                destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
                 result: Ok(crate::mkmacro::StagedImageAsset {
                     asset_id: 10,
                     managed_reference: "mkmacro_assets/4/10.png".into(),
@@ -3908,6 +4018,7 @@ mod tests {
         sender
             .send(ImageAuthoringCompletion {
                 token,
+                destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
                 result: Err("Reference image: corrupt PNG".into()),
             })
             .unwrap();
@@ -3937,6 +4048,7 @@ mod tests {
             sender
                 .send(ImageAuthoringCompletion {
                     token,
+                    destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
                     result: Ok(crate::mkmacro::StagedImageAsset {
                         asset_id: 55,
                         managed_reference: "unused.png".into(),
@@ -3959,6 +4071,7 @@ mod tests {
         sender
             .send(ImageAuthoringCompletion {
                 token,
+                destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
                 result: Ok(crate::mkmacro::StagedImageAsset {
                     asset_id: 55,
                     managed_reference: "unused.png".into(),
