@@ -192,6 +192,25 @@ These checks are intentionally manual and destructive. They require a real inter
 
 This checklist requires a **real, interactive Windows desktop**. The native layered-window renderer cannot be visually validated in headless CI, so these checks must not be automated there. For every item, record pass/fail evidence (screenshots or video where useful) plus:
 
+#### Direct passive-preview harness
+
+Before debugging this rendering path through **Wait for Visual Change**, run the
+manual harness from a Windows terminal:
+
+```powershell
+cargo run --bin passive_overlay_smoke
+```
+
+1. Confirm four bright yellow edges appear at `(100,100)`, outlining a
+   `500×300` rectangle.
+2. Confirm all four edges remain visible for roughly 2.5 seconds.
+3. Confirm every edge disappears afterward, and that the terminal prints the
+   launch, active, and cleanup diagnostics.
+
+This harness must pass before debugging the same path through **Wait for Visual
+Change**. It is manual-only: ordinary cross-platform unit tests never execute it
+or open native windows.
+
 - Windows version and build;
 - Multi Launcher commit;
 - GPU and graphics configuration;

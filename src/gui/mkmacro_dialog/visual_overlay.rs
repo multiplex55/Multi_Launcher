@@ -644,9 +644,15 @@ impl OverlayVisual {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum OutlineEdge {
     Top,
+    Right,
     Bottom,
     Left,
-    Right,
+}
+
+/// Platform-neutral styling contract for passive outline windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassiveWindowStyle {
+    BrightYellow,
 }
 
 impl fmt::Display for OutlineEdge {
@@ -666,6 +672,7 @@ pub(crate) enum PassiveWindowSpec {
         edge: OutlineEdge,
         target: ScreenRect,
         rect: ScreenRect,
+        style: PassiveWindowStyle,
     },
     Badge {
         monitor: ScreenRect,
@@ -689,16 +696,16 @@ pub(crate) fn outline_edge_rects(rect: ScreenRect) -> [(OutlineEdge, ScreenRect)
             ScreenRect::new(rect.x, rect.y, rect.width.max(1), horizontal),
         ),
         (
+            OutlineEdge::Right,
+            ScreenRect::new(right, rect.y, vertical, rect.height.max(1)),
+        ),
+        (
             OutlineEdge::Bottom,
             ScreenRect::new(rect.x, bottom, rect.width.max(1), horizontal),
         ),
         (
             OutlineEdge::Left,
             ScreenRect::new(rect.x, rect.y, vertical, rect.height.max(1)),
-        ),
-        (
-            OutlineEdge::Right,
-            ScreenRect::new(right, rect.y, vertical, rect.height.max(1)),
         ),
     ]
 }
@@ -744,7 +751,12 @@ pub(crate) fn passive_overlay_plan(
         for (edge, edge_rect) in outline_edge_rects(target) {
             for display in displays {
                 if let Some(rect) = rect_intersection(edge_rect, *display) {
-                    plan.push(PassiveWindowSpec::Edge { edge, target, rect });
+                    plan.push(PassiveWindowSpec::Edge {
+                        edge,
+                        target,
+                        rect,
+                        style: PassiveWindowStyle::BrightYellow,
+                    });
                 }
             }
         }
@@ -755,10 +767,26 @@ pub(crate) fn passive_overlay_plan(
             .map(|(monitor, index)| PassiveWindowSpec::Badge { monitor, index }),
     );
     plan.sort_by_key(|spec| match spec {
-        PassiveWindowSpec::Edge { edge, rect, .. } => (0, rect.x, rect.y, *edge as i32, 0),
-        PassiveWindowSpec::Badge { monitor, index } => (1, monitor.x, monitor.y, 0, *index as i32),
+        PassiveWindowSpec::Edge {
+            edge, target, rect, ..
+        } => (0, target.x, target.y, *edge as i32, rect.x, rect.y),
+        PassiveWindowSpec::Badge { monitor, index } => {
+            (1, monitor.x, monitor.y, 0, *index as i32, 0)
+        }
     });
     Some(plan)
+}
+
+/// Runs the production Win32 renderer directly for manual smoke testing.
+#[cfg(windows)]
+pub fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError> {
+    native::run_passive_overlay_smoke_test()
+}
+
+/// Keeps the manual harness buildable while making its platform requirement explicit.
+#[cfg(not(windows))]
+pub fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError> {
+    Err(VisualOverlayError::unsupported())
 }
 
 /// Platform-neutral description of the pixels a native overlay must produce.
@@ -1965,29 +1993,104 @@ mod tests {
             outline_edge_rects(ScreenRect::new(10, 20, 100, 50)),
             [
                 (OutlineEdge::Top, ScreenRect::new(10, 20, 100, 3)),
+                (OutlineEdge::Right, ScreenRect::new(107, 20, 3, 50)),
                 (OutlineEdge::Bottom, ScreenRect::new(10, 67, 100, 3)),
                 (OutlineEdge::Left, ScreenRect::new(10, 20, 3, 50)),
-                (OutlineEdge::Right, ScreenRect::new(107, 20, 3, 50)),
             ]
         );
         let negative = outline_edge_rects(ScreenRect::new(-20, -10, 8, 7));
-        assert_eq!(negative[1].1, ScreenRect::new(-20, -6, 8, 3));
+        assert_eq!(negative[2].1, ScreenRect::new(-20, -6, 8, 3));
         let tiny = outline_edge_rects(ScreenRect::new(-2, -3, 2, 1));
         assert!(tiny.iter().all(|(_, r)| r.width > 0 && r.height > 0));
         assert_eq!(tiny[3].1, ScreenRect::new(-2, -3, 2, 1));
     }
 
+    fn assert_four_bright_yellow_edges(
+        visual: OverlayVisual,
+        target: ScreenRect,
+        displays: &[ScreenRect],
+    ) {
+        let plan = passive_overlay_plan(&visual, displays).unwrap();
+        let expected: Vec<_> = outline_edge_rects(target)
+            .into_iter()
+            .map(|(edge, rect)| PassiveWindowSpec::Edge {
+                edge,
+                target,
+                rect,
+                style: PassiveWindowStyle::BrightYellow,
+            })
+            .collect();
+        assert_eq!(plan, expected);
+    }
+
+    #[test]
+    fn passive_single_target_variants_have_exact_order_bounds_clipping_and_style() {
+        let display = ScreenRect::new(-500, -300, 1600, 1000);
+        let rectangle = ScreenRect::new(100, 100, 500, 300);
+        assert_four_bright_yellow_edges(
+            OverlayVisual::RectanglePreview(rectangle),
+            rectangle,
+            &[display],
+        );
+
+        let monitor_descriptor = monitor(4, ScreenRect::new(-400, -200, 400, 250));
+        assert_four_bright_yellow_edges(
+            OverlayVisual::Monitor(monitor_descriptor.clone()),
+            monitor_descriptor.bounds,
+            &[display],
+        );
+
+        for area_kind in [WindowAreaKind::WholeWindow, WindowAreaKind::ClientArea] {
+            let supplied_bounds = ScreenRect::new(-125, 40, 225, 175);
+            assert_four_bright_yellow_edges(
+                OverlayVisual::Window {
+                    rect: supplied_bounds,
+                    area_kind,
+                },
+                supplied_bounds,
+                &[display],
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_preview_preserves_negative_monitor_topology_and_edge_order() {
+        let left = monitor(7, ScreenRect::new(-600, -100, 300, 200));
+        let right = monitor(2, ScreenRect::new(100, 50, 400, 250));
+        let plan = passive_overlay_plan(
+            &OverlayVisual::Desktop(vec![right.clone(), left.clone()]),
+            &[left.bounds, right.bounds],
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        for target in [left.bounds, right.bounds] {
+            expected.extend(outline_edge_rects(target).map(|(edge, rect)| {
+                PassiveWindowSpec::Edge {
+                    edge,
+                    target,
+                    rect,
+                    style: PassiveWindowStyle::BrightYellow,
+                }
+            }));
+        }
+        assert_eq!(plan, expected);
+        assert!(plan.iter().all(|spec| match spec {
+            PassiveWindowSpec::Edge { rect, .. } =>
+                rect.right() <= left.bounds.right()
+                    || i64::from(rect.x) >= i64::from(right.bounds.x),
+            PassiveWindowSpec::Badge { .. } => false,
+        }));
+    }
+
     #[test]
     fn passive_plan_clips_cross_monitor_edges_and_never_bridges_a_gap() {
         let displays = [
-            ScreenRect::new(0, 0, 100, 100),
-            ScreenRect::new(200, 0, 100, 100),
+            ScreenRect::new(-200, -50, 100, 100),
+            ScreenRect::new(0, -50, 100, 100),
         ];
-        let plan = passive_overlay_plan(
-            &OverlayVisual::RectanglePreview(ScreenRect::new(50, 20, 200, 60)),
-            &displays,
-        )
-        .unwrap();
+        let target = ScreenRect::new(-150, -20, 200, 60);
+        let plan =
+            passive_overlay_plan(&OverlayVisual::RectanglePreview(target), &displays).unwrap();
         let edges: Vec<_> = plan
             .iter()
             .filter_map(|s| match s {
@@ -1995,13 +2098,24 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert!(edges.iter().all(|r| r.right() <= -100 || r.x >= 0));
+        assert_eq!(
+            plan.iter()
+                .filter(|spec| matches!(spec, PassiveWindowSpec::Edge {
+                edge: OutlineEdge::Top,
+                target: actual_target,
+                style: PassiveWindowStyle::BrightYellow,
+                ..
+            } if *actual_target == target))
+                .count(),
+            2
+        );
         assert!(
             edges
                 .iter()
-                .all(|r| r.right() <= 100 || i64::from(r.x) >= 200)
+                .any(|r| *r == ScreenRect::new(-150, -20, 50, 3))
         );
-        assert!(edges.iter().any(|r| *r == ScreenRect::new(50, 20, 50, 3)));
-        assert!(edges.iter().any(|r| *r == ScreenRect::new(200, 20, 50, 3)));
+        assert!(edges.iter().any(|r| *r == ScreenRect::new(0, -20, 50, 3)));
     }
 
     #[test]
