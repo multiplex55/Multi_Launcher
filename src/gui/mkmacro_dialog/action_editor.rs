@@ -42,6 +42,7 @@ pub struct ActionEditorState {
     /// launcher and dialog native-window visibility boundary.
     pub visual_capture: Option<super::visual_capture_workflow::VisualCaptureWorkflow>,
     overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
+    active_point_pick: Option<super::visual_overlay::OperationId>,
     pending_visual_region: Option<PendingVisualRegionOperation>,
     picker: NativePositionPicker,
     notification_preview: NotificationPreview,
@@ -289,6 +290,7 @@ impl ActionEditorState {
             visual_overlay,
             visual_capture: None,
             overlay_diagnostic: None,
+            active_point_pick: None,
             pending_visual_region: None,
             picker: Default::default(),
             notification_preview: Arc::new(production_notification_preview),
@@ -326,6 +328,9 @@ impl ActionEditorState {
         self.variable_catalog = VariableCatalog::before_step(steps, index);
     }
     fn cancel_owned_passive_overlay(&mut self) {
+        if let Some(operation_id) = self.active_point_pick.take() {
+            self.visual_overlay.cancel_operation(operation_id);
+        }
         if let Some((operation_id, _)) = self.overlay_diagnostic.take() {
             self.visual_overlay.cancel_operation(operation_id);
         }
@@ -888,10 +893,93 @@ impl ActionEditorState {
             }
         }
     }
-    fn poll_visual_overlay(&mut self) {
+    fn poll_visual_overlay(&mut self, current_macro_id: Option<u64>) {
         for event in self.visual_overlay.poll() {
-            apply_overlay_diagnostic(&mut self.capture_message, &self.overlay_diagnostic, event);
+            match event {
+                super::visual_overlay::VisualOverlayEvent::PointConfirmed {
+                    operation_id,
+                    request,
+                    point,
+                } => {
+                    if self.active_point_pick == Some(operation_id) {
+                        self.active_point_pick = None;
+                        self.apply_point_confirmation(&request, point, current_macro_id);
+                    }
+                }
+                super::visual_overlay::VisualOverlayEvent::Cancelled { operation_id }
+                    if self.active_point_pick == Some(operation_id) =>
+                {
+                    self.active_point_pick = None;
+                }
+                super::visual_overlay::VisualOverlayEvent::Error {
+                    operation_id,
+                    ref error,
+                } if self.active_point_pick == Some(operation_id) => {
+                    self.active_point_pick = None;
+                    self.capture_message = Some(format!("Unable to pick position: {error}"));
+                }
+                event => apply_overlay_diagnostic(
+                    &mut self.capture_message,
+                    &self.overlay_diagnostic,
+                    event,
+                ),
+            }
         }
+    }
+    fn apply_point_confirmation(
+        &mut self,
+        request: &super::visual_overlay::VisualPointRequest,
+        point: MkPoint,
+        current_macro_id: Option<u64>,
+    ) -> bool {
+        if current_macro_id != Some(request.macro_id)
+            || self.draft_generation != request.draft_generation
+            || self.editing_id != request.step_id
+            || !matches!(
+                request.destination,
+                super::visual_overlay::VisualPointDestination::SetVariablePoint
+            )
+        {
+            return false;
+        }
+        let Some(MkStep {
+            action:
+                MkAction::SetVariable {
+                    value: MkValue::Point(target),
+                    ..
+                },
+            ..
+        }) = self.draft.as_mut()
+        else {
+            return false;
+        };
+        *target = point;
+        self.draft_changed = true;
+        true
+    }
+    fn request_point_pick(&mut self, macro_id: u64) {
+        if self.active_point_pick.is_some() {
+            return;
+        }
+        if !matches!(
+            self.draft.as_ref().map(|s| &s.action),
+            Some(MkAction::SetVariable {
+                value: MkValue::Point(_),
+                ..
+            })
+        ) {
+            return;
+        }
+        let id = self
+            .visual_overlay
+            .begin_point_pick(super::visual_overlay::VisualPointRequest {
+                macro_id,
+                draft_generation: self.draft_generation,
+                step_id: self.editing_id,
+                destination: super::visual_overlay::VisualPointDestination::SetVariablePoint,
+            });
+        self.active_point_pick = Some(id);
+        self.capture_message = None;
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
         if self.image_authoring.is_importing() {
@@ -1929,6 +2017,7 @@ fn action_ui(
     image_context: super::image_asset_picker::ImageAssetUiContext<'_>,
     draft_generation: u64,
     variable_catalog: &VariableCatalog,
+    point_pick_active: bool,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -1936,6 +2025,7 @@ fn action_ui(
     Option<ImageAuthoringRequest>,
     Option<super::condition_editor::ConditionImageRequest>,
     Option<PreviewRequest>,
+    bool,
 ) {
     let target_context = TargetEditorContext {
         macro_id: image_context.macro_id,
@@ -1948,6 +2038,7 @@ fn action_ui(
     let image_request = None;
     let mut condition_image_request = None;
     let mut preview_request = None;
+    let mut point_pick = false;
     let draft_id = step.id;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
@@ -2342,6 +2433,11 @@ fn action_ui(
                 ui.text_edit_singleline(name);
             });
             value_ui(ui, value);
+            if matches!(value, MkValue::Point(_)) {
+                point_pick = ui
+                    .add_enabled(!point_pick_active, egui::Button::new("Pick Position"))
+                    .clicked();
+            }
         }
         MkAction::UnsetVariable { name } => {
             ui.horizontal(|ui| {
@@ -2724,6 +2820,7 @@ fn action_ui(
         image_request,
         condition_image_request,
         preview_request,
+        point_pick,
     )
 }
 
@@ -3032,7 +3129,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         ctx.request_repaint();
     }
     let overlay_was_active = d.action_editor.visual_overlay.operation_id().is_some();
-    d.action_editor.poll_visual_overlay();
+    d.action_editor.poll_visual_overlay(d.selected_macro_id);
     if overlay_was_active || d.action_editor.visual_overlay.operation_id().is_some() {
         ctx.request_repaint();
     }
@@ -3064,6 +3161,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut screenshot_region_request = false;
     let mut condition_image_request = None;
     let mut preview_request = None;
+    let mut point_pick_request = false;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
     let image_assets = d
@@ -3084,6 +3182,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
           egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let state = &mut d.action_editor;
             let draft_generation = state.draft_generation;
+            let point_pick_active = state.active_point_pick.is_some();
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
@@ -3093,19 +3192,21 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 assets: &image_assets,
                 store: &d.store,
             };
-            let (position, mut window, launcher, image, condition_image, preview)=action_ui(
+            let (position, mut window, launcher, image, condition_image, preview, pick_point)=action_ui(
                 ui,
                 step,
                 &mut state.capture_keys,
                 image_context,
                 draft_generation,
                 &state.variable_catalog,
+                point_pick_active,
             );
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
             image_request = image;
             condition_image_request = condition_image;
             preview_request = preview;
+            point_pick_request = pick_point;
             if matches!(
                 step.action,
                 MkAction::WaitForVisualChange(_) | MkAction::CaptureScreenshot(_)
@@ -3268,6 +3369,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         });
     if let Some(request) = preview_request {
         dispatch_preview(&mut d.action_editor, request);
+    }
+    if point_pick_request {
+        d.action_editor
+            .request_point_pick(d.selected_macro_id.unwrap_or(0));
     }
     if let Some(region) = region_preview_request {
         d.action_editor.preview_region(region);
@@ -5623,6 +5728,86 @@ mod tests {
             );
             editor.draft_generation += 1;
             assert!(!editor.apply_window_matcher(&request, MkWindowMatcher::default(), Some(7)));
+        }
+    }
+
+    mod point_picker_routing_tests {
+        use super::*;
+        use crate::gui::mkmacro_dialog::visual_overlay::{
+            VisualPointDestination, VisualPointRequest,
+        };
+
+        fn setup() -> (ActionEditorState, VisualPointRequest) {
+            let mut editor = test_editor();
+            let step = MkStep {
+                id: 55,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: MkErrorPolicy::Stop,
+                action: MkAction::SetVariable {
+                    name: "p".into(),
+                    value: MkValue::Point(MkPoint { x: 1, y: 2 }),
+                },
+            };
+            editor.begin_edit(&step);
+            let request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: Some(55),
+                destination: VisualPointDestination::SetVariablePoint,
+            };
+            (editor, request)
+        }
+        fn value(editor: &ActionEditorState) -> Option<MkPoint> {
+            match &editor.draft.as_ref()?.action {
+                MkAction::SetVariable {
+                    value: MkValue::Point(p),
+                    ..
+                } => Some(*p),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn matching_confirmation_updates_both_axes_atomically() {
+            let (mut editor, request) = setup();
+            assert!(editor.apply_point_confirmation(&request, MkPoint { x: -8, y: 99 }, Some(7)));
+            assert_eq!(value(&editor), Some(MkPoint { x: -8, y: 99 }));
+        }
+
+        #[test]
+        fn stale_identity_and_changed_draft_are_ignored() {
+            for mutation in 0..5 {
+                let (mut editor, mut request) = setup();
+                match mutation {
+                    0 => request.macro_id = 8,
+                    1 => request.draft_generation += 1,
+                    2 => request.step_id = Some(56),
+                    3 => {
+                        editor.draft.as_mut().unwrap().action =
+                            MkAction::UnsetVariable { name: "p".into() }
+                    }
+                    _ => {
+                        if let MkAction::SetVariable { value, .. } =
+                            &mut editor.draft.as_mut().unwrap().action
+                        {
+                            *value = MkValue::Number(1.0)
+                        }
+                    }
+                }
+                assert!(!editor.apply_point_confirmation(
+                    &request,
+                    MkPoint { x: 10, y: 20 },
+                    Some(7)
+                ));
+            }
+        }
+
+        #[test]
+        fn cancellation_preserves_original_point() {
+            let (editor, _) = setup();
+            assert_eq!(value(&editor), Some(MkPoint { x: 1, y: 2 }));
         }
     }
 }

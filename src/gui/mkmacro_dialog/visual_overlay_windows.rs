@@ -247,6 +247,7 @@ fn displays() -> Result<Vec<ScreenRect>, VisualOverlayError> {
 impl NativeOverlayRenderer {
     fn target(visual: &OverlayVisual) -> Option<ScreenRect> {
         match visual {
+            OverlayVisual::PointPicker { .. } => None,
             OverlayVisual::RectanglePicker {
                 virtual_desktop, ..
             } => Some(*virtual_desktop),
@@ -429,6 +430,12 @@ impl OverlayRenderer for NativeOverlayRenderer {
         if matches!(visual, OverlayVisual::RectanglePicker { .. }) {
             self.left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
             self.escape_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
+        } else if matches!(visual, OverlayVisual::PointPicker { .. }) {
+            // Treat the launch click as held until polling observes an actual
+            // up state. This also synthesizes the arming release when command
+            // dispatch happens just after the GUI button was released.
+            self.left_down = true;
+            self.escape_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
         }
         let module = unsafe { GetModuleHandleW(None) }
             .map_err(|e| platform(format!("overlay module lookup failed: {e}")))?;
@@ -454,6 +461,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             return Ok(());
         }
         let monitor_bounds = match visual {
+            OverlayVisual::PointPicker { .. } => vec![],
             // Preserve the descriptor topology: never create a virtual-desktop union window
             // spanning gaps between physical displays.
             OverlayVisual::Desktop(descriptors) => descriptors.iter().map(|d| d.bounds).collect(),
@@ -469,7 +477,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 intersecting_monitor_bounds(&physical, target)
             }
         };
-        if monitor_bounds.is_empty() {
+        if monitor_bounds.is_empty() && !matches!(visual, OverlayVisual::PointPicker { .. }) {
             return self.fail("No physical display intersects the requested preview region");
         }
         let frame = overlay_frame(visual);
@@ -541,18 +549,26 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 }));
             }
         }
-        if let OverlayVisual::RectanglePicker { tooltip, .. } = visual {
+        let tooltip_spec = match visual {
+            OverlayVisual::RectanglePicker { tooltip, .. } => {
+                Some((tooltip.pointer, tooltip.text.clone(), (330, 76)))
+            }
+            OverlayVisual::PointPicker { pointer } => {
+                Some((*pointer, POINT_INSTRUCTION.to_owned(), (300, 42)))
+            }
+            _ => None,
+        };
+        if let Some((tooltip_pointer, tooltip_text, size)) = tooltip_spec {
             let all = displays()?;
-            let monitor = monitor_nearest_pointer(&all, tooltip.pointer)
+            let monitor = monitor_nearest_pointer(&all, tooltip_pointer)
                 .ok_or_else(|| platform("No display is available for the selection tooltip"))?;
-            let size = (330, 76);
             let at =
-                place_rectangle_tooltip(tooltip.pointer, size, monitor, RECTANGLE_TOOLTIP_OFFSET);
+                place_rectangle_tooltip(tooltip_pointer, size, monitor, RECTANGLE_TOOLTIP_OFFSET);
             let bounds = ScreenRect::new(at.x, at.y, size.0, size.1);
             let mut state = Box::new(WindowPaintState {
                 bounds,
                 frame: vec![],
-                hint: Some(tooltip.text.clone()),
+                hint: Some(tooltip_text),
                 solid: None,
                 operation_id,
                 description: "tooltip",
@@ -625,14 +641,19 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 })));
             }
         }
-        if let (Some(window), OverlayVisual::RectanglePicker { tooltip, .. }) =
-            (&mut self.tooltip, visual)
-        {
-            window.state.hint = Some(tooltip.text.clone());
+        if let Some(window) = &mut self.tooltip {
+            let (pointer, text) = match visual {
+                OverlayVisual::RectanglePicker { tooltip, .. } => {
+                    (tooltip.pointer, tooltip.text.clone())
+                }
+                OverlayVisual::PointPicker { pointer } => (*pointer, POINT_INSTRUCTION.to_owned()),
+                _ => return Ok(()),
+            };
+            window.state.hint = Some(text);
             let all = displays()?;
-            if let Some(monitor) = monitor_nearest_pointer(&all, tooltip.pointer) {
+            if let Some(monitor) = monitor_nearest_pointer(&all, pointer) {
                 let at = place_rectangle_tooltip(
-                    tooltip.pointer,
+                    pointer,
                     (window.state.bounds.width, window.state.bounds.height),
                     monitor,
                     RECTANGLE_TOOLTIP_OFFSET,

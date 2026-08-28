@@ -23,6 +23,7 @@ pub const PASSIVE_OVERLAY_DURATION: Duration = Duration::from_millis(2500);
 pub const RECTANGLE_OUTLINE_WIDTH: i32 = 3;
 pub const RECTANGLE_TOOLTIP_OFFSET: (i32, i32) = (16, 16);
 pub const RECTANGLE_INSTRUCTION: &str = "Draw a rectangle around the region — Esc to cancel";
+pub const POINT_INSTRUCTION: &str = "Click a screen position — Esc to cancel";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RectangleTooltip {
@@ -82,6 +83,26 @@ pub fn monitor_nearest_pointer(monitors: &[ScreenRect], pointer: MkPoint) -> Opt
 pub type OperationId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualPointDestination {
+    SetVariablePoint,
+}
+
+/// Complete editor identity travels to the native worker and back unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisualPointRequest {
+    pub macro_id: u64,
+    pub draft_generation: u64,
+    pub step_id: Option<u64>,
+    pub destination: VisualPointDestination,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointInteractionPhase {
+    AwaitingInitialRelease,
+    Armed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RectanglePurpose {
     SearchRegion,
     ReferenceImageCapture,
@@ -113,6 +134,12 @@ pub enum VisualOverlayState {
         virtual_desktop: ScreenRect,
         pointer: MkPoint,
         phase: RectangleInteractionPhase,
+    },
+    PickingPoint {
+        operation_id: OperationId,
+        request: VisualPointRequest,
+        pointer: MkPoint,
+        phase: PointInteractionPhase,
     },
     PreviewingRectangle {
         rect: ScreenRect,
@@ -172,6 +199,11 @@ impl std::error::Error for VisualOverlayError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisualOverlayEvent {
+    PointConfirmed {
+        operation_id: OperationId,
+        request: VisualPointRequest,
+        point: MkPoint,
+    },
     RectangleConfirmed {
         operation_id: OperationId,
         purpose: RectanglePurpose,
@@ -192,6 +224,10 @@ pub enum VisualOverlayEvent {
 /// Messages are the only way native overlay work crosses onto its owning thread.
 #[derive(Debug, Clone)]
 pub(crate) enum VisualOverlayCommand {
+    PickPoint {
+        operation_id: OperationId,
+        request: VisualPointRequest,
+    },
     BeginRectanglePick {
         operation_id: OperationId,
         purpose: RectanglePurpose,
@@ -507,6 +543,12 @@ impl NativeVisualOverlayService {
 
 fn apply_command(controller: &mut VisualOverlayController, command: VisualOverlayCommand) -> bool {
     match command {
+        VisualOverlayCommand::PickPoint {
+            operation_id,
+            request,
+        } => {
+            controller.begin_point_pick_with_id(operation_id, request);
+        }
         VisualOverlayCommand::BeginRectanglePick {
             operation_id,
             purpose,
@@ -571,6 +613,9 @@ pub struct OverlayInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayVisual {
+    PointPicker {
+        pointer: MkPoint,
+    },
     RectanglePicker {
         virtual_desktop: ScreenRect,
         selection: Option<ScreenRect>,
@@ -588,7 +633,10 @@ pub enum OverlayVisual {
 }
 impl OverlayVisual {
     pub(crate) fn passive(&self) -> bool {
-        !matches!(self, Self::RectanglePicker { .. })
+        !matches!(
+            self,
+            Self::RectanglePicker { .. } | Self::PointPicker { .. }
+        )
     }
 }
 
@@ -689,7 +737,7 @@ pub(crate) fn passive_overlay_plan(
             ds.iter().map(|d| d.bounds).collect(),
             ds.iter().map(|d| (d.bounds, d.index)).collect(),
         ),
-        OverlayVisual::RectanglePicker { .. } => unreachable!(),
+        OverlayVisual::RectanglePicker { .. } | OverlayVisual::PointPicker { .. } => unreachable!(),
     };
     let mut plan = Vec::new();
     for target in targets {
@@ -726,6 +774,7 @@ pub(crate) enum OverlayFramePrimitive {
 pub(crate) fn overlay_frame(visual: &OverlayVisual) -> Vec<OverlayFramePrimitive> {
     let mut frame = vec![OverlayFramePrimitive::Clear];
     match visual {
+        OverlayVisual::PointPicker { .. } => {}
         OverlayVisual::RectanglePicker { selection, .. } => {
             if let Some(rect) = selection {
                 frame.push(OverlayFramePrimitive::Outline(*rect));
@@ -962,6 +1011,38 @@ impl VisualOverlayController {
     ) -> OperationId {
         let id = self.allocate();
         self.begin_rectangle_pick_with_id(id, purpose, virtual_desktop)
+    }
+    pub fn begin_point_pick(&mut self, request: VisualPointRequest) -> OperationId {
+        let id = self.allocate();
+        self.begin_point_pick_with_id(id, request)
+    }
+    pub(crate) fn begin_point_pick_with_id(
+        &mut self,
+        id: OperationId,
+        request: VisualPointRequest,
+    ) -> OperationId {
+        let pointer = match self.renderer.cursor_position() {
+            Ok(point) => point,
+            Err(error) => {
+                self.replace_with_id(id);
+                self.renderer.close();
+                self.events.push_back(VisualOverlayEvent::Error {
+                    operation_id: id,
+                    error,
+                });
+                return id;
+            }
+        };
+        self.start_with_id(
+            id,
+            VisualOverlayState::PickingPoint {
+                operation_id: id,
+                request,
+                pointer,
+                phase: PointInteractionPhase::AwaitingInitialRelease,
+            },
+            OverlayVisual::PointPicker { pointer },
+        )
     }
     pub(crate) fn begin_rectangle_pick_with_id(
         &mut self,
@@ -1243,6 +1324,28 @@ impl VisualOverlayController {
             self.cancel();
             return;
         }
+        if let VisualOverlayState::PickingPoint { pointer, phase, .. } = &mut self.state {
+            match input.kind {
+                OverlayInputKind::PointerMoved(point) => {
+                    *pointer = point;
+                    self.repaint_point_picker();
+                }
+                OverlayInputKind::LeftReleased(point)
+                    if matches!(phase, PointInteractionPhase::AwaitingInitialRelease) =>
+                {
+                    *pointer = point;
+                    *phase = PointInteractionPhase::Armed;
+                    self.repaint_point_picker();
+                }
+                OverlayInputKind::LeftPressed(_)
+                    if matches!(phase, PointInteractionPhase::Armed) =>
+                {
+                    self.confirm_point();
+                }
+                _ => {}
+            }
+            return;
+        }
         let VisualOverlayState::PickingRectangle { pointer, phase, .. } = &mut self.state else {
             return;
         };
@@ -1286,6 +1389,57 @@ impl VisualOverlayController {
             OverlayInputKind::Enter
             | OverlayInputKind::LeftPressed(_)
             | OverlayInputKind::Escape => {}
+        }
+    }
+    fn repaint_point_picker(&mut self) {
+        let VisualOverlayState::PickingPoint { pointer, .. } = self.state else {
+            return;
+        };
+        let Some(id) = self.operation_id else { return };
+        if let Err(error) = self
+            .renderer
+            .repaint(id, &OverlayVisual::PointPicker { pointer })
+        {
+            self.renderer.close();
+            self.operation_id = None;
+            self.state = VisualOverlayState::Idle;
+            self.events.push_back(VisualOverlayEvent::Error {
+                operation_id: id,
+                error,
+            });
+        }
+    }
+    fn confirm_point(&mut self) {
+        let VisualOverlayState::PickingPoint {
+            request: ref request_value,
+            ..
+        } = self.state
+        else {
+            return;
+        };
+        let request = request_value.clone();
+        let id = self
+            .operation_id
+            .take()
+            .expect("point picker must be active");
+        match self.renderer.cursor_position() {
+            Ok(point) => {
+                self.renderer.close();
+                self.state = VisualOverlayState::Idle;
+                self.events.push_back(VisualOverlayEvent::PointConfirmed {
+                    operation_id: id,
+                    request,
+                    point,
+                });
+            }
+            Err(error) => {
+                self.renderer.close();
+                self.state = VisualOverlayState::Idle;
+                self.events.push_back(VisualOverlayEvent::Error {
+                    operation_id: id,
+                    error,
+                });
+            }
         }
     }
     fn repaint_picker(&mut self) {
@@ -1377,7 +1531,8 @@ fn passive_expiry(state: &VisualOverlayState) -> Option<Duration> {
 
 fn event_operation_id(event: &VisualOverlayEvent) -> OperationId {
     match event {
-        VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+        VisualOverlayEvent::PointConfirmed { operation_id, .. }
+        | VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
         | VisualOverlayEvent::Cancelled { operation_id }
         | VisualOverlayEvent::Expired { operation_id }
         | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
@@ -1472,13 +1627,25 @@ mod tests {
         Close,
     }
 
-    #[derive(Default)]
     struct FakeData {
         left_down: bool,
+        cursor: MkPoint,
         inputs: Vec<OverlayInput>,
         calls: Vec<RecordedCall>,
         show_error: Option<VisualOverlayError>,
         poll_error: Option<VisualOverlayError>,
+    }
+    impl Default for FakeData {
+        fn default() -> Self {
+            Self {
+                left_down: false,
+                cursor: point(40, 50),
+                inputs: vec![],
+                calls: vec![],
+                show_error: None,
+                poll_error: None,
+            }
+        }
     }
     struct FakeRenderer(Arc<Mutex<FakeData>>);
     impl OverlayRenderer for FakeRenderer {
@@ -1486,7 +1653,7 @@ mod tests {
             Ok(self.0.lock().unwrap().left_down)
         }
         fn cursor_position(&mut self) -> Result<MkPoint, VisualOverlayError> {
-            Ok(point(40, 50))
+            Ok(self.0.lock().unwrap().cursor)
         }
         fn show(
             &mut self,
@@ -1553,6 +1720,93 @@ mod tests {
     }
     fn point(x: i32, y: i32) -> MkPoint {
         MkPoint { x, y }
+    }
+
+    fn point_request() -> VisualPointRequest {
+        VisualPointRequest {
+            macro_id: 9,
+            draft_generation: 4,
+            step_id: Some(77),
+            destination: VisualPointDestination::SetVariablePoint,
+        }
+    }
+
+    #[test]
+    fn point_picker_arms_then_confirms_once_and_preserves_negative_coordinates() {
+        let (mut c, data, _) = controller();
+        let id = c.begin_point_pick(point_request());
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::LeftPressed(point(1, 2)),
+        });
+        assert!(
+            advance_and_drain(&mut c).is_empty(),
+            "initiating press is ignored"
+        );
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingPoint {
+                phase: PointInteractionPhase::AwaitingInitialRelease,
+                ..
+            }
+        ));
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::LeftReleased(point(1, 2)),
+        });
+        assert!(advance_and_drain(&mut c).is_empty());
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingPoint {
+                phase: PointInteractionPhase::Armed,
+                ..
+            }
+        ));
+        data.lock().unwrap().cursor = point(-321, -45);
+        data.lock().unwrap().inputs.extend([
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(0, 0)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftPressed(point(0, 0)),
+            },
+        ]);
+        assert_eq!(
+            advance_and_drain(&mut c),
+            vec![VisualOverlayEvent::PointConfirmed {
+                operation_id: id,
+                request: point_request(),
+                point: point(-321, -45)
+            }]
+        );
+        assert_eq!(c.state(), &VisualOverlayState::Idle);
+        assert!(advance_and_drain(&mut c).is_empty());
+    }
+
+    #[test]
+    fn point_picker_escape_cancels_before_and_after_arming() {
+        for arm in [false, true] {
+            let (mut c, data, _) = controller();
+            let id = c.begin_point_pick(point_request());
+            if arm {
+                data.lock().unwrap().inputs.push(OverlayInput {
+                    operation_id: id,
+                    kind: OverlayInputKind::LeftReleased(point(0, 0)),
+                });
+                assert!(advance_and_drain(&mut c).is_empty());
+            }
+            data.lock().unwrap().inputs.push(OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Escape,
+            });
+            assert_eq!(
+                advance_and_drain(&mut c),
+                vec![VisualOverlayEvent::Cancelled { operation_id: id }]
+            );
+            assert_eq!(c.state(), &VisualOverlayState::Idle);
+        }
     }
 
     fn close_count(fake: &Arc<Mutex<FakeData>>) -> usize {
