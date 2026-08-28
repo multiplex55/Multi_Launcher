@@ -103,6 +103,11 @@ impl SharedVisualOverlayController {
     }
 
     #[cfg(test)]
+    pub(crate) fn inject_editor_event_for_test(&self, event: VisualOverlayEvent) {
+        self.0.editor_events.lock().unwrap().push_back(event);
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_fixture() -> TestOverlayServiceFixture {
         let observer = Arc::new(super::visual_overlay::ServiceTestObserver::default());
         let factory: OverlayServiceFactory = Arc::new({

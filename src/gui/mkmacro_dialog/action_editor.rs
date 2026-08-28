@@ -6406,5 +6406,187 @@ mod tests {
             let (editor, _) = setup();
             assert_eq!(value(&editor), Some(MkPoint { x: 1, y: 2 }));
         }
+
+        fn fixture_editor() -> (
+            ActionEditorState,
+            crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
+        ) {
+            let fixture = super::super::super::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+            let editor = ActionEditorState::new(fixture.controller.clone());
+            (editor, fixture)
+        }
+
+        fn confirmed(
+            id: OperationId,
+            request: VisualPointRequest,
+            point: MkPoint,
+        ) -> VisualOverlayEvent {
+            VisualOverlayEvent::PointConfirmed {
+                operation_id: id,
+                request,
+                point,
+            }
+        }
+
+        #[test]
+        fn request_and_result_preserve_signed_point_and_variable_name() {
+            let (mut editor, fixture) = fixture_editor();
+            editor.begin_edit(&variable_step(
+                55,
+                "screen_point",
+                MkValue::Point(MkPoint { x: 4, y: 5 }),
+            ));
+            fixture.observer.set_left_button_down(true);
+            editor.request_point_pick(7);
+            let id = editor.active_point_pick.unwrap();
+            fixture.observer.wait_for_commands(1);
+            for _ in 0..3 {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                editor.poll_visual_overlay(Some(7));
+                assert_eq!(editor.active_point_pick, Some(id));
+            }
+            fixture.observer.set_left_button_down(false);
+            fixture.observer.emit(
+                id,
+                super::super::super::visual_overlay::OverlayInputKind::LeftReleased(MkPoint {
+                    x: 4,
+                    y: 5,
+                }),
+            );
+            fixture.observer.set_cursor(MkPoint { x: -320, y: 650 });
+            fixture.observer.emit(
+                id,
+                super::super::super::visual_overlay::OverlayInputKind::LeftPressed(MkPoint {
+                    x: -320,
+                    y: 650,
+                }),
+            );
+            for _ in 0..100 {
+                editor.poll_visual_overlay(Some(7));
+                if editor.active_point_pick.is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert_eq!(editor.active_point_pick, None);
+            assert!(matches!(editor.draft.as_ref().map(|s| &s.action), Some(
+                MkAction::SetVariable { name, value: MkValue::Point(MkPoint { x: -320, y: 650 }) }
+            ) if name == "screen_point"));
+        }
+
+        #[test]
+        fn escape_cancellation_before_and_after_arming_preserves_existing_point() {
+            for armed in [false, true] {
+                let (mut editor, fixture) = fixture_editor();
+                editor.begin_edit(&variable_step(
+                    55,
+                    "p",
+                    MkValue::Point(MkPoint { x: 81, y: -19 }),
+                ));
+                editor.request_point_pick(7);
+                let id = editor.active_point_pick.unwrap();
+                if armed {
+                    fixture.observer.emit(
+                        id,
+                        super::super::super::visual_overlay::OverlayInputKind::LeftReleased(
+                            MkPoint { x: 0, y: 0 },
+                        ),
+                    );
+                }
+                fixture
+                    .controller
+                    .inject_editor_event_for_test(VisualOverlayEvent::Cancelled {
+                        operation_id: id,
+                    });
+                editor.poll_visual_overlay(Some(7));
+                assert_eq!(value(&editor), Some(MkPoint { x: 81, y: -19 }));
+                assert_eq!(editor.active_point_pick, None);
+            }
+        }
+
+        #[test]
+        fn stale_superseded_and_duplicate_results_only_apply_to_current_draft_once() {
+            let (mut editor, fixture) = fixture_editor();
+            editor.begin_edit(&variable_step(
+                10,
+                "a",
+                MkValue::Point(MkPoint { x: 1, y: 2 }),
+            ));
+            editor.request_point_pick(7);
+            let old_id = editor.active_point_pick.unwrap();
+            let old_request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: Some(10),
+                destination: VisualPointDestination::SetVariablePoint,
+            };
+
+            editor.begin_edit(&variable_step(
+                20,
+                "b",
+                MkValue::Point(MkPoint { x: 3, y: 4 }),
+            ));
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                old_id,
+                old_request,
+                MkPoint { x: -99, y: 88 },
+            ));
+            editor.poll_visual_overlay(Some(7));
+            assert_eq!(value(&editor), Some(MkPoint { x: 3, y: 4 }));
+
+            editor.request_point_pick(7);
+            let new_id = editor.active_point_pick.unwrap();
+            let new_request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: Some(20),
+                destination: VisualPointDestination::SetVariablePoint,
+            };
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                old_id,
+                new_request.clone(),
+                MkPoint { x: -1, y: -1 },
+            ));
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                new_id,
+                new_request.clone(),
+                MkPoint { x: -320, y: 650 },
+            ));
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                new_id,
+                new_request,
+                MkPoint { x: 9, y: 9 },
+            ));
+            editor.poll_visual_overlay(Some(7));
+            assert_eq!(value(&editor), Some(MkPoint { x: -320, y: 650 }));
+            assert_eq!(editor.active_point_pick, None);
+        }
+
+        #[test]
+        fn result_after_editor_closure_is_safely_discarded() {
+            let (mut editor, fixture) = fixture_editor();
+            editor.begin_edit(&variable_step(
+                55,
+                "p",
+                MkValue::Point(MkPoint { x: 1, y: 2 }),
+            ));
+            editor.request_point_pick(7);
+            let id = editor.active_point_pick.unwrap();
+            let request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: Some(55),
+                destination: VisualPointDestination::SetVariablePoint,
+            };
+            editor.cancel();
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                id,
+                request,
+                MkPoint { x: -320, y: 650 },
+            ));
+            editor.poll_visual_overlay(Some(7));
+            assert!(editor.draft.is_none());
+            assert_eq!(editor.active_point_pick, None);
+        }
     }
 }
