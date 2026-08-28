@@ -711,7 +711,9 @@ impl LauncherApp {
             [] => LauncherCommandResponse::NoResults,
             [action] => {
                 let action = action.clone();
+                let before = self.launcher_interaction_snapshot();
                 self.activate_action(action, None, ActivationSource::Macro);
+                self.restore_for_new_launcher_interaction(&before);
                 LauncherCommandResponse::Activated
             }
             results => {
