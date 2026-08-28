@@ -1215,7 +1215,13 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         }
         MkAction::Delay { milliseconds } => format!("{milliseconds} ms"),
         MkAction::Process(p) => format!("{} {}", p.program, p.arguments.join(" ")),
-        MkAction::LauncherCommand(payload) => payload.query.clone(),
+        MkAction::LauncherCommand(payload) => {
+            if payload.query.trim().is_empty() {
+                "No Launcher query configured".into()
+            } else {
+                payload.query.clone()
+            }
+        }
         MkAction::SetVariable { name, .. } => format!("Set {name}"),
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
         MkAction::PromptInput(p) => format!(
@@ -2324,5 +2330,20 @@ mod launcher_command_default_tests {
         };
         assert!(payload.query.is_empty());
         assert!(payload.legacy_resolved_action.is_none());
+    }
+
+    #[test]
+    fn empty_launcher_draft_has_meaningful_catalog_details() {
+        let action = MkAction::LauncherCommand(MkLauncherCommandPayload::default());
+        assert_eq!(action_details(&action), "No Launcher query configured");
+    }
+
+    #[test]
+    fn configured_launcher_details_are_the_query() {
+        let action = MkAction::LauncherCommand(MkLauncherCommandPayload {
+            query: "note list".into(),
+            legacy_resolved_action: None,
+        });
+        assert_eq!(action_details(&action), "note list");
     }
 }
