@@ -1784,6 +1784,14 @@ fn target_ui_with_variables(
                 variable_picker_ui(ui, picker_id, name, catalog, |value_type| {
                     value_type == VariableValueType::Point
                 });
+                if let Some(warning) =
+                    catalog.warning_for_expected_type(name, VariableValueType::Point)
+                {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("⚠ {}", warning.message_for_consumer("Mouse Move")),
+                    );
+                }
             } else {
                 ui.horizontal(|ui| {
                     ui.label("Variable");
