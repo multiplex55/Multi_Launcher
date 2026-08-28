@@ -4672,11 +4672,11 @@ mod phase_d_tests {
     }
 
     #[test]
-    fn compiled_image_output_flows_to_following_mouse_move_in_one_execution() {
+    fn find_image_point_output_mandatory_match_moves_mouse_in_one_compiled_playback() {
         let fake = Arc::new(FakeBackend::default());
-        let point = MkPoint { x: 500, y: 300 };
+        let point = MkPoint { x: 823, y: 441 };
         fake.script_image(10, Ok(Some(point)));
-        let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
+        let mut payload = image_payload(10, MkImageNotFoundPolicy::Fail);
         payload.outputs = MkImageOutputs {
             point: Some("point".into()),
             ..Default::default()
@@ -4693,14 +4693,21 @@ mod phase_d_tests {
         assert_eq!(
             fake.events()
                 .iter()
-                .filter(|event| **event == "move:500,300")
+                .filter(|event| event.starts_with("move:"))
+                .collect::<Vec<_>>(),
+            ["move:823,441"]
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| **event == "move:823,441")
                 .count(),
             1
         );
     }
 
     #[test]
-    fn continued_image_miss_nulls_stale_output_and_following_move_reports_type_mismatch() {
+    fn find_image_point_output_continued_miss_writes_null_and_reports_variable_type() {
         let fake = Arc::new(FakeBackend::default());
         fake.script_image(10, Ok(None));
         let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
@@ -4728,10 +4735,64 @@ mod phase_d_tests {
         assert_eq!(snapshots[0].get("point"), Some(&MkValue::Null));
         assert_eq!(error.kind, DiagnosticKind::TypeMismatch);
         assert_eq!(
+            error.message,
+            "Variable 'point' contains Null; coordinate target requires Point"
+        );
+        assert_eq!(
+            error.context.get("variable").map(String::as_str),
+            Some("point")
+        );
+        assert_eq!(
             error.context.get("expected").map(String::as_str),
             Some("Point")
         );
+        assert_eq!(
+            error.context.get("action").map(String::as_str),
+            Some("Mouse Move")
+        );
         assert!(!fake.events().iter().any(|event| event.starts_with("move:")));
+    }
+
+    #[test]
+    fn repeated_find_image_point_output_match_then_miss_overwrites_same_runtime_value() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_image(10, Ok(Some(MkPoint { x: 10, y: 20 })));
+        fake.script_image(10, Ok(None));
+        let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
+        payload.outputs = MkImageOutputs {
+            point: Some("point".into()),
+            ..Default::default()
+        };
+
+        let error = run(
+            vec![
+                s(1, MkAction::ImageFind(payload.clone())),
+                s(2, variable_move()),
+                s(3, MkAction::ImageFind(payload)),
+                s(4, variable_move()),
+            ],
+            fake.clone(),
+        )
+        .unwrap_err();
+
+        let snapshots = fake.resolved_variables.lock().unwrap();
+        assert_eq!(
+            snapshots[0].get("point"),
+            Some(&MkValue::Point(MkPoint { x: 10, y: 20 }))
+        );
+        assert_eq!(snapshots[1].get("point"), Some(&MkValue::Null));
+        assert_ne!(
+            snapshots[1].get("point"),
+            Some(&MkValue::Point(MkPoint { x: 10, y: 20 }))
+        );
+        assert_eq!(error.kind, DiagnosticKind::TypeMismatch);
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| event.starts_with("move:"))
+                .collect::<Vec<_>>(),
+            ["move:10,20"]
+        );
     }
 
     #[test]
