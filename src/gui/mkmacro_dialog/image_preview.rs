@@ -20,6 +20,20 @@ pub const PREVIEW_BOUND: f32 = 220.0;
 pub const TARGET_THUMBNAIL_BOUND: f32 = 140.0;
 const VALIDATE_INTERVAL: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct PreviewLookupKey {
+    pub macro_id: u64,
+    pub asset_id: u64,
+}
+
+impl PreviewLookupKey {
+    pub const fn new(macro_id: u64, asset_id: u64) -> Self {
+        Self { macro_id, asset_id }
+    }
+}
+
+const PREVIEW_CACHE_ID: &str = "mkmacro-image-preview-cache-v2";
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct PreviewKey {
     macro_id: u64,
@@ -112,6 +126,9 @@ pub fn fitted_size(width: u32, height: u32, bound: f32) -> egui::Vec2 {
 }
 
 fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (0, 0);
+    }
     if width <= PREVIEW_BOUND as u32 && height <= PREVIEW_BOUND as u32 {
         return (width, height);
     }
@@ -280,19 +297,20 @@ fn show_sized(
     bound: f32,
     details: bool,
 ) {
+    let lookup_key = PreviewLookupKey::new(macro_id, asset_id);
     let Ok(path) = store.asset_path(macro_id, asset_id) else {
         ui.colored_label(egui::Color32::RED, "No reference image selected");
         return;
     };
     let ctx = ui.ctx().clone();
-    let cache_id = egui::Id::new("mkmacro-image-preview-cache-v2");
+    let cache_id = egui::Id::new(PREVIEW_CACHE_ID);
     // Phase one: a short cache-only egui data section.
     let inspection = ctx.data_mut(|data| {
         inspect_cache(
             data.get_temp_mut_or_default::<PreviewCache>(cache_id),
             path.clone(),
-            macro_id,
-            asset_id,
+            lookup_key.macro_id,
+            lookup_key.asset_id,
             Instant::now(),
         )
     });
@@ -392,6 +410,11 @@ mod tests {
             assert!((th as f32 - h as f32 * scale).abs() <= 1.0);
         }
         assert_eq!(thumbnail_dimensions(20, 10), (20, 10));
+        assert_eq!(thumbnail_dimensions(1, 1), (1, 1));
+        assert_eq!(thumbnail_dimensions(0, 10), (0, 0));
+        assert_eq!(thumbnail_dimensions(10, 0), (0, 0));
+        assert_eq!(thumbnail_dimensions(0, 0), (0, 0));
+        assert_eq!(fitted_size(0, u32::MAX, PREVIEW_BOUND), egui::Vec2::ZERO);
     }
 
     #[test]
@@ -451,6 +474,83 @@ mod tests {
             retry.previous_key = Some(key.clone());
             assert!(matches!(decode_job(&retry),DecodeResult::Unchanged(k) if k==key));
         }
+    }
+
+    #[test]
+    fn missing_and_unreadable_paths_are_fallbacks_and_not_redecoded() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in [dir.path().join("missing.png"), dir.path().to_path_buf()] {
+            let (tx, _) = mpsc::channel();
+            let mut job = Job {
+                path,
+                macro_id: 4,
+                asset_id: 5,
+                previous_key: None,
+                sender: tx,
+            };
+            let DecodeResult::Failed(key, message) = decode_job(&job) else {
+                panic!("invalid path must fall back")
+            };
+            assert!(!message.is_empty());
+            job.previous_key = Some(key.clone());
+            assert!(matches!(decode_job(&job), DecodeResult::Unchanged(same) if same == key));
+        }
+    }
+
+    #[test]
+    fn invalid_png_dimensions_take_the_fallback_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-width.png");
+        let mut bytes = png(1, 1);
+        // PNG IHDR width occupies bytes 16..20. A zero dimension is invalid;
+        // the stale CRC is immaterial because either rejection is a fallback.
+        bytes[16..20].copy_from_slice(&0_u32.to_be_bytes());
+        fs::write(&path, bytes).unwrap();
+        let (tx, _) = mpsc::channel();
+        assert!(matches!(
+            decode_job(&Job {
+                path,
+                macro_id: 1,
+                asset_id: 9,
+                previous_key: None,
+                sender: tx
+            }),
+            DecodeResult::Failed(_, _)
+        ));
+    }
+
+    #[test]
+    fn browser_and_mouse_move_share_lookup_and_single_cache_job() {
+        // Browser rows and Mouse Move -> Image Result both ultimately pass this
+        // same identity to show_thumbnail; there is deliberately one cache ID.
+        let browser_key = PreviewLookupKey::new(12, 34);
+        let mouse_move_key = PreviewLookupKey::new(12, 34);
+        assert_eq!(browser_key, mouse_move_key);
+        assert_eq!(PREVIEW_CACHE_ID, "mkmacro-image-preview-cache-v2");
+
+        let mut cache = PreviewCache::default();
+        let now = Instant::now();
+        let first = inspect_cache(
+            &mut cache,
+            "same.png".into(),
+            browser_key.macro_id,
+            browser_key.asset_id,
+            now,
+        );
+        let second = inspect_cache(
+            &mut cache,
+            "same.png".into(),
+            mouse_move_key.macro_id,
+            mouse_move_key.asset_id,
+            now,
+        );
+        assert!(first.job.is_some());
+        assert!(second.job.is_none());
+        assert_eq!(
+            cache.assets.len(),
+            1,
+            "a Mouse Move-specific cache/decoder must not be introduced"
+        );
     }
 
     #[test]
