@@ -172,10 +172,13 @@ pub fn show_search_region_fields(
                 ui.add(egui::DragValue::new(&mut state.rectangle.width));
                 ui.label("H");
                 ui.add(egui::DragValue::new(&mut state.rectangle.height));
+                if ui.button("Select Region").clicked() {
+                    out = Some(SearchRegionRequest::SelectRectangle);
+                }
+                if ui.button("Preview Region").clicked() {
+                    out = Some(SearchRegionRequest::PreviewRegion);
+                }
             });
-            if ui.button("Select Region").clicked() {
-                out = Some(SearchRegionRequest::SelectRectangle);
-            }
         }
         SearchRegionKind::Window | SearchRegionKind::ClientArea => {
             let m = if state.kind == SearchRegionKind::Window {
@@ -192,7 +195,8 @@ pub fn show_search_region_fields(
     if !matches!(
         out,
         Some(SearchRegionRequest::PickWindow | SearchRegionRequest::SelectRectangle)
-    ) && ui.button("Preview Region").clicked()
+    ) && state.kind != SearchRegionKind::Rectangle
+        && ui.button("Preview Region").clicked()
     {
         out = Some(SearchRegionRequest::PreviewRegion);
     }
