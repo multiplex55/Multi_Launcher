@@ -508,7 +508,8 @@ mod tests {
             ),
         ];
         for (steps, kind) in cases {
-            let descriptor = &VariableCatalog::before_step(&steps, usize::MAX).descriptors()[0];
+            let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+            let descriptor = &catalog.descriptors()[0];
             assert_eq!(
                 descriptor.availability,
                 VariableAvailability::PossiblyUnavailable
