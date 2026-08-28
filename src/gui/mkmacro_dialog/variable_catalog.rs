@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(effective.source_step_id, 20);
         assert_eq!(effective.source_step_index, 1);
         assert_eq!(effective.source_step_number, 2);
-        assert_eq!(effective.source_action_label, "Prompt Input");
+        assert_eq!(effective.source_action_label, "Prompt for Input");
     }
 
     #[test]
