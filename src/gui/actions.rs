@@ -1,6 +1,15 @@
 use super::*;
 use crate::gui::note_mutation::{NoteMutationOutcome, NoteMutationOutput, NoteMutationResult};
 
+/// A compact, testable description of Launcher-owned UI that can be opened by
+/// an action.  Comparing snapshots keeps macro dispatch independent of action
+/// names (and, importantly, does not mistake external actions for UI actions).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LauncherInteractionSnapshot {
+    panel_instances: Vec<usize>,
+    confirmation_open: bool,
+}
+
 fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
 }
@@ -26,16 +35,49 @@ fn validate_note_new_payload(slug: &str, template: Option<&str>) -> Result<(), S
 }
 
 impl LauncherApp {
+    pub(crate) fn launcher_interaction_snapshot(&self) -> LauncherInteractionSnapshot {
+        let panel_instances = Self::TRACKED_PANELS
+            .iter()
+            .map(|panel| match panel {
+                Panel::NotePanel => self.note_panels.len(),
+                Panel::ImagePanel => self.image_panels.len(),
+                Panel::ScreenshotEditor => self.screenshot_editors.len(),
+                _ => usize::from(self.is_panel_open(*panel)),
+            })
+            .collect();
+        LauncherInteractionSnapshot {
+            panel_instances,
+            confirmation_open: self.pending_confirm.is_some(),
+        }
+    }
+
+    pub(crate) fn restore_for_new_launcher_interaction(
+        &self,
+        before: &LauncherInteractionSnapshot,
+    ) {
+        let after = self.launcher_interaction_snapshot();
+        let opened_panel = after
+            .panel_instances
+            .iter()
+            .zip(&before.panel_instances)
+            .any(|(after, before)| after > before);
+        if opened_panel || (after.confirmation_open && !before.confirmation_open) {
+            self.visible_flag.store(true, Ordering::SeqCst);
+            self.restore_flag.store(true, Ordering::SeqCst);
+        }
+    }
+
     pub fn activate_action(
         &mut self,
         a: Action,
         query_override: Option<String>,
         source: ActivationSource,
     ) {
-        if self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
-            return;
+        let before = self.launcher_interaction_snapshot();
+        if !self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
+            self.activate_action_confirmed(a, query_override, source);
         }
-        self.activate_action_confirmed(a, query_override, source);
+        self.restore_for_new_launcher_interaction(&before);
     }
 
     fn maybe_confirm_destructive_action(
@@ -110,9 +152,13 @@ impl LauncherApp {
             self.move_cursor_end = true;
             if let Some(action) = self.results.first().cloned() {
                 self.activate_action(action, None, source);
-            } else {
-                self.focus_input();
             }
+            // Query dispatch remains interactive even when its first result
+            // happens to perform work outside the Launcher.
+            self.visible_flag.store(true, Ordering::SeqCst);
+            self.restore_flag.store(true, Ordering::SeqCst);
+            self.move_cursor_end = true;
+            self.focus_input();
             return;
         } else if let Some(new_q) = a.action.strip_prefix("query:") {
             tracing::debug!("query action via activation: {new_q}");
@@ -133,6 +179,8 @@ impl LauncherApp {
             self.last_timer_query =
                 new_q.starts_with("timer list") || new_q.starts_with("alarm list");
             self.search();
+            self.visible_flag.store(true, Ordering::SeqCst);
+            self.restore_flag.store(true, Ordering::SeqCst);
             self.move_cursor_end = true;
             self.focus_input();
             return;
@@ -1626,6 +1674,57 @@ mod tests {
 
         set_execute_action_hook(None);
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn interactive_activation_restores_hidden_launcher_but_external_work_does_not() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+
+        app.activate_action(
+            Action {
+                label: "Query".into(),
+                desc: "Test".into(),
+                action: "query:kept query".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Macro,
+        );
+        assert_eq!(app.query, "kept query");
+        assert!(app.focus_query && app.move_cursor_end);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+        app.activate_action(
+            Action {
+                label: "External".into(),
+                desc: "Test".into(),
+                action: "exec:external".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Macro,
+        );
+        set_execute_action_hook(None);
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+
+        app.activate_action(
+            Action {
+                label: "Show".into(),
+                desc: "Test".into(),
+                action: "launcher:show".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Macro,
+        );
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
     }
 }
 
