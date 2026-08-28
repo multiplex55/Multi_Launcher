@@ -90,6 +90,30 @@ fn gesture_activation_increments_history() {
 }
 
 #[test]
+fn macro_activation_records_macro_source_in_history() {
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    clear_history().unwrap();
+
+    let ctx = eframe::egui::Context::default();
+    let mut app = new_app(&ctx);
+    app.require_confirm_destructive = false;
+
+    let action = Action {
+        label: "Clear history".into(),
+        desc: "".into(),
+        action: "history:clear".into(),
+        args: None,
+    };
+
+    app.activate_action(action, None, ActivationSource::Macro);
+
+    let history = get_history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].source.as_deref(), Some("macro"));
+}
+
+#[test]
 fn gesture_query_action_sets_query_without_execution() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
