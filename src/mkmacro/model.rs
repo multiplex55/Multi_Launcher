@@ -1020,6 +1020,75 @@ mod image_payload_tests {
 }
 
 #[cfg(test)]
+mod screenshot_region_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_regions_round_trip_without_a_schema_change() {
+        let matcher = MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        };
+        let regions = vec![
+            SearchRegion::Rectangle {
+                rect: crate::mkmacro::ScreenRect::new(-1600, -120, 3200, 900),
+            },
+            SearchRegion::Monitor { index: 3 },
+            SearchRegion::Window {
+                matcher: matcher.clone(),
+            },
+            SearchRegion::ClientArea { matcher },
+        ];
+        let steps = regions
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(id, region)| MkStep {
+                id: id as u64 + 1,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: MkErrorPolicy::Stop,
+                action: MkAction::CaptureScreenshot(MkScreenshotPayload {
+                    region,
+                    destination: MkScreenshotDestination::Clipboard,
+                    path: None,
+                    format: MkScreenshotFormat::Png,
+                    collision: MkFileCollisionPolicy::Error,
+                    path_output: None,
+                }),
+            })
+            .collect();
+        let document = MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            macros: vec![MkMacro {
+                id: 7,
+                name: "screenshots".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: MkPlayback::default(),
+                steps,
+                image_assets: vec![],
+            }],
+            settings: MkMacroSettings::default(),
+        };
+        let json = serde_json::to_string(&document).unwrap();
+        let loaded: MkMacroDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        let loaded_regions: Vec<_> = loaded.macros[0]
+            .steps
+            .iter()
+            .map(|step| match &step.action {
+                MkAction::CaptureScreenshot(payload) => payload.region.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(loaded_regions, regions);
+    }
+}
+
+#[cfg(test)]
 mod prompt_payload_tests {
     use super::*;
     #[test]

@@ -78,6 +78,7 @@ pub enum InsertionIntent {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VisualRegionDestination {
+    CaptureScreenshotRegion,
     ImageActionSearchRegion,
     ImageActionReferenceAsset,
     ConditionSearchRegion(ConditionOperationDestination),
@@ -86,6 +87,7 @@ pub enum VisualRegionDestination {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpectedVisualAction {
+    CaptureScreenshot,
     ImageFind,
     ImageClick,
     Condition,
@@ -292,6 +294,16 @@ impl ActionEditorState {
             self.visual_overlay.cancel_operation(operation_id);
         }
     }
+    fn cancel_visual_capture(&mut self) {
+        self.pending_visual_region = None;
+        if let Some(workflow) = &mut self.visual_capture {
+            workflow.cancel();
+            while workflow.active() {
+                workflow.tick();
+            }
+            let _ = workflow.take_completed();
+        }
+    }
     fn preview_region(&mut self, region: SearchRegion) {
         let monitors = if matches!(region, SearchRegion::Desktop | SearchRegion::Monitor { .. }) {
             crate::mkmacro::monitor_descriptors().map_err(|e| e.to_string())
@@ -474,6 +486,15 @@ impl ActionEditorState {
         destination: VisualRegionDestination,
     ) -> anyhow::Result<()> {
         self.pending_visual_region = None;
+        if let Some(workflow) = &mut self.visual_capture {
+            if workflow.active() {
+                workflow.cancel();
+                while workflow.active() {
+                    workflow.tick();
+                }
+                let _ = workflow.take_completed();
+            }
+        }
         if self.image_authoring.is_importing() || self.position_capture.is_some() {
             anyhow::bail!("an authoring operation is already active");
         }
@@ -485,6 +506,7 @@ impl ActionEditorState {
             | Some(MkAction::WhileStart { .. })
             | Some(MkAction::WaitUntil { .. }) => ExpectedVisualAction::Condition,
             Some(MkAction::WaitForVisualChange(_)) => ExpectedVisualAction::WaitForVisualChange,
+            Some(MkAction::CaptureScreenshot(_)) => ExpectedVisualAction::CaptureScreenshot,
             _ => anyhow::bail!("draft does not support rectangle selection"),
         };
         let compatible = matches!(
@@ -504,6 +526,10 @@ impl ActionEditorState {
             ) | (
                 VisualRegionDestination::WaitForVisualChangeRegion,
                 ExpectedVisualAction::WaitForVisualChange,
+                super::visual_overlay::RectanglePurpose::SearchRegion
+            ) | (
+                VisualRegionDestination::CaptureScreenshotRegion,
+                ExpectedVisualAction::CaptureScreenshot,
                 super::visual_overlay::RectanglePurpose::SearchRegion
             )
         );
@@ -553,7 +579,10 @@ impl ActionEditorState {
         if matches!(path, super::window_picker::MatcherPath::VisualRegion) {
             if !matches!(
                 step.action,
-                MkAction::ImageFind(_) | MkAction::ImageClick(_) | MkAction::WaitForVisualChange(_)
+                MkAction::ImageFind(_)
+                    | MkAction::ImageClick(_)
+                    | MkAction::WaitForVisualChange(_)
+                    | MkAction::CaptureScreenshot(_)
             ) {
                 return false;
             }
@@ -590,7 +619,7 @@ impl ActionEditorState {
             return;
         }
         self.cancel_owned_passive_overlay();
-        self.pending_visual_region = None;
+        self.cancel_visual_capture();
         self.image_authoring = Default::default();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
@@ -611,6 +640,9 @@ impl ActionEditorState {
             MkAction::WaitForVisualChange(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
+            MkAction::CaptureScreenshot(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
             _ => None,
         };
         self.draft = Some(MkStep {
@@ -624,7 +656,7 @@ impl ActionEditorState {
     }
     pub fn begin_edit(&mut self, step: &MkStep) {
         self.cancel_owned_passive_overlay();
-        self.pending_visual_region = None;
+        self.cancel_visual_capture();
         self.image_authoring = Default::default();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
@@ -639,6 +671,9 @@ impl ActionEditorState {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             MkAction::WaitForVisualChange(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
+            MkAction::CaptureScreenshot(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             _ => None,
@@ -713,6 +748,9 @@ impl ActionEditorState {
                             ExpectedVisualAction::WaitForVisualChange => {
                                 matches!(step.action, MkAction::WaitForVisualChange(_))
                             }
+                            ExpectedVisualAction::CaptureScreenshot => {
+                                matches!(step.action, MkAction::CaptureScreenshot(_))
+                            }
                         });
                 if !valid {
                     return;
@@ -741,6 +779,20 @@ impl ActionEditorState {
                             payload.region = region.clone();
                             image.rectangle = rect;
                             image.kind = super::image_search_editor::SearchRegionKind::Rectangle;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VisualRegionDestination::CaptureScreenshotRegion => {
+                        if let (Some(step), Some(region_editor)) =
+                            (&mut self.draft, &mut self.image_search)
+                            && let MkAction::CaptureScreenshot(payload) = &mut step.action
+                        {
+                            payload.region = SearchRegion::Rectangle { rect };
+                            region_editor.rectangle = rect;
+                            region_editor.kind =
+                                super::image_search_editor::SearchRegionKind::Rectangle;
                             true
                         } else {
                             false
@@ -795,6 +847,7 @@ impl ActionEditorState {
             match &mut step.action {
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => p.region = region,
                 MkAction::WaitForVisualChange(p) => p.region = region,
+                MkAction::CaptureScreenshot(p) => p.region = region,
                 _ => {}
             }
         }
@@ -2153,51 +2206,6 @@ fn action_ui(
         }
         MkAction::CaptureScreenshot(p) => {
             ui.heading("Capture Screenshot");
-            let mut region =
-                super::image_search_controls::ImageSearchControlState::from_region(&p.region);
-            egui::ComboBox::from_label("Region")
-                .selected_text(format!("{:?}", region.kind))
-                .show_ui(ui, |ui| {
-                    use super::image_search_controls::SearchRegionKind as K;
-                    for (kind, label) in [
-                        (K::Desktop, "Desktop"),
-                        (K::Monitor, "Monitor"),
-                        (K::Rectangle, "Rectangle"),
-                        (K::Window, "Window"),
-                        (K::ClientArea, "Client Area"),
-                    ] {
-                        ui.selectable_value(&mut region.kind, kind, label);
-                    }
-                });
-            match region.kind {
-                super::image_search_controls::SearchRegionKind::Monitor => {
-                    ui.add(egui::DragValue::new(&mut region.monitor_index).prefix("Monitor "));
-                }
-                super::image_search_controls::SearchRegionKind::Rectangle => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut region.rectangle.x).prefix("X "));
-                        ui.add(egui::DragValue::new(&mut region.rectangle.y).prefix("Y "));
-                        ui.add(egui::DragValue::new(&mut region.rectangle.width).prefix("W "));
-                        ui.add(egui::DragValue::new(&mut region.rectangle.height).prefix("H "));
-                    });
-                }
-                super::image_search_controls::SearchRegionKind::Window
-                | super::image_search_controls::SearchRegionKind::ClientArea => {
-                    let matcher = if matches!(
-                        region.kind,
-                        super::image_search_controls::SearchRegionKind::Window
-                    ) {
-                        &mut region.window_matcher
-                    } else {
-                        &mut region.client_matcher
-                    };
-                    ui.label("Window matcher");
-                    ui.text_edit_singleline(matcher.title.get_or_insert_default());
-                    ui.small("Title matcher; advanced matcher fields remain preserved.");
-                }
-                _ => {}
-            }
-            p.region = region.selected_region();
             egui::ComboBox::from_label("Destination")
                 .selected_text(format!("{:?}", p.destination))
                 .show_ui(ui, |ui| {
@@ -2783,6 +2791,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut pick_request = None;
     let mut image_request = None;
     let mut wait_visual_region_request = false;
+    let mut screenshot_region_request = false;
     let mut condition_image_request = None;
     let mut preview_request = None;
     // Execute after egui releases the mutable draft borrow held by `step`.
@@ -2815,15 +2824,24 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             image_request = image;
             condition_image_request = condition_image;
             preview_request = preview;
-            if matches!(step.action, MkAction::WaitForVisualChange(_)) {
+            if matches!(
+                step.action,
+                MkAction::WaitForVisualChange(_) | MkAction::CaptureScreenshot(_)
+            ) {
                 ui.separator(); ui.heading("Region");
-                let region_state = state.image_search.as_mut().expect("visual change requires region state");
+                let is_screenshot = matches!(step.action, MkAction::CaptureScreenshot(_));
+                let region_state = state.image_search.as_mut().expect("visual region requires editor state");
+                let before = region_state.selected_region();
                 if let Some(request) = super::image_search_controls::show_search_region_fields(ui, region_state) {
                     use super::image_search_controls::SearchRegionRequest as R;
                     match request {
                         R::SelectRectangle => {
                             image_request = Some(ImageAuthoringRequest::PickRectangle);
-                            wait_visual_region_request = true;
+                            if is_screenshot {
+                                screenshot_region_request = true;
+                            } else {
+                                wait_visual_region_request = true;
+                            }
                         }
                         R::PickWindow => window = Some(super::window_picker::MatcherPath::VisualRegion),
                         R::RefreshMonitors => region_state.refresh_monitors(),
@@ -2832,6 +2850,15 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             region_preview_request = Some(region_state.selected_region());
                         }
                     }
+                }
+                let selected = region_state.selected_region();
+                if selected != before {
+                    match &mut step.action {
+                        MkAction::WaitForVisualChange(payload) => payload.region = selected,
+                        MkAction::CaptureScreenshot(payload) => payload.region = selected,
+                        _ => unreachable!(),
+                    }
+                    state.draft_changed = true;
                 }
             }
             let find_action = matches!(step.action, MkAction::ImageFind(_));
@@ -2988,6 +3015,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             | ImageAuthoringRequest::PickRectangle) => {
                 let destination = if wait_visual_region_request {
                     VisualRegionDestination::WaitForVisualChangeRegion
+                } else if screenshot_region_request {
+                    VisualRegionDestination::CaptureScreenshotRegion
                 } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
                     VisualRegionDestination::ImageActionReferenceAsset
                 } else {
@@ -3200,6 +3229,79 @@ mod tests {
             not_found_policy: MkImageNotFoundPolicy::Fail,
             outputs: MkImageOutputs::default(),
         })
+    }
+
+    fn screenshot_action(region: SearchRegion) -> MkAction {
+        MkAction::CaptureScreenshot(MkScreenshotPayload {
+            region,
+            destination: MkScreenshotDestination::Clipboard,
+            path: None,
+            format: MkScreenshotFormat::Png,
+            collision: MkFileCollisionPolicy::Error,
+            path_output: None,
+        })
+    }
+
+    #[test]
+    fn screenshot_rectangle_completion_is_typed_dirty_and_single_use() {
+        let mut editor = test_editor();
+        editor.begin_new(screenshot_action(SearchRegion::Desktop));
+        let pending = PendingVisualRegionOperation {
+            destination: VisualRegionDestination::CaptureScreenshotRegion,
+            macro_id: 17,
+            step_id: None,
+            draft_generation: editor.draft_generation,
+            expected_action: ExpectedVisualAction::CaptureScreenshot,
+        };
+        editor.pending_visual_region = Some(pending.clone());
+        let token = super::super::visual_capture_workflow::DraftToken {
+            macro_id: 17,
+            draft_generation: editor.draft_generation,
+        };
+        let rect = ScreenRect::new(-1920, -80, 3840, 1080);
+        editor.apply_visual_capture_outcome(
+            Some(17),
+            super::super::visual_capture_workflow::WorkflowOutcome::Region {
+                token: token.clone(),
+                rect,
+            },
+        );
+        assert!(editor.draft_changed);
+        assert!(matches!(
+            &editor.draft.as_ref().unwrap().action,
+            MkAction::CaptureScreenshot(p) if p.region == (SearchRegion::Rectangle { rect })
+        ));
+
+        // A duplicate completion has no pending ownership and cannot overwrite the payload.
+        editor.apply_visual_capture_outcome(
+            Some(17),
+            super::super::visual_capture_workflow::WorkflowOutcome::Region {
+                token,
+                rect: ScreenRect::new(1, 2, 3, 4),
+            },
+        );
+        assert!(matches!(
+            &editor.draft.as_ref().unwrap().action,
+            MkAction::CaptureScreenshot(p) if p.region == (SearchRegion::Rectangle { rect })
+        ));
+
+        // Even a matching snapshot is incompatible after the action variant changes.
+        editor.pending_visual_region = Some(pending);
+        editor.draft.as_mut().unwrap().action = image_action();
+        editor.apply_visual_capture_outcome(
+            Some(17),
+            super::super::visual_capture_workflow::WorkflowOutcome::Region {
+                token: super::super::visual_capture_workflow::DraftToken {
+                    macro_id: 17,
+                    draft_generation: editor.draft_generation,
+                },
+                rect: ScreenRect::new(-5, -6, 7, 8),
+            },
+        );
+        assert!(matches!(
+            editor.draft.as_ref().unwrap().action,
+            MkAction::ImageFind(_)
+        ));
     }
 
     fn shared_dialog() -> (
