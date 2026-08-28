@@ -694,6 +694,65 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    fn dispatch_macro_launcher_query(
+        &mut self,
+        request: &crate::mkmacro::LauncherCommandRequest,
+    ) -> crate::mkmacro::LauncherCommandResponse {
+        use crate::mkmacro::LauncherCommandResponse;
+
+        let previous_error = self.error.clone();
+        self.query = request.query.clone();
+        self.last_results_valid = false;
+        self.search();
+        if self.error != previous_error
+            && let Some(message) = self.error.clone()
+        {
+            return LauncherCommandResponse::Failed(message);
+        }
+
+        match self.results.as_slice() {
+            [] => LauncherCommandResponse::NoResults,
+            [action] => {
+                let action = action.clone();
+                self.activate_action(action, None, ActivationSource::Enter);
+                if self.error != previous_error
+                    && let Some(message) = self.error.clone()
+                {
+                    LauncherCommandResponse::Failed(message)
+                } else {
+                    LauncherCommandResponse::Activated
+                }
+            }
+            results => LauncherCommandResponse::PresentedForSelection {
+                result_count: results.len(),
+            },
+        }
+    }
+
+    fn poll_macro_launcher_commands_from(
+        &mut self,
+        ctx: &egui::Context,
+        broker: &crate::mkmacro::LauncherCommandBroker,
+    ) {
+        broker.set_repaint(std::sync::Arc::new({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        }));
+        let Some(pending) = broker.take_pending() else {
+            return;
+        };
+
+        let response = self.dispatch_macro_launcher_query(&pending.request);
+        // A stopped macro may have dropped its receiver after the GUI took the
+        // request. `respond` deliberately makes that race harmless.
+        let _ = pending.respond(response);
+    }
+
+    fn poll_macro_launcher_commands(&mut self, ctx: &egui::Context) {
+        let broker = crate::mkmacro::production_launcher_command_broker();
+        self.poll_macro_launcher_commands_from(ctx, &broker);
+    }
+
     fn poll_macro_launcher_query(&mut self, ctx: &egui::Context) {
         let broker = crate::mkmacro::production_launcher_query_broker();
         broker.set_repaint(std::sync::Arc::new({
@@ -811,6 +870,7 @@ impl eframe::App for LauncherApp {
         }
 
         self.poll_macro_launcher_query(ctx);
+        self.poll_macro_launcher_commands(ctx);
         self.poll_macro_prompt(ctx);
 
         // tracing::debug!("LauncherApp::update called");
@@ -1605,9 +1665,20 @@ impl eframe::App for LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{plugin::PluginManager, settings::Settings};
+    use crate::{
+        mkmacro::{LauncherCommandBroker, LauncherCommandResponse, RunControl},
+        plugin::PluginManager,
+        settings::Settings,
+    };
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -1626,6 +1697,111 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn two_results() -> Vec<Action> {
+        (0..2)
+            .map(|index| Action {
+                label: format!("Result {index}"),
+                desc: "Test".into(),
+                action: format!("test:{index}"),
+                args: None,
+            })
+            .collect()
+    }
+
+    fn wait_for_repaint(wakes: &AtomicUsize) {
+        for _ in 0..100 {
+            if wakes.load(Ordering::SeqCst) != 0 {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("worker submission did not wake egui");
+    }
+
+    #[test]
+    fn macro_launcher_poll_consumes_one_request_and_mutates_query_on_gui_dispatch() {
+        let ctx = egui::Context::default();
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let mut app = new_app(&ctx);
+        app.command_cache = two_results();
+        app.query = "before polling".into();
+
+        // Consume repaint requests made while constructing the app. An immediate
+        // egui repaint intentionally remains outstanding for another frame, so
+        // one frame is not sufficient to put the context back to sleep. If a
+        // repaint is already pending, another `request_repaint` is coalesced and
+        // does not invoke the integration callback.
+        for _ in 0..8 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            if !ctx.has_requested_repaint() {
+                break;
+            }
+        }
+        assert!(!ctx.has_requested_repaint());
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let callback_wakes = Arc::clone(&wakes);
+        ctx.set_request_repaint_callback(move |_| {
+            callback_wakes.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // The empty poll installs the wakeup callback but changes no GUI state.
+        app.poll_macro_launcher_commands_from(&ctx, &broker);
+        assert_eq!(app.query, "before polling");
+
+        let submit_broker = Arc::clone(&broker);
+        let submitter = thread::spawn(move || submit_broker.submit("", &RunControl::default()));
+        wait_for_repaint(&wakes);
+        assert_eq!(app.query, "before polling");
+
+        app.poll_macro_launcher_commands_from(&ctx, &broker);
+        assert_eq!(app.query, "");
+        assert!(broker.take_pending().is_none());
+        assert_eq!(
+            submitter.join().unwrap().unwrap(),
+            LauncherCommandResponse::PresentedForSelection { result_count: 2 }
+        );
+
+        // A second poll cannot respond to, or otherwise process, the request again.
+        app.poll_macro_launcher_commands_from(&ctx, &broker);
+        assert_eq!(app.query, "");
+    }
+
+    #[test]
+    fn empty_macro_launcher_broker_is_a_no_op() {
+        let ctx = egui::Context::default();
+        let broker = LauncherCommandBroker::default();
+        let mut app = new_app(&ctx);
+        app.query = "unchanged".into();
+
+        app.poll_macro_launcher_commands_from(&ctx, &broker);
+
+        assert_eq!(app.query, "unchanged");
+        assert!(app.results.is_empty());
+    }
+
+    #[test]
+    fn disconnected_macro_launcher_waiter_does_not_panic_gui_dispatch() {
+        let ctx = egui::Context::default();
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let control = Arc::new(RunControl::default());
+        let submit_broker = Arc::clone(&broker);
+        let submit_control = Arc::clone(&control);
+        let submitter = thread::spawn(move || submit_broker.submit("missing", &submit_control));
+        let pending = loop {
+            if let Some(pending) = broker.take_pending() {
+                break pending;
+            }
+            thread::yield_now();
+        };
+        control.stop();
+        assert!(submitter.join().unwrap().is_err());
+
+        let mut app = new_app(&ctx);
+        let response = app.dispatch_macro_launcher_query(&pending.request);
+        assert_eq!(response, LauncherCommandResponse::NoResults);
+        assert!(!pending.respond(response));
     }
 
     #[test]
