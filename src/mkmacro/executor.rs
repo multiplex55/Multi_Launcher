@@ -406,9 +406,11 @@ fn uia_unavailable<T>(action: &'static str) -> ExecResult<T> {
     .context("action", action))
 }
 
-#[cfg(windows)]
-struct ProductionLauncher;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+struct ProductionLauncher {
+    command_broker: Arc<super::LauncherCommandBroker>,
+}
+#[cfg(any(windows, test))]
 impl LauncherBackend for ProductionLauncher {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult {
         let mut command = std::process::Command::new(&p.program);
@@ -432,7 +434,25 @@ impl LauncherBackend for ProductionLauncher {
         })
     }
     fn command(&self, query: &str, control: &RunControl) -> ExecResult {
-        super::production_launcher_query_broker().submit(query, control)
+        let response = self
+            .command_broker
+            .submit(query, control)
+            .map_err(|error| error.context("backend", "launcher").context("query", query))?;
+        match response {
+            super::LauncherCommandResponse::Activated
+            | super::LauncherCommandResponse::PresentedForSelection { .. } => Ok(()),
+            super::LauncherCommandResponse::NoResults => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "Launcher command produced no results",
+            )
+            .context("backend", "launcher")
+            .context("query", query)),
+            super::LauncherCommandResponse::Failed(message) => {
+                Err(ExecutionDiagnostic::new(DiagnosticKind::Backend, message)
+                    .context("backend", "launcher")
+                    .context("query", query))
+            }
+        }
     }
 }
 
@@ -455,7 +475,9 @@ pub fn production_backends() -> Backends {
             window: Arc::new(super::windows::Win32WindowBackend),
             screen: Arc::new(super::screen::WindowsScreenBackend::system()),
             uia: unsupported.uia,
-            launcher: Arc::new(ProductionLauncher),
+            launcher: Arc::new(ProductionLauncher {
+                command_broker: super::production_launcher_command_broker(),
+            }),
             prompt: super::prompt::production_prompt_broker(),
             clipboard: Arc::new(ProductionClipboard),
             screenshot_capture: Arc::new(super::screen::WindowsScreenCaptureBackend::system()),
@@ -914,8 +936,133 @@ impl InputCleanupGuard {
 mod tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
-        AlphaPolicy, MkErrorPolicy, MkMacro, MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
+        AlphaPolicy, LauncherCommandBroker, LauncherCommandResponse, MkErrorPolicy, MkMacro,
+        MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
     };
+
+    fn run_production_launcher_command(response: LauncherCommandResponse) -> (ExecResult, String) {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let launcher = Arc::new(ProductionLauncher {
+            command_broker: Arc::clone(&broker),
+        });
+        let worker = std::thread::spawn(move || {
+            launcher.command("raw query --exact", &RunControl::default())
+        });
+        let pending = loop {
+            if let Some(pending) = broker.take_pending() {
+                break pending;
+            }
+            std::thread::yield_now();
+        };
+        let query = pending.request.query.clone();
+        assert!(pending.respond(response));
+        (worker.join().unwrap(), query)
+    }
+
+    #[test]
+    fn production_launcher_accepts_activated_and_selection_responses() {
+        for response in [
+            LauncherCommandResponse::Activated,
+            LauncherCommandResponse::PresentedForSelection { result_count: 2 },
+        ] {
+            assert_eq!(run_production_launcher_command(response).0, Ok(()));
+        }
+    }
+
+    #[test]
+    fn production_launcher_no_results_diagnostic_contains_raw_query() {
+        let (result, submitted_query) =
+            run_production_launcher_command(LauncherCommandResponse::NoResults);
+        let error = result.unwrap_err();
+        assert_eq!(submitted_query, "raw query --exact");
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(error.message, "Launcher command produced no results");
+        assert_eq!(
+            error.context.get("backend").map(String::as_str),
+            Some("launcher")
+        );
+        assert_eq!(
+            error.context.get("query").map(String::as_str),
+            Some("raw query --exact")
+        );
+    }
+
+    #[test]
+    fn production_launcher_preserves_gui_failure_message() {
+        let error = run_production_launcher_command(LauncherCommandResponse::Failed(
+            "GUI could not activate that result".into(),
+        ))
+        .0
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(error.message, "GUI could not activate that result");
+        assert_eq!(
+            error.context.get("query").map(String::as_str),
+            Some("raw query --exact")
+        );
+    }
+
+    #[test]
+    fn production_launcher_responses_do_not_execute_resolved_actions() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let called = Arc::new(AtomicBool::new(false));
+        let hook_called = Arc::clone(&called);
+        crate::gui::set_execute_action_hook(Some(Box::new(move |_| {
+            hook_called.store(true, Ordering::SeqCst);
+            Ok(())
+        })));
+        for response in [
+            LauncherCommandResponse::Activated,
+            LauncherCommandResponse::PresentedForSelection { result_count: 1 },
+            LauncherCommandResponse::NoResults,
+            LauncherCommandResponse::Failed("failure".into()),
+        ] {
+            let _ = run_production_launcher_command(response);
+        }
+        crate::gui::set_execute_action_hook(None);
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn production_launcher_process_launch_is_independent_of_command_broker() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let launcher = ProductionLauncher {
+            command_broker: Arc::clone(&broker),
+        };
+        let control = Arc::new(RunControl::default());
+        let submitting_broker = Arc::clone(&broker);
+        let submitting_control = Arc::clone(&control);
+        let submission =
+            std::thread::spawn(move || submitting_broker.submit("occupied", &submitting_control));
+        let _pending = loop {
+            if let Some(pending) = broker.take_pending() {
+                break pending;
+            }
+            std::thread::yield_now();
+        };
+
+        #[cfg(windows)]
+        let process = MkProcessPayload {
+            program: "cmd".into(),
+            arguments: vec!["/C".into(), "exit 0".into()],
+            working_directory: None,
+            wait: true,
+        };
+        #[cfg(not(windows))]
+        let process = MkProcessPayload {
+            program: "sh".into(),
+            arguments: vec!["-c".into(), "exit 0".into()],
+            working_directory: None,
+            wait: true,
+        };
+        assert_eq!(launcher.launch_process(&process), Ok(()));
+        control.stop();
+        assert_eq!(
+            submission.join().unwrap().unwrap_err().kind,
+            DiagnosticKind::Cancelled
+        );
+    }
 
     #[derive(Default)]
     struct ShotCapture {
