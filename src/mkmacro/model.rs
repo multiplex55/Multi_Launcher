@@ -754,7 +754,10 @@ pub enum MkAction {
     },
     Process(MkProcessPayload),
     LauncherCommand {
+        /// Raw Launcher query text. The legacy `args` value, when non-empty,
+        /// is appended after one space and submitted as part of this query.
         command: String,
+        #[serde(default)]
         args: Option<String>,
     },
     WindowActivate(MkWindowPayload),

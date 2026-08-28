@@ -163,7 +163,8 @@ pub trait UiAutomationInspector: Send + Sync {
 }
 pub trait LauncherBackend: Send + Sync {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult;
-    fn command(&self, command: &str, args: Option<&str>) -> ExecResult;
+    /// Submits raw text to the Launcher query/search pipeline.
+    fn command(&self, query: &str, control: &RunControl) -> ExecResult;
 }
 pub trait ClipboardBackend: Send + Sync {
     /// Captures the text clipboard. Backends which cannot preserve non-text
@@ -430,18 +431,8 @@ impl LauncherBackend for ProductionLauncher {
                 .context("action", p.program.clone())
         })
     }
-    fn command(&self, command: &str, args: Option<&str>) -> ExecResult {
-        let action = crate::actions::Action {
-            label: command.to_owned(),
-            desc: "Macro".into(),
-            action: command.to_owned(),
-            args: args.map(str::to_owned),
-        };
-        crate::gui::execute_action(&action).map_err(|e| {
-            ExecutionDiagnostic::new(DiagnosticKind::Backend, e.to_string())
-                .context("backend", "launcher")
-                .context("action", command)
-        })
+    fn command(&self, query: &str, control: &RunControl) -> ExecResult {
+        super::production_launcher_query_broker().submit(query, control)
     }
 }
 
@@ -499,7 +490,8 @@ impl LauncherBackend for Unsupported {
     fn launch_process(&self, _: &MkProcessPayload) -> ExecResult {
         unsupported()
     }
-    fn command(&self, _: &str, _: Option<&str>) -> ExecResult {
+    fn command(&self, _: &str, control: &RunControl) -> ExecResult {
+        control.checkpoint()?;
         unsupported()
     }
 }
@@ -1983,6 +1975,8 @@ impl Executor {
                         }
                         Err(e) => {
                             let e = e
+                                .context("step", step.id.to_string())
+                                .context("step_id", step.id.to_string())
                                 .context("backend_operation", action_name(&step.action))
                                 .context("attempt", attempt.to_string())
                                 .context("attempts_exhausted", (attempt == attempts).to_string());
@@ -2160,6 +2154,8 @@ impl Executor {
                 self.backends.launcher.launch_process(&expanded)
             }
             MkAction::LauncherCommand { command, args } => {
+                let expanded_command = interpolate(command, v)
+                    .map_err(|error| error.context("field", "launcher_command.command"))?;
                 let expanded_args = args
                     .as_deref()
                     .map(|args| {
@@ -2167,9 +2163,19 @@ impl Executor {
                             .map_err(|error| error.context("field", "launcher_command.args"))
                     })
                     .transpose()?;
+                // `args` remains persisted for backwards compatibility. It is
+                // query text, joined with one space, never resolved Action args.
+                let query = match expanded_args.as_deref().filter(|args| !args.is_empty()) {
+                    Some(args) if !expanded_command.is_empty() => {
+                        format!("{expanded_command} {args}")
+                    }
+                    Some(args) => args.to_owned(),
+                    None => expanded_command,
+                };
                 self.backends
                     .launcher
-                    .command(command, expanded_args.as_deref())
+                    .command(&query, &self.control)
+                    .map_err(|error| error.context("backend", "launcher").context("query", query))
             }
             MkAction::WindowActivate(p) => self.backends.window.activate(p),
             MkAction::WindowClose(m) => self.backends.window.close(m),
@@ -3217,7 +3223,8 @@ pub mod fake {
         pub cursor: Mutex<MkPoint>,
         pub prompt_responses: Mutex<Vec<PromptResponse>>,
         pub processes: Mutex<Vec<MkProcessPayload>>,
-        pub commands: Mutex<Vec<(String, Option<String>)>>,
+        pub commands: Mutex<Vec<String>>,
+        pub command_controls: Mutex<Vec<usize>>,
         pub prompts: Mutex<Vec<PromptRequest>>,
         pub window_calls: Mutex<Vec<WindowCall>>,
         pub virtual_desktop_calls: Mutex<Vec<super::super::MkVirtualDesktopAction>>,
@@ -3237,6 +3244,7 @@ pub mod fake {
                 prompt_responses: Mutex::new(Vec::new()),
                 processes: Mutex::new(Vec::new()),
                 commands: Mutex::new(Vec::new()),
+                command_controls: Mutex::new(Vec::new()),
                 prompts: Mutex::new(Vec::new()),
                 window_calls: Mutex::new(Vec::new()),
                 virtual_desktop_calls: Mutex::new(Vec::new()),
@@ -3557,11 +3565,13 @@ pub mod fake {
             self.processes.lock().unwrap().push(p.clone());
             self.event(format!("process:{}", p.program))
         }
-        fn command(&self, c: &str, args: Option<&str>) -> ExecResult {
-            self.commands
+        fn command(&self, c: &str, control: &RunControl) -> ExecResult {
+            self.commands.lock().unwrap().push(c.into());
+            self.command_controls
                 .lock()
                 .unwrap()
-                .push((c.into(), args.map(str::to_owned)));
+                .push(control as *const RunControl as usize);
+            control.checkpoint()?;
             self.event(format!("command:{c}"))
         }
     }
@@ -4384,8 +4394,117 @@ mod phase_d_tests {
         assert_eq!(original_action, MkAction::Process(original_process));
         assert_eq!(
             f.commands.lock().unwrap()[0],
-            ("canonical-${value}".into(), Some("open two words".into()))
+            "canonical-two words open two words"
         );
+    }
+
+    #[test]
+    fn launcher_command_submits_expanded_raw_query_with_active_control_only() {
+        let f = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        Executor::new(f.clone().backends(), control.clone())
+            .execute(
+                &plan(vec![
+                    s(
+                        1,
+                        MkAction::SetVariable {
+                            name: "target".into(),
+                            value: MkValue::String("project alpha".into()),
+                        },
+                    ),
+                    s(
+                        2,
+                        MkAction::LauncherCommand {
+                            command: "note open ${target}".into(),
+                            args: Some("--exact ${target}".into()),
+                        },
+                    ),
+                ]),
+                &|_| {},
+            )
+            .unwrap();
+
+        assert_eq!(
+            f.commands.lock().unwrap().as_slice(),
+            ["note open project alpha --exact project alpha"]
+        );
+        assert_eq!(f.processes.lock().unwrap().len(), 0);
+        assert_eq!(
+            f.command_controls.lock().unwrap().as_slice(),
+            [Arc::as_ptr(&control) as usize]
+        );
+    }
+
+    #[test]
+    fn process_uses_only_process_launching() {
+        let f = Arc::new(FakeBackend::default());
+        run(
+            vec![s(
+                1,
+                MkAction::Process(MkProcessPayload {
+                    program: "tool".into(),
+                    arguments: vec![],
+                    working_directory: None,
+                    wait: false,
+                }),
+            )],
+            f.clone(),
+        )
+        .unwrap();
+        assert_eq!(f.processes.lock().unwrap().len(), 1);
+        assert!(f.commands.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn launcher_backend_error_has_backend_query_and_step_context() {
+        let f = Arc::new(FakeBackend::default());
+        f.fail(
+            "command:broken query",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "query failed"),
+        );
+        let error = run(
+            vec![s(
+                42,
+                MkAction::LauncherCommand {
+                    command: "broken".into(),
+                    args: Some("query".into()),
+                },
+            )],
+            f,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.context.get("backend").map(String::as_str),
+            Some("launcher")
+        );
+        assert_eq!(
+            error.context.get("query").map(String::as_str),
+            Some("broken query")
+        );
+        assert_eq!(error.context.get("step").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn stopped_launcher_run_is_cancelled_without_launching_process() {
+        let f = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        control.stop();
+        let error = Executor::new(f.clone().backends(), control)
+            .execute(
+                &plan(vec![s(
+                    1,
+                    MkAction::LauncherCommand {
+                        command: "anything".into(),
+                        args: None,
+                    },
+                )]),
+                &|_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert!(f.processes.lock().unwrap().is_empty());
     }
 
     #[test]
