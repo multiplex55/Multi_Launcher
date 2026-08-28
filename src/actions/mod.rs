@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static ACTIONS_VERSION: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Action {
     pub label: String,
     pub desc: String,

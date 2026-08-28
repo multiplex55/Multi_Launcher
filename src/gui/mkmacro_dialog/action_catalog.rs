@@ -556,10 +556,10 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Run a launcher command",
             &["run", "launch"],
             Launcher,
-            MkAction::LauncherCommand {
-                command: "command".into(),
-                args: None
-            }
+            MkAction::LauncherCommand(MkLauncherCommandPayload {
+                query: String::new(),
+                legacy_resolved_action: None,
+            })
         ),
         d!(
             Variables,
@@ -825,7 +825,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         MkAction::MouseScroll { .. } => EditorKind::MouseScroll,
         MkAction::Delay { .. } => EditorKind::Timing,
         MkAction::Process(_) => EditorKind::Process,
-        MkAction::LauncherCommand { .. } => EditorKind::Launcher,
+        MkAction::LauncherCommand(_) => EditorKind::Launcher,
         MkAction::WindowActivate(_)
         | MkAction::WindowClose(_)
         | MkAction::WindowWait(_)
@@ -1086,7 +1086,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::MouseScroll { .. } => "Mouse Scroll",
         MkAction::Delay { .. } => "Delay",
         MkAction::Process(_) => "Run Program",
-        MkAction::LauncherCommand { .. } => "Launcher Command",
+        MkAction::LauncherCommand(_) => "Launcher Command",
         MkAction::WindowActivate(_) => "Activate Window",
         MkAction::WindowClose(_) => "Close Window",
         MkAction::WindowWait(_) => "Wait for Window",
@@ -1215,8 +1215,12 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         }
         MkAction::Delay { milliseconds } => format!("{milliseconds} ms"),
         MkAction::Process(p) => format!("{} {}", p.program, p.arguments.join(" ")),
-        MkAction::LauncherCommand { command, args } => {
-            format!("{} {}", command, args.as_deref().unwrap_or(""))
+        MkAction::LauncherCommand(payload) => {
+            if payload.query.trim().is_empty() {
+                "No Launcher query configured".into()
+            } else {
+                payload.query.clone()
+            }
         }
         MkAction::SetVariable { name, .. } => format!("Set {name}"),
         MkAction::UnsetVariable { name } => format!("Unset {name}"),
@@ -2308,5 +2312,38 @@ pub(super) fn show_modal(ctx: &egui::Context, d: &mut MkMacroDialog) {
         });
     if !open || close_clicked {
         close(d);
+    }
+}
+
+#[cfg(test)]
+mod launcher_command_default_tests {
+    use super::*;
+
+    #[test]
+    fn new_launcher_command_is_an_empty_non_legacy_query() {
+        let descriptor = descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.name == "Launcher Command")
+            .unwrap();
+        let MkAction::LauncherCommand(payload) = (descriptor.make_default)() else {
+            panic!("launcher descriptor returned the wrong action");
+        };
+        assert!(payload.query.is_empty());
+        assert!(payload.legacy_resolved_action.is_none());
+    }
+
+    #[test]
+    fn empty_launcher_draft_has_meaningful_catalog_details() {
+        let action = MkAction::LauncherCommand(MkLauncherCommandPayload::default());
+        assert_eq!(action_details(&action), "No Launcher query configured");
+    }
+
+    #[test]
+    fn configured_launcher_details_are_the_query() {
+        let action = MkAction::LauncherCommand(MkLauncherCommandPayload {
+            query: "note list".into(),
+            legacy_resolved_action: None,
+        });
+        assert_eq!(action_details(&action), "note list");
     }
 }

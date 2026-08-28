@@ -753,13 +753,7 @@ pub enum MkAction {
         milliseconds: u64,
     },
     Process(MkProcessPayload),
-    LauncherCommand {
-        /// Raw Launcher query text. The legacy `args` value, when non-empty,
-        /// is appended after one space and submitted as part of this query.
-        command: String,
-        #[serde(default)]
-        args: Option<String>,
-    },
+    LauncherCommand(MkLauncherCommandPayload),
     WindowActivate(MkWindowPayload),
     WindowClose(MkWindowMatcher),
     WindowWait(MkWindowPayload),
@@ -819,6 +813,16 @@ pub enum MkAction {
     UiSelect(MkUiPayload),
     UiFocus(MkUiPayload),
     UiWait(MkUiPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MkLauncherCommandPayload {
+    /// Text submitted to the Launcher's normal search and command pipeline.
+    #[serde(default)]
+    pub query: String,
+    /// A resolved action retained only while reading macros authored by older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_resolved_action: Option<crate::actions::Action>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MkBlockKind {

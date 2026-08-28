@@ -2300,25 +2300,9 @@ impl Executor {
                     .transpose()?;
                 self.backends.launcher.launch_process(&expanded)
             }
-            MkAction::LauncherCommand { command, args } => {
-                let expanded_command = interpolate(command, v)
-                    .map_err(|error| error.context("field", "launcher_command.command"))?;
-                let expanded_args = args
-                    .as_deref()
-                    .map(|args| {
-                        interpolate(args, v)
-                            .map_err(|error| error.context("field", "launcher_command.args"))
-                    })
-                    .transpose()?;
-                // `args` remains persisted for backwards compatibility. It is
-                // query text, joined with one space, never resolved Action args.
-                let query = match expanded_args.as_deref().filter(|args| !args.is_empty()) {
-                    Some(args) if !expanded_command.is_empty() => {
-                        format!("{expanded_command} {args}")
-                    }
-                    Some(args) => args.to_owned(),
-                    None => expanded_command,
-                };
+            MkAction::LauncherCommand(payload) => {
+                let query = interpolate(&payload.query, v)
+                    .map_err(|error| error.context("field", "launcher_command.query"))?;
                 // The broker must observe the executor's own pause/stop state;
                 // never substitute a fresh RunControl for this blocking call.
                 self.backends
@@ -3218,7 +3202,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::MouseScroll { .. }
         | MkAction::Delay { .. }
         | MkAction::Process(_)
-        | MkAction::LauncherCommand { .. }
+        | MkAction::LauncherCommand(_)
         | MkAction::WindowActivate(_)
         | MkAction::WindowClose(_)
         | MkAction::WindowWait(_)
@@ -3278,7 +3262,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::UiSelect(_)
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => "UIAutomation",
-        MkAction::Process(_) | MkAction::LauncherCommand { .. } => "launcher",
+        MkAction::Process(_) | MkAction::LauncherCommand(_) => "launcher",
         MkAction::WaitUntil { .. } => "condition_evaluator",
         MkAction::PromptInput(_) => "prompt",
         MkAction::Notify(_) => "notification",
@@ -3753,7 +3737,8 @@ pub mod fake {
 mod phase_d_tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
-        MkErrorPolicy, MkMacro, MkPlayback, MkRetry, MkStep, MkTextMode, compile,
+        MkErrorPolicy, MkLauncherCommandPayload, MkMacro, MkPlayback, MkRetry, MkStep, MkTextMode,
+        compile,
     };
 
     fn s(id: u64, action: MkAction) -> MkStep {
@@ -4524,10 +4509,10 @@ mod phase_d_tests {
                 s(3, original_action.clone()),
                 s(
                     4,
-                    MkAction::LauncherCommand {
-                        command: "canonical-${value}".into(),
-                        args: Some("open ${value}".into()),
-                    },
+                    MkAction::LauncherCommand(MkLauncherCommandPayload {
+                        query: "canonical-${value} open ${value}".into(),
+                        legacy_resolved_action: None,
+                    }),
                 ),
             ],
             f.clone(),
@@ -4564,10 +4549,10 @@ mod phase_d_tests {
                     ),
                     s(
                         2,
-                        MkAction::LauncherCommand {
-                            command: "note open ${target}".into(),
-                            args: Some("--exact ${target}".into()),
-                        },
+                        MkAction::LauncherCommand(MkLauncherCommandPayload {
+                            query: "note open ${target} --exact ${target}".into(),
+                            legacy_resolved_action: None,
+                        }),
                     ),
                 ]),
                 &|_| {},
@@ -4615,10 +4600,10 @@ mod phase_d_tests {
         let error = run(
             vec![s(
                 42,
-                MkAction::LauncherCommand {
-                    command: "broken".into(),
-                    args: Some("query".into()),
-                },
+                MkAction::LauncherCommand(MkLauncherCommandPayload {
+                    query: "broken query".into(),
+                    legacy_resolved_action: None,
+                }),
             )],
             f,
         )
@@ -4644,10 +4629,10 @@ mod phase_d_tests {
             .execute(
                 &plan(vec![s(
                     1,
-                    MkAction::LauncherCommand {
-                        command: "anything".into(),
-                        args: None,
-                    },
+                    MkAction::LauncherCommand(MkLauncherCommandPayload {
+                        query: "anything".into(),
+                        legacy_resolved_action: None,
+                    }),
                 )]),
                 &|_| {},
             )
