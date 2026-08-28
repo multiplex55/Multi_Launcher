@@ -62,8 +62,9 @@ impl DestructiveAction {
 
 #[cfg(test)]
 mod tests {
-    use super::DestructiveAction;
+    use super::{ConfirmationModal, DestructiveAction};
     use crate::actions::Action;
+    use crate::gui::ActivationSource;
 
     #[test]
     fn from_action_maps_note_remove() {
@@ -78,6 +79,18 @@ mod tests {
             DestructiveAction::from_action(&action),
             Some(DestructiveAction::DeleteNote)
         );
+    }
+
+    #[test]
+    fn macro_source_is_rendered_in_confirmation_text() {
+        let mut modal = ConfirmationModal::default();
+
+        modal.open_for_source(
+            DestructiveAction::ClearHistory,
+            Some(ActivationSource::Macro),
+        );
+
+        assert_eq!(modal.source_label.as_deref(), Some("Triggered by macro"));
     }
 }
 

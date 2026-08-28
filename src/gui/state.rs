@@ -49,6 +49,20 @@ impl ActivationSource {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::ActivationSource;
+
+    #[test]
+    fn activation_source_labels_are_stable() {
+        assert_eq!(ActivationSource::Enter.label(), "enter");
+        assert_eq!(ActivationSource::Click.label(), "click");
+        assert_eq!(ActivationSource::Dashboard.label(), "dashboard");
+        assert_eq!(ActivationSource::Gesture.label(), "gesture");
+        assert_eq!(ActivationSource::Macro.label(), "macro");
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiErrorEvent {
     pub context: &'static str,

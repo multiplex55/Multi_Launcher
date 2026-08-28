@@ -1800,7 +1800,10 @@ mod tests {
             query: "destroy".into(),
         });
         assert_eq!(response, LauncherCommandResponse::Activated);
-        assert!(app.pending_confirm.is_some());
+        assert_eq!(
+            app.pending_confirm.as_ref().map(|pending| pending.source),
+            Some(ActivationSource::Macro)
+        );
 
         app.selected = Some(1);
         let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
