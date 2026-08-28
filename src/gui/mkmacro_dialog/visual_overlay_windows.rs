@@ -279,7 +279,12 @@ impl NativeOverlayRenderer {
         };
         for spec in plan {
             let (bounds, target, hint, solid, description, badge) = match spec {
-                PassiveWindowSpec::Edge { edge, target, rect } => (
+                PassiveWindowSpec::Edge {
+                    edge,
+                    target,
+                    rect,
+                    style: PassiveWindowStyle::BrightYellow,
+                } => (
                     rect,
                     target,
                     None,
@@ -775,4 +780,57 @@ impl Drop for NativeOverlayRenderer {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+/// Manual diagnostic entry point. This deliberately uses the same renderer,
+/// visual, message pump, and teardown path as production without constructing
+/// any Action Editor state.
+pub(super) fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError> {
+    const OPERATION_ID: OperationId = 1;
+    let visual = OverlayVisual::RectanglePreview(ScreenRect::new(100, 100, 500, 300));
+    let mut renderer = NativeOverlayRenderer::default();
+
+    eprintln!("passive-overlay-smoke: launch: planning passive rectangle");
+    let physical = displays().map_err(|error| {
+        eprintln!("passive-overlay-smoke: planning failed: {error}");
+        error
+    })?;
+    let planned = passive_overlay_plan(&visual, &physical).ok_or_else(|| {
+        let error = platform("passive rectangle unexpectedly has no passive window plan");
+        eprintln!("passive-overlay-smoke: planning failed: {error}");
+        error
+    })?;
+    if planned.len() != 4 {
+        let error = platform(format!(
+            "expected four native edge windows, planned {}",
+            planned.len()
+        ));
+        eprintln!("passive-overlay-smoke: planning failed: {error}");
+        return Err(error);
+    }
+    eprintln!("passive-overlay-smoke: launch: plan ready; creating four native windows");
+    renderer
+        .show(OPERATION_ID, &visual, true)
+        .map_err(|error| {
+            eprintln!("passive-overlay-smoke: creation failed: {error}");
+            error
+        })?;
+    eprintln!(
+        "passive-overlay-smoke: active: four bright-yellow edges; pumping messages for ~2.5s"
+    );
+
+    let deadline = Instant::now() + PASSIVE_OVERLAY_DURATION;
+    while Instant::now() < deadline {
+        if let Err(error) = renderer.poll_input() {
+            eprintln!("passive-overlay-smoke: message pump failed: {error}");
+            renderer.close();
+            eprintln!("passive-overlay-smoke: cleanup: overlay windows dismissed after failure");
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    renderer.close();
+    eprintln!("passive-overlay-smoke: cleanup: all overlay windows dismissed");
+    Ok(())
 }
