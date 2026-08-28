@@ -16,6 +16,57 @@ use std::sync::Arc;
 type NotificationPreview = Arc<dyn Fn(&ResolvedNotification) -> Result<(), String> + Send + Sync>;
 type SoundPreview = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Applies only the state transition associated with an egui text response.
+/// The text edit itself writes `query`; keeping compatibility removal here
+/// makes the important `changed()` distinction independently testable.
+fn apply_launcher_query_change(payload: &mut MkLauncherCommandPayload, changed: bool) {
+    if changed {
+        payload.legacy_resolved_action = None;
+    }
+}
+
+#[cfg(test)]
+mod launcher_query_editor_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    fn migrated() -> MkLauncherCommandPayload {
+        MkLauncherCommandPayload {
+            query: "old query".into(),
+            legacy_resolved_action: Some(Action {
+                label: "Old".into(),
+                desc: String::new(),
+                action: "old.exe".into(),
+                args: Some("--flag".into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn normal_query_edit_updates_query_without_creating_legacy_state() {
+        let mut payload = MkLauncherCommandPayload::default();
+        payload.query = "note list".into();
+        apply_launcher_query_change(&mut payload, true);
+        assert_eq!(payload.query, "note list");
+        assert!(payload.legacy_resolved_action.is_none());
+    }
+
+    #[test]
+    fn changed_migrated_query_discards_compatibility_action() {
+        let mut payload = migrated();
+        payload.query = "bm github".into();
+        apply_launcher_query_change(&mut payload, true);
+        assert!(payload.legacy_resolved_action.is_none());
+    }
+
+    #[test]
+    fn unchanged_migrated_query_preserves_compatibility_action() {
+        let mut payload = migrated();
+        apply_launcher_query_change(&mut payload, false);
+        assert!(payload.legacy_resolved_action.is_some());
+    }
+}
+
 pub struct ActionEditorState {
     pub draft: Option<MkStep>,
     /// `None` means insert a new row; otherwise replace this stable step id.
@@ -2532,23 +2583,21 @@ fn action_ui(
                 });
             });
         }
-        MkAction::LauncherCommand { command, args } => {
+        MkAction::LauncherCommand(payload) => {
+            ui.heading("Launcher Command");
             ui.horizontal(|ui| {
-                ui.label("Canonical action");
-                ui.text_edit_singleline(command);
+                ui.label("Command");
+                let response =
+                    ui.add(egui::TextEdit::singleline(&mut payload.query).hint_text("note list"));
+                apply_launcher_query_change(payload, response.changed());
             });
-            let a = args.get_or_insert_with(String::new);
-            ui.horizontal(|ui| {
-                ui.label("Arguments");
-                ui.text_edit_singleline(a);
-            });
-            if a.is_empty() {
-                *args = None;
+            ui.weak("Executes this text through Multi Launcher's normal search/command system.");
+            ui.add_space(4.0);
+            ui.weak("Examples: note list · note open daily-note · bm list · bm github · f list · calc 12 * 4 · Notepad");
+            if payload.legacy_resolved_action.is_some() {
+                ui.weak("This action was migrated from the older resolved-action format. Editing the Command converts it to normal Launcher-query behavior.");
             }
-            ui.small(
-                "Search uses canonical launcher action values; display labels are not persisted.",
-            );
-            if ui.button("Choose Launcher Action…").clicked() {
+            if ui.button("Choose Launcher Command…").clicked() {
                 launcher_pick = Some(super::launcher_action_picker::PickerPurpose::LauncherCommand);
             }
         }

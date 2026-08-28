@@ -1,7 +1,7 @@
 //! Searchable launcher-action picker and its transactional conversion helpers.
 use crate::{
     actions::Action,
-    mkmacro::{MkAction, MkProcessPayload},
+    mkmacro::{MkAction, MkLauncherCommandPayload, MkProcessPayload},
 };
 use eframe::egui;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
@@ -143,15 +143,12 @@ pub fn apply_program_action(payload: &mut MkProcessPayload, action: &Action) {
     }
 }
 
-fn normalized_args(args: &Option<String>) -> Option<String> {
-    args.as_ref().filter(|v| !v.trim().is_empty()).cloned()
-}
-
 pub fn apply_launcher_action(target: &mut MkAction, action: &Action) {
-    *target = MkAction::LauncherCommand {
-        command: action.action.clone(),
-        args: normalized_args(&action.args),
-    };
+    *target = MkAction::LauncherCommand(MkLauncherCommandPayload {
+        // Picker rows are suggestions for search text, not resolved actions.
+        query: action.action.clone(),
+        legacy_resolved_action: None,
+    });
 }
 
 impl super::action_editor::ActionEditorState {
@@ -196,7 +193,7 @@ impl super::action_editor::ActionEditorState {
             }
             PickerPurpose::Process => return false,
             PickerPurpose::LauncherCommand => {
-                if !matches!(step.action, MkAction::LauncherCommand { .. }) {
+                if !matches!(step.action, MkAction::LauncherCommand(_)) {
                     return false;
                 }
                 apply_launcher_action(&mut step.action, action);
@@ -430,10 +427,10 @@ mod tests {
         apply_launcher_action(&mut target, &selected);
         assert_eq!(
             target,
-            MkAction::LauncherCommand {
-                command: "notes:dialog".into(),
-                args: None
-            }
+            MkAction::LauncherCommand(MkLauncherCommandPayload {
+                query: "notes:dialog".into(),
+                legacy_resolved_action: None,
+            })
         );
         let json = serde_json::to_string(&target).unwrap();
         assert!(!json.contains("Secret"));
