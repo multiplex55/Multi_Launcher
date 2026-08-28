@@ -542,12 +542,15 @@ mod tests {
                 path: ConditionPath::root(),
                 operation,
             });
-            prepend_request(&mut request, 1);
-            prepend_request(&mut request, 0);
+            prepend_request(&mut request, ConditionBranch::Any(1));
+            prepend_request(&mut request, ConditionBranch::All(0));
+            let mut expected_path = ConditionPath::root();
+            expected_path.prepend(ConditionBranch::Any(1));
+            expected_path.prepend(ConditionBranch::All(0));
             assert_eq!(
                 request,
                 ConditionEditorRequest::Image(ConditionImageRequest {
-                    path: ConditionPath::from_indexes(vec![0, 1]),
+                    path: expected_path,
                     operation
                 })
             );
