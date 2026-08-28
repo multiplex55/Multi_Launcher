@@ -486,6 +486,21 @@ impl ActionEditorState {
         destination: ConditionOperationDestination,
         path: std::path::PathBuf,
     ) -> anyhow::Result<()> {
+        self.start_condition_import_from_selected_path_with_executor(
+            store,
+            destination,
+            path,
+            &super::image_authoring_job::ThreadExecutor,
+        )
+    }
+
+    fn start_condition_import_from_selected_path_with_executor(
+        &mut self,
+        store: Arc<MkMacroStore>,
+        destination: ConditionOperationDestination,
+        path: std::path::PathBuf,
+        executor: &dyn super::image_authoring_job::ImageAuthoringExecutor,
+    ) -> anyhow::Result<()> {
         let previous = self
             .draft
             .as_ref()
@@ -507,12 +522,13 @@ impl ActionEditorState {
             draft_generation: destination.draft_generation,
         };
         self.image_authoring
-            .start(
+            .start_with_executor(
                 store,
                 token,
                 super::image_authoring_job::ImageAuthoringDestination::ConditionImage(destination),
                 previous,
                 path,
+                executor,
             )
             .map_err(anyhow::Error::msg)
     }
@@ -1048,16 +1064,19 @@ impl ActionEditorState {
         Some(id)
     }
 
-    fn poll_image_authoring(&mut self, current_macro_id: Option<u64>) {
+    fn poll_image_authoring(
+        &mut self,
+        current_macro_id: Option<u64>,
+    ) -> Option<crate::mkmacro::StagedImageAsset> {
         let Some((active_token, active_destination, previous_asset_id, source, completion)) =
             self.image_authoring.try_take()
         else {
-            return;
+            return None;
         };
         // The receiver itself identifies the active job; this extra comparison makes
         // it impossible for a queued completion to retire a subsequently started job.
         if completion.token != active_token || completion.destination != active_destination {
-            return;
+            return None;
         }
         self.image_authoring = Default::default();
         match completion.result {
@@ -1122,6 +1141,7 @@ impl ActionEditorState {
                 if applied {
                     self.draft_changed = true;
                     self.capture_message = None;
+                    return Some(staged);
                 }
             }
             Err(error) => {
@@ -1132,6 +1152,7 @@ impl ActionEditorState {
                 self.capture_message = Some(format!("{error} ({name}, {active_destination:?})"));
             }
         }
+        None
     }
     fn stop_position_capture(&mut self) {
         self.position_capture = None;
@@ -3005,6 +3026,31 @@ fn ensure_image_asset_catalog_entry(dialog: &mut MkMacroDialog, asset_id: u64) {
     }
 }
 
+/// Non-egui completion reducer used by the frame loop and authoring tests.
+/// A staged file becomes visible in the live macro asset browser only when the
+/// editor still owns the exact destination that initiated the operation.
+fn reduce_image_authoring_completion(dialog: &mut MkMacroDialog) {
+    let selected_macro_id = dialog.selected_macro_id;
+    let Some(staged) = dialog.action_editor.poll_image_authoring(selected_macro_id) else {
+        return;
+    };
+    let Some(macro_) = dialog.selected_macro_mut() else {
+        return;
+    };
+    if !macro_
+        .image_assets
+        .iter()
+        .any(|asset| asset.id == staged.asset_id)
+    {
+        macro_.image_assets.push(MkImageAsset {
+            id: staged.asset_id,
+            name: String::new(),
+            relative_path: staged.managed_reference,
+        });
+        dialog.mark_dirty();
+    }
+}
+
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
     match &mut step.action {
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => Some(p),
@@ -3123,7 +3169,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     }
     let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
-    d.action_editor.poll_image_authoring(d.selected_macro_id);
+    reduce_image_authoring_completion(d);
     let importing = d.action_editor.image_authoring.is_importing();
     if importing {
         ctx.request_repaint();
@@ -4330,6 +4376,283 @@ mod tests {
             on_error: Default::default(),
             action: a,
         }
+    }
+
+    fn condition_search(asset_id: u64) -> MkCondition {
+        MkCondition::ImageSearch {
+            search: MkImageSearchCondition {
+                asset_id,
+                region: SearchRegion::Rectangle {
+                    rect: ScreenRect::new(11, 12, 130, 140),
+                },
+                tolerance: 17,
+                alpha: AlphaPolicy::Ignore,
+                return_point: ReturnPoint::TopLeft,
+            },
+            found: false,
+        }
+    }
+
+    fn condition_import_dialog() -> (tempfile::TempDir, MkMacroDialog, HeldExecutor) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        // Reserve IDs 1..=8 in storage so the real importer deterministically returns 9.
+        for id in 1..=8 {
+            store
+                .write_png_asset(
+                    4,
+                    id,
+                    &RgbaImage::from_pixel(1, 1, Rgba([id as u8, 0, 0, 255])),
+                )
+                .unwrap();
+        }
+        let source = dir.path().join("condition.png");
+        RgbaImage::from_pixel(2, 2, Rgba([9, 8, 7, 255]))
+            .save(&source)
+            .unwrap();
+        let mut dialog = MkMacroDialog::new(Arc::new(store));
+        let wait = MkWaitOptions {
+            timeout_ms: 12_345,
+            poll_interval_ms: 321,
+        };
+        let selected = step(MkAction::WaitUntil {
+            condition: condition_search(4),
+            wait,
+        });
+        dialog.draft.macros = vec![
+            MkMacro {
+                id: 4,
+                name: "Current".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps: vec![selected.clone()],
+                image_assets: vec![asset(4, "Original", "mkmacro_assets/4/4.png")],
+            },
+            MkMacro {
+                id: 40,
+                name: "Other".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: Default::default(),
+                steps: vec![],
+                image_assets: vec![asset(77, "Other", "mkmacro_assets/40/77.png")],
+            },
+        ];
+        dialog.set_selected_macro(Some(4));
+        dialog.action_editor.begin_edit(&selected);
+        let request = super::super::condition_editor::ConditionImageRequest {
+            path: super::super::image_authoring_destination::ConditionPath::root(),
+            operation: super::super::condition_editor::ConditionImageOperation::ImportPng,
+        };
+        let destination = dialog.action_editor.condition_destination(4, request);
+        let executor = HeldExecutor::default();
+        dialog
+            .action_editor
+            .start_condition_import_from_selected_path_with_executor(
+                dialog.store.clone(),
+                destination.clone(),
+                source,
+                &executor,
+            )
+            .unwrap();
+        let super::super::image_authoring_job::ImageAuthoringJob::Importing {
+            token,
+            destination: actual,
+            previous_asset_id,
+            ..
+        } = &dialog.action_editor.image_authoring
+        else {
+            panic!("condition import did not start")
+        };
+        assert_eq!(token.macro_id, 4);
+        assert_eq!(token.draft_generation, destination.draft_generation);
+        assert_eq!(previous_asset_id, &4);
+        assert_eq!(
+            actual,
+            &super::super::image_authoring_job::ImageAuthoringDestination::ConditionImage(
+                destination
+            )
+        );
+        (dir, dialog, executor)
+    }
+
+    #[test]
+    fn condition_png_completion_is_transactional_integrated_and_single_use() {
+        let (_dir, mut dialog, executor) = condition_import_dialog();
+        let original = dialog.action_editor.draft.clone().unwrap();
+        let other_assets = dialog.draft.macros[1].image_assets.clone();
+        executor.release();
+        reduce_image_authoring_completion(&mut dialog);
+
+        let edited = dialog.action_editor.draft.as_ref().unwrap();
+        let (condition, wait) = match &edited.action {
+            MkAction::WaitUntil { condition, wait } => (condition, wait),
+            other => panic!("selected step changed action: {other:?}"),
+        };
+        let MkCondition::ImageSearch { search, found } = condition else {
+            panic!("condition type changed")
+        };
+        assert_eq!(search.asset_id, 9);
+        assert!(!found);
+        let MkAction::WaitUntil {
+            condition: original_condition,
+            wait: original_wait,
+        } = &original.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(wait, original_wait);
+        let MkCondition::ImageSearch {
+            search: original_search,
+            found: original_found,
+        } = original_condition
+        else {
+            unreachable!()
+        };
+        assert_eq!(search.region, original_search.region);
+        assert_eq!(search.tolerance, original_search.tolerance);
+        assert_eq!(search.alpha, original_search.alpha);
+        assert_eq!(search.return_point, original_search.return_point);
+        assert_eq!(found, original_found);
+        let current = dialog.selected_macro().unwrap();
+        assert_eq!(current.image_assets.iter().filter(|a| a.id == 9).count(), 1);
+        assert_eq!(dialog.draft.macros[1].image_assets, other_assets);
+        assert_eq!(
+            super::super::image_asset_picker::filtered_assets(&current.image_assets, "9")
+                .iter()
+                .map(|asset| asset.id)
+                .collect::<Vec<_>>(),
+            vec![9]
+        );
+
+        // Polling the consumed operation again cannot duplicate it or overwrite a later edit.
+        if let MkAction::WaitUntil { condition, .. } =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        {
+            *condition = MkCondition::WindowActive {
+                matcher: MkWindowMatcher::default(),
+            };
+        }
+        reduce_image_authoring_completion(&mut dialog);
+        assert!(matches!(
+            dialog.action_editor.draft.as_ref().unwrap().action,
+            MkAction::WaitUntil {
+                condition: MkCondition::WindowActive { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            dialog
+                .selected_macro()
+                .unwrap()
+                .image_assets
+                .iter()
+                .filter(|a| a.id == 9)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn condition_png_completion_rejects_changed_condition_step_and_closed_editor() {
+        let (_dir, mut dialog, executor) = condition_import_dialog();
+        if let MkAction::WaitUntil { condition, .. } =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        {
+            *condition = MkCondition::WindowExists {
+                matcher: MkWindowMatcher {
+                    title: Some("replacement".into()),
+                    ..Default::default()
+                },
+            };
+        }
+        executor.release();
+        reduce_image_authoring_completion(&mut dialog);
+        assert!(matches!(
+            dialog.action_editor.draft.as_ref().unwrap().action,
+            MkAction::WaitUntil {
+                condition: MkCondition::WindowExists { .. },
+                ..
+            }
+        ));
+        assert!(
+            !dialog
+                .selected_macro()
+                .unwrap()
+                .image_assets
+                .iter()
+                .any(|a| a.id == 9)
+        );
+
+        let (_dir, mut dialog, executor) = condition_import_dialog();
+        let step_b = step(MkAction::Delay { milliseconds: 88 });
+        dialog.action_editor.begin_edit(&step_b);
+        executor.release();
+        reduce_image_authoring_completion(&mut dialog);
+        assert!(matches!(
+            dialog.action_editor.draft.as_ref().unwrap().action,
+            MkAction::Delay { milliseconds: 88 }
+        ));
+        assert!(matches!(
+            dialog.selected_macro().unwrap().steps[0].action,
+            MkAction::WaitUntil { .. }
+        ));
+        assert!(
+            !dialog
+                .selected_macro()
+                .unwrap()
+                .image_assets
+                .iter()
+                .any(|a| a.id == 9)
+        );
+
+        let (_dir, mut dialog, executor) = condition_import_dialog();
+        dialog.action_editor.cancel();
+        executor.release();
+        reduce_image_authoring_completion(&mut dialog);
+        assert!(dialog.action_editor.draft.is_none());
+        assert!(
+            !dialog
+                .selected_macro()
+                .unwrap()
+                .image_assets
+                .iter()
+                .any(|a| a.id == 9)
+        );
+    }
+
+    #[test]
+    fn failed_condition_png_completion_preserves_asset_and_reports_error() {
+        let (_dir, mut dialog, executor) = condition_import_dialog();
+        let source = match &mut dialog.action_editor.image_authoring {
+            super::super::image_authoring_job::ImageAuthoringJob::Importing { source, .. } => {
+                source
+            }
+            _ => unreachable!(),
+        };
+        std::fs::write(source, b"representative corrupt PNG").unwrap();
+        executor.release();
+        reduce_image_authoring_completion(&mut dialog);
+        let MkAction::WaitUntil {
+            condition: MkCondition::ImageSearch { search, .. },
+            ..
+        } = &dialog.action_editor.draft.as_ref().unwrap().action
+        else {
+            unreachable!()
+        };
+        assert_eq!(search.asset_id, 4);
+        assert_eq!(dialog.selected_macro().unwrap().image_assets.len(), 1);
+        assert!(
+            dialog
+                .action_editor
+                .capture_message
+                .as_deref()
+                .unwrap()
+                .contains("Reference image")
+        );
     }
 
     fn pending_wait(editor: &ActionEditorState, macro_id: u64) -> PendingVisualRegionOperation {
