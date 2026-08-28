@@ -1728,10 +1728,18 @@ mod tests {
         app.command_cache = two_results();
         app.query = "before polling".into();
 
-        // Consume repaint requests made while constructing the app. Otherwise
-        // egui may coalesce the worker's wakeup with that already-pending frame,
-        // and the counter below would not identify broker submission.
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        // Consume repaint requests made while constructing the app. An immediate
+        // egui repaint intentionally remains outstanding for another frame, so
+        // one frame is not sufficient to put the context back to sleep. If a
+        // repaint is already pending, another `request_repaint` is coalesced and
+        // does not invoke the integration callback.
+        for _ in 0..8 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            if !ctx.has_requested_repaint() {
+                break;
+            }
+        }
+        assert!(!ctx.has_requested_repaint());
         let wakes = Arc::new(AtomicUsize::new(0));
         let callback_wakes = Arc::clone(&wakes);
         ctx.set_request_repaint_callback(move |_| {
