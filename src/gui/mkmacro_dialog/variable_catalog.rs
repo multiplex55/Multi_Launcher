@@ -105,8 +105,12 @@ impl VariableCatalog {
                             descriptor
                                 .uncertainty_reasons
                                 .insert(0, VariableUncertaintyReason::ProducedInside(kind));
-                            descriptor.help_text =
-                                Some(VariableUncertaintyReason::ProducedInside(kind).help_text());
+                            // Keep a producer-specific nullable explanation (for example an
+                            // image miss) when one exists. Structural uncertainty is still
+                            // retained separately in `uncertainty_reasons`.
+                            descriptor.help_text.get_or_insert(
+                                VariableUncertaintyReason::ProducedInside(kind).help_text(),
+                            );
                         }
                         descriptor
                     })
