@@ -3045,7 +3045,10 @@ fn reduce_image_authoring_completion(dialog: &mut MkMacroDialog) {
         macro_.image_assets.push(MkImageAsset {
             id: staged.asset_id,
             name: String::new(),
-            relative_path: staged.managed_reference,
+            relative_path: staged
+                .managed_reference
+                .to_string_lossy()
+                .replace('\\', "/"),
         });
         dialog.mark_dirty();
     }
