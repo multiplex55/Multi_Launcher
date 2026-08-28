@@ -220,7 +220,7 @@ pub enum SharedImageOperation {
 /// Render the persisted fields that deliberately have identical semantics in actions and conditions.
 pub fn show_shared_fields(
     ui: &mut egui::Ui,
-    asset_id: &mut u64,
+    _asset_id: &mut u64,
     region: &mut SearchRegion,
     tolerance: &mut u8,
     alpha: &mut AlphaPolicy,

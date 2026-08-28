@@ -188,6 +188,7 @@ mod tests {
     #[test]
     fn selection_event_updates_only_the_passed_value() {
         let mut selected = 4;
+        assert_eq!(selected, 4);
         let event = ImageAssetSelection { asset_id: 8 };
         selected = event.asset_id;
         assert_eq!(selected, 8);
