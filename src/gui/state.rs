@@ -34,6 +34,7 @@ pub enum ActivationSource {
     Click,
     Dashboard,
     Gesture,
+    Macro,
 }
 
 impl ActivationSource {
@@ -43,6 +44,7 @@ impl ActivationSource {
             Self::Click => "click",
             Self::Dashboard => "dashboard",
             Self::Gesture => "gesture",
+            Self::Macro => "macro",
         }
     }
 }

@@ -700,32 +700,29 @@ impl LauncherApp {
     ) -> crate::mkmacro::LauncherCommandResponse {
         use crate::mkmacro::LauncherCommandResponse;
 
-        let previous_error = self.error.clone();
         self.query = request.query.clone();
+        self.last_timer_query =
+            self.query.starts_with("timer list") || self.query.starts_with("alarm list");
+        self.selected = None;
         self.last_results_valid = false;
         self.search();
-        if self.error != previous_error
-            && let Some(message) = self.error.clone()
-        {
-            return LauncherCommandResponse::Failed(message);
-        }
 
         match self.results.as_slice() {
             [] => LauncherCommandResponse::NoResults,
             [action] => {
                 let action = action.clone();
-                self.activate_action(action, None, ActivationSource::Enter);
-                if self.error != previous_error
-                    && let Some(message) = self.error.clone()
-                {
-                    LauncherCommandResponse::Failed(message)
-                } else {
-                    LauncherCommandResponse::Activated
-                }
+                self.activate_action(action, None, ActivationSource::Macro);
+                LauncherCommandResponse::Activated
             }
-            results => LauncherCommandResponse::PresentedForSelection {
-                result_count: results.len(),
-            },
+            results => {
+                let result_count = results.len();
+                self.selected = None;
+                self.move_cursor_end = true;
+                self.focus_input();
+                self.visible_flag.store(true, Ordering::SeqCst);
+                self.restore_flag.store(true, Ordering::SeqCst);
+                LauncherCommandResponse::PresentedForSelection { result_count }
+            }
         }
     }
 
@@ -1667,7 +1664,7 @@ mod tests {
     use super::*;
     use crate::{
         mkmacro::{LauncherCommandBroker, LauncherCommandResponse, RunControl},
-        plugin::PluginManager,
+        plugin::{Plugin, PluginManager},
         settings::Settings,
     };
     use eframe::egui;
@@ -1708,6 +1705,122 @@ mod tests {
                 args: None,
             })
             .collect()
+    }
+
+    struct FakePlugin;
+
+    impl Plugin for FakePlugin {
+        fn search(&self, query: &str) -> Vec<Action> {
+            let action = |label: &str, action: &str| Action {
+                label: label.into(),
+                desc: "Fake".into(),
+                action: action.into(),
+                args: None,
+            };
+            match query {
+                "one" => vec![action("Help", "help:show")],
+                "rewrite" => vec![action("Rewrite", "query:rewritten")],
+                "recursive" => vec![action("Recursive", "queryexec:one")],
+                "destroy" => vec![action("Clear history", "history:clear")],
+                "many" => vec![action("First", "help:show"), action("Second", "help:show")],
+                _ => Vec::new(),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn description(&self) -> &str {
+            "deterministic launcher test plugin"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
+    fn app_with_fake(ctx: &egui::Context) -> LauncherApp {
+        let mut app = new_app(ctx);
+        app.plugins.register(Box::new(FakePlugin));
+        app
+    }
+
+    #[test]
+    fn macro_launcher_resolution_uses_search_and_normal_activation() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+
+        for (query, expected) in [
+            ("missing raw query", LauncherCommandResponse::NoResults),
+            ("one", LauncherCommandResponse::Activated),
+        ] {
+            let response =
+                app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
+                    id: 1,
+                    query: query.into(),
+                });
+            assert_eq!(response, expected);
+            assert_eq!(app.query, query);
+        }
+        assert!(
+            app.help_window.open,
+            "the one result used normal activation"
+        );
+
+        app.help_window.open = false;
+        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
+            id: 2,
+            query: "rewrite".into(),
+        });
+        assert_eq!(response, LauncherCommandResponse::Activated);
+        assert_eq!(app.query, "rewritten");
+
+        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
+            id: 3,
+            query: "recursive".into(),
+        });
+        assert_eq!(response, LauncherCommandResponse::Activated);
+        assert_eq!(app.query, "one");
+        assert!(
+            app.help_window.open,
+            "queryexec recursively activated its result"
+        );
+    }
+
+    #[test]
+    fn macro_launcher_destructive_and_ambiguous_results_remain_interactive() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+        app.require_confirm_destructive = true;
+
+        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
+            id: 1,
+            query: "destroy".into(),
+        });
+        assert_eq!(response, LauncherCommandResponse::Activated);
+        assert!(app.pending_confirm.is_some());
+
+        app.selected = Some(1);
+        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
+            id: 2,
+            query: "many".into(),
+        });
+        assert_eq!(
+            response,
+            LauncherCommandResponse::PresentedForSelection { result_count: 2 }
+        );
+        assert_eq!(app.query, "many");
+        assert_eq!(app.results.len(), 2);
+        assert_eq!(app.selected, None);
+        assert!(app.move_cursor_end && app.focus_query);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(
+            !app.help_window.open,
+            "ambiguous results were not activated"
+        );
     }
 
     fn wait_for_repaint(wakes: &AtomicUsize) {
