@@ -30,6 +30,73 @@ pub enum VariableUncertaintyReason {
     MayBeNullIfNotFound,
 }
 
+/// A non-fatal authoring diagnostic for a variable consumer.
+///
+/// The kind, variable name, and producer metadata deliberately remain
+/// structured; callers should use
+/// [`VariableConsumerWarning::message_for_consumer`] rather than assembling
+/// UI-specific wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableWarningKind {
+    NoKnownPriorProducer,
+    KnownWrongType {
+        actual: VariableValueType,
+        expected: VariableValueType,
+    },
+    PossiblyUnavailable {
+        reason: VariableUncertaintyReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableWarningSource {
+    pub step_id: u64,
+    pub step_index: usize,
+    pub step_number: usize,
+    pub action_label: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableConsumerWarning {
+    pub variable_name: String,
+    pub expected_type: VariableValueType,
+    pub source: Option<VariableWarningSource>,
+    pub kind: VariableWarningKind,
+}
+
+impl VariableConsumerWarning {
+    pub fn message_for_consumer(&self, consumer_label: &str) -> String {
+        match self.kind {
+            VariableWarningKind::NoKnownPriorProducer => format!(
+                "No earlier action is known to produce {} variable \"{}\". Manual/dynamic variables are still allowed.",
+                variable_type_label(self.expected_type),
+                self.variable_name
+            ),
+            VariableWarningKind::KnownWrongType { actual, expected } => format!(
+                "\"{}\" is currently known as {}; {} requires {}.",
+                self.variable_name,
+                variable_type_label(actual),
+                consumer_label,
+                variable_type_label(expected)
+            ),
+            VariableWarningKind::PossiblyUnavailable { .. } => format!(
+                "\"{}\" is produced conditionally and may be Null/unavailable here.",
+                self.variable_name
+            ),
+        }
+    }
+}
+
+fn variable_type_label(value_type: VariableValueType) -> &'static str {
+    match value_type {
+        VariableValueType::String => "String",
+        VariableValueType::Number => "Number",
+        VariableValueType::Boolean => "Boolean",
+        VariableValueType::Point => "Point",
+        VariableValueType::Unknown => "Unknown",
+    }
+}
+
 impl VariableUncertaintyReason {
     pub fn help_text(self) -> &'static str {
         match self {
@@ -145,6 +212,49 @@ impl VariableCatalog {
     /// then by that action's output order.
     pub fn effective_variables(&self) -> &[VariableDescriptor] {
         &self.effective
+    }
+
+    /// Checks an exact variable name against its effective preceding
+    /// definition. Lookup intentionally happens before type comparison, so a
+    /// wrong-typed shadowing definition cannot reveal an older compatible one.
+    pub fn warning_for_expected_type(
+        &self,
+        name: &str,
+        expected: VariableValueType,
+    ) -> Option<VariableConsumerWarning> {
+        if name.is_empty() {
+            return None;
+        }
+        let descriptor = self.effective.iter().find(|item| item.name == name);
+        let source = descriptor.map(|item| VariableWarningSource {
+            step_id: item.source_step_id,
+            step_index: item.source_step_index,
+            step_number: item.source_step_number,
+            action_label: item.source_action_label,
+        });
+        let kind = match descriptor {
+            None => VariableWarningKind::NoKnownPriorProducer,
+            Some(item) if item.value_type != expected => VariableWarningKind::KnownWrongType {
+                actual: item.value_type,
+                expected,
+            },
+            Some(item) if item.availability == VariableAvailability::PossiblyUnavailable => {
+                VariableWarningKind::PossiblyUnavailable {
+                    reason: item
+                        .uncertainty_reasons
+                        .first()
+                        .copied()
+                        .unwrap_or(VariableUncertaintyReason::MayBeNullIfNotFound),
+                }
+            }
+            Some(_) => return None,
+        };
+        Some(VariableConsumerWarning {
+            variable_name: name.to_owned(),
+            expected_type: expected,
+            source,
+            kind,
+        })
     }
 
     /// Effective picker entries of `value_type`. Shadowing is deliberately
@@ -605,6 +715,84 @@ mod tests {
         // keeps the two runtime keys distinct.
         assert_eq!(effective, vec![("middle", 1), ("Target", 2), ("target", 3)]);
         assert!(!catalog.history().iter().any(|item| item.name == "future"));
+    }
+
+    #[test]
+    fn expected_type_warnings_obey_lookup_precedence() {
+        let point = |id, name: &str| set_value(id, name, MkValue::Point(MkPoint { x: 1, y: 2 }));
+        let string = |id, name: &str| set_value(id, name, MkValue::String("text".into()));
+
+        let unknown = VariableCatalog::before_step(&[point(9, "future")], 0)
+            .warning_for_expected_type("point", VariableValueType::Point)
+            .unwrap();
+        assert_eq!(unknown.kind, VariableWarningKind::NoKnownPriorProducer);
+        assert_eq!(unknown.source, None);
+        assert_eq!(
+            unknown.message_for_consumer("Mouse Move"),
+            "No earlier action is known to produce Point variable \"point\". Manual/dynamic variables are still allowed."
+        );
+
+        let wrong =
+            VariableCatalog::before_step(&[point(1, "point"), string(2, "point")], usize::MAX)
+                .warning_for_expected_type("point", VariableValueType::Point)
+                .unwrap();
+        assert!(matches!(
+            wrong.kind,
+            VariableWarningKind::KnownWrongType {
+                actual: VariableValueType::String,
+                expected: VariableValueType::Point
+            }
+        ));
+        assert_eq!(wrong.source.as_ref().unwrap().step_id, 2);
+        assert_eq!(
+            wrong.message_for_consumer("Mouse Move"),
+            "\"point\" is currently known as String; Mouse Move requires Point."
+        );
+
+        let latest_point =
+            VariableCatalog::before_step(&[string(1, "point"), point(2, "point")], usize::MAX);
+        assert_eq!(
+            latest_point.warning_for_expected_type("point", VariableValueType::Point),
+            None
+        );
+    }
+
+    #[test]
+    fn conditional_and_nullable_points_each_produce_one_warning() {
+        let conditional = VariableCatalog::before_step(
+            &[
+                step(1, MkAction::If(empty_condition())),
+                set_value(2, "point", MkValue::Point(MkPoint { x: 1, y: 2 })),
+                step(3, MkAction::EndIf),
+            ],
+            usize::MAX,
+        );
+        let warning = conditional
+            .warning_for_expected_type("point", VariableValueType::Point)
+            .unwrap();
+        assert!(matches!(
+            warning.kind,
+            VariableWarningKind::PossiblyUnavailable {
+                reason: VariableUncertaintyReason::ProducedInside(MkBlockKind::If)
+            }
+        ));
+
+        let nullable = VariableCatalog::before_step(&[step(4, image(outputs()))], usize::MAX);
+        let warnings: Vec<_> =
+            std::iter::once(nullable.warning_for_expected_type("point", VariableValueType::Point))
+                .flatten()
+                .collect();
+        assert_eq!(warnings.len(), 1, "one consumer/name/reason diagnostic");
+        assert!(matches!(
+            warnings[0].kind,
+            VariableWarningKind::PossiblyUnavailable {
+                reason: VariableUncertaintyReason::MayBeNullIfNotFound
+            }
+        ));
+        assert_eq!(
+            warnings[0].message_for_consumer("Mouse Move"),
+            "\"point\" is produced conditionally and may be Null/unavailable here."
+        );
     }
 
     #[test]
