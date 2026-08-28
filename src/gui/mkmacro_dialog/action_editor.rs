@@ -3,6 +3,7 @@
 //! The editor owns a complete `MkStep` clone.  No document field is borrowed by
 //! the modal, which makes closing/cancelling it a genuinely lossless operation.
 pub use super::image_authoring_destination::ConditionOperationDestination;
+use super::variable_catalog::{VariableCatalog, VariableDescriptor, VariableValueType};
 use super::{
     MkMacroDialog,
     key_capture::{CapturedChord, captured_chord, key_name},
@@ -45,6 +46,11 @@ pub struct ActionEditorState {
     picker: NativePositionPicker,
     notification_preview: NotificationPreview,
     sound_preview: SoundPreview,
+    /// Rebuilt from the live document on every editor frame. The stable id is
+    /// resolved against that document, so row moves cannot leave a stale scope.
+    variable_catalog: VariableCatalog,
+    variable_consumer_index: usize,
+    variable_consumer_id: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -287,7 +293,37 @@ impl ActionEditorState {
             picker: Default::default(),
             notification_preview: Arc::new(production_notification_preview),
             sound_preview: Arc::new(crate::sound::play_sound),
+            variable_catalog: VariableCatalog::default(),
+            variable_consumer_index: 0,
+            variable_consumer_id: None,
         }
+    }
+
+    fn refresh_variable_catalog(&mut self, steps: &[MkStep]) {
+        let index = if let Some(id) = self.editing_id {
+            steps
+                .iter()
+                .position(|step| step.id == id)
+                .unwrap_or(steps.len())
+        } else {
+            match self.insertion.as_ref() {
+                Some(InsertionIntent::Plain {
+                    after_step_id: Some(id),
+                }) => steps
+                    .iter()
+                    .position(|step| step.id == *id)
+                    .map_or(steps.len(), |index| index + 1),
+                Some(InsertionIntent::Wrap { step_ids }) => step_ids
+                    .iter()
+                    .filter_map(|id| steps.iter().position(|step| step.id == *id))
+                    .min()
+                    .unwrap_or(steps.len()),
+                _ => 0,
+            }
+        };
+        self.variable_consumer_index = index;
+        self.variable_consumer_id = self.editing_id;
+        self.variable_catalog = VariableCatalog::before_step(steps, index);
     }
     fn cancel_owned_passive_overlay(&mut self) {
         if let Some((operation_id, _)) = self.overlay_diagnostic.take() {
@@ -1413,6 +1449,152 @@ pub(super) struct TargetUiOutcome {
     pick_matcher: bool,
 }
 
+const RUNTIME_SCOPE_TOOLTIP: &str = "Runtime outputs are available when the producing and consuming steps execute in the same macro run.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VariablePickerModel {
+    suggestions: Vec<VariableDescriptor>,
+}
+
+impl VariablePickerModel {
+    fn new(catalog: &VariableCatalog, allowed: impl Fn(VariableValueType) -> bool) -> Self {
+        // Filtering follows effective definitions, rather than filtering the
+        // history first. Thus a later String correctly shadows an earlier Point.
+        Self {
+            suggestions: catalog
+                .effective_variables()
+                .iter()
+                .filter(|descriptor| allowed(descriptor.value_type))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn select(&self, index: usize, buffer: &mut String) -> bool {
+        let Some(suggestion) = self.suggestions.get(index) else {
+            return false;
+        };
+        *buffer = suggestion.name.clone();
+        true
+    }
+}
+
+fn variable_type_label(value_type: VariableValueType) -> &'static str {
+    match value_type {
+        VariableValueType::String => "String",
+        VariableValueType::Number => "Number",
+        VariableValueType::Boolean => "Boolean",
+        VariableValueType::Point => "Point",
+        VariableValueType::Unknown => "Unknown",
+    }
+}
+
+fn variable_detail_text(descriptor: &VariableDescriptor) -> String {
+    let mut lines = vec![format!(
+        "Produced by {} at step {} (stable ID {}).",
+        descriptor.source_action_label, descriptor.source_step_number, descriptor.source_step_id
+    )];
+    for reason in &descriptor.uncertainty_reasons {
+        lines.push(reason.help_text().to_owned());
+    }
+    if let Some(help) = descriptor.help_text
+        && !lines.iter().any(|line| line == help)
+    {
+        lines.push(help.to_owned());
+    }
+    lines.push(RUNTIME_SCOPE_TOOLTIP.to_owned());
+    lines.join("\n")
+}
+
+/// Editable variable consumer with a deliberately optional suggestion popup.
+/// The predicate keeps this reusable for consumers accepting multiple types.
+fn variable_picker_ui(
+    ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
+    buffer: &mut String,
+    catalog: &VariableCatalog,
+    allowed: impl Fn(VariableValueType) -> bool,
+) {
+    let model = VariablePickerModel::new(catalog, allowed);
+    let popup_id = ui.make_persistent_id(("variable_picker_popup", id_source));
+    let highlighted_id = popup_id.with("highlighted");
+    let mut anchor = None;
+    ui.horizontal(|ui| {
+        ui.label("Variable");
+        ui.text_edit_singleline(buffer)
+            .on_hover_text(RUNTIME_SCOPE_TOOLTIP);
+        let response = ui.button("Suggestions ▾");
+        if response.clicked() {
+            ui.memory_mut(|memory| memory.toggle_popup(popup_id));
+        }
+        anchor = Some(response);
+    });
+    let anchor = anchor.expect("picker button is always rendered");
+    let mut close = false;
+    let mut chosen = None;
+    let popup_open = ui.memory(|memory| memory.is_popup_open(popup_id));
+    if popup_open
+        && egui::popup::popup_below_widget(ui, popup_id, &anchor, |ui| {
+            ui.set_min_width(430.0);
+            if model.suggestions.is_empty() {
+                ui.weak("No compatible variables are available before this step.");
+                return;
+            }
+            let mut highlighted = ui
+                .data(|data| data.get_temp::<usize>(highlighted_id))
+                .unwrap_or(0)
+                .min(model.suggestions.len() - 1);
+            // Do not consume arrows while the editable field owns keyboard focus.
+            if !ui.ctx().wants_keyboard_input() {
+                if ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+                    highlighted = (highlighted + 1).min(model.suggestions.len() - 1);
+                }
+                if ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+                    highlighted = highlighted.saturating_sub(1);
+                }
+            }
+            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                close = true;
+            } else if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                chosen = Some(highlighted);
+            }
+            for (index, descriptor) in model.suggestions.iter().enumerate() {
+                let warning = descriptor
+                    .warning_marker()
+                    .map_or(String::new(), |marker| format!("{marker} "));
+                let label = format!(
+                    "{warning}{} · {} · {} · step {}",
+                    descriptor.name,
+                    variable_type_label(descriptor.value_type),
+                    descriptor.source_action_label,
+                    descriptor.source_step_number
+                );
+                let response = ui.selectable_label(index == highlighted, label);
+                response
+                    .clone()
+                    .on_hover_text(variable_detail_text(descriptor));
+                if response.hovered() {
+                    highlighted = index;
+                }
+                if response.clicked() {
+                    chosen = Some(index);
+                }
+            }
+            ui.data_mut(|data| data.insert_temp(highlighted_id, highlighted));
+        })
+        .is_none()
+    {
+        close = true;
+    }
+    if let Some(index) = chosen {
+        model.select(index, buffer);
+        close = true;
+    }
+    if close {
+        ui.memory_mut(|memory| memory.close_popup());
+    }
+}
+
 /// Produces one consistent, stable description wherever an image asset is shown.
 pub(crate) fn image_asset_label(asset_id: u64, assets: &[MkImageAsset]) -> String {
     let Some(asset) = assets.iter().find(|asset| asset.id == asset_id) else {
@@ -1496,6 +1678,16 @@ pub(super) fn target_ui(
     target: &mut MkCoordinateTarget,
     context: &TargetEditorContext<'_>,
 ) -> TargetUiOutcome {
+    target_ui_with_variables(ui, target, context, None, 0)
+}
+
+fn target_ui_with_variables(
+    ui: &mut egui::Ui,
+    target: &mut MkCoordinateTarget,
+    context: &TargetEditorContext<'_>,
+    variable_catalog: Option<&VariableCatalog>,
+    picker_id: u64,
+) -> TargetUiOutcome {
     let assets = context.assets;
     let kind = match target {
         MkCoordinateTarget::Screen { .. } => 0,
@@ -1573,10 +1765,16 @@ pub(super) fn target_ui(
             };
         }
         MkCoordinateTarget::Variable { name } => {
-            ui.horizontal(|ui| {
-                ui.label("Variable");
-                ui.text_edit_singleline(name);
-            });
+            if let Some(catalog) = variable_catalog {
+                variable_picker_ui(ui, picker_id, name, catalog, |value_type| {
+                    value_type == VariableValueType::Point
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Variable");
+                    ui.text_edit_singleline(name);
+                });
+            }
         }
         MkCoordinateTarget::Image { asset_id, offset } => {
             if assets.is_empty() {
@@ -1707,6 +1905,7 @@ fn action_ui(
     capture: &mut bool,
     image_context: super::image_asset_picker::ImageAssetUiContext<'_>,
     draft_generation: u64,
+    variable_catalog: &VariableCatalog,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -1825,7 +2024,13 @@ fn action_ui(
             }
         }
         MkAction::MouseMove(p) => {
-            let response = target_ui(ui, &mut p.target, &target_context);
+            let response = target_ui_with_variables(
+                ui,
+                &mut p.target,
+                &target_context,
+                Some(variable_catalog),
+                draft_id,
+            );
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::MoveTarget);
             }
@@ -2842,6 +3047,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .selected_macro()
         .map(|m| m.image_assets.clone())
         .unwrap_or_default();
+    let live_steps = d
+        .selected_macro()
+        .map(|macro_| macro_.steps.clone())
+        .unwrap_or_default();
+    d.action_editor.refresh_variable_catalog(&live_steps);
     egui::Window::new("Action Editor")
         .open(&mut open)
         .collapsible(false)
@@ -2860,7 +3070,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 assets: &image_assets,
                 store: &d.store,
             };
-            let (position, mut window, launcher, image, condition_image, preview)=action_ui(ui, step, &mut state.capture_keys, image_context, draft_generation);
+            let (position, mut window, launcher, image, condition_image, preview)=action_ui(
+                ui,
+                step,
+                &mut state.capture_keys,
+                image_context,
+                draft_generation,
+                &state.variable_catalog,
+            );
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
             image_request = image;
@@ -3215,6 +3432,123 @@ mod tests {
     use image::RgbaImage;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+
+    fn variable_step(id: u64, name: &str, value: MkValue) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::SetVariable {
+                name: name.into(),
+                value,
+            },
+        }
+    }
+
+    #[test]
+    fn variable_picker_model_filters_effective_points_and_preserves_manual_text() {
+        let steps = vec![
+            variable_step(1, "point", MkValue::Point(MkPoint { x: 1, y: 2 })),
+            variable_step(2, "text", MkValue::String("hello".into())),
+            variable_step(3, "shadowed", MkValue::Point(MkPoint { x: 3, y: 4 })),
+            variable_step(4, "shadowed", MkValue::Number(42.0)),
+            variable_step(5, "future", MkValue::Point(MkPoint { x: 5, y: 6 })),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, 4);
+        let model = VariablePickerModel::new(&catalog, |kind| kind == VariableValueType::Point);
+        assert_eq!(
+            model
+                .suggestions
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["point"]
+        );
+
+        let mut manual = "unknown_custom_name".to_owned();
+        assert_eq!(manual, "unknown_custom_name");
+        assert!(!model.select(99, &mut manual));
+        assert_eq!(manual, "unknown_custom_name");
+        assert!(model.select(0, &mut manual));
+        assert_eq!(manual, "point");
+    }
+
+    #[test]
+    fn editor_catalog_re_resolves_stable_consumer_after_reorder() {
+        let producer = variable_step(1, "point", MkValue::Point(MkPoint { x: 1, y: 2 }));
+        let consumer = variable_step(2, "unused", MkValue::Null);
+        let mut editor = test_editor();
+        editor.begin_edit(&consumer);
+        editor.refresh_variable_catalog(&[producer.clone(), consumer.clone()]);
+        assert_eq!(editor.variable_consumer_index, 1);
+        assert_eq!(editor.variable_consumer_id, Some(2));
+        assert_eq!(editor.variable_catalog.effective_variables().len(), 1);
+
+        editor.refresh_variable_catalog(&[consumer, producer]);
+        assert_eq!(editor.variable_consumer_index, 0);
+        assert!(editor.variable_catalog.effective_variables().is_empty());
+    }
+
+    #[test]
+    fn variable_picker_details_distinguish_nullable_and_structural_warnings() {
+        use super::super::variable_catalog::{VariableAvailability, VariableUncertaintyReason};
+        let marker = |id, action| MkStep {
+            id,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action,
+        };
+        let condition = MkCondition::Variable {
+            name: "guard".into(),
+            op: MkCompareOp::Eq,
+            value: MkValue::Boolean(true),
+        };
+        let conditional_steps = vec![
+            marker(77, MkAction::If(condition)),
+            variable_step(
+                78,
+                "conditional_point",
+                MkValue::Point(MkPoint { x: 1, y: 2 }),
+            ),
+            marker(79, MkAction::EndIf),
+        ];
+        let catalog = VariableCatalog::before_step(&conditional_steps, usize::MAX);
+        let model = VariablePickerModel::new(&catalog, |kind| kind == VariableValueType::Point);
+        assert_eq!(model.suggestions.len(), 1);
+        assert_eq!(
+            model.suggestions[0].availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert!(matches!(
+            model.suggestions[0].uncertainty_reasons.as_slice(),
+            [VariableUncertaintyReason::ProducedInside(MkBlockKind::If)]
+        ));
+
+        let descriptor = VariableDescriptor {
+            name: "image_point".into(),
+            value_type: VariableValueType::Point,
+            source_step_id: 77,
+            source_step_index: 2,
+            source_step_number: 3,
+            source_action_label: "Find Image",
+            availability: VariableAvailability::PossiblyUnavailable,
+            uncertainty_reasons: vec![
+                VariableUncertaintyReason::ProducedInside(MkBlockKind::If),
+                VariableUncertaintyReason::MayBeNullIfNotFound,
+            ],
+            help_text: Some("May be Null if the image is not found"),
+        };
+        assert_eq!(descriptor.warning_marker(), Some("⚠"));
+        let details = variable_detail_text(&descriptor);
+        assert!(details.contains("Find Image at step 3 (stable ID 77)"));
+        assert!(details.contains("Produced inside If"));
+        assert!(details.contains("May be Null if the image is not found"));
+        assert!(details.contains(RUNTIME_SCOPE_TOOLTIP));
+    }
 
     #[test]
     fn target_context_resolves_only_nonzero_current_macro_assets() {
