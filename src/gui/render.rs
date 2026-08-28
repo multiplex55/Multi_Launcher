@@ -694,6 +694,27 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    fn poll_macro_launcher_query(&mut self, ctx: &egui::Context) {
+        let broker = crate::mkmacro::production_launcher_query_broker();
+        broker.set_repaint(std::sync::Arc::new({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        }));
+        let Some(pending) = broker.take_pending() else {
+            return;
+        };
+        self.query = pending.query.clone();
+        self.last_results_valid = false;
+        self.search();
+        let response = if let Some(action) = self.results.first().cloned() {
+            self.activate_action(action, None, ActivationSource::Enter);
+            Ok(())
+        } else {
+            Err(format!("no launcher result for query '{}'", pending.query))
+        };
+        pending.respond(response);
+    }
+
     fn poll_macro_prompt(&mut self, ctx: &egui::Context) {
         let broker = crate::mkmacro::production_prompt_broker();
         broker.set_repaint(std::sync::Arc::new({
@@ -789,6 +810,7 @@ impl eframe::App for LauncherApp {
             ctx.request_repaint();
         }
 
+        self.poll_macro_launcher_query(ctx);
         self.poll_macro_prompt(ctx);
 
         // tracing::debug!("LauncherApp::update called");
