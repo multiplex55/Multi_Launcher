@@ -16,6 +16,8 @@ use std::{
 };
 
 pub const PREVIEW_BOUND: f32 = 220.0;
+/// Compact bound used inside a coordinate target form.
+pub const TARGET_THUMBNAIL_BOUND: f32 = 140.0;
 const VALIDATE_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -390,6 +392,16 @@ mod tests {
             assert!((th as f32 - h as f32 * scale).abs() <= 1.0);
         }
         assert_eq!(thumbnail_dimensions(20, 10), (20, 10));
+    }
+
+    #[test]
+    fn target_thumbnail_is_bounded_for_wide_tall_and_square_images() {
+        for (width, height) in [(1200, 200), (200, 1200), (1200, 1200)] {
+            let size = fitted_size(width, height, TARGET_THUMBNAIL_BOUND);
+            assert!(size.x <= TARGET_THUMBNAIL_BOUND);
+            assert!(size.y <= TARGET_THUMBNAIL_BOUND);
+            assert!((size.x / size.y - width as f32 / height as f32).abs() < 0.001);
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Recursive editor and pure mutation operations for macro conditions.
 
-use super::action_editor::{matcher_ui, target_ui, value_ui};
+use super::action_editor::{TargetEditorContext, matcher_ui, target_ui, value_ui};
 use super::image_asset_picker::ImageAssetUiContext;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::{
@@ -178,13 +178,6 @@ pub fn remove_child(c: &mut MkCondition, index: usize) -> bool {
     }
 }
 
-pub fn condition_ui(
-    ui: &mut egui::Ui,
-    condition: &mut MkCondition,
-) -> Option<ConditionEditorRequest> {
-    condition_ui_with_assets(ui, condition, &[])
-}
-
 /// Resolves the same recursive path shape returned by `condition_ui` when the
 /// picker button for the first window condition is requested. Kept private to
 /// the dialog module so routing tests do not expose editor internals publicly.
@@ -214,8 +207,9 @@ pub(super) fn first_window_picker_path(condition: &MkCondition) -> Option<Vec<us
 pub fn condition_ui_with_assets(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
-    assets: &[MkImageAsset],
+    context: &TargetEditorContext<'_>,
 ) -> Option<ConditionEditorRequest> {
+    let assets = context.assets;
     let mut requested = None;
     ui.group(|ui| {
         let kind = condition_kind(condition);
@@ -340,7 +334,7 @@ pub fn condition_ui_with_assets(
                 color,
                 tolerance,
             } => {
-                let _ = target_ui(ui, target, assets);
+                let _ = target_ui(ui, target, context);
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.text_edit_singleline(color);
@@ -348,11 +342,11 @@ pub fn condition_ui_with_assets(
                     ui.add(egui::DragValue::new(tolerance));
                 });
             }
-            MkCondition::All { conditions } => requested = group_ui(ui, conditions, assets, true),
-            MkCondition::Any { conditions } => requested = group_ui(ui, conditions, assets, false),
+            MkCondition::All { conditions } => requested = group_ui(ui, conditions, context, true),
+            MkCondition::Any { conditions } => requested = group_ui(ui, conditions, context, false),
             MkCondition::Not { condition } => {
                 ui.indent("not-child", |ui| {
-                    if let Some(mut request) = condition_ui_with_assets(ui, condition, assets) {
+                    if let Some(mut request) = condition_ui_with_assets(ui, condition, context) {
                         prepend_request(&mut request, ConditionBranch::Not);
                         requested = Some(request)
                     }
@@ -370,13 +364,25 @@ pub fn condition_ui_with_context(
     condition: &mut MkCondition,
     context: ImageAssetUiContext<'_>,
 ) -> Option<ConditionEditorRequest> {
-    condition_ui_context_at(ui, condition, context, &ConditionPath::root())
+    let target_context = TargetEditorContext {
+        macro_id: context.macro_id,
+        assets: context.assets,
+        store: context.store,
+    };
+    condition_ui_context_at(
+        ui,
+        condition,
+        context,
+        &target_context,
+        &ConditionPath::root(),
+    )
 }
 
 fn condition_ui_context_at(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
     context: ImageAssetUiContext<'_>,
+    target_context: &TargetEditorContext<'_>,
     path: &ConditionPath,
 ) -> Option<ConditionEditorRequest> {
     // The established editor handles all non-browser controls and request
@@ -439,7 +445,9 @@ fn condition_ui_context_at(
                 let mut child_path = path.clone();
                 child_path.push(branch);
                 ui.indent(index, |ui| {
-                    if let Some(r) = condition_ui_context_at(ui, child, context, &child_path) {
+                    if let Some(r) =
+                        condition_ui_context_at(ui, child, context, target_context, &child_path)
+                    {
                         request = Some(r);
                     }
                 });
@@ -455,7 +463,9 @@ fn condition_ui_context_at(
                 let mut child_path = path.clone();
                 child_path.push(ConditionBranch::Any(index));
                 ui.indent(index, |ui| {
-                    if let Some(r) = condition_ui_context_at(ui, child, context, &child_path) {
+                    if let Some(r) =
+                        condition_ui_context_at(ui, child, context, target_context, &child_path)
+                    {
                         request = Some(r);
                     }
                 });
@@ -469,11 +479,11 @@ fn condition_ui_context_at(
             let mut child_path = path.clone();
             child_path.push(ConditionBranch::Not);
             ui.indent("not-child", |ui| {
-                condition_ui_context_at(ui, condition, context, &child_path)
+                condition_ui_context_at(ui, condition, context, target_context, &child_path)
             })
             .inner
         }
-        _ => condition_ui_with_assets(ui, condition, context.assets).map(|mut request| {
+        _ => condition_ui_with_assets(ui, condition, target_context).map(|mut request| {
             match &mut request {
                 ConditionEditorRequest::WindowMatcher { path: p }
                 | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. }) => {
@@ -487,14 +497,14 @@ fn condition_ui_context_at(
 fn group_ui(
     ui: &mut egui::Ui,
     conditions: &mut Vec<MkCondition>,
-    assets: &[MkImageAsset],
+    context: &TargetEditorContext<'_>,
     is_all: bool,
 ) -> Option<ConditionEditorRequest> {
     let mut remove = None;
     let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
-            if let Some(mut request) = condition_ui_with_assets(ui, child, assets) {
+            if let Some(mut request) = condition_ui_with_assets(ui, child, context) {
                 prepend_request(
                     &mut request,
                     if is_all {

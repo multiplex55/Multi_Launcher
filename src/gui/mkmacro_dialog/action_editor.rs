@@ -1472,11 +1472,31 @@ pub(crate) fn change_target_kind(
     };
 }
 
+/// Immutable document state shared by every coordinate-target editor.
+///
+/// Keeping this separate from the mutable target makes it impossible for the
+/// widget to silently repair (or replace) a dangling asset reference.
+#[derive(Clone, Copy)]
+pub(super) struct TargetEditorContext<'a> {
+    pub macro_id: u64,
+    pub assets: &'a [MkImageAsset],
+    pub store: &'a MkMacroStore,
+}
+
+impl<'a> TargetEditorContext<'a> {
+    pub(super) fn resolve_asset(&self, asset_id: u64) -> Option<&'a MkImageAsset> {
+        (asset_id != 0)
+            .then(|| self.assets.iter().find(|asset| asset.id == asset_id))
+            .flatten()
+    }
+}
+
 pub(super) fn target_ui(
     ui: &mut egui::Ui,
     target: &mut MkCoordinateTarget,
-    assets: &[MkImageAsset],
+    context: &TargetEditorContext<'_>,
 ) -> TargetUiOutcome {
+    let assets = context.assets;
     let kind = match target {
         MkCoordinateTarget::Screen { .. } => 0,
         MkCoordinateTarget::ActiveWindow { .. } => 1,
@@ -1575,6 +1595,24 @@ pub(super) fn target_ui(
                             }
                         }
                     });
+            }
+            ui.label("Reference/result image:");
+            if *asset_id == 0 {
+                ui.weak("No image result selected");
+            } else if context.resolve_asset(*asset_id).is_some() {
+                super::image_preview::show_thumbnail(
+                    ui,
+                    context.store,
+                    context.macro_id,
+                    *asset_id,
+                    super::image_preview::TARGET_THUMBNAIL_BOUND,
+                );
+                ui.weak("Visual reference for the selected image-search result; Mouse Move does not run a new search.");
+            } else {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Missing asset · ID {}", *asset_id),
+                );
             }
             ui.heading("Offset");
             ui.horizontal(|ui| {
@@ -1678,6 +1716,11 @@ fn action_ui(
     Option<super::condition_editor::ConditionImageRequest>,
     Option<PreviewRequest>,
 ) {
+    let target_context = TargetEditorContext {
+        macro_id: image_context.macro_id,
+        assets: image_context.assets,
+        store: image_context.store,
+    };
     let mut pick = None;
     let mut window_pick = None;
     let mut launcher_pick = None;
@@ -1783,7 +1826,7 @@ fn action_ui(
             }
         }
         MkAction::MouseMove(p) => {
-            let response = target_ui(ui, &mut p.target, image_assets);
+            let response = target_ui(ui, &mut p.target, &target_context);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::MoveTarget);
             }
@@ -1813,7 +1856,7 @@ fn action_ui(
         }
         MkAction::MouseDrag(p) => {
             ui.label("Start");
-            let response = target_ui(ui, &mut p.from, image_assets);
+            let response = target_ui(ui, &mut p.from, &target_context);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragFrom);
             }
@@ -1823,7 +1866,7 @@ fn action_ui(
                 ));
             }
             ui.label("Destination");
-            let response = target_ui(ui, &mut p.to, image_assets);
+            let response = target_ui(ui, &mut p.to, &target_context);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragTo);
             }
@@ -1851,7 +1894,7 @@ fn action_ui(
             });
         }
         MkAction::MouseClick(p) => {
-            let response = target_ui(ui, &mut p.target, image_assets);
+            let response = target_ui(ui, &mut p.target, &target_context);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::ClickTarget);
             }
@@ -2402,7 +2445,7 @@ fn action_ui(
             tolerance,
         } => {
             ui.heading("Coordinate");
-            let response = target_ui(ui, target, image_assets);
+            let response = target_ui(ui, target, &target_context);
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::PixelPosition);
             }
@@ -3173,6 +3216,26 @@ mod tests {
     use image::RgbaImage;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn target_context_resolves_only_nonzero_current_macro_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let assets = vec![MkImageAsset {
+            id: 14,
+            name: "needle".into(),
+            relative_path: "mkmacro_assets/7/14.png".into(),
+        }];
+        let context = TargetEditorContext {
+            macro_id: 7,
+            assets: &assets,
+            store: &store,
+        };
+
+        assert_eq!(context.resolve_asset(14).map(|asset| asset.id), Some(14));
+        assert!(context.resolve_asset(0).is_none());
+        assert!(context.resolve_asset(99).is_none());
+    }
 
     struct TestDesktop;
     impl ScreenCaptureBackend for TestDesktop {
