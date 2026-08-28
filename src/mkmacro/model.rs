@@ -548,9 +548,10 @@ pub struct MkImageOutputs {
 impl MkImageOutputs {
     pub fn normalize(&mut self) {
         for value in [&mut self.found, &mut self.point, &mut self.x, &mut self.y] {
-            if value.as_ref().is_some_and(|name| name.trim().is_empty()) {
-                *value = None;
-            }
+            *value = value.take().and_then(|name| {
+                let name = name.trim();
+                (!name.is_empty()).then(|| name.to_owned())
+            });
         }
     }
 }

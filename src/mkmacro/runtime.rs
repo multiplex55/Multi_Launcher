@@ -65,6 +65,7 @@ pub struct RuntimeSnapshot {
     /// Transient results, deliberately held outside the persisted macro document.
     pub failures: Arc<BTreeMap<DiagnosticKey, ExecutionDiagnostic>>,
     pub steps: Arc<BTreeMap<u64, StepState>>,
+    pub step_outcomes: Arc<BTreeMap<u64, StepOutcome>>,
     pub revision: u64,
 }
 impl Default for RuntimeSnapshot {
@@ -81,6 +82,7 @@ impl Default for RuntimeSnapshot {
             latest_failure: None,
             failures: Arc::new(BTreeMap::new()),
             steps: Arc::new(BTreeMap::new()),
+            step_outcomes: Arc::new(BTreeMap::new()),
             revision: 0,
         }
     }
@@ -389,7 +391,8 @@ fn run_one(
             s.finished_at = None;
             s.latest_failure = None;
             s.failures = Arc::new(BTreeMap::new());
-            s.steps = Arc::new(states)
+            s.steps = Arc::new(states);
+            s.step_outcomes = Arc::new(BTreeMap::new())
         });
         let observer = |ev: ExecutionEvent| {
             publish(shared, |s| match ev {
@@ -397,9 +400,10 @@ fn run_one(
                     s.step_id = Some(id);
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
                 }
-                ExecutionEvent::StepFinished(id) => {
+                ExecutionEvent::StepFinished(id, outcome) => {
                     s.completed_steps += 1;
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
+                    Arc::make_mut(&mut s.step_outcomes).insert(id, outcome);
                 }
                 ExecutionEvent::StepSkipped(id) => {
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
@@ -693,5 +697,36 @@ mod recording_controller_tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].macro_id, 2);
         assert!(results[0].generated_steps.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod step_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn image_match_and_continued_miss_are_distinct_success_details() {
+        let matched = StepOutcome {
+            last_image_found: Some(true),
+        };
+        let missed = StepOutcome {
+            last_image_found: Some(false),
+        };
+        assert_ne!(matched.detail(), missed.detail());
+        assert_eq!(matched.last_image_found, Some(true));
+        assert_eq!(missed.last_image_found, Some(false));
+        assert_eq!(
+            missed.detail(),
+            Some("Success — image not found; continued.")
+        );
+        // Outcome metadata augments, rather than changes, the successful state.
+        assert_eq!(StepState::Success, StepState::Success);
+    }
+
+    #[test]
+    fn unrelated_step_has_no_inherited_image_status() {
+        let unrelated = StepOutcome::default();
+        assert_eq!(unrelated.last_image_found, None);
+        assert_eq!(unrelated.detail(), None);
     }
 }
