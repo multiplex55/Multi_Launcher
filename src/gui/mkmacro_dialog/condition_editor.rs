@@ -8,32 +8,9 @@ use crate::mkmacro::{
 };
 use eframe::egui;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct ConditionPath(Vec<usize>);
-impl ConditionPath {
-    pub fn root() -> Self {
-        Self::default()
-    }
-    pub fn from_indexes(indexes: impl Into<Vec<usize>>) -> Self {
-        Self(indexes.into())
-    }
-    pub fn indexes(&self) -> &[usize] {
-        &self.0
-    }
-    fn prepend(&mut self, index: usize) {
-        self.0.insert(0, index);
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConditionImageOperation {
-    ImportPng,
-    CaptureRectangle,
-    PickRectangle,
-    PreviewRectangle,
-    HighlightMonitor,
-    PickWindow,
-    HighlightWindow,
-}
+pub use super::image_authoring_destination::{
+    ConditionBranch, ConditionImageOperation, ConditionPath,
+};
 
 impl ConditionImageOperation {
     pub(crate) fn rectangle_purpose(&self) -> Option<super::visual_overlay::RectanglePurpose> {
@@ -60,12 +37,19 @@ pub fn resolve_condition_mut<'a>(
     mut condition: &'a mut MkCondition,
     path: &ConditionPath,
 ) -> Option<&'a mut MkCondition> {
-    for &index in path.indexes() {
-        condition = match condition {
-            MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-                conditions.get_mut(index)?
+    for branch in path.branches() {
+        condition = match (condition, branch) {
+            (
+                MkCondition::All { conditions },
+                ConditionBranch::All(index) | ConditionBranch::Index(index),
+            ) => conditions.get_mut(*index)?,
+            (
+                MkCondition::Any { conditions },
+                ConditionBranch::Any(index) | ConditionBranch::Index(index),
+            ) => conditions.get_mut(*index)?,
+            (MkCondition::Not { condition }, ConditionBranch::Not | ConditionBranch::Index(0)) => {
+                condition
             }
-            MkCondition::Not { condition } if index == 0 => condition,
             _ => return None,
         };
     }
@@ -75,12 +59,19 @@ pub fn resolve_condition<'a>(
     mut condition: &'a MkCondition,
     path: &ConditionPath,
 ) -> Option<&'a MkCondition> {
-    for &index in path.indexes() {
-        condition = match condition {
-            MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-                conditions.get(index)?
+    for branch in path.branches() {
+        condition = match (condition, branch) {
+            (
+                MkCondition::All { conditions },
+                ConditionBranch::All(index) | ConditionBranch::Index(index),
+            ) => conditions.get(*index)?,
+            (
+                MkCondition::Any { conditions },
+                ConditionBranch::Any(index) | ConditionBranch::Index(index),
+            ) => conditions.get(*index)?,
+            (MkCondition::Not { condition }, ConditionBranch::Not | ConditionBranch::Index(0)) => {
+                condition
             }
-            MkCondition::Not { condition } if index == 0 => condition,
             _ => return None,
         };
     }
@@ -356,13 +347,12 @@ pub fn condition_ui_with_assets(
                     ui.add(egui::DragValue::new(tolerance));
                 });
             }
-            MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-                requested = group_ui(ui, conditions, assets)
-            }
+            MkCondition::All { conditions } => requested = group_ui(ui, conditions, assets, true),
+            MkCondition::Any { conditions } => requested = group_ui(ui, conditions, assets, false),
             MkCondition::Not { condition } => {
                 ui.indent("not-child", |ui| {
                     if let Some(mut request) = condition_ui_with_assets(ui, condition, assets) {
-                        prepend_request(&mut request, 0);
+                        prepend_request(&mut request, ConditionBranch::Not);
                         requested = Some(request)
                     }
                 });
@@ -375,13 +365,21 @@ fn group_ui(
     ui: &mut egui::Ui,
     conditions: &mut Vec<MkCondition>,
     assets: &[MkImageAsset],
+    is_all: bool,
 ) -> Option<ConditionEditorRequest> {
     let mut remove = None;
     let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
             if let Some(mut request) = condition_ui_with_assets(ui, child, assets) {
-                prepend_request(&mut request, index);
+                prepend_request(
+                    &mut request,
+                    if is_all {
+                        ConditionBranch::All(index)
+                    } else {
+                        ConditionBranch::Any(index)
+                    },
+                );
                 requested = Some(request);
             }
             if ui.button("Remove").clicked() {
@@ -397,10 +395,10 @@ fn group_ui(
     }
     requested
 }
-fn prepend_request(request: &mut ConditionEditorRequest, index: usize) {
+fn prepend_request(request: &mut ConditionEditorRequest, branch: ConditionBranch) {
     match request {
         ConditionEditorRequest::WindowMatcher { path }
-        | ConditionEditorRequest::Image(ConditionImageRequest { path, .. }) => path.prepend(index),
+        | ConditionEditorRequest::Image(ConditionImageRequest { path, .. }) => path.prepend(branch),
     }
 }
 fn kind_label(k: ConditionKind) -> &'static str {
@@ -544,12 +542,15 @@ mod tests {
                 path: ConditionPath::root(),
                 operation,
             });
-            prepend_request(&mut request, 1);
-            prepend_request(&mut request, 0);
+            prepend_request(&mut request, ConditionBranch::Any(1));
+            prepend_request(&mut request, ConditionBranch::All(0));
+            let mut expected_path = ConditionPath::root();
+            expected_path.prepend(ConditionBranch::Any(1));
+            expected_path.prepend(ConditionBranch::All(0));
             assert_eq!(
                 request,
                 ConditionEditorRequest::Image(ConditionImageRequest {
-                    path: ConditionPath::from_indexes(vec![0, 1]),
+                    path: expected_path,
                     operation
                 })
             );
