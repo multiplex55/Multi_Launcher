@@ -2172,9 +2172,11 @@ impl Executor {
                     Some(args) => args.to_owned(),
                     None => expanded_command,
                 };
+                // The broker must observe the executor's own pause/stop state;
+                // never substitute a fresh RunControl for this blocking call.
                 self.backends
                     .launcher
-                    .command(&query, &self.control)
+                    .command(&query, Arc::as_ref(&self.control))
                     .map_err(|error| error.context("backend", "launcher").context("query", query))
             }
             MkAction::WindowActivate(p) => self.backends.window.activate(p),

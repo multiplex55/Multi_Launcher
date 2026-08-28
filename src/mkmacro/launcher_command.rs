@@ -75,6 +75,7 @@ impl LauncherCommandBroker {
         query: impl Into<String>,
         control: &RunControl,
     ) -> ExecResult<LauncherCommandResponse> {
+        let query = query.into();
         let (tx, rx) = mpsc::channel();
         let request_id;
         {
@@ -89,7 +90,7 @@ impl LauncherCommandBroker {
             *pending = Some(PendingLauncherCommand {
                 request: LauncherCommandRequest {
                     id: request_id,
-                    query: query.into(),
+                    query: query.clone(),
                 },
                 response: Some(tx),
             });
@@ -104,11 +105,17 @@ impl LauncherCommandBroker {
 
         loop {
             if control.is_stopped() {
+                // Withdrawal can prevent execution only while this request is
+                // still in the broker. If the GUI has already taken it, the
+                // GUI owns processing; dropping `rx` below makes a late
+                // response harmless (`PendingLauncherCommand::respond`
+                // deliberately tolerates a disconnected receiver).
                 self.withdraw_pending(request_id);
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::Cancelled,
                     "Launcher command cancelled because automation stopped",
-                ));
+                )
+                .context("query", query));
             }
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok((id, response)) if id == request_id => return Ok(response),
@@ -118,7 +125,9 @@ impl LauncherCommandBroker {
                     return Err(ExecutionDiagnostic::new(
                         DiagnosticKind::Backend,
                         "Launcher command response channel disconnected",
-                    ));
+                    )
+                    .context("backend", "launcher")
+                    .context("query", query));
                 }
             }
         }
@@ -137,6 +146,7 @@ pub fn production_launcher_command_broker() -> Arc<LauncherCommandBroker> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Barrier, mpsc};
     use std::thread;
 
     fn submit_async(
@@ -156,6 +166,23 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         panic!("submission did not install a pending request");
+    }
+
+    fn submit_with_control(
+        broker: &Arc<LauncherCommandBroker>,
+        query: &str,
+        control: Arc<RunControl>,
+    ) -> (
+        mpsc::Receiver<ExecResult<LauncherCommandResponse>>,
+        thread::JoinHandle<()>,
+    ) {
+        let broker = Arc::clone(broker);
+        let query = query.to_owned();
+        let (result_tx, result_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            result_tx.send(broker.submit(query, &control)).unwrap();
+        });
+        (result_rx, handle)
     }
 
     #[test]
@@ -269,5 +296,125 @@ mod tests {
             submitter.join().unwrap().unwrap(),
             LauncherCommandResponse::Activated
         );
+    }
+
+    #[test]
+    fn waiting_submitter_completes_after_gui_response() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let submitter = submit_async(&broker, "query");
+        let pending = wait_for_pending(&broker);
+        assert!(pending.respond(LauncherCommandResponse::NoResults));
+        assert_eq!(
+            submitter.join().unwrap().unwrap(),
+            LauncherCommandResponse::NoResults
+        );
+    }
+
+    #[test]
+    fn stop_cancels_promptly_and_withdraws_pending_request() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let control = Arc::new(RunControl::default());
+        let (result, submitter) = submit_with_control(&broker, "cancel me", control.clone());
+        while broker.pending.lock().unwrap().is_none() {
+            thread::yield_now();
+        }
+        control.stop();
+        let error = result
+            .recv_timeout(Duration::from_millis(250))
+            .expect("stop must wake the polling submitter")
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(
+            error.context.get("query").map(String::as_str),
+            Some("cancel me")
+        );
+        assert!(broker.take_pending().is_none());
+        submitter.join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_of_taken_request_does_not_withdraw_later_request() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let first_control = Arc::new(RunControl::default());
+        let (first_result, first_submitter) =
+            submit_with_control(&broker, "first", first_control.clone());
+        let first = wait_for_pending(&broker);
+
+        let second_control = Arc::new(RunControl::default());
+        let (second_result, second_submitter) =
+            submit_with_control(&broker, "second", second_control);
+        while broker.pending.lock().unwrap().is_none() {
+            thread::yield_now();
+        }
+
+        first_control.stop();
+        assert_eq!(
+            first_result
+                .recv_timeout(Duration::from_millis(250))
+                .unwrap()
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Cancelled
+        );
+        let second = broker
+            .take_pending()
+            .expect("request N+1 must remain pending");
+        assert_eq!(second.request.query, "second");
+        assert!(!first.respond(LauncherCommandResponse::Activated));
+        assert!(second.respond(LauncherCommandResponse::Activated));
+        assert_eq!(
+            second_result.recv().unwrap().unwrap(),
+            LauncherCommandResponse::Activated
+        );
+        first_submitter.join().unwrap();
+        second_submitter.join().unwrap();
+    }
+
+    #[test]
+    fn pause_does_not_masquerade_as_cancellation() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let control = Arc::new(RunControl::default());
+        control.pause();
+        let (result, submitter) = submit_with_control(&broker, "paused", control);
+        assert!(wait_for_pending(&broker).respond(LauncherCommandResponse::Activated));
+        assert_eq!(
+            result.recv().unwrap().unwrap(),
+            LauncherCommandResponse::Activated
+        );
+        submitter.join().unwrap();
+    }
+
+    #[test]
+    fn response_racing_with_stop_has_one_terminal_result_and_no_stale_slot() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let control = Arc::new(RunControl::default());
+        let (result, submitter) = submit_with_control(&broker, "race", control.clone());
+        let pending = wait_for_pending(&broker);
+        let barrier = Arc::new(Barrier::new(3));
+        let stop_barrier = barrier.clone();
+        let stopper = thread::spawn(move || {
+            stop_barrier.wait();
+            control.stop();
+        });
+        let response_barrier = barrier.clone();
+        let responder = thread::spawn(move || {
+            response_barrier.wait();
+            pending.respond(LauncherCommandResponse::Activated)
+        });
+        barrier.wait();
+
+        let terminal = result.recv_timeout(Duration::from_millis(250)).unwrap();
+        assert!(matches!(
+            terminal,
+            Ok(LauncherCommandResponse::Activated)
+                | Err(ExecutionDiagnostic {
+                    kind: DiagnosticKind::Cancelled,
+                    ..
+                })
+        ));
+        stopper.join().unwrap();
+        let _ = responder.join().unwrap();
+        submitter.join().unwrap();
+        assert!(broker.take_pending().is_none());
     }
 }
