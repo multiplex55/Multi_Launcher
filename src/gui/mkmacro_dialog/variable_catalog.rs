@@ -4,7 +4,10 @@
 //! rebuild whenever a picker opens and is never serialized with a macro.
 
 use super::action_catalog::action_name;
-use crate::mkmacro::{MkAction, MkImageNotFoundPolicy, MkImageOutputs, MkStep, MkValue};
+use crate::mkmacro::{
+    MkAction, MkBlockKind, MkImageNotFoundPolicy, MkImageOutputs, MkStep, MkValue,
+    structure::analyze_structure,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableValueType {
@@ -21,16 +24,45 @@ pub enum VariableAvailability {
     PossiblyUnavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableUncertaintyReason {
+    ProducedInside(MkBlockKind),
+    MayBeNullIfNotFound,
+}
+
+impl VariableUncertaintyReason {
+    pub fn help_text(self) -> &'static str {
+        match self {
+            Self::ProducedInside(MkBlockKind::If) => "Produced inside If",
+            Self::ProducedInside(MkBlockKind::While) => "Produced inside While",
+            Self::ProducedInside(MkBlockKind::Repeat) => "Produced inside Repeat",
+            Self::MayBeNullIfNotFound => "May be Null if not found",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableDescriptor {
     pub name: String,
     pub value_type: VariableValueType,
     pub source_step_id: u64,
     pub source_step_index: usize,
+    /// One-based step number suitable for presentation in the picker.
+    pub source_step_number: usize,
     pub source_action_label: &'static str,
     pub availability: VariableAvailability,
+    /// Structured causes used by picker warning icons and tooltips.
+    pub uncertainty_reasons: Vec<VariableUncertaintyReason>,
     /// Extra picker guidance, including when a value can be Null at runtime.
     pub help_text: Option<&'static str>,
+}
+
+impl VariableDescriptor {
+    /// Marker rendered beside entries whose producer may not execute or may
+    /// yield Null.
+    pub fn warning_marker(&self) -> Option<&'static str> {
+        (self.availability == VariableAvailability::PossiblyUnavailable).then_some("⚠")
+    }
 }
 
 /// Source-ordered history of all variable definitions visible at a location.
@@ -46,10 +78,34 @@ impl VariableCatalog {
     /// `usize::MAX` useful for asking for the catalog at the end of a macro.
     pub fn before_step(steps: &[MkStep], consumer_index: usize) -> Self {
         let end = consumer_index.min(steps.len());
+        // Analyze once for the whole construction. In particular, do not
+        // reproduce block parsing here: structure analysis also owns the
+        // conservative semantics for incomplete editor drafts.
+        let structure = analyze_structure(steps);
         let descriptors = steps[..end]
             .iter()
             .enumerate()
-            .flat_map(|(index, step)| descriptors_for_action(step, index))
+            .flat_map(|(index, step)| {
+                let complete_kind = structure
+                    .step(step.id)
+                    .and_then(|_| structure.containing_block(step.id))
+                    .map(|block| block.kind);
+                let enclosing_kind =
+                    complete_kind.or_else(|| structure.editor_enclosing_kind(step.id));
+                descriptors_for_action(step, index)
+                    .into_iter()
+                    .map(move |mut descriptor| {
+                        if let Some(kind) = enclosing_kind {
+                            descriptor.availability = VariableAvailability::PossiblyUnavailable;
+                            descriptor
+                                .uncertainty_reasons
+                                .insert(0, VariableUncertaintyReason::ProducedInside(kind));
+                            descriptor.help_text =
+                                Some(VariableUncertaintyReason::ProducedInside(kind).help_text());
+                        }
+                        descriptor
+                    })
+            })
             .collect();
         Self { descriptors }
     }
@@ -87,8 +143,14 @@ pub fn descriptors_for_action(step: &MkStep, step_index: usize) -> Vec<VariableD
                 value_type,
                 source_step_id: step.id,
                 source_step_index: step_index,
+                source_step_number: step_index + 1,
                 source_action_label: label,
                 availability,
+                uncertainty_reasons: if availability == VariableAvailability::PossiblyUnavailable {
+                    vec![VariableUncertaintyReason::MayBeNullIfNotFound]
+                } else {
+                    Vec::new()
+                },
                 help_text,
             });
         }
@@ -179,9 +241,9 @@ fn add_visual_outputs(
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        AlphaPolicy, MkFileCollisionPolicy, MkImagePayload, MkPixelSearchPayload, MkPoint,
-        MkPromptInputPayload, MkScreenshotDestination, MkScreenshotFormat, MkScreenshotPayload,
-        MkWaitOptions, ReturnPoint, SearchRegion,
+        AlphaPolicy, MkBlockKind, MkCondition, MkFileCollisionPolicy, MkImagePayload,
+        MkPixelSearchPayload, MkPoint, MkPromptInputPayload, MkScreenshotDestination,
+        MkScreenshotFormat, MkScreenshotPayload, MkWaitOptions, ReturnPoint, SearchRegion,
     };
 
     fn step(id: u64, action: MkAction) -> MkStep {
@@ -224,6 +286,18 @@ mod tests {
             not_found_policy: MkImageNotFoundPolicy::Continue,
             outputs,
         })
+    }
+    fn set(id: u64, name: &str) -> MkStep {
+        step(
+            id,
+            MkAction::SetVariable {
+                name: name.into(),
+                value: MkValue::Number(id as f64),
+            },
+        )
+    }
+    fn empty_condition() -> MkCondition {
+        MkCondition::All { conditions: vec![] }
     }
 
     #[test]
@@ -388,6 +462,127 @@ mod tests {
                 .map(|d| &*d.name)
                 .collect::<Vec<_>>(),
             vec!["b", "a", "later"]
+        );
+    }
+
+    #[test]
+    fn structural_enclosures_make_producers_possibly_unavailable() {
+        let cases = [
+            (
+                vec![
+                    step(1, MkAction::If(empty_condition())),
+                    set(2, "if_body"),
+                    step(3, MkAction::EndIf),
+                ],
+                MkBlockKind::If,
+            ),
+            (
+                vec![
+                    step(1, MkAction::If(empty_condition())),
+                    step(2, MkAction::Else),
+                    set(3, "else_body"),
+                    step(4, MkAction::EndIf),
+                ],
+                MkBlockKind::If,
+            ),
+            (
+                vec![
+                    step(
+                        1,
+                        MkAction::WhileStart {
+                            condition: empty_condition(),
+                        },
+                    ),
+                    set(2, "while_body"),
+                    step(3, MkAction::WhileEnd),
+                ],
+                MkBlockKind::While,
+            ),
+            (
+                vec![
+                    step(1, MkAction::RepeatStart { count: 2 }),
+                    set(2, "repeat_body"),
+                    step(3, MkAction::RepeatEnd),
+                ],
+                MkBlockKind::Repeat,
+            ),
+        ];
+        for (steps, kind) in cases {
+            let descriptor = &VariableCatalog::before_step(&steps, usize::MAX).descriptors()[0];
+            assert_eq!(
+                descriptor.availability,
+                VariableAvailability::PossiblyUnavailable
+            );
+            assert_eq!(
+                descriptor.uncertainty_reasons,
+                vec![VariableUncertaintyReason::ProducedInside(kind)]
+            );
+            assert_eq!(descriptor.warning_marker(), Some("⚠"));
+        }
+    }
+
+    #[test]
+    fn nested_production_stays_possible_but_completed_block_restores_top_level() {
+        let steps = vec![
+            set(10, "top"),
+            step(11, MkAction::If(empty_condition())),
+            step(12, MkAction::RepeatStart { count: 2 }),
+            set(13, "nested"),
+            step(14, MkAction::RepeatEnd),
+            step(15, MkAction::EndIf),
+            set(16, "after"),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+        let descriptors = catalog.descriptors();
+        assert_eq!(
+            descriptors[0].availability,
+            VariableAvailability::DefinitelyAvailable
+        );
+        assert_eq!(
+            descriptors[1].availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(
+            descriptors[2].availability,
+            VariableAvailability::DefinitelyAvailable
+        );
+    }
+
+    #[test]
+    fn unclosed_draft_is_conservative_and_preserves_source_metadata() {
+        let steps = vec![step(40, MkAction::If(empty_condition())), set(987, "draft")];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+        let descriptor = &catalog.descriptors()[0];
+        assert_eq!(
+            descriptor.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(descriptor.source_step_id, 987);
+        assert_eq!(descriptor.source_step_index, 1);
+        assert_eq!(descriptor.source_step_number, 2);
+        assert_eq!(descriptor.source_action_label, "Set Variable");
+    }
+
+    #[test]
+    fn top_level_nullable_point_remains_possibly_unavailable() {
+        let steps = vec![step(
+            55,
+            image(MkImageOutputs {
+                found: None,
+                point: Some("location".into()),
+                x: None,
+                y: None,
+            }),
+        )];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+        let descriptor = &catalog.descriptors()[0];
+        assert_eq!(
+            descriptor.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(
+            descriptor.uncertainty_reasons,
+            vec![VariableUncertaintyReason::MayBeNullIfNotFound]
         );
     }
 }
