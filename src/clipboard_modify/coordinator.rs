@@ -696,13 +696,17 @@ mod tests {
     fn wait_one<S: ClipboardCommit>(
         ic: &mut ImmediateExecutionCoordinator<S>,
     ) -> ImmediateCompletionEvent {
-        for _ in 0..50 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
             if let Some(ev) = ic.drain_completions().pop() {
                 return ev;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "completion not received within 10 seconds"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("completion not received")
     }
 
     #[test]
@@ -841,6 +845,12 @@ mod tests {
             )
             .unwrap();
         let _ = wait_one(&mut panicc);
+        let repaint_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while repaint_count.load(Ordering::SeqCst) != 3
+            && std::time::Instant::now() < repaint_deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(repaint_count.load(Ordering::SeqCst), 3);
     }
 
