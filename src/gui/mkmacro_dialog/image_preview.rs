@@ -254,6 +254,30 @@ fn inspect_cache(
 }
 
 pub fn show(ui: &mut egui::Ui, store: &MkMacroStore, macro_id: u64, asset_id: u64) {
+    show_sized(ui, store, macro_id, asset_id, PREVIEW_BOUND, true);
+}
+
+/// A compact view backed by the exact same asynchronous decode and texture
+/// cache as [`show`]. The decoded pixels are never recreated merely because a
+/// caller requests a different logical display size.
+pub fn show_thumbnail(
+    ui: &mut egui::Ui,
+    store: &MkMacroStore,
+    macro_id: u64,
+    asset_id: u64,
+    max_size: f32,
+) {
+    show_sized(ui, store, macro_id, asset_id, max_size.max(1.0), false);
+}
+
+fn show_sized(
+    ui: &mut egui::Ui,
+    store: &MkMacroStore,
+    macro_id: u64,
+    asset_id: u64,
+    bound: f32,
+    details: bool,
+) {
     let Ok(path) = store.asset_path(macro_id, asset_id) else {
         ui.colored_label(egui::Color32::RED, "No reference image selected");
         return;
@@ -301,22 +325,32 @@ pub fn show(ui: &mut egui::Ui, store: &MkMacroStore, macro_id: u64, asset_id: u6
     if let Some(ready) = uploaded_ready.or(inspection.ready) {
         ui.image((
             ready.texture.id(),
-            egui::vec2(
-                ready.thumbnail_size[0] as f32,
-                ready.thumbnail_size[1] as f32,
-            ),
+            fitted_size(ready.width, ready.height, bound),
         ));
-        ui.label(format!(
-            "{} — {} × {} px",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            ready.width,
-            ready.height
-        ));
-        ui.small(format!("Asset ID {asset_id}"));
+        if details {
+            ui.label(format!(
+                "{} — {} × {} px",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                ready.width,
+                ready.height
+            ));
+            ui.small(format!("Asset ID {asset_id}"));
+        }
     } else if let Some(error) = inspection.failed {
-        ui.colored_label(egui::Color32::RED, format!("{error} (asset {asset_id})"));
+        ui.colored_label(
+            egui::Color32::RED,
+            if details {
+                format!("{error} (asset {asset_id})")
+            } else {
+                "Unavailable".into()
+            },
+        );
     } else {
-        ui.small("Loading reference image preview...");
+        ui.small(if details {
+            "Loading reference image preview..."
+        } else {
+            "Loading…"
+        });
     }
 }
 

@@ -221,7 +221,7 @@ pub fn show_shared_fields(
     tolerance: &mut u8,
     alpha: &mut AlphaPolicy,
     return_point: &mut ReturnPoint,
-    assets: &[crate::mkmacro::MkImageAsset],
+    _assets: &[crate::mkmacro::MkImageAsset],
 ) -> Option<SharedImageOperation> {
     let mut request = None;
     ui.heading("Reference Image");
@@ -233,17 +233,6 @@ pub fn show_shared_fields(
             request = Some(SharedImageOperation::CaptureRectangle)
         }
     });
-    egui::ComboBox::from_label("Reference image")
-        .selected_text(super::action_editor::image_asset_label(*asset_id, assets))
-        .show_ui(ui, |ui| {
-            for asset in assets {
-                ui.selectable_value(
-                    asset_id,
-                    asset.id,
-                    super::action_editor::image_asset_label(asset.id, assets),
-                );
-            }
-        });
     ui.add(egui::Slider::new(tolerance, 0..=255).text("Tolerance"));
     egui::ComboBox::from_label("Alpha handling")
         .selected_text(format!("{alpha:?}"))

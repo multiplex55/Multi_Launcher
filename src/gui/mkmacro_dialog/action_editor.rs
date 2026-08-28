@@ -1615,6 +1615,7 @@ fn action_ui(
     step: &mut MkStep,
     capture: &mut bool,
     image_assets: &[MkImageAsset],
+    image_context: super::image_asset_picker::ImageAssetUiContext<'_>,
     draft_generation: u64,
 ) -> (
     Option<PositionCaptureSlot>,
@@ -2049,7 +2050,7 @@ fn action_ui(
         }
         MkAction::If(condition) | MkAction::WhileStart { condition } => {
             if let Some(request) =
-                super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
+                super::condition_editor::condition_ui_with_context(ui, condition, image_context)
             {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
@@ -2064,7 +2065,7 @@ fn action_ui(
         }
         MkAction::WaitUntil { condition, wait } => {
             if let Some(request) =
-                super::condition_editor::condition_ui_with_assets(ui, condition, image_assets)
+                super::condition_editor::condition_ui_with_context(ui, condition, image_context)
             {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
@@ -2803,7 +2804,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
             let action_before = step.action.clone();
-            let (position, mut window, launcher, image, condition_image, preview)=action_ui(ui, step, &mut state.capture_keys, &image_assets, draft_generation);
+            let image_context = super::image_asset_picker::ImageAssetUiContext {
+                macro_id: d.selected_macro_id.unwrap_or(0),
+                assets: &image_assets,
+                store: &d.store,
+            };
+            let (position, mut window, launcher, image, condition_image, preview)=action_ui(ui, step, &mut state.capture_keys, &image_assets, image_context, draft_generation);
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
             image_request = image;
