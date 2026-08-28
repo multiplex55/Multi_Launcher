@@ -2053,9 +2053,8 @@ fn action_ui(
             {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
-                        window_pick = Some(super::window_picker::MatcherPath::Condition(
-                            path.indexes().to_vec(),
-                        ));
+                        window_pick =
+                            Some(super::window_picker::MatcherPath::Condition(path.indexes()));
                     }
                     super::condition_editor::ConditionEditorRequest::Image(request) => {
                         condition_image_request = Some(request);
@@ -2069,9 +2068,8 @@ fn action_ui(
             {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
-                        window_pick = Some(super::window_picker::MatcherPath::Condition(
-                            path.indexes().to_vec(),
-                        ));
+                        window_pick =
+                            Some(super::window_picker::MatcherPath::Condition(path.indexes()));
                     }
                     super::condition_editor::ConditionEditorRequest::Image(request) => {
                         condition_image_request = Some(request);
