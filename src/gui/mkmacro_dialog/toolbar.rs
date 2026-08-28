@@ -75,7 +75,6 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             let result = dialog.run_selected_macro();
             report(dialog, result);
         }
-        ui.small("Runtime outputs exist only within one playback run. Select Find Image and its variable-consuming steps together; a later Run Selected starts a new runtime.");
         if ui
             .add_enabled(state.pause, eframe::egui::Button::new("Pause"))
             .clicked()
