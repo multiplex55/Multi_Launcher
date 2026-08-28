@@ -1,6 +1,7 @@
 //! Recursive editor and pure mutation operations for macro conditions.
 
 use super::action_editor::{matcher_ui, target_ui, value_ui};
+use super::image_asset_picker::ImageAssetUiContext;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::{
     AlphaPolicy, MkCompareOp, MkCondition, MkCoordinateTarget, MkImageAsset,
@@ -360,6 +361,128 @@ pub fn condition_ui_with_assets(
         }
     });
     requested
+}
+
+/// Condition editor used by the action dialog. The active macro context is
+/// passed unchanged through the whole condition tree.
+pub fn condition_ui_with_context(
+    ui: &mut egui::Ui,
+    condition: &mut MkCondition,
+    context: ImageAssetUiContext<'_>,
+) -> Option<ConditionEditorRequest> {
+    condition_ui_context_at(ui, condition, context, &ConditionPath::root())
+}
+
+fn condition_ui_context_at(
+    ui: &mut egui::Ui,
+    condition: &mut MkCondition,
+    context: ImageAssetUiContext<'_>,
+    path: &ConditionPath,
+) -> Option<ConditionEditorRequest> {
+    // The established editor handles all non-browser controls and request
+    // routing. Temporarily rendering ImageSearch ourselves avoids maintaining
+    // a second asset selector while leaving its capture controls untouched.
+    if let MkCondition::ImageSearch { search, found } = condition {
+        let mut requested = None;
+        ui.group(|ui| {
+            egui::ComboBox::from_label("Condition type")
+                .selected_text(kind_label(ConditionKind::ImageSearch))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut ConditionKind::ImageSearch,
+                        ConditionKind::ImageSearch,
+                        kind_label(ConditionKind::ImageSearch),
+                    );
+                });
+            super::image_asset_picker::show(ui, path.indexes(), context, &mut search.asset_id);
+            if let Some(operation) = super::image_search_controls::show_shared_fields(
+                ui,
+                &mut search.asset_id,
+                &mut search.region,
+                &mut search.tolerance,
+                &mut search.alpha,
+                &mut search.return_point,
+                context.assets,
+            ) {
+                use super::image_search_controls::SharedImageOperation as S;
+                use ConditionImageOperation as O;
+                let operation = match operation {
+                    S::ImportPng => O::ImportPng,
+                    S::CaptureRectangle => O::CaptureRectangle,
+                    S::PickRectangle => O::PickRectangle,
+                    S::PreviewRectangle => O::PreviewRectangle,
+                    S::HighlightMonitor => O::HighlightMonitor,
+                    S::PickWindow => O::PickWindow,
+                    S::HighlightWindow => O::HighlightWindow,
+                };
+                requested = Some(ConditionEditorRequest::Image(ConditionImageRequest {
+                    path: path.clone(),
+                    operation,
+                }));
+            }
+            egui::ComboBox::from_label("Expected")
+                .selected_text(if *found { "Found" } else { "Not Found" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(found, true, "Found");
+                    ui.selectable_value(found, false, "Not found");
+                });
+        });
+        return requested;
+    }
+    // Recursive containers need the context-aware path before their child is
+    // rendered, both for request routing and stable per-node picker state.
+    match condition {
+        MkCondition::All { conditions } => {
+            let mut request = None;
+            for (index, child) in conditions.iter_mut().enumerate() {
+                let branch = ConditionBranch::All(index);
+                let mut child_path = path.clone();
+                child_path.push(branch);
+                ui.indent(index, |ui| {
+                    if let Some(r) = condition_ui_context_at(ui, child, context, &child_path) {
+                        request = Some(r);
+                    }
+                });
+            }
+            if ui.button("+ Add Condition").clicked() {
+                conditions.push(default_condition(ConditionKind::Variable));
+            }
+            request
+        }
+        MkCondition::Any { conditions } => {
+            let mut request = None;
+            for (index, child) in conditions.iter_mut().enumerate() {
+                let mut child_path = path.clone();
+                child_path.push(ConditionBranch::Any(index));
+                ui.indent(index, |ui| {
+                    if let Some(r) = condition_ui_context_at(ui, child, context, &child_path) {
+                        request = Some(r);
+                    }
+                });
+            }
+            if ui.button("+ Add Condition").clicked() {
+                conditions.push(default_condition(ConditionKind::Variable));
+            }
+            request
+        }
+        MkCondition::Not { condition } => {
+            let mut child_path = path.clone();
+            child_path.push(ConditionBranch::Not);
+            ui.indent("not-child", |ui| {
+                condition_ui_context_at(ui, condition, context, &child_path)
+            })
+            .inner
+        }
+        _ => condition_ui_with_assets(ui, condition, context.assets).map(|mut request| {
+            match &mut request {
+                ConditionEditorRequest::WindowMatcher { path: p }
+                | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. }) => {
+                    *p = path.clone()
+                }
+            }
+            request
+        }),
+    }
 }
 fn group_ui(
     ui: &mut egui::Ui,

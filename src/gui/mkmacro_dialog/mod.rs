@@ -1,6 +1,7 @@
 pub mod action_catalog;
 pub mod action_editor;
 pub mod condition_editor;
+pub mod image_asset_picker;
 pub mod image_authoring_destination;
 pub mod image_authoring_job;
 pub mod image_preview;

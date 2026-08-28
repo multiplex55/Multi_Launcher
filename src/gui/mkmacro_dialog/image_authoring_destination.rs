@@ -42,6 +42,9 @@ impl ConditionPath {
     pub(crate) fn prepend(&mut self, branch: ConditionBranch) {
         self.0.insert(0, branch);
     }
+    pub(crate) fn push(&mut self, branch: ConditionBranch) {
+        self.0.push(branch);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
