@@ -65,10 +65,15 @@ impl VariableDescriptor {
     }
 }
 
-/// Source-ordered history of all variable definitions visible at a location.
+/// Both views of the variable definitions visible at a consumer location.
+///
+/// Names have the same semantics as [`crate::mkmacro::RuntimeVariables`] keys:
+/// surrounding editor whitespace is removed when a descriptor is made, but
+/// comparison is otherwise exact and case-sensitive.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VariableCatalog {
-    descriptors: Vec<VariableDescriptor>,
+    history: Vec<VariableDescriptor>,
+    effective: Vec<VariableDescriptor>,
 }
 
 impl VariableCatalog {
@@ -82,7 +87,7 @@ impl VariableCatalog {
         // reproduce block parsing here: structure analysis also owns the
         // conservative semantics for incomplete editor drafts.
         let structure = analyze_structure(steps);
-        let descriptors = steps[..end]
+        let history: Vec<_> = steps[..end]
             .iter()
             .enumerate()
             .flat_map(|(index, step)| {
@@ -107,27 +112,57 @@ impl VariableCatalog {
                     })
             })
             .collect();
-        Self { descriptors }
+
+        // Walk the source-ordered history and replace an old winner whenever
+        // its exact name is produced again. Removing before appending means
+        // picker order is the source position of each latest definition, then
+        // the output order declared by that action.
+        let mut effective = Vec::new();
+        for descriptor in &history {
+            if let Some(old) = effective
+                .iter()
+                .position(|old: &VariableDescriptor| old.name == descriptor.name)
+            {
+                effective.remove(old);
+            }
+            effective.push(descriptor.clone());
+        }
+        Self { history, effective }
     }
 
+    /// Ordered producer history, intended for diagnostics and hover details.
+    pub fn history(&self) -> &[VariableDescriptor] {
+        &self.history
+    }
+
+    /// Effective variables at the consumer, with one entry per exact name.
+    ///
+    /// Entries are ordered by the source position of their latest definition,
+    /// then by that action's output order.
+    pub fn effective_variables(&self) -> &[VariableDescriptor] {
+        &self.effective
+    }
+
+    /// Effective picker entries of `value_type`. Shadowing is deliberately
+    /// resolved before this filter is applied.
+    pub fn effective_variables_of_type(
+        &self,
+        value_type: VariableValueType,
+    ) -> impl Iterator<Item = &VariableDescriptor> {
+        self.effective
+            .iter()
+            .filter(move |descriptor| descriptor.value_type == value_type)
+    }
+
+    /// Compatibility alias for the ordered producer history.
     pub fn descriptors(&self) -> &[VariableDescriptor] {
-        &self.descriptors
+        self.history()
     }
 
     /// Returns one descriptor per name, choosing its latest definition while
     /// retaining the deterministic source order of those winning definitions.
     pub fn latest_definitions(&self) -> Vec<&VariableDescriptor> {
-        let mut latest = Vec::new();
-        for descriptor in self.descriptors.iter().rev() {
-            if !latest
-                .iter()
-                .any(|existing: &&VariableDescriptor| existing.name == descriptor.name)
-            {
-                latest.push(descriptor);
-            }
-        }
-        latest.reverse();
-        latest
+        self.effective.iter().collect()
     }
 }
 
@@ -293,6 +328,15 @@ mod tests {
             MkAction::SetVariable {
                 name: name.into(),
                 value: MkValue::Number(id as f64),
+            },
+        )
+    }
+    fn set_value(id: u64, name: &str, value: MkValue) -> MkStep {
+        step(
+            id,
+            MkAction::SetVariable {
+                name: name.into(),
+                value,
             },
         )
     }
@@ -463,6 +507,100 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b", "a", "later"]
         );
+    }
+
+    #[test]
+    fn effective_view_replaces_same_name_and_keeps_latest_metadata() {
+        let steps = vec![
+            set_value(10, " value ", MkValue::Number(1.0)),
+            step(
+                20,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    variable: "value".into(),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+
+        assert_eq!(catalog.history().len(), 2, "history retains both producers");
+        assert_eq!(catalog.effective_variables().len(), 1);
+        let effective = &catalog.effective_variables()[0];
+        assert_eq!(effective.value_type, VariableValueType::String);
+        assert_eq!(effective.source_step_id, 20);
+        assert_eq!(effective.source_step_index, 1);
+        assert_eq!(effective.source_step_number, 2);
+        assert_eq!(effective.source_action_label, "Prompt for Input");
+    }
+
+    #[test]
+    fn effective_type_filter_runs_after_point_string_shadow_resolution() {
+        let point = |id, name: &str| set_value(id, name, MkValue::Point(MkPoint { x: 1, y: 2 }));
+        let string = |id, name: &str| set_value(id, name, MkValue::String("text".into()));
+
+        let point_then_string =
+            VariableCatalog::before_step(&[point(1, "target"), string(4, "target")], 2);
+        assert_eq!(
+            point_then_string
+                .effective_variables_of_type(VariableValueType::Point)
+                .count(),
+            0
+        );
+
+        let string_then_point =
+            VariableCatalog::before_step(&[string(1, "target"), point(4, "target")], 2);
+        let points: Vec<_> = string_then_point
+            .effective_variables_of_type(VariableValueType::Point)
+            .collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_step_id, 4);
+    }
+
+    #[test]
+    fn conditional_latest_definition_supplies_type_and_availability() {
+        let conditional_string = vec![
+            set_value(1, "target", MkValue::Point(MkPoint { x: 1, y: 2 })),
+            step(2, MkAction::If(empty_condition())),
+            set_value(3, "target", MkValue::String("conditional".into())),
+            step(4, MkAction::EndIf),
+        ];
+        let catalog = VariableCatalog::before_step(&conditional_string, usize::MAX);
+        let effective = &catalog.effective_variables()[0];
+
+        assert_eq!(effective.value_type, VariableValueType::String);
+        assert_eq!(
+            effective.availability,
+            VariableAvailability::PossiblyUnavailable
+        );
+        assert_eq!(effective.source_step_id, 3);
+        assert_eq!(
+            catalog
+                .effective_variables_of_type(VariableValueType::Point)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn effective_names_are_case_sensitive_ignore_future_steps_and_have_stable_order() {
+        let steps = vec![
+            set(1, "target"),
+            set(2, "middle"),
+            set(3, "Target"),
+            set(4, "target"),
+            set(5, "future"),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, 4);
+        let effective: Vec<_> = catalog
+            .effective_variables()
+            .iter()
+            .map(|descriptor| (&*descriptor.name, descriptor.source_step_index))
+            .collect();
+
+        // Winners are ordered by their latest source position. Exact casing
+        // keeps the two runtime keys distinct.
+        assert_eq!(effective, vec![("middle", 1), ("Target", 2), ("target", 3)]);
+        assert!(!catalog.history().iter().any(|item| item.name == "future"));
     }
 
     #[test]
