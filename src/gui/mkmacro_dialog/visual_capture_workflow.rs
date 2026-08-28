@@ -254,6 +254,19 @@ impl SharedVisualOverlayController {
             },
         )
     }
+    pub fn begin_point_pick(
+        &self,
+        request: super::visual_overlay::VisualPointRequest,
+    ) -> OperationId {
+        let id = self.allocate();
+        self.send_with_recovery(
+            id,
+            VisualOverlayCommand::PickPoint {
+                operation_id: id,
+                request,
+            },
+        )
+    }
     pub fn preview_rectangle(&self, rect: ScreenRect) -> OperationId {
         let id = self.allocate();
         self.send_with_recovery(
@@ -351,7 +364,8 @@ impl SharedVisualOverlayController {
         }
         for event in &incoming {
             let id = match event {
-                VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+                VisualOverlayEvent::PointConfirmed { operation_id, .. }
+                | VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
                 | VisualOverlayEvent::Cancelled { operation_id }
                 | VisualOverlayEvent::Expired { operation_id }
                 | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
