@@ -817,7 +817,10 @@ impl Drop for RunActivityGuard<'_> {
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {
     StepStarted(u64),
-    StepFinished(u64, StepOutcome),
+    /// Kept as a single-field event for observers that only track lifecycle.
+    StepFinished(u64),
+    /// Optional structured metadata emitted immediately before `StepFinished`.
+    StepOutcome(u64, StepOutcome),
     StepSkipped(u64),
     StepFailed(u64, ExecutionDiagnostic),
     Paused,
@@ -1902,10 +1905,11 @@ impl Executor {
                     return Err(e);
                 }
             } else {
-                observe(ExecutionEvent::StepFinished(
-                    step.id,
-                    StepOutcome::for_action(&step.action, &vars),
-                ))
+                let outcome = StepOutcome::for_action(&step.action, &vars);
+                if outcome.last_image_found.is_some() {
+                    observe(ExecutionEvent::StepOutcome(step.id, outcome));
+                }
+                observe(ExecutionEvent::StepFinished(step.id))
             }
             pc = match (&step.action, &ins.jump) {
                 (MkAction::If(c) | MkAction::WhileStart { condition: c }, Jump::IfFalse(to)) => {

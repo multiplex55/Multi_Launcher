@@ -400,9 +400,11 @@ fn run_one(
                     s.step_id = Some(id);
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
                 }
-                ExecutionEvent::StepFinished(id, outcome) => {
+                ExecutionEvent::StepFinished(id) => {
                     s.completed_steps += 1;
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
+                }
+                ExecutionEvent::StepOutcome(id, outcome) => {
                     Arc::make_mut(&mut s.step_outcomes).insert(id, outcome);
                 }
                 ExecutionEvent::StepSkipped(id) => {
