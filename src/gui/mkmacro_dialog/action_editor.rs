@@ -3857,6 +3857,198 @@ mod tests {
         })
     }
 
+    #[derive(Default)]
+    struct PickerState {
+        next_id: u64,
+        events: std::collections::VecDeque<super::super::visual_capture_workflow::SelectionEvent>,
+        cancelled: Vec<u64>,
+    }
+    struct FakeRectanglePicker(Arc<Mutex<PickerState>>);
+    impl super::super::visual_capture_workflow::RectangleOverlay for FakeRectanglePicker {
+        fn begin(
+            &mut self,
+            _: super::super::visual_overlay::RectanglePurpose,
+        ) -> Result<u64, String> {
+            let mut state = self.0.lock().unwrap();
+            state.next_id += 1;
+            Ok(state.next_id)
+        }
+        fn poll(&mut self) -> super::super::visual_capture_workflow::SelectionEvent {
+            self.0
+                .lock()
+                .unwrap()
+                .events
+                .pop_front()
+                .unwrap_or(super::super::visual_capture_workflow::SelectionEvent::Pending)
+        }
+        fn cancel(&mut self, operation_id: u64) {
+            self.0.lock().unwrap().cancelled.push(operation_id);
+        }
+    }
+    struct UnusedCapture;
+    impl super::super::visual_capture_workflow::CaptureAdapter for UnusedCapture {
+        fn capture_rect(&mut self, _: ScreenRect) -> Result<RgbaImage, String> {
+            panic!("search-region selection must not capture a screenshot")
+        }
+    }
+    struct UnusedAssetStore;
+    impl super::super::visual_capture_workflow::AssetStoreAdapter for UnusedAssetStore {
+        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
+            panic!("search-region selection must not import an asset")
+        }
+    }
+    fn install_fake_picker(editor: &mut ActionEditorState) -> Arc<Mutex<PickerState>> {
+        let state = Arc::new(Mutex::new(PickerState::default()));
+        editor.visual_capture = Some(
+            super::super::visual_capture_workflow::VisualCaptureWorkflow::new(
+                Box::new(FakeRectanglePicker(state.clone())),
+                Box::new(UnusedCapture),
+                Box::new(UnusedAssetStore),
+            ),
+        );
+        state
+    }
+    fn select_screenshot_region(editor: &mut ActionEditorState, macro_id: u64) {
+        editor
+            .request_rectangle_selection(
+                macro_id,
+                super::super::visual_overlay::RectanglePurpose::SearchRegion,
+                VisualRegionDestination::CaptureScreenshotRegion,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn screenshot_picker_completion_changes_only_the_region_and_cancellation_is_retryable() {
+        let rectangle_a = ScreenRect::new(-900, 20, 301, 207);
+        let rectangle_b = ScreenRect::new(45, -330, 640, 480);
+        let mut action = screenshot_action(SearchRegion::Rectangle { rect: rectangle_a });
+        let MkAction::CaptureScreenshot(payload) = &mut action else {
+            unreachable!()
+        };
+        payload.destination = MkScreenshotDestination::File;
+        payload.path = Some("captures/example.jpg".into());
+        payload.format = MkScreenshotFormat::Jpeg;
+        payload.collision = MkFileCollisionPolicy::Unique;
+        payload.path_output = Some("screenshot_path".into());
+
+        let mut editor = test_editor();
+        editor.begin_edit(&MkStep {
+            id: 808,
+            enabled: false,
+            repeat: 3,
+            delay_after_ms: 91,
+            on_error: MkErrorPolicy::Continue,
+            action,
+        });
+        let picker = install_fake_picker(&mut editor);
+        let original = editor.draft.clone().unwrap();
+        select_screenshot_region(&mut editor, 17);
+        let operation_id = match editor.visual_capture.as_ref().unwrap().state() {
+            super::super::visual_capture_workflow::WorkflowState::Selecting {
+                operation_id,
+                ..
+            } => *operation_id,
+            state => panic!("unexpected picker state: {state:?}"),
+        };
+        let target = editor.pending_visual_region.clone().unwrap();
+        assert_eq!(target.step_id, Some(808));
+        assert_eq!(target.draft_generation, editor.draft_generation);
+        picker.lock().unwrap().events.push_back(
+            super::super::visual_capture_workflow::SelectionEvent::Confirmed {
+                operation_id,
+                rect: rectangle_b,
+            },
+        );
+        editor.tick_visual_capture(Some(17));
+        let mut expected = original.clone();
+        let MkAction::CaptureScreenshot(expected_payload) = &mut expected.action else {
+            unreachable!()
+        };
+        expected_payload.region = SearchRegion::Rectangle { rect: rectangle_b };
+        assert_eq!(editor.draft.as_ref(), Some(&expected));
+        assert!(editor.pending_visual_region.is_none());
+
+        // A second, independent operation is cancelled by the picker.  It must
+        // release ownership, preserve A, and remain available for an immediate retry.
+        editor.draft = Some(original.clone());
+        editor.capture_message = None;
+        select_screenshot_region(&mut editor, 17);
+        let cancelled_id = picker.lock().unwrap().next_id;
+        picker.lock().unwrap().events.push_back(
+            super::super::visual_capture_workflow::SelectionEvent::Cancelled {
+                operation_id: cancelled_id,
+            },
+        );
+        editor.tick_visual_capture(Some(17));
+        assert_eq!(editor.draft.as_ref(), Some(&original));
+        assert!(editor.pending_visual_region.is_none());
+        assert!(!editor.image_authoring.is_importing());
+        assert_eq!(
+            editor.capture_message.as_deref(),
+            Some("Visual capture cancelled")
+        );
+        select_screenshot_region(&mut editor, 17);
+        assert!(editor.pending_visual_region.is_some());
+    }
+
+    #[test]
+    fn late_screenshot_picker_result_cannot_mutate_a_new_target_or_closed_editor() {
+        let rectangle_a = ScreenRect::new(-30, -20, 10, 11);
+        let rectangle_b = ScreenRect::new(500, 400, 30, 20);
+        for close_editor in [false, true] {
+            let mut editor = test_editor();
+            let step_a = MkStep {
+                id: 1,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: MkErrorPolicy::Stop,
+                action: screenshot_action(SearchRegion::Rectangle { rect: rectangle_a }),
+            };
+            editor.begin_edit(&step_a);
+            let picker = install_fake_picker(&mut editor);
+            select_screenshot_region(&mut editor, 17);
+            let old_id = picker.lock().unwrap().next_id;
+            let old_token = super::super::visual_capture_workflow::DraftToken {
+                macro_id: 17,
+                draft_generation: editor.draft_generation,
+            };
+            if close_editor {
+                editor.cancel();
+                editor.apply_visual_capture_outcome(
+                    Some(17),
+                    super::super::visual_capture_workflow::WorkflowOutcome::Region {
+                        token: old_token,
+                        rect: rectangle_b,
+                    },
+                );
+                assert!(editor.draft.is_none());
+            } else {
+                let step_b = MkStep {
+                    id: 2,
+                    action: MkAction::Delay { ms: 77 },
+                    ..step_a.clone()
+                };
+                editor.begin_edit(&step_b);
+                let current = editor.draft.clone();
+                editor.apply_visual_capture_outcome(
+                    Some(17),
+                    super::super::visual_capture_workflow::WorkflowOutcome::Region {
+                        token: old_token,
+                        rect: rectangle_b,
+                    },
+                );
+                assert_eq!(editor.draft, current);
+                assert_eq!(
+                    step_a.action,
+                    screenshot_action(SearchRegion::Rectangle { rect: rectangle_a })
+                );
+            }
+            assert!(picker.lock().unwrap().cancelled.contains(&old_id));
+        }
+    }
+
     #[test]
     fn screenshot_rectangle_completion_is_typed_dirty_and_single_use() {
         let mut editor = test_editor();
@@ -4165,54 +4357,57 @@ mod tests {
             monitor(7, ScreenRect::new(50, 20, 70, 60)),
         ]);
         let fake = FakePreview::default();
-        dispatch_region_preview(
-            &SearchRegion::Desktop,
-            &monitors,
-            &resolve(ScreenRect::new(0, 0, 1, 1)),
-            &fake,
-        )
-        .unwrap();
-        dispatch_region_preview(
+        let outer = ScreenRect::new(-701, -503, 411, 307);
+        let client = ScreenRect::new(-680, -460, 350, 220);
+        let resolver =
+            |_: &MkWindowMatcher, client_area: bool| Ok(if client_area { client } else { outer });
+        let (desktop_id, _) =
+            dispatch_region_preview(&SearchRegion::Desktop, &monitors, &resolver, &fake).unwrap();
+        let (monitor_id, _) = dispatch_region_preview(
             &SearchRegion::Monitor { index: 7 },
             &monitors,
-            &resolve(ScreenRect::new(0, 0, 1, 1)),
+            &resolver,
             &fake,
         )
         .unwrap();
         let signed = ScreenRect::new(-42, -9, 31, 27);
-        dispatch_region_preview(
+        let (rectangle_id, _) = dispatch_region_preview(
             &SearchRegion::Rectangle { rect: signed },
             &monitors,
-            &resolve(signed),
+            &resolver,
             &fake,
         )
         .unwrap();
-        dispatch_region_preview(
+        let (window_id, _) = dispatch_region_preview(
             &SearchRegion::Window {
                 matcher: Default::default(),
             },
             &monitors,
-            &resolve(signed),
+            &resolver,
             &fake,
         )
         .unwrap();
-        dispatch_region_preview(
+        let (client_id, _) = dispatch_region_preview(
             &SearchRegion::ClientArea {
                 matcher: Default::default(),
             },
             &monitors,
-            &resolve(signed),
+            &resolver,
             &fake,
         )
         .unwrap();
+        assert_eq!(
+            [desktop_id, monitor_id, rectangle_id, window_id, client_id],
+            [1, 2, 3, 4, 4]
+        );
         assert_eq!(
             *fake.0.lock().unwrap(),
             vec![
                 PreviewCall::Desktop(monitors.unwrap()),
                 PreviewCall::Monitor(monitor(7, ScreenRect::new(50, 20, 70, 60))),
                 PreviewCall::Rectangle(signed),
-                PreviewCall::Window(signed, WindowAreaKind::WholeWindow),
-                PreviewCall::Window(signed, WindowAreaKind::ClientArea)
+                PreviewCall::Window(outer, WindowAreaKind::WholeWindow),
+                PreviewCall::Window(client, WindowAreaKind::ClientArea)
             ]
         );
     }
