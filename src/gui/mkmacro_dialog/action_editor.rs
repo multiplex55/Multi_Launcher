@@ -4027,7 +4027,7 @@ mod tests {
             } else {
                 let step_b = MkStep {
                     id: 2,
-                    action: MkAction::Delay { ms: 77 },
+                    action: MkAction::Delay { milliseconds: 77 },
                     ..step_a.clone()
                 };
                 editor.begin_edit(&step_b);
