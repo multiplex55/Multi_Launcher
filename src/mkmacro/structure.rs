@@ -22,6 +22,11 @@ pub struct StepStructure {
     pub depth: usize,
     /// Stable ID of the innermost complete containing block's opener.
     pub containing_block: Option<u64>,
+    /// Kind of the innermost editor enclosure, including an unclosed draft.
+    ///
+    /// Unlike `containing_block`, this is intentionally conservative: an
+    /// opener remains an enclosure until a matching closer is encountered.
+    pub editor_enclosing_kind: Option<BlockKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +70,11 @@ impl StructureAnalysis {
         let opener = self.step(id)?.containing_block?;
         self.block_for_marker(opener)
     }
+    /// Returns the innermost enclosure visible while editing, even when that
+    /// enclosure has not yet acquired a matching closer.
+    pub fn editor_enclosing_kind(&self, id: u64) -> Option<BlockKind> {
+        self.step(id)?.editor_enclosing_kind
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +97,10 @@ pub fn analyze_structure(steps: &[MkStep]) -> StructureAnalysis {
             index,
             depth,
             containing_block: None,
+            editor_enclosing_kind: depth
+                .checked_sub(1)
+                .and_then(|enclosing| stack.get(enclosing))
+                .map(|open| open.kind),
         });
         result.step_by_id.entry(step.id).or_insert(index);
         if let Some(MkBlockMarker::Open(kind)) = marker {
@@ -292,6 +306,24 @@ mod tests {
         for v in cases {
             assert!(!analyze_structure(&v).diagnostics.is_empty());
         }
+    }
+    #[test]
+    fn editor_enclosure_query_covers_nested_and_unclosed_blocks() {
+        let v = vec![
+            s(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            delay(2),
+            s(3, MkAction::RepeatStart { count: 2 }),
+            delay(4),
+            s(5, MkAction::RepeatEnd),
+            delay(6),
+            // Deliberately leave the If open as an editor draft.
+        ];
+        let a = analyze_structure(&v);
+        assert_eq!(a.editor_enclosing_kind(2), Some(BlockKind::If));
+        assert_eq!(a.editor_enclosing_kind(4), Some(BlockKind::Repeat));
+        assert_eq!(a.editor_enclosing_kind(6), Some(BlockKind::If));
+        assert!(a.containing_block(6).is_none());
+        assert!(a.editor_enclosing_kind(999).is_none());
     }
     #[test]
     fn controls_are_not_markers() {
