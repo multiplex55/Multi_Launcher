@@ -1723,15 +1723,20 @@ mod tests {
     #[test]
     fn macro_launcher_poll_consumes_one_request_and_mutates_query_on_gui_dispatch() {
         let ctx = egui::Context::default();
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let mut app = new_app(&ctx);
+        app.command_cache = two_results();
+        app.query = "before polling".into();
+
+        // Consume repaint requests made while constructing the app. Otherwise
+        // egui may coalesce the worker's wakeup with that already-pending frame,
+        // and the counter below would not identify broker submission.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
         let wakes = Arc::new(AtomicUsize::new(0));
         let callback_wakes = Arc::clone(&wakes);
         ctx.set_request_repaint_callback(move |_| {
             callback_wakes.fetch_add(1, Ordering::SeqCst);
         });
-        let broker = Arc::new(LauncherCommandBroker::default());
-        let mut app = new_app(&ctx);
-        app.command_cache = two_results();
-        app.query = "before polling".into();
 
         // The empty poll installs the wakeup callback but changes no GUI state.
         app.poll_macro_launcher_commands_from(&ctx, &broker);
