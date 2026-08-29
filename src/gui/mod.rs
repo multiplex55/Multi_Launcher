@@ -269,10 +269,24 @@ static EXECUTE_ACTION_HOOK: Lazy<
     Mutex<Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>>,
 > = Lazy::new(|| Mutex::new(None));
 
+pub type ActivationHook = Box<dyn Fn(&Action, ActivationSource) + Send + Sync>;
+static ACTIVATION_HOOK: Lazy<Mutex<Option<ActivationHook>>> = Lazy::new(|| Mutex::new(None));
+
 pub fn set_execute_action_hook(
     hook: Option<Box<dyn Fn(&Action) -> anyhow::Result<()> + Send + Sync>>,
 ) {
     if let Ok(mut guard) = EXECUTE_ACTION_HOOK.lock() {
+        *guard = hook;
+    }
+}
+
+/// Install an observer for actions entering the normal launcher activation path.
+///
+/// This is primarily an integration-test seam: unlike the execution hook it
+/// does not replace activation, and therefore can verify the dispatch source
+/// while the real action handler continues to run.
+pub fn set_activation_hook(hook: Option<ActivationHook>) {
+    if let Ok(mut guard) = ACTIVATION_HOOK.lock() {
         *guard = hook;
     }
 }

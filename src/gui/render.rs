@@ -694,7 +694,9 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
-    fn handle_macro_launcher_command(
+    /// Route a macro's raw launcher query through the same search and action
+    /// activation paths used by the GUI.
+    pub fn handle_macro_launcher_command(
         &mut self,
         request: &crate::mkmacro::LauncherCommandRequest,
     ) -> crate::mkmacro::LauncherCommandResponse {
@@ -736,6 +738,11 @@ impl LauncherApp {
                 LauncherCommandResponse::PresentedForSelection { result_count }
             }
         }
+    }
+
+    /// Number of normal note editor panels currently open.
+    pub fn open_note_panel_count(&self) -> usize {
+        self.note_panels.len()
     }
 
     fn poll_macro_launcher_commands_from(
