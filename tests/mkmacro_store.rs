@@ -215,7 +215,7 @@ fn schema_six_is_normalized_and_delay_is_migrated() {
                     "mode": "fixed",
                     "fixed_ms": 42,
                     "minimum_ms": 0,
-                    "maximum_ms": 0
+                    "maximum_ms": 42
                 }
             }),
             original_actions[1].clone(),
