@@ -491,7 +491,7 @@ fn join_legacy_text(command: &str, args: Option<&str>) -> String {
     }
 }
 
-fn query_action_text(query: &str, args: Option<&str>) -> String {
+pub(crate) fn query_action_text(query: &str, args: Option<&str>) -> String {
     // This is the only argument contract implemented by Launcher `query:` actions.
     // Arbitrary action args are deliberately not guessed into the query.
     let query_arg = args
