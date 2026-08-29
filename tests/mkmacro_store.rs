@@ -176,7 +176,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
 }
 
 #[test]
-fn schema_six_is_normalized_without_changing_actions() {
+fn schema_six_is_normalized_and_delay_is_migrated() {
     let dir = tempdir().unwrap();
     let path = dir.path().join(MKMACROS_FILE);
     let original_actions = serde_json::json!([
@@ -198,7 +198,7 @@ fn schema_six_is_normalized_without_changing_actions() {
     )
     .unwrap();
     let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-    assert_eq!(store.snapshot().schema_version, 8);
+    assert_eq!(store.snapshot().schema_version, SCHEMA_VERSION);
     let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     let saved_actions: Vec<_> = saved["macros"][0]["steps"]
         .as_array()
@@ -206,7 +206,21 @@ fn schema_six_is_normalized_without_changing_actions() {
         .iter()
         .map(|step| step["action"].clone())
         .collect();
-    assert_eq!(saved_actions, original_actions.as_array().unwrap().clone());
+    assert_eq!(
+        saved_actions,
+        vec![
+            serde_json::json!({
+                "type": "delay",
+                "data": {
+                    "mode": "fixed",
+                    "fixed_ms": 42,
+                    "minimum_ms": 0,
+                    "maximum_ms": 0
+                }
+            }),
+            original_actions[1].clone(),
+        ]
+    );
 }
 
 #[test]
@@ -236,7 +250,7 @@ fn schema_seven_new_actions_migrate_and_survive_store_round_trips() {
     assert_eq!(*reloaded.snapshot(), first);
 
     let structural = serde_json::to_value(reloaded.snapshot().as_ref()).unwrap();
-    assert_eq!(structural["schema_version"], 8);
+    assert_eq!(structural["schema_version"], SCHEMA_VERSION);
     assert_eq!(
         structural["macros"][0]["steps"][0]["action"]["type"],
         "notify"
@@ -322,7 +336,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
     drop(store);
     let (reopened, _) = MkMacroStore::open(dir.path()).unwrap();
     let snapshot = reopened.snapshot();
-    assert_eq!(snapshot.schema_version, 8);
+    assert_eq!(snapshot.schema_version, SCHEMA_VERSION);
     assert_eq!(
         snapshot.macros[0]
             .steps
@@ -334,16 +348,17 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
 }
 
 #[test]
-fn schema_newer_than_eight_is_rejected() {
+fn schema_newer_than_current_is_rejected() {
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join(MKMACROS_FILE),
-        r#"{"schema_version":9,"macros":[]}"#,
+        format!(r#"{{"schema_version":{},"macros":[]}}"#, SCHEMA_VERSION + 1),
     )
     .unwrap();
     let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    let expected = format!("newer than supported version {SCHEMA_VERSION}");
     assert!(
-        matches!(disposition, LoadDisposition::NeedsUserRecovery { error } if error.contains("newer than supported version 8"))
+        matches!(disposition, LoadDisposition::NeedsUserRecovery { error } if error.contains(&expected))
     );
     assert!(store.snapshot().macros.is_empty());
 }
