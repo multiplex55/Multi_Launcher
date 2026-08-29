@@ -148,7 +148,7 @@ fn run_notification_sequence(
     let continues = matches!(&policy, MkErrorPolicy::Continue);
     store
         .save(MkMacroDocument {
-            schema_version: 7,
+            schema_version: SCHEMA_VERSION,
             settings: Default::default(),
             macros: vec![notification_sequence(policy)],
         })

@@ -418,8 +418,11 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if version <= 4 {
         migrate_v4_to_v5(&mut value)?;
     }
+    if version <= 7 {
+        migrate_v7_to_v8(&mut value)?;
+    }
     let mut doc: MkMacroDocument = match version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 => serde_json::from_value(value)
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => serde_json::from_value(value)
             .context("mkmacros.json does not match the macro schema")?,
         _ => unreachable!(),
     };
@@ -427,6 +430,52 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+/// Converts schema-7 resolved Launcher actions into the temporary compatibility
+/// state used by schema 8. No Serde aliases accept the old shape outside here.
+fn migrate_v7_to_v8(value: &mut serde_json::Value) -> Result<()> {
+    if let Some(macros) = value.get_mut("macros").and_then(|v| v.as_array_mut()) {
+        for mac in macros {
+            let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for step in steps {
+                let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) else {
+                    continue;
+                };
+                if action.get("type").and_then(|v| v.as_str()) != Some("launcher_command") {
+                    continue;
+                }
+                let data = action
+                    .get_mut("data")
+                    .and_then(|v| v.as_object_mut())
+                    .ok_or_else(|| anyhow::anyhow!("legacy launcher_command has no data object"))?;
+                let command = data
+                    .remove("command")
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .ok_or_else(|| anyhow::anyhow!("legacy launcher_command has no command"))?;
+                let args = match data.remove("args") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(args)) => Some(args),
+                    Some(_) => anyhow::bail!("legacy launcher_command has invalid args"),
+                };
+                *data = serde_json::json!({
+                    "query": command,
+                    "legacy_resolved_action": {
+                        "label": command,
+                        "desc": "",
+                        "action": command,
+                        "args": args,
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(8);
+    Ok(())
 }
 /// Splits the schema-4 ambiguous `image_result` condition into an explicit live
 /// search. Previous-result conditions did not exist in schema 4.
@@ -658,6 +707,42 @@ mod tests {
                 image_assets: vec![],
             }],
         }
+    }
+    #[test]
+    fn v7_launcher_command_migrates_to_lossless_compatibility_action() {
+        let mut value = serde_json::json!({
+            "schema_version": 7,
+            "macros": [{"id": 1, "name": "legacy", "steps": [{
+                "id": 2,
+                "action": {"type": "launcher_command", "data": {
+                    "command": "tool.exe", "args": "--profile work"
+                }}
+            }]}]
+        });
+
+        migrate_v7_to_v8(&mut value).unwrap();
+        assert_eq!(value["schema_version"], 8);
+        let data = &value["macros"][0]["steps"][0]["action"]["data"];
+        assert_eq!(data["query"], "tool.exe");
+        assert!(data.get("command").is_none());
+        assert!(data.get("args").is_none());
+
+        let document: MkMacroDocument = serde_json::from_value(value).unwrap();
+        let MkAction::LauncherCommand(payload) = &document.macros[0].steps[0].action else {
+            unreachable!()
+        };
+        let legacy = payload.legacy_resolved_action.as_ref().unwrap();
+        assert_eq!(legacy.action, "tool.exe");
+        assert_eq!(legacy.args.as_deref(), Some("--profile work"));
+    }
+
+    #[test]
+    fn old_launcher_shape_is_not_a_serde_alias_for_schema_8() {
+        let action = serde_json::json!({
+            "type": "launcher_command",
+            "data": {"command": "tool.exe", "args": "--flag"}
+        });
+        assert!(serde_json::from_value::<MkAction>(action).is_err());
     }
     #[test]
     fn v4_image_conditions_migrate_recursively_with_live_search_defaults() {
