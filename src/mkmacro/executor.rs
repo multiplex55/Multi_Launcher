@@ -2301,8 +2301,17 @@ impl Executor {
                 self.backends.launcher.launch_process(&expanded)
             }
             MkAction::LauncherCommand(payload) => {
+                if let Some(action) = &payload.legacy_resolved_action {
+                    self.control.checkpoint()?;
+                    return crate::gui::execute_action(action).map_err(|error| {
+                        ExecutionDiagnostic::new(DiagnosticKind::Backend, error.to_string())
+                            .context("backend", "launcher")
+                            .context("action", action.label.clone())
+                    });
+                }
+
                 let query = interpolate(&payload.query, v)
-                    .map_err(|error| error.context("field", "launcher_command.query"))?;
+                    .map_err(|error| error.context("field", "launcher_command.command"))?;
                 // The broker must observe the executor's own pause/stop state;
                 // never substitute a fresh RunControl for this blocking call.
                 self.backends
@@ -4543,14 +4552,14 @@ mod phase_d_tests {
                     s(
                         1,
                         MkAction::SetVariable {
-                            name: "target".into(),
-                            value: MkValue::String("project alpha".into()),
+                            name: "note_name".into(),
+                            value: MkValue::String("daily-log".into()),
                         },
                     ),
                     s(
                         2,
                         MkAction::LauncherCommand(MkLauncherCommandPayload {
-                            query: "note open ${target} --exact ${target}".into(),
+                            query: "note open ${note_name}".into(),
                             legacy_resolved_action: None,
                         }),
                     ),
@@ -4561,12 +4570,94 @@ mod phase_d_tests {
 
         assert_eq!(
             f.commands.lock().unwrap().as_slice(),
-            ["note open project alpha --exact project alpha"]
+            ["note open daily-log"]
         );
         assert_eq!(f.processes.lock().unwrap().len(), 0);
         assert_eq!(
             f.command_controls.lock().unwrap().as_slice(),
             [Arc::as_ptr(&control) as usize]
+        );
+    }
+
+    #[test]
+    fn launcher_command_preserves_spaces_in_interpolated_raw_query() {
+        let f = Arc::new(FakeBackend::default());
+        run(
+            vec![
+                s(
+                    1,
+                    MkAction::SetVariable {
+                        name: "note_name".into(),
+                        value: MkValue::String("daily log with spaces".into()),
+                    },
+                ),
+                s(
+                    2,
+                    MkAction::LauncherCommand(MkLauncherCommandPayload {
+                        query: "note  open ${note_name}  --exact".into(),
+                        legacy_resolved_action: None,
+                    }),
+                ),
+            ],
+            f.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            f.commands.lock().unwrap().as_slice(),
+            ["note  open daily log with spaces  --exact"]
+        );
+    }
+
+    #[test]
+    fn launcher_command_interpolation_failure_has_context_and_no_effects() {
+        let f = Arc::new(FakeBackend::default());
+        let error = run(
+            vec![
+                s(
+                    1,
+                    MkAction::LauncherCommand(MkLauncherCommandPayload {
+                        query: "note open ${note_name}".into(),
+                        legacy_resolved_action: None,
+                    }),
+                ),
+                s(2, text("later observable step")),
+            ],
+            f.clone(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(
+            error.context.get("field").map(String::as_str),
+            Some("launcher_command.command")
+        );
+        assert_eq!(
+            error.context.get("variable").map(String::as_str),
+            Some("note_name")
+        );
+        assert!(f.commands.lock().unwrap().is_empty());
+        assert!(f.events().is_empty());
+    }
+
+    #[test]
+    fn launcher_command_uses_interpolation_escape_contract() {
+        let f = Arc::new(FakeBackend::default());
+        run(
+            vec![s(
+                1,
+                MkAction::LauncherCommand(MkLauncherCommandPayload {
+                    query: "note open $${note_name}".into(),
+                    legacy_resolved_action: None,
+                }),
+            )],
+            f.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            f.commands.lock().unwrap().as_slice(),
+            ["note open ${note_name}"]
         );
     }
 
