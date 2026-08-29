@@ -785,6 +785,37 @@ mod tests {
     use super::*;
     use crate::mkmacro::{AlphaPolicy, MkPoint, ReturnPoint, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
+
+    fn schema_v7_document(actions: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 7,
+            "settings": {},
+            "macros": [{
+                "id": 1,
+                "name": "legacy",
+                "description": "",
+                "enabled": true,
+                "hotkey": null,
+                "playback": {},
+                "steps": actions.into_iter().enumerate().map(|(index, action)| serde_json::json!({
+                    "id": index + 1,
+                    "enabled": true,
+                    "repeat": 1,
+                    "delay_after_ms": 0,
+                    "on_error": "stop",
+                    "action": action
+                })).collect::<Vec<_>>(),
+                "image_assets": []
+            }]
+        })
+    }
+
+    fn legacy_launcher(command: &str, args: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "launcher_command",
+            "data": {"command": command, "args": args}
+        })
+    }
     fn document() -> MkMacroDocument {
         MkMacroDocument {
             settings: Default::default(),
@@ -878,6 +909,132 @@ mod tests {
             let decoded: MkMacroDocument = serde_json::from_value(stable.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), stable);
         }
+    }
+
+    #[test]
+    fn production_load_migrates_manually_entered_launcher_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let legacy =
+            schema_v7_document(vec![legacy_launcher("note list", serde_json::Value::Null)]);
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        let document = store.snapshot();
+        assert_eq!(document.schema_version, 8);
+        let MkAction::LauncherCommand(payload) = &document.macros[0].steps[0].action else {
+            panic!("legacy Launcher step was not migrated")
+        };
+        assert_eq!(payload.query, "note list");
+        assert_eq!(payload.legacy_resolved_action, None);
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let data = &persisted["macros"][0]["steps"][0]["action"]["data"];
+        assert_eq!(persisted["schema_version"], 8);
+        assert_eq!(data["query"], "note list");
+        assert!(data.get("legacy_resolved_action").is_none());
+        assert!(data.get("command").is_none());
+        assert!(data.get("args").is_none());
+    }
+
+    #[test]
+    fn query_picker_migration_strips_prefix_and_honors_json_query_argument() {
+        let mut value = schema_v7_document(vec![
+            legacy_launcher("query:bm list", serde_json::Value::Null),
+            legacy_launcher(
+                "query:bm list",
+                serde_json::json!(r#"{"query":"unique bookmark"}"#),
+            ),
+        ]);
+        migrate_v7_to_v8(&mut value).unwrap();
+
+        for (index, expected) in [(0, "bm list"), (1, "bm list unique bookmark")] {
+            let data = &value["macros"][0]["steps"][index]["action"]["data"];
+            assert_eq!(data["query"], expected);
+            assert!(data.get("legacy_resolved_action").is_none());
+            assert!(data.get("command").is_none());
+            assert!(data.get("args").is_none());
+        }
+        assert_eq!(
+            query_action_text("bm list", Some(r#"{"query":"unique bookmark"}"#)),
+            "bm list unique bookmark"
+        );
+    }
+
+    #[test]
+    fn canonical_action_migration_preserves_complete_resolved_action() {
+        let mut value = schema_v7_document(vec![legacy_launcher(
+            "settings:open_section",
+            serde_json::json!("advanced-launcher-options"),
+        )]);
+        migrate_v7_to_v8(&mut value).unwrap();
+        let data = &value["macros"][0]["steps"][0]["action"]["data"];
+        assert_eq!(
+            data["query"],
+            "settings:open_section advanced-launcher-options"
+        );
+        assert_eq!(
+            data["legacy_resolved_action"],
+            serde_json::json!({
+                "label": "settings:open_section",
+                "desc": "",
+                "action": "settings:open_section",
+                "args": "advanced-launcher-options"
+            })
+        );
+
+        let document: MkMacroDocument = serde_json::from_value(value).unwrap();
+        let MkAction::LauncherCommand(payload) = &document.macros[0].steps[0].action else {
+            panic!()
+        };
+        assert_eq!(
+            payload.legacy_resolved_action,
+            Some(crate::actions::Action {
+                label: "settings:open_section".into(),
+                desc: String::new(),
+                action: "settings:open_section".into(),
+                args: Some("advanced-launcher-options".into()),
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<MkMacroDocument>(serde_json::to_value(&document).unwrap())
+                .unwrap(),
+            document
+        );
+    }
+
+    #[test]
+    fn production_store_v7_to_v8_round_trip_is_structurally_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let legacy = schema_v7_document(vec![
+            legacy_launcher("note list", serde_json::Value::Null),
+            legacy_launcher("settings:open_section", serde_json::json!("launcher")),
+        ]);
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        let first = store.snapshot();
+        assert_eq!(first.schema_version, 8);
+        store.save((*first).clone()).unwrap();
+        drop(store);
+
+        let first_saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        assert_eq!(reopened.snapshot().as_ref(), first.as_ref());
+        reopened.save((*reopened.snapshot()).clone()).unwrap();
+        let second_saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(second_saved, first_saved);
+        assert_eq!(second_saved["schema_version"], 8);
+        let text = serde_json::to_string(&second_saved).unwrap();
+        assert!(!text.contains("\"command\""));
+        assert_eq!(text.matches("legacy_resolved_action").count(), 1);
     }
 
     #[test]
