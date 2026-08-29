@@ -557,7 +557,10 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             &["run", "launch"],
             Launcher,
             MkAction::LauncherCommand(MkLauncherCommandPayload {
-                query: String::new(),
+                // Catalog defaults must satisfy the same commit-ready contract as
+                // every other configurable action. Authors can replace this raw
+                // example with any Launcher query in the editor.
+                query: "note list".into(),
                 legacy_resolved_action: None,
             })
         ),
@@ -2325,7 +2328,7 @@ mod launcher_command_default_tests {
     use super::*;
 
     #[test]
-    fn new_launcher_command_is_an_empty_non_legacy_query() {
+    fn new_launcher_command_is_a_valid_non_legacy_example_query() {
         let descriptor = descriptors()
             .into_iter()
             .find(|descriptor| descriptor.name == "Launcher Command")
@@ -2333,7 +2336,7 @@ mod launcher_command_default_tests {
         let MkAction::LauncherCommand(payload) = (descriptor.make_default)() else {
             panic!("launcher descriptor returned the wrong action");
         };
-        assert!(payload.query.is_empty());
+        assert_eq!(payload.query, "note list");
         assert!(payload.legacy_resolved_action.is_none());
     }
 
