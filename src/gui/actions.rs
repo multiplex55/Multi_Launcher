@@ -73,6 +73,11 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        if let Ok(guard) = ACTIVATION_HOOK.lock()
+            && let Some(ref hook) = *guard
+        {
+            hook(&a, source);
+        }
         #[cfg(test)]
         {
             self.test_last_activation = Some((a.clone(), source));
