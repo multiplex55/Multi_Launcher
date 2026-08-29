@@ -2365,7 +2365,7 @@ impl Executor {
                 }
 
                 let query = interpolate(&payload.query, v)
-                    .map_err(|error| error.context("field", "launcher_command.command"))?;
+                    .map_err(|error| error.context("field", "launcher_command.query"))?;
                 // The broker must observe the executor's own pause/stop state;
                 // never substitute a fresh RunControl for this blocking call.
                 self.backends
@@ -4611,7 +4611,7 @@ mod phase_d_tests {
     }
 
     #[test]
-    fn launcher_command_submits_expanded_raw_query_with_active_control_only() {
+    fn launcher_command_submits_current_variable_as_one_raw_query() {
         let f = Arc::new(FakeBackend::default());
         let control = Arc::new(RunControl::default());
         control.reset();
@@ -4622,7 +4622,7 @@ mod phase_d_tests {
                         1,
                         MkAction::SetVariable {
                             name: "note_name".into(),
-                            value: MkValue::String("daily-log".into()),
+                            value: MkValue::String("alpha".into()),
                         },
                     ),
                     s(
@@ -4637,10 +4637,15 @@ mod phase_d_tests {
             )
             .unwrap();
 
-        assert_eq!(
-            f.commands.lock().unwrap().as_slice(),
-            ["note open daily-log"]
+        assert_eq!(f.commands.lock().unwrap().as_slice(), ["note open alpha"]);
+        assert!(
+            !f.commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|query| query == "note open ${note_name}")
         );
+        assert!(f.legacy_actions.lock().unwrap().is_empty());
         assert_eq!(f.processes.lock().unwrap().len(), 0);
         assert_eq!(
             f.command_controls.lock().unwrap().as_slice(),
@@ -4697,14 +4702,14 @@ mod phase_d_tests {
                 s(
                     1,
                     MkAction::SetVariable {
-                        name: "note_name".into(),
-                        value: MkValue::String("daily log with spaces".into()),
+                        name: "project_name".into(),
+                        value: MkValue::String("Daily Work Notes".into()),
                     },
                 ),
                 s(
                     2,
                     MkAction::LauncherCommand(MkLauncherCommandPayload {
-                        query: "note  open ${note_name}  --exact".into(),
+                        query: "note open ${project_name}".into(),
                         legacy_resolved_action: None,
                     }),
                 ),
@@ -4713,10 +4718,48 @@ mod phase_d_tests {
         )
         .unwrap();
 
+        let commands = f.commands.lock().unwrap();
+        assert_eq!(
+            commands.len(),
+            1,
+            "the query is submitted once, not tokenized"
+        );
+        assert_eq!(commands[0], "note open Daily Work Notes");
+        assert!(!commands[0].contains(['\'', '"', '\\']));
+        assert!(f.legacy_actions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn launcher_command_repeated_executions_use_each_current_value() {
+        let f = Arc::new(FakeBackend::default());
+        for value in ["alpha", "beta"] {
+            run(
+                vec![
+                    s(
+                        1,
+                        MkAction::SetVariable {
+                            name: "note_name".into(),
+                            value: MkValue::String(value.into()),
+                        },
+                    ),
+                    s(
+                        2,
+                        MkAction::LauncherCommand(MkLauncherCommandPayload {
+                            query: "note open ${note_name}".into(),
+                            legacy_resolved_action: None,
+                        }),
+                    ),
+                ],
+                f.clone(),
+            )
+            .unwrap();
+        }
+
         assert_eq!(
             f.commands.lock().unwrap().as_slice(),
-            ["note  open daily log with spaces  --exact"]
+            ["note open alpha", "note open beta"]
         );
+        assert!(f.legacy_actions.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -4740,13 +4783,14 @@ mod phase_d_tests {
         assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
         assert_eq!(
             error.context.get("field").map(String::as_str),
-            Some("launcher_command.command")
+            Some("launcher_command.query")
         );
         assert_eq!(
             error.context.get("variable").map(String::as_str),
             Some("note_name")
         );
         assert!(f.commands.lock().unwrap().is_empty());
+        assert!(f.legacy_actions.lock().unwrap().is_empty());
         assert!(f.events().is_empty());
     }
 
