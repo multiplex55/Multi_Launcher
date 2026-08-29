@@ -248,6 +248,12 @@ fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
             action: "notes:dialog".into(),
             args: None,
         },
+        Action {
+            label: "List notes".into(),
+            desc: "query suggestion".into(),
+            action: "query:note list".into(),
+            args: Some(r#"{"query":"${project}"}"#.into()),
+        },
     ]);
     let mut dialog = MkMacroDialog::new_with_authoring_context(
         Arc::new(store),
@@ -296,14 +302,23 @@ fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
     let conversion = dialog
         .action_editor
         .launcher_picker_request(PickerPurpose::Process, macro_id);
+    assert!(
+        !dialog.action_editor.apply_launcher_picker_action(
+            &conversion,
+            &actions[1],
+            Some(macro_id),
+            true
+        ),
+        "a resolved dialog action cannot be converted into a raw query"
+    );
     assert!(dialog.action_editor.apply_launcher_picker_action(
         &conversion,
-        &actions[1],
+        &actions[2],
         Some(macro_id),
         true
     ));
     assert!(
-        matches!(&dialog.action_editor.draft.as_ref().unwrap().action, MkAction::LauncherCommand(payload) if payload.query == "notes:dialog")
+        matches!(&dialog.action_editor.draft.as_ref().unwrap().action, MkAction::LauncherCommand(payload) if payload.query == "note list ${project}" && payload.legacy_resolved_action.is_none())
     );
     dialog.action_editor.cancel();
     dialog
