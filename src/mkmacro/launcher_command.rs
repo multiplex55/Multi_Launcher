@@ -1,14 +1,21 @@
-//! Thread-safe boundary for raw Launcher queries sent from macro workers to the GUI.
+//! Thread-safe boundary for Launcher requests sent from macro workers to the GUI.
 
 use super::executor::{DiagnosticKind, ExecResult, ExecutionDiagnostic, RunControl};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum LauncherCommandKind {
+    Query(String),
+    /// Compatibility-only action produced by macro document migration.
+    ResolvedLegacy(crate::actions::Action),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct LauncherCommandRequest {
     pub id: u64,
-    pub query: String,
+    pub kind: LauncherCommandKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,12 +77,31 @@ impl LauncherCommandBroker {
         }
     }
 
-    pub fn submit(
+    pub fn submit_query(
         &self,
         query: impl Into<String>,
         control: &RunControl,
     ) -> ExecResult<LauncherCommandResponse> {
-        let query = query.into();
+        self.submit_kind(LauncherCommandKind::Query(query.into()), control)
+    }
+
+    pub fn submit_resolved_legacy(
+        &self,
+        action: crate::actions::Action,
+        control: &RunControl,
+    ) -> ExecResult<LauncherCommandResponse> {
+        self.submit_kind(LauncherCommandKind::ResolvedLegacy(action), control)
+    }
+
+    fn submit_kind(
+        &self,
+        kind: LauncherCommandKind,
+        control: &RunControl,
+    ) -> ExecResult<LauncherCommandResponse> {
+        let diagnostic_value = match &kind {
+            LauncherCommandKind::Query(query) => ("query", query.clone()),
+            LauncherCommandKind::ResolvedLegacy(action) => ("action", action.action.clone()),
+        };
         let (tx, rx) = mpsc::channel();
         let request_id;
         {
@@ -90,14 +116,12 @@ impl LauncherCommandBroker {
             *pending = Some(PendingLauncherCommand {
                 request: LauncherCommandRequest {
                     id: request_id,
-                    query: query.clone(),
+                    kind,
                 },
                 response: Some(tx),
             });
         }
 
-        // Clone and invoke outside both mutexes: GUI callbacks may immediately
-        // inspect the request or replace the callback itself.
         let repaint = self.repaint.lock().unwrap().clone();
         if let Some(repaint) = repaint {
             repaint();
@@ -105,17 +129,14 @@ impl LauncherCommandBroker {
 
         loop {
             if control.is_stopped() {
-                // Withdrawal can prevent execution only while this request is
-                // still in the broker. If the GUI has already taken it, the
-                // GUI owns processing; dropping `rx` below makes a late
-                // response harmless (`PendingLauncherCommand::respond`
-                // deliberately tolerates a disconnected receiver).
+                // Withdrawal prevents execution only until the GUI takes ownership.
+                // Once taken, dropping `rx` makes the eventual response harmless.
                 self.withdraw_pending(request_id);
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::Cancelled,
                     "Launcher command cancelled because automation stopped",
                 )
-                .context("query", query));
+                .context(diagnostic_value.0, diagnostic_value.1));
             }
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok((id, response)) if id == request_id => return Ok(response),
@@ -127,7 +148,7 @@ impl LauncherCommandBroker {
                         "Launcher command response channel disconnected",
                     )
                     .context("backend", "launcher")
-                    .context("query", query));
+                    .context(diagnostic_value.0, diagnostic_value.1));
                 }
             }
         }
@@ -155,7 +176,7 @@ mod tests {
     ) -> thread::JoinHandle<ExecResult<LauncherCommandResponse>> {
         let broker = Arc::clone(broker);
         let query = query.to_owned();
-        thread::spawn(move || broker.submit(query, &RunControl::default()))
+        thread::spawn(move || broker.submit_query(query, &RunControl::default()))
     }
 
     fn wait_for_pending(broker: &LauncherCommandBroker) -> PendingLauncherCommand {
@@ -180,7 +201,9 @@ mod tests {
         let query = query.to_owned();
         let (result_tx, result_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
-            result_tx.send(broker.submit(query, &control)).unwrap();
+            result_tx
+                .send(broker.submit_query(query, &control))
+                .unwrap();
         });
         (result_rx, handle)
     }
@@ -191,7 +214,13 @@ mod tests {
         let first = submit_async(&broker, "  first QUERY  ");
         let pending = wait_for_pending(&broker);
         let first_id = pending.request.id;
-        assert_eq!(pending.request.query, "  first QUERY  ");
+        assert_eq!(
+            match &pending.request.kind {
+                LauncherCommandKind::Query(query) => query,
+                _ => panic!("expected query"),
+            },
+            "  first QUERY  "
+        );
         assert!(pending.respond(LauncherCommandResponse::Activated));
         assert_eq!(
             first.join().unwrap().unwrap(),
@@ -203,6 +232,69 @@ mod tests {
         assert!(pending.request.id > first_id);
         assert!(pending.respond(LauncherCommandResponse::NoResults));
         second.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn both_request_kinds_round_trip_and_preserve_ids() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let query_worker = submit_async(&broker, "query");
+        let query = wait_for_pending(&broker);
+        let query_id = query.request.id;
+        assert_eq!(
+            query.request.kind,
+            LauncherCommandKind::Query("query".into())
+        );
+        assert!(query.respond(LauncherCommandResponse::NoResults));
+        query_worker.join().unwrap().unwrap();
+
+        let action = crate::actions::Action {
+            label: "Notes".into(),
+            desc: "Open dialog".into(),
+            action: "note:dialog".into(),
+            args: Some("payload".into()),
+        };
+        let submit_broker = Arc::clone(&broker);
+        let expected = action.clone();
+        let worker = thread::spawn(move || {
+            submit_broker.submit_resolved_legacy(action, &RunControl::default())
+        });
+        let legacy = wait_for_pending(&broker);
+        assert!(legacy.request.id > query_id);
+        assert_eq!(
+            legacy.request.kind,
+            LauncherCommandKind::ResolvedLegacy(expected)
+        );
+        assert!(legacy.respond(LauncherCommandResponse::Activated));
+        assert_eq!(
+            worker.join().unwrap().unwrap(),
+            LauncherCommandResponse::Activated
+        );
+    }
+
+    #[test]
+    fn query_and_legacy_share_pending_slot() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let first = submit_async(&broker, "first");
+        while broker.pending.lock().unwrap().is_none() {
+            thread::yield_now();
+        }
+        let error = broker
+            .submit_resolved_legacy(
+                crate::actions::Action {
+                    label: "legacy".into(),
+                    desc: String::new(),
+                    action: "help:show".into(),
+                    args: None,
+                },
+                &RunControl::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "another Launcher command request is already active"
+        );
+        assert!(wait_for_pending(&broker).respond(LauncherCommandResponse::Activated));
+        first.join().unwrap().unwrap();
     }
 
     #[test]
@@ -238,14 +330,22 @@ mod tests {
         while broker.pending.lock().unwrap().is_none() {
             thread::yield_now();
         }
-        let error = broker.submit("second", &RunControl::default()).unwrap_err();
+        let error = broker
+            .submit_query("second", &RunControl::default())
+            .unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::Backend);
         assert_eq!(
             error.message,
             "another Launcher command request is already active"
         );
         let pending = broker.take_pending().unwrap();
-        assert_eq!(pending.request.query, "first");
+        assert_eq!(
+            match &pending.request.kind {
+                LauncherCommandKind::Query(query) => query,
+                _ => panic!("expected query"),
+            },
+            "first"
+        );
         assert!(pending.respond(LauncherCommandResponse::Activated));
         first.join().unwrap().unwrap();
     }
@@ -263,7 +363,9 @@ mod tests {
         }));
 
         assert_eq!(
-            broker.submit("query", &RunControl::default()).unwrap(),
+            broker
+                .submit_query("query", &RunControl::default())
+                .unwrap(),
             LauncherCommandResponse::Activated
         );
         assert!(called.load(Ordering::SeqCst));
@@ -333,6 +435,34 @@ mod tests {
     }
 
     #[test]
+    fn stop_withdraws_pending_legacy_request() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let control = Arc::new(RunControl::default());
+        let submit_broker = Arc::clone(&broker);
+        let submit_control = Arc::clone(&control);
+        let worker = thread::spawn(move || {
+            submit_broker.submit_resolved_legacy(
+                crate::actions::Action {
+                    label: "Help".into(),
+                    desc: String::new(),
+                    action: "help:show".into(),
+                    args: None,
+                },
+                &submit_control,
+            )
+        });
+        while broker.pending.lock().unwrap().is_none() {
+            thread::yield_now();
+        }
+        control.stop();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind,
+            DiagnosticKind::Cancelled
+        );
+        assert!(broker.take_pending().is_none());
+    }
+
+    #[test]
     fn cancellation_of_taken_request_does_not_withdraw_later_request() {
         let broker = Arc::new(LauncherCommandBroker::default());
         let first_control = Arc::new(RunControl::default());
@@ -359,7 +489,10 @@ mod tests {
         let second = broker
             .take_pending()
             .expect("request N+1 must remain pending");
-        assert_eq!(second.request.query, "second");
+        assert_eq!(
+            second.request.kind,
+            LauncherCommandKind::Query("second".into())
+        );
         assert!(!first.respond(LauncherCommandResponse::Activated));
         assert!(second.respond(LauncherCommandResponse::Activated));
         assert_eq!(

@@ -165,6 +165,8 @@ pub trait LauncherBackend: Send + Sync {
     fn launch_process(&self, p: &MkProcessPayload) -> ExecResult;
     /// Submits raw text to the Launcher query/search pipeline.
     fn command(&self, query: &str, control: &RunControl) -> ExecResult;
+    /// Submits a migration-only resolved action for GUI-thread activation.
+    fn resolved_legacy(&self, action: &crate::actions::Action, control: &RunControl) -> ExecResult;
 }
 pub trait ClipboardBackend: Send + Sync {
     /// Captures the text clipboard. Backends which cannot preserve non-text
@@ -436,7 +438,7 @@ impl LauncherBackend for ProductionLauncher {
     fn command(&self, query: &str, control: &RunControl) -> ExecResult {
         let response = self
             .command_broker
-            .submit(query, control)
+            .submit_query(query, control)
             .map_err(|error| error.context("backend", "launcher").context("query", query))?;
         match response {
             super::LauncherCommandResponse::Activated
@@ -452,6 +454,31 @@ impl LauncherBackend for ProductionLauncher {
                     .context("backend", "launcher")
                     .context("query", query))
             }
+        }
+    }
+
+    fn resolved_legacy(&self, action: &crate::actions::Action, control: &RunControl) -> ExecResult {
+        let response = self
+            .command_broker
+            .submit_resolved_legacy(action.clone(), control)
+            .map_err(|error| {
+                error
+                    .context("backend", "launcher")
+                    .context("action", action.action.clone())
+            })?;
+        match response {
+            super::LauncherCommandResponse::Activated => Ok(()),
+            super::LauncherCommandResponse::Failed(message) => {
+                Err(ExecutionDiagnostic::new(DiagnosticKind::Backend, message)
+                    .context("backend", "launcher")
+                    .context("action", action.action.clone()))
+            }
+            other => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                format!("unexpected response to resolved legacy action: {other:?}"),
+            )
+            .context("backend", "launcher")
+            .context("action", action.action.clone())),
         }
     }
 }
@@ -513,6 +540,10 @@ impl LauncherBackend for Unsupported {
         unsupported()
     }
     fn command(&self, _: &str, control: &RunControl) -> ExecResult {
+        control.checkpoint()?;
+        unsupported()
+    }
+    fn resolved_legacy(&self, _: &crate::actions::Action, control: &RunControl) -> ExecResult {
         control.checkpoint()?;
         unsupported()
     }
@@ -936,8 +967,8 @@ impl InputCleanupGuard {
 mod tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
-        AlphaPolicy, LauncherCommandBroker, LauncherCommandResponse, MkErrorPolicy, MkMacro,
-        MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
+        AlphaPolicy, LauncherCommandBroker, LauncherCommandKind, LauncherCommandResponse,
+        MkErrorPolicy, MkMacro, MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
     };
 
     fn run_production_launcher_command(response: LauncherCommandResponse) -> (ExecResult, String) {
@@ -954,7 +985,10 @@ mod tests {
             }
             std::thread::yield_now();
         };
-        let query = pending.request.query.clone();
+        let query = match &pending.request.kind {
+            LauncherCommandKind::Query(query) => query.clone(),
+            _ => panic!("expected query"),
+        };
         assert!(pending.respond(response));
         (worker.join().unwrap(), query)
     }
@@ -1033,8 +1067,9 @@ mod tests {
         let control = Arc::new(RunControl::default());
         let submitting_broker = Arc::clone(&broker);
         let submitting_control = Arc::clone(&control);
-        let submission =
-            std::thread::spawn(move || submitting_broker.submit("occupied", &submitting_control));
+        let submission = std::thread::spawn(move || {
+            submitting_broker.submit_query("occupied", &submitting_control)
+        });
         let _pending = loop {
             if let Some(pending) = broker.take_pending() {
                 break pending;
@@ -2302,12 +2337,31 @@ impl Executor {
             }
             MkAction::LauncherCommand(payload) => {
                 if let Some(action) = &payload.legacy_resolved_action {
-                    self.control.checkpoint()?;
-                    return crate::gui::execute_action(action).map_err(|error| {
-                        ExecutionDiagnostic::new(DiagnosticKind::Backend, error.to_string())
-                            .context("backend", "launcher")
-                            .context("action", action.label.clone())
-                    });
+                    let field = |value: &str, name: &'static str| {
+                        interpolate(value, v).map_err(|error| error.context("field", name))
+                    };
+                    let expanded = crate::actions::Action {
+                        label: field(
+                            &action.label,
+                            "launcher_command.legacy_resolved_action.label",
+                        )?,
+                        desc: field(&action.desc, "launcher_command.legacy_resolved_action.desc")?,
+                        action: field(
+                            &action.action,
+                            "launcher_command.legacy_resolved_action.action",
+                        )?,
+                        args: action
+                            .args
+                            .as_deref()
+                            .map(|value| {
+                                field(value, "launcher_command.legacy_resolved_action.args")
+                            })
+                            .transpose()?,
+                    };
+                    return self
+                        .backends
+                        .launcher
+                        .resolved_legacy(&expanded, Arc::as_ref(&self.control));
                 }
 
                 let query = interpolate(&payload.query, v)
@@ -3366,6 +3420,7 @@ pub mod fake {
         pub prompt_responses: Mutex<Vec<PromptResponse>>,
         pub processes: Mutex<Vec<MkProcessPayload>>,
         pub commands: Mutex<Vec<String>>,
+        pub legacy_actions: Mutex<Vec<crate::actions::Action>>,
         pub command_controls: Mutex<Vec<usize>>,
         pub prompts: Mutex<Vec<PromptRequest>>,
         pub window_calls: Mutex<Vec<WindowCall>>,
@@ -3386,6 +3441,7 @@ pub mod fake {
                 prompt_responses: Mutex::new(Vec::new()),
                 processes: Mutex::new(Vec::new()),
                 commands: Mutex::new(Vec::new()),
+                legacy_actions: Mutex::new(Vec::new()),
                 command_controls: Mutex::new(Vec::new()),
                 prompts: Mutex::new(Vec::new()),
                 window_calls: Mutex::new(Vec::new()),
@@ -3715,6 +3771,19 @@ pub mod fake {
                 .push(control as *const RunControl as usize);
             control.checkpoint()?;
             self.event(format!("command:{c}"))
+        }
+        fn resolved_legacy(
+            &self,
+            action: &crate::actions::Action,
+            control: &RunControl,
+        ) -> ExecResult {
+            self.legacy_actions.lock().unwrap().push(action.clone());
+            self.command_controls
+                .lock()
+                .unwrap()
+                .push(control as *const RunControl as usize);
+            control.checkpoint()?;
+            self.event(format!("legacy:{}", action.action))
         }
     }
     impl PromptBackend for FakeBackend {
@@ -4576,6 +4645,47 @@ mod phase_d_tests {
         assert_eq!(
             f.command_controls.lock().unwrap().as_slice(),
             [Arc::as_ptr(&control) as usize]
+        );
+    }
+
+    #[test]
+    fn migrated_launcher_action_is_interpolated_and_submitted_to_gui_boundary() {
+        let f = Arc::new(FakeBackend::default());
+        run(
+            vec![
+                s(
+                    1,
+                    MkAction::SetVariable {
+                        name: "name".into(),
+                        value: MkValue::String("daily".into()),
+                    },
+                ),
+                s(
+                    2,
+                    MkAction::LauncherCommand(MkLauncherCommandPayload {
+                        query: String::new(),
+                        legacy_resolved_action: Some(crate::actions::Action {
+                            label: "Open ${name}".into(),
+                            desc: "Description ${name}".into(),
+                            action: "note:open:${name}".into(),
+                            args: Some(r#"{"note":"${name}"}"#.into()),
+                        }),
+                    }),
+                ),
+            ],
+            f.clone(),
+        )
+        .unwrap();
+        assert!(f.commands.lock().unwrap().is_empty());
+        assert!(f.processes.lock().unwrap().is_empty());
+        assert_eq!(
+            f.legacy_actions.lock().unwrap().as_slice(),
+            &[crate::actions::Action {
+                label: "Open daily".into(),
+                desc: "Description daily".into(),
+                action: "note:open:daily".into(),
+                args: Some(r#"{"note":"daily"}"#.into()),
+            }]
         );
     }
 
