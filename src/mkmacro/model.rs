@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-// Schema 7 introduces action tags that schema-6 builds do not know how to
-// deserialize, so documents containing them must not claim schema-6 compatibility.
-pub const SCHEMA_VERSION: u32 = 7;
+// Schema 8 changes Launcher commands from resolved actions to raw queries.
+pub const SCHEMA_VERSION: u32 = 8;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -816,11 +815,16 @@ pub enum MkAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct MkLauncherCommandPayload {
     /// Text submitted to the Launcher's normal search and command pipeline.
     #[serde(default)]
     pub query: String,
     /// A resolved action retained only while reading macros authored by older versions.
+    ///
+    /// New and editor-created actions always set this to `None`. `Some` is written
+    /// exclusively by the v7-to-v8 migration, and editing `query` permanently
+    /// clears it so the action thereafter uses normal query behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_resolved_action: Option<crate::actions::Action>,
 }
@@ -873,6 +877,97 @@ impl MkAction {
             self,
             Self::Else | Self::EndIf | Self::RepeatEnd | Self::WhileEnd
         )
+    }
+}
+
+#[cfg(test)]
+mod launcher_command_payload_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    #[test]
+    fn normal_query_round_trips_with_variables_and_has_canonical_shape() {
+        let action = MkAction::LauncherCommand(MkLauncherCommandPayload {
+            query: "note list ${project name}".into(),
+            legacy_resolved_action: None,
+        });
+
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"launcher_command","data":{"query":"note list ${project name}"}}"#
+        );
+        assert!(json.contains("\"query\""));
+        assert!(!json.contains("legacy_resolved_action"));
+        assert!(!json.contains("\"command\""));
+        assert!(!json.contains("\"args\""));
+        assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+    }
+
+    #[test]
+    fn legacy_resolved_action_round_trips_without_losing_arguments() {
+        let action = MkAction::LauncherCommand(MkLauncherCommandPayload {
+            query: "legacy tool".into(),
+            legacy_resolved_action: Some(Action {
+                label: "Legacy Tool".into(),
+                desc: "Imported from schema 7".into(),
+                action: "tool.exe".into(),
+                args: Some("--profile \"work notes\"".into()),
+            }),
+        });
+
+        let json = serde_json::to_string(&action).unwrap();
+        let decoded: MkAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, action);
+        let MkAction::LauncherCommand(payload) = decoded else {
+            unreachable!()
+        };
+        assert_eq!(
+            payload.legacy_resolved_action.unwrap().args.as_deref(),
+            Some("--profile \"work notes\"")
+        );
+    }
+
+    #[test]
+    fn default_payload_cannot_populate_legacy_compatibility_state() {
+        let payload = MkLauncherCommandPayload::default();
+        assert!(payload.query.is_empty());
+        assert!(payload.legacy_resolved_action.is_none());
+    }
+
+    #[test]
+    fn current_document_round_trips_as_schema_8_with_query_payload() {
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                id: 1,
+                name: "launcher".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                playback: MkPlayback::default(),
+                steps: vec![MkStep {
+                    id: 2,
+                    enabled: true,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: MkErrorPolicy::Stop,
+                    action: MkAction::LauncherCommand(MkLauncherCommandPayload {
+                        query: "note list".into(),
+                        legacy_resolved_action: None,
+                    }),
+                }],
+                image_assets: vec![],
+            }],
+            ..MkMacroDocument::default()
+        };
+
+        let json = serde_json::to_string(&document).unwrap();
+        assert!(json.contains("\"schema_version\":8"));
+        assert!(json.contains(r#""data":{"query":"note list"}"#));
+        assert_eq!(
+            serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
+            document
+        );
     }
 }
 #[cfg(test)]
