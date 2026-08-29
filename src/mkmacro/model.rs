@@ -1,14 +1,14 @@
 use super::{
     image_search::{AlphaPolicy, ReturnPoint},
-    screen::SearchRegion,
+    screen::{ScreenRect, SearchRegion},
 };
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-// Schema 8 changes Launcher commands from resolved actions to raw queries.
-pub const SCHEMA_VERSION: u32 = 8;
+// Schema 9 adds folders, scoped hotkeys, configurable delays, region clicks, and desktop selection.
+pub const SCHEMA_VERSION: u32 = 9;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -24,6 +24,8 @@ pub struct MkMacroDocument {
     pub schema_version: u32,
     #[serde(default)]
     pub macros: Vec<MkMacro>,
+    #[serde(default)]
+    pub folders: Vec<MkMacroFolder>,
     /// Document-wide authoring controls shared by every macro.
     #[serde(default)]
     pub settings: MkMacroSettings,
@@ -33,9 +35,15 @@ impl Default for MkMacroDocument {
         Self {
             schema_version: SCHEMA_VERSION,
             macros: vec![],
+            folders: vec![],
             settings: MkMacroSettings::default(),
         }
     }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkMacroFolder {
+    pub id: u64,
+    pub name: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMacroSettings {
@@ -63,6 +71,10 @@ pub struct MkMacro {
     #[serde(default)]
     pub hotkey: Option<MkHotkey>,
     #[serde(default)]
+    pub hotkey_scope: MkHotkeyScope,
+    #[serde(default)]
+    pub folder_id: Option<u64>,
+    #[serde(default)]
     pub playback: MkPlayback,
     #[serde(default)]
     pub steps: Vec<MkStep>,
@@ -89,6 +101,13 @@ pub struct MkHotkey {
     pub key: MkKey,
     #[serde(default)]
     pub modifiers: Vec<MkKey>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum MkHotkeyScope {
+    #[default]
+    AnyWindow,
+    ActiveWindow(MkWindowMatcher),
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkPlayback {
@@ -469,6 +488,47 @@ pub struct MkMousePayload {
     pub clicks: u32,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkClickWithinRegionPayload {
+    pub rect: ScreenRect,
+    pub button: MkMouseButton,
+    #[serde(default = "one")]
+    pub clicks: u32,
+    #[serde(default)]
+    pub edge_padding_px: u32,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MkDelayMode {
+    #[default]
+    #[serde(rename = "fixed")]
+    Fixed,
+    #[serde(rename = "random_range")]
+    RandomRange,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkDelayPayload {
+    #[serde(default, rename = "mode")]
+    pub mode: MkDelayMode,
+    #[serde(default = "default_delay_ms", rename = "fixed_ms")]
+    pub fixed_ms: u64,
+    #[serde(default, rename = "minimum_ms")]
+    pub minimum_ms: u64,
+    #[serde(default, rename = "maximum_ms")]
+    pub maximum_ms: u64,
+}
+fn default_delay_ms() -> u64 {
+    1_000
+}
+impl Default for MkDelayPayload {
+    fn default() -> Self {
+        Self {
+            mode: MkDelayMode::Fixed,
+            fixed_ms: default_delay_ms(),
+            minimum_ms: 0,
+            maximum_ms: 0,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMouseMovePayload {
     pub target: MkCoordinateTarget,
     #[serde(default)]
@@ -685,6 +745,7 @@ pub enum MkVirtualDesktopAction {
     SwitchLeft,
     SwitchRight,
     CloseCurrent,
+    GoTo { desktop: u32 },
 }
 /// The wheel axis used by a mouse-scroll action.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -741,6 +802,7 @@ pub enum MkAction {
     MouseMove(MkMouseMovePayload),
     MouseDrag(MkMouseDragPayload),
     MouseClick(MkMousePayload),
+    ClickWithinRegion(MkClickWithinRegionPayload),
     MouseDown(MkMouseButton),
     MouseUp(MkMouseButton),
     MouseScroll {
@@ -748,9 +810,7 @@ pub enum MkAction {
         axis: MkMouseScrollAxis,
         i32_delta: i32,
     },
-    Delay {
-        milliseconds: u64,
-    },
+    Delay(MkDelayPayload),
     Process(MkProcessPayload),
     LauncherCommand(MkLauncherCommandPayload),
     WindowActivate(MkWindowPayload),
@@ -936,7 +996,7 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_8_with_query_payload() {
+    fn current_document_round_trips_as_schema_9_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 id: 1,
@@ -944,6 +1004,8 @@ mod launcher_command_payload_tests {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: MkPlayback::default(),
                 steps: vec![MkStep {
                     id: 2,
@@ -962,7 +1024,7 @@ mod launcher_command_payload_tests {
         };
 
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"schema_version\":8"));
+        assert!(json.contains("\"schema_version\":9"));
         assert!(json.contains(r#""data":{"query":"note list"}"#));
         assert_eq!(
             serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
@@ -1164,12 +1226,15 @@ mod screenshot_region_serialization_tests {
             .collect();
         let document = MkMacroDocument {
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 7,
                 name: "screenshots".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: MkPlayback::default(),
                 steps,
                 image_assets: vec![],
@@ -1333,5 +1398,111 @@ mod wait_timeout_tests {
             ..WaitForVisualChange::default()
         };
         assert_eq!(visual.timeout_duration(), None);
+    }
+}
+
+#[cfg(test)]
+mod schema_v9_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn document_defaults_to_schema_nine_and_no_folders() {
+        let document: MkMacroDocument = serde_json::from_str("{}").unwrap();
+        assert_eq!(document.schema_version, 9);
+        assert!(document.folders.is_empty());
+        assert!(MkMacroDocument::default().folders.is_empty());
+    }
+
+    fn sample_macro() -> MkMacro {
+        MkMacro {
+            id: 7,
+            name: "Scoped".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: MkHotkeyScope::default(),
+            folder_id: Some(42),
+            playback: MkPlayback::default(),
+            steps: vec![],
+            image_assets: vec![],
+        }
+    }
+
+    #[test]
+    fn folders_and_macro_folder_ids_round_trip() {
+        let document = MkMacroDocument {
+            folders: vec![MkMacroFolder {
+                id: 42,
+                name: "Work".into(),
+            }],
+            macros: vec![sample_macro()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&document).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
+            document
+        );
+    }
+
+    #[test]
+    fn hotkey_scopes_default_and_round_trip() {
+        let json = serde_json::to_value(sample_macro()).unwrap();
+        let mut legacy = json.as_object().unwrap().clone();
+        legacy.remove("hotkey_scope");
+        let decoded: MkMacro = serde_json::from_value(legacy.into()).unwrap();
+        assert_eq!(decoded.hotkey_scope, MkHotkeyScope::AnyWindow);
+
+        let scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            process: Some("editor.exe".into()),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&scope).unwrap();
+        assert!(json.contains(r#""type":"active_window""#));
+        assert_eq!(serde_json::from_str::<MkHotkeyScope>(&json).unwrap(), scope);
+    }
+
+    #[test]
+    fn fixed_and_random_delays_round_trip() {
+        let delays = [
+            MkDelayPayload::default(),
+            MkDelayPayload {
+                mode: MkDelayMode::RandomRange,
+                fixed_ms: 1000,
+                minimum_ms: 25,
+                maximum_ms: 75,
+            },
+        ];
+        for payload in delays {
+            let action = MkAction::Delay(payload);
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn click_within_signed_region_round_trips() {
+        let action = MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+            rect: ScreenRect::new(-1920, -240, 640, 480),
+            button: MkMouseButton::Right,
+            clicks: 2,
+            edge_padding_px: 12,
+        });
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains(r#""x":-1920"#));
+        assert!(json.contains(r#""y":-240"#));
+        assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+    }
+
+    #[test]
+    fn go_to_desktop_persists_one_based_number() {
+        let action = MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 3 });
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"virtual_desktop","data":{"go_to":{"desktop":3}}}"#
+        );
+        assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
     }
 }

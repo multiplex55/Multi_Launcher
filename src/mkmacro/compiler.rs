@@ -30,6 +30,7 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
         settings: Default::default(),
         schema_version: SCHEMA_VERSION,
         macros: vec![m.clone()],
+        folders: vec![],
     };
     let d = validate_document(&doc, None);
     if !can_run(&d) {
@@ -122,6 +123,8 @@ mod tests {
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: Default::default(),
             steps,
             image_assets: vec![],
@@ -131,9 +134,21 @@ mod tests {
     fn if_else_jumps_and_depth() {
         let p = compile(&mac(vec![
             step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
-            step(2, MkAction::Delay { milliseconds: 1 }),
+            step(
+                2,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 1,
+                    ..Default::default()
+                }),
+            ),
             step(3, MkAction::Else),
-            step(4, MkAction::Delay { milliseconds: 2 }),
+            step(
+                4,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 2,
+                    ..Default::default()
+                }),
+            ),
             step(5, MkAction::EndIf),
         ]))
         .unwrap();

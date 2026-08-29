@@ -6,12 +6,15 @@ fn invalid_doc() -> MkMacroDocument {
     MkMacroDocument {
         settings: Default::default(),
         schema_version: SCHEMA_VERSION,
+        folders: vec![],
         macros: vec![MkMacro {
             id: 7,
             name: "recover me".into(),
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: Default::default(),
             steps: vec![MkStep {
                 id: 8,
@@ -67,6 +70,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
     };
     let document = MkMacroDocument {
         schema_version: SCHEMA_VERSION,
+        folders: vec![],
         settings: settings.clone(),
         macros: vec![
             MkMacro {
@@ -75,6 +79,8 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
                     id: 201,
@@ -95,6 +101,8 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
                     id: 202,
@@ -102,7 +110,10 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),
-                    action: MkAction::Delay { milliseconds: 42 },
+                    action: MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 42,
+                        ..Default::default()
+                    }),
                 }],
                 image_assets: vec![],
             },
@@ -292,6 +303,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
     store
         .save(MkMacroDocument {
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
                 id: 77,
@@ -299,6 +311,8 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps,
                 image_assets: vec![],

@@ -323,7 +323,10 @@ fn launcher_snapshot_picker_is_transactional_convertible_and_stale_safe() {
     dialog.action_editor.cancel();
     dialog
         .action_editor
-        .begin_new(MkAction::Delay { milliseconds: 1 });
+        .begin_new(MkAction::Delay(MkDelayPayload {
+            fixed_ms: 1,
+            ..Default::default()
+        }));
     assert!(
         !dialog.action_editor.apply_launcher_picker_action(
             &conversion,
@@ -343,13 +346,22 @@ fn deleting_last_macro_clears_editor_requests_and_persists_empty_document() {
     let mut dialog = MkMacroDialog::new(Arc::clone(&store));
     dialog.create_macro();
     assert!(dialog.rename_selected("Delete this final macro"));
-    insert(&mut dialog, MkAction::Delay { milliseconds: 9 });
+    insert(
+        &mut dialog,
+        MkAction::Delay(MkDelayPayload {
+            fixed_ms: 9,
+            ..Default::default()
+        }),
+    );
     dialog.save().unwrap();
     let deleted_id = dialog.selected_macro_id.unwrap();
 
     dialog
         .action_editor
-        .begin_new(MkAction::Delay { milliseconds: 10 });
+        .begin_new(MkAction::Delay(MkDelayPayload {
+            fixed_ms: 10,
+            ..Default::default()
+        }));
     let request = dialog
         .action_editor
         .launcher_picker_request(PickerPurpose::LauncherCommand, deleted_id);
@@ -555,7 +567,13 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
             mode: MkTextMode::Type,
         }),
     );
-    insert(&mut dialog, MkAction::Delay { milliseconds: 250 });
+    insert(
+        &mut dialog,
+        MkAction::Delay(MkDelayPayload {
+            fixed_ms: 250,
+            ..Default::default()
+        }),
+    );
 
     let visible = dialog
         .selected_macro()
@@ -765,6 +783,8 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
         description: String::new(),
         enabled: true,
         hotkey: None,
+        hotkey_scope: Default::default(),
+        folder_id: None,
         playback: Default::default(),
         steps: vec![MkStep {
             id: 1,

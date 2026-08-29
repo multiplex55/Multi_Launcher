@@ -93,6 +93,7 @@ mod tests {
         MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: (1..=5)
                 .map(|id| MkMacro {
                     id,
@@ -100,6 +101,8 @@ mod tests {
                     description: String::new(),
                     enabled: true,
                     hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
                     playback: Default::default(),
                     steps: vec![],
                     image_assets: vec![],
@@ -235,7 +238,10 @@ mod tests {
             repeat: 1,
             delay_after_ms: 0,
             on_error: Default::default(),
-            action: MkAction::Delay { milliseconds: 1 },
+            action: MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                fixed_ms: 1,
+                ..Default::default()
+            }),
         });
         repair_ids(&mut d.draft);
         d.duplicate_selected_macro();
@@ -374,7 +380,13 @@ mod tests {
         let (_dir, mut d) = dialog();
         d.create_macro();
         for milliseconds in 1..=3 {
-            action_catalog::insert_action(&mut d, MkAction::Delay { milliseconds });
+            action_catalog::insert_action(
+                &mut d,
+                MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                    fixed_ms: milliseconds,
+                    ..Default::default()
+                }),
+            );
         }
         let ids: Vec<_> = d
             .selected_macro()
@@ -764,7 +776,10 @@ mod tests {
 
         d.action_catalog_visible = true;
         d.action_editor
-            .begin_new(MkAction::Delay { milliseconds: 1 });
+            .begin_new(MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                fixed_ms: 1,
+                ..Default::default()
+            }));
         d.open = false;
         d.close_children();
         assert!(!d.action_catalog_visible);
@@ -1553,6 +1568,8 @@ impl MkMacroDialog {
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: Default::default(),
             steps: vec![],
             image_assets: vec![],

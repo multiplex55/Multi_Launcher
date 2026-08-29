@@ -742,6 +742,8 @@ mod tests {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: MkPlayback::default(),
                 steps: vec![
                     step(

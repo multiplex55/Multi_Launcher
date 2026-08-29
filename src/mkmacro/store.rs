@@ -820,12 +820,15 @@ mod tests {
         MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 7,
                 name: "x".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
                     id: 9,
@@ -833,7 +836,10 @@ mod tests {
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),
-                    action: MkAction::Delay { milliseconds: 1 },
+                    action: MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 1,
+                        ..Default::default()
+                    }),
                 }],
                 image_assets: vec![],
             }],
