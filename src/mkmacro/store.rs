@@ -789,7 +789,7 @@ mod tests {
     fn schema_v7_document(actions: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "schema_version": 7,
-            "settings": {},
+            "settings": serde_json::to_value(MkMacroSettings::default()).unwrap(),
             "macros": [{
                 "id": 1,
                 "name": "legacy",
