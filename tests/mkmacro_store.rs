@@ -320,16 +320,16 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
 }
 
 #[test]
-fn schema_newer_than_seven_is_rejected() {
+fn schema_newer_than_eight_is_rejected() {
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join(MKMACROS_FILE),
-        r#"{"schema_version":8,"macros":[]}"#,
+        r#"{"schema_version":9,"macros":[]}"#,
     )
     .unwrap();
     let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
     assert!(
-        matches!(disposition, LoadDisposition::NeedsUserRecovery { error } if error.contains("newer than supported version 7"))
+        matches!(disposition, LoadDisposition::NeedsUserRecovery { error } if error.contains("newer than supported version 8"))
     );
     assert!(store.snapshot().macros.is_empty());
 }
