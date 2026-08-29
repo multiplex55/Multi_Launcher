@@ -397,69 +397,39 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     };
     let mut value: serde_json::Value = serde_json::from_str(&text)
         .context("mkmacros.json is malformed; keep it for recovery or correct the JSON")?;
-    let version = value
+    let input_version = value
         .get("schema_version")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    if version > SCHEMA_VERSION {
+    if input_version > SCHEMA_VERSION {
         anyhow::bail!(
-            "mkmacros.json schema version {version} is newer than supported version {SCHEMA_VERSION}; update Multi Launcher before opening it"
+            "mkmacros.json schema version {input_version} is newer than supported version {SCHEMA_VERSION}; update Multi Launcher before opening it"
         )
     };
-    if version == 1 {
+    if input_version == 1 {
         migrate_v1_to_v2(&mut value)?;
     }
-    if version <= 2 {
+    if input_version <= 2 {
         migrate_v2_to_v3(&mut value)?;
     }
-    if version <= 3 {
+    if input_version <= 3 {
         migrate_v3_to_v4(&mut value);
     }
-    if version <= 4 {
+    if input_version <= 4 {
         migrate_v4_to_v5(&mut value)?;
     }
-    if version <= 7 {
+    if input_version <= 7 {
         migrate_v7_to_v8(&mut value)?;
     }
-    if version <= 8 {
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(8) {
         migrate_v8_to_v9(&mut value)?;
     }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
-    let mut changed = version != SCHEMA_VERSION;
+    let mut changed = input_version != SCHEMA_VERSION;
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
-}
-/// Converts the schema-8 delay object into the typed schema-9 delay payload.
-/// Other schema-9 additions use Serde defaults and need no structural migration.
-fn migrate_v8_to_v9(value: &mut serde_json::Value) -> Result<()> {
-    if let Some(macros) = value.get_mut("macros").and_then(|v| v.as_array_mut()) {
-        for mac in macros {
-            let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) else {
-                continue;
-            };
-            for step in steps {
-                let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) else {
-                    continue;
-                };
-                if action.get("type").and_then(|v| v.as_str()) != Some("delay") {
-                    continue;
-                }
-                let Some(data) = action.get_mut("data").and_then(|v| v.as_object_mut()) else {
-                    anyhow::bail!("delay action data must be an object")
-                };
-                if let Some(milliseconds) = data.remove("milliseconds") {
-                    data.insert("mode".into(), serde_json::json!("fixed"));
-                    data.insert("fixed_ms".into(), milliseconds);
-                    data.insert("minimum_ms".into(), serde_json::json!(0));
-                    data.insert("maximum_ms".into(), serde_json::json!(0));
-                }
-            }
-        }
-    }
-    value["schema_version"] = serde_json::json!(9);
-    Ok(())
 }
 /// Converts schema-7 resolved Launcher actions into the temporary compatibility
 /// state used by schema 8. No Serde aliases accept the old shape outside here.
@@ -513,6 +483,68 @@ fn migrate_v7_to_v8(value: &mut serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Converts schema-8 delay objects and adds the schema-9 document/macro fields.
+fn migrate_v8_to_v9(value: &mut serde_json::Value) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 8 macro document must be an object"))?;
+    object
+        .entry("folders")
+        .or_insert_with(|| serde_json::json!([]));
+
+    let Some(macros) = object.get_mut("macros").and_then(|v| v.as_array_mut()) else {
+        object.insert("schema_version".into(), serde_json::json!(9));
+        return Ok(());
+    };
+    for (macro_index, mac) in macros.iter_mut().enumerate() {
+        let macro_object = mac.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("macro {macro_index}: legacy macro must be an object")
+        })?;
+        macro_object
+            .entry("folder_id")
+            .or_insert(serde_json::Value::Null);
+        macro_object
+            .entry("hotkey_scope")
+            .or_insert_with(|| serde_json::json!({"type": "any_window"}));
+
+        let Some(steps) = macro_object.get_mut("steps").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for (step_index, step) in steps.iter_mut().enumerate() {
+            let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            if action.get("type").and_then(|v| v.as_str()) != Some("delay") {
+                continue;
+            }
+            let data = action
+                .get("data")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "macro {macro_index} step {step_index}: legacy delay data must be an object"
+                    )
+                })?;
+            let milliseconds = data
+                .get("milliseconds")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!(
+                    "macro {macro_index} step {step_index}: legacy delay milliseconds must be an unsigned integer"
+                ))?;
+            action.insert(
+                "data".into(),
+                serde_json::json!({
+                    "mode": "fixed",
+                    "fixed_ms": milliseconds,
+                    "minimum_ms": 0,
+                    "maximum_ms": milliseconds,
+                }),
+            );
+        }
+    }
+    object.insert("schema_version".into(), serde_json::json!(9));
+    Ok(())
+}
 /// Joins legacy free-form fields without trimming meaningful text from either field.
 fn join_legacy_text(command: &str, args: Option<&str>) -> String {
     match args.filter(|args| !args.trim().is_empty()) {
@@ -1524,6 +1556,72 @@ mod tests {
     }
 
     #[test]
+    fn schema_eight_migration_covers_fields_boundaries_virtual_desktops_and_errors() {
+        let mut value = serde_json::json!({"schema_version":8,"macros":[{"name":"legacy","hotkey_scope":{"type":"active_window","data":{"title":"Editor"}},"folder_id":7,"steps":[
+            {"action":{"type":"delay","data":{"milliseconds":0}}}, {"action":{"type":"delay","data":{"milliseconds":u64::MAX}}},
+            {"action":{"type":"virtual_desktop","data":"create"}}, {"action":{"type":"virtual_desktop","data":"switch_left"}},
+            {"action":{"type":"virtual_desktop","data":"switch_right"}}, {"action":{"type":"virtual_desktop","data":"close_current"}}
+        ]}]});
+        migrate_v8_to_v9(&mut value).unwrap();
+        assert_eq!(value["folders"], serde_json::json!([]));
+        assert_eq!(value["macros"][0]["folder_id"], 7);
+        assert_eq!(value["macros"][0]["hotkey_scope"]["type"], "active_window");
+        assert_eq!(
+            value["macros"][0]["steps"][0]["action"]["data"]["fixed_ms"],
+            0
+        );
+        assert_eq!(
+            value["macros"][0]["steps"][1]["action"]["data"]["maximum_ms"],
+            18446744073709551615u64
+        );
+        for (index, action) in ["create", "switch_left", "switch_right", "close_current"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                value["macros"][0]["steps"][index + 2]["action"],
+                serde_json::json!({"type":"virtual_desktop","data":action})
+            );
+        }
+        for data in [
+            serde_json::json!(null),
+            serde_json::json!({"milliseconds":-1}),
+            serde_json::json!({"milliseconds":"1"}),
+        ] {
+            let mut malformed = serde_json::json!({"schema_version":8,"macros":[{"steps":[{"action":{"type":"delay","data":data}}]}]});
+            let error = migrate_v8_to_v9(&mut malformed).unwrap_err().to_string();
+            assert!(error.contains("macro 0 step 0"), "{error}");
+            assert_eq!(malformed["schema_version"], 8);
+        }
+    }
+
+    #[test]
+    fn schema_seven_load_runs_both_migrations_and_round_trips_as_nine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let value = schema_v7_document(vec![
+            legacy_launcher("note list", serde_json::Value::Null),
+            serde_json::json!({"type":"delay","data":{"milliseconds":123}}),
+        ]);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (doc, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(doc.schema_version, 9);
+        assert_eq!(doc.macros[0].hotkey_scope, MkHotkeyScope::AnyWindow);
+        assert_eq!(
+            doc.macros[0].steps[1].action,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 123,
+                maximum_ms: 123,
+                ..Default::default()
+            })
+        );
+        persist(&path, &doc).unwrap();
+        let (again, changed_again) = read_document(&path).unwrap().unwrap();
+        assert!(!changed_again);
+        assert_eq!(again, doc);
+    }
+    #[test]
     fn schema_eight_delay_migrates_to_schema_nine_payload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MKMACROS_FILE);
@@ -1540,6 +1638,7 @@ mod tests {
             document.macros[0].steps[0].action,
             MkAction::Delay(crate::mkmacro::MkDelayPayload {
                 fixed_ms: 42,
+                maximum_ms: 42,
                 ..Default::default()
             })
         );
