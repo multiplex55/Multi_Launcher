@@ -73,6 +73,10 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        #[cfg(test)]
+        {
+            self.test_last_activation = Some((a.clone(), source));
+        }
         let before = self.launcher_interaction_snapshot();
         if !self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
             self.activate_action_confirmed(a, query_override, source);
