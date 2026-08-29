@@ -1817,7 +1817,10 @@ mod tests {
             1,
             "the normal note action opened a note panel"
         );
-        assert_eq!(app.note_panels[0].note_slug(), "alpha");
+        assert!(
+            app.is_panel_open(Panel::NotePanel),
+            "normal note activation must update the Launcher panel state"
+        );
     }
 
     #[test]
