@@ -188,6 +188,27 @@ pub fn validate_document_with_context(
                 )
             }
             match &s.action {
+                MkAction::LauncherCommand(payload) => {
+                    if let Some(action) = &payload.legacy_resolved_action {
+                        if action.action.trim().is_empty() {
+                            push(
+                                &mut out,
+                                m.id,
+                                sid,
+                                "invalid_legacy_launcher_action",
+                                "Preserved Launcher action requires a canonical action",
+                            );
+                        }
+                    } else if payload.query.trim().is_empty() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "empty_launcher_command",
+                            "Launcher Command requires a command/query",
+                        );
+                    }
+                }
                 MkAction::Notify(payload) => {
                     // Windows notifications require a title; diagnose this before delivery.
                     if payload.title.trim().is_empty() {
@@ -1182,5 +1203,90 @@ mod notification_action_tests {
             }))
             .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod launcher_command_action_tests {
+    use super::*;
+    use crate::actions::Action;
+
+    fn diagnostics(payload: MkLauncherCommandPayload) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    id: 1,
+                    name: "test".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    playback: MkPlayback::default(),
+                    steps: vec![MkStep {
+                        id: 1,
+                        enabled: true,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: MkErrorPolicy::default(),
+                        action: MkAction::LauncherCommand(payload),
+                    }],
+                    image_assets: vec![],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_queries_are_rejected_without_mutation() {
+        for query in ["", " ", "\t", " \t\n\r\u{2003} "] {
+            let payload = MkLauncherCommandPayload {
+                query: query.into(),
+                legacy_resolved_action: None,
+            };
+            let found = diagnostics(payload.clone());
+            assert_eq!(found.len(), 1, "{query:?}");
+            assert_eq!(
+                found[0].message,
+                "Launcher Command requires a command/query"
+            );
+            assert_eq!(payload.query, query);
+        }
+    }
+
+    #[test]
+    fn arbitrary_queries_pass_structural_validation_without_launcher_resolution() {
+        for query in [
+            "note list",
+            "Notepad",
+            "note open ${note_name}",
+            "unknown-plugin command available only during playback",
+        ] {
+            assert!(
+                diagnostics(MkLauncherCommandPayload {
+                    query: query.into(),
+                    legacy_resolved_action: None,
+                })
+                .is_empty(),
+                "{query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn usable_legacy_action_allows_an_empty_display_query_but_is_structurally_validated() {
+        let legacy = |action: &str| MkLauncherCommandPayload {
+            query: String::new(),
+            legacy_resolved_action: Some(Action {
+                label: String::new(),
+                desc: String::new(),
+                action: action.into(),
+                args: Some("daily".into()),
+            }),
+        };
+        assert!(diagnostics(legacy("note:open")).is_empty());
+        let found = diagnostics(legacy(" \t"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "invalid_legacy_launcher_action");
     }
 }

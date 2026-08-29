@@ -1216,8 +1216,13 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         MkAction::Delay { milliseconds } => format!("{milliseconds} ms"),
         MkAction::Process(p) => format!("{} {}", p.program, p.arguments.join(" ")),
         MkAction::LauncherCommand(payload) => {
-            if payload.query.trim().is_empty() {
-                "No Launcher query configured".into()
+            if let Some(action) = &payload.legacy_resolved_action {
+                let mut detail = format!("Legacy action: {}", action.action);
+                if let Some(args) = action.args.as_deref().filter(|args| !args.is_empty()) {
+                    detail.push(' ');
+                    detail.push_str(args);
+                }
+                detail
             } else {
                 payload.query.clone()
             }
@@ -2333,9 +2338,9 @@ mod launcher_command_default_tests {
     }
 
     #[test]
-    fn empty_launcher_draft_has_meaningful_catalog_details() {
+    fn empty_launcher_draft_preserves_its_raw_query_as_details() {
         let action = MkAction::LauncherCommand(MkLauncherCommandPayload::default());
-        assert_eq!(action_details(&action), "No Launcher query configured");
+        assert_eq!(action_details(&action), "");
     }
 
     #[test]
@@ -2345,5 +2350,26 @@ mod launcher_command_default_tests {
             legacy_resolved_action: None,
         });
         assert_eq!(action_details(&action), "note list");
+    }
+
+    #[test]
+    fn legacy_launcher_details_identify_the_preserved_action() {
+        let mut action = MkAction::LauncherCommand(MkLauncherCommandPayload {
+            query: "display text".into(),
+            legacy_resolved_action: Some(crate::actions::Action {
+                label: "Old note".into(),
+                desc: "metadata is not execution identity".into(),
+                action: "note:open".into(),
+                args: Some("daily".into()),
+            }),
+        });
+        assert_eq!(action_details(&action), "Legacy action: note:open daily");
+        let MkAction::LauncherCommand(payload) = &mut action else {
+            unreachable!()
+        };
+        payload.query = "note open ${note_name}".into();
+        payload.legacy_resolved_action = None;
+        assert_eq!(action_details(&action), "note open ${note_name}");
+        assert!(!action_details(&action).contains("args"));
     }
 }
