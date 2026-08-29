@@ -208,6 +208,85 @@ mod tests {
         (result_rx, handle)
     }
 
+    fn notify_on_submission(broker: &LauncherCommandBroker) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        broker.set_repaint(Arc::new(move || {
+            // A disconnected test observer must not make submission panic.
+            let _ = tx.send(());
+        }));
+        rx
+    }
+
+    fn await_submission(notifications: &mpsc::Receiver<()>) {
+        notifications
+            .recv_timeout(Duration::from_millis(250))
+            .expect("submission must notify the GUI within the test deadline");
+    }
+
+    #[test]
+    fn fresh_broker_query_round_trips_activated_and_clears_slot() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let notifications = notify_on_submission(&broker);
+        let worker = submit_async(&broker, "note list");
+
+        await_submission(&notifications);
+        let pending = broker.take_pending().expect("GUI must receive the request");
+        assert_eq!(
+            pending.request.kind,
+            LauncherCommandKind::Query("note list".into())
+        );
+        assert!(pending.respond(LauncherCommandResponse::Activated));
+        assert_eq!(
+            worker.join().unwrap().unwrap(),
+            LauncherCommandResponse::Activated
+        );
+        assert!(broker.take_pending().is_none());
+    }
+
+    #[test]
+    fn waiting_cancellation_withdraws_request_and_stale_id_cannot_remove_successor() {
+        let broker = Arc::new(LauncherCommandBroker::default());
+        let notifications = notify_on_submission(&broker);
+        let control = Arc::new(RunControl::default());
+        let (first_result, first_worker) =
+            submit_with_control(&broker, "cancel exactly this", Arc::clone(&control));
+        await_submission(&notifications);
+        let cancelled_id = broker.pending.lock().unwrap().as_ref().unwrap().request.id;
+
+        control.stop();
+        let error = first_result
+            .recv_timeout(Duration::from_millis(250))
+            .expect("cancelled submission must finish promptly")
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(
+            error.message,
+            "Launcher command cancelled because automation stopped"
+        );
+        assert_eq!(
+            error.context.get("query").map(String::as_str),
+            Some("cancel exactly this")
+        );
+        assert!(broker.take_pending().is_none());
+        first_worker.join().unwrap();
+
+        let second = submit_async(&broker, "still live");
+        await_submission(&notifications);
+        let newer_id = broker.pending.lock().unwrap().as_ref().unwrap().request.id;
+        assert_ne!(newer_id, cancelled_id);
+        assert!(broker.withdraw_pending(cancelled_id).is_none());
+        let newer = broker
+            .take_pending()
+            .expect("stale withdrawal kept successor");
+        assert_eq!(newer.request.id, newer_id);
+        assert!(newer.respond(LauncherCommandResponse::Activated));
+        assert_eq!(
+            second.join().unwrap().unwrap(),
+            LauncherCommandResponse::Activated
+        );
+        assert!(broker.take_pending().is_none());
+    }
+
     #[test]
     fn ids_increase_monotonically_and_query_is_exact() {
         let broker = Arc::new(LauncherCommandBroker::default());
@@ -382,6 +461,15 @@ mod tests {
             error.message,
             "Launcher command response channel disconnected"
         );
+        assert_eq!(
+            error.context.get("backend").map(String::as_str),
+            Some("launcher")
+        );
+        assert_eq!(
+            error.context.get("query").map(String::as_str),
+            Some("query")
+        );
+        assert!(broker.take_pending().is_none());
     }
 
     #[test]
@@ -465,17 +553,13 @@ mod tests {
     #[test]
     fn cancellation_of_taken_request_does_not_withdraw_later_request() {
         let broker = Arc::new(LauncherCommandBroker::default());
+        let notifications = notify_on_submission(&broker);
         let first_control = Arc::new(RunControl::default());
         let (first_result, first_submitter) =
             submit_with_control(&broker, "first", first_control.clone());
-        let first = wait_for_pending(&broker);
-
-        let second_control = Arc::new(RunControl::default());
-        let (second_result, second_submitter) =
-            submit_with_control(&broker, "second", second_control);
-        while broker.pending.lock().unwrap().is_none() {
-            thread::yield_now();
-        }
+        await_submission(&notifications);
+        let first = broker.take_pending().unwrap();
+        let first_id = first.request.id;
 
         first_control.stop();
         assert_eq!(
@@ -486,21 +570,33 @@ mod tests {
                 .kind,
             DiagnosticKind::Cancelled
         );
+        first_submitter.join().unwrap();
+
+        let second_control = Arc::new(RunControl::default());
+        let (second_result, second_submitter) =
+            submit_with_control(&broker, "second", second_control);
+        await_submission(&notifications);
         let second = broker
             .take_pending()
             .expect("request N+1 must remain pending");
+        assert_ne!(second.request.id, first_id);
         assert_eq!(
             second.request.kind,
             LauncherCommandKind::Query("second".into())
         );
+        // The first receiver was dropped on cancellation, so this late GUI
+        // action is rejected and cannot deliver to the second request.
         assert!(!first.respond(LauncherCommandResponse::Activated));
         assert!(second.respond(LauncherCommandResponse::Activated));
         assert_eq!(
-            second_result.recv().unwrap().unwrap(),
+            second_result
+                .recv_timeout(Duration::from_millis(250))
+                .unwrap()
+                .unwrap(),
             LauncherCommandResponse::Activated
         );
-        first_submitter.join().unwrap();
         second_submitter.join().unwrap();
+        assert!(broker.take_pending().is_none());
     }
 
     #[test]
