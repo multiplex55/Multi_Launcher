@@ -967,8 +967,8 @@ impl InputCleanupGuard {
 mod tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
-        AlphaPolicy, LauncherCommandBroker, LauncherCommandResponse, MkErrorPolicy, MkMacro,
-        MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
+        AlphaPolicy, LauncherCommandBroker, LauncherCommandKind, LauncherCommandResponse,
+        MkErrorPolicy, MkMacro, MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
     };
 
     fn run_production_launcher_command(response: LauncherCommandResponse) -> (ExecResult, String) {
@@ -986,7 +986,7 @@ mod tests {
             std::thread::yield_now();
         };
         let query = match &pending.request.kind {
-            super::LauncherCommandKind::Query(query) => query.clone(),
+            LauncherCommandKind::Query(query) => query.clone(),
             _ => panic!("expected query"),
         };
         assert!(pending.respond(response));
