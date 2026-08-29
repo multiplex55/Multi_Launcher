@@ -418,6 +418,10 @@ pub struct LauncherApp {
     error_time: Option<Instant>,
     pub plugins: PluginManager,
     pub selected: Option<usize>,
+    /// Test seam for verifying that command dispatch used normal activation,
+    /// including the activation source, without launching an external process.
+    #[cfg(test)]
+    pub(crate) test_last_activation: Option<(Action, ActivationSource)>,
     pub usage: HashMap<String, u32>,
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
@@ -1382,6 +1386,8 @@ impl LauncherApp {
             error_time: None,
             plugins,
             selected: None,
+            #[cfg(test)]
+            test_last_activation: None,
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
