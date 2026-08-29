@@ -435,11 +435,11 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
 /// state used by schema 8. No Serde aliases accept the old shape outside here.
 fn migrate_v7_to_v8(value: &mut serde_json::Value) -> Result<()> {
     if let Some(macros) = value.get_mut("macros").and_then(|v| v.as_array_mut()) {
-        for mac in macros {
+        for (macro_index, mac) in macros.iter_mut().enumerate() {
             let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
-            for step in steps {
+            for (step_index, step) in steps.iter_mut().enumerate() {
                 let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) else {
                     continue;
                 };
@@ -449,33 +449,133 @@ fn migrate_v7_to_v8(value: &mut serde_json::Value) -> Result<()> {
                 let data = action
                     .get_mut("data")
                     .and_then(|v| v.as_object_mut())
-                    .ok_or_else(|| anyhow::anyhow!("legacy launcher_command has no data object"))?;
+                    .ok_or_else(|| anyhow::anyhow!("macro {macro_index} step {step_index}: legacy launcher_command data must be an object"))?;
                 let command = data
                     .remove("command")
                     .and_then(|v| v.as_str().map(str::to_owned))
-                    .ok_or_else(|| anyhow::anyhow!("legacy launcher_command has no command"))?;
+                    .ok_or_else(|| anyhow::anyhow!("macro {macro_index} step {step_index}: legacy launcher_command command must be a string"))?;
                 let args = match data.remove("args") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(serde_json::Value::String(args)) => Some(args),
-                    Some(_) => anyhow::bail!("legacy launcher_command has invalid args"),
+                    Some(_) => anyhow::bail!(
+                        "macro {macro_index} step {step_index}: legacy launcher_command args must be a string or null"
+                    ),
                 };
-                *data = serde_json::json!({
-                    "query": command,
-                    "legacy_resolved_action": {
-                        "label": command,
-                        "desc": "",
-                        "action": command,
-                        "args": args,
-                    }
-                })
-                .as_object()
-                .unwrap()
-                .clone();
+                let (query, preserve) = classify_legacy_launcher_command(&command, args.as_deref());
+                let mut replacement = serde_json::Map::new();
+                replacement.insert("query".into(), serde_json::Value::String(query));
+                if preserve {
+                    replacement.insert(
+                        "legacy_resolved_action".into(),
+                        serde_json::to_value(crate::actions::Action {
+                            label: command.clone(),
+                            desc: String::new(),
+                            action: command,
+                            args,
+                        })?,
+                    );
+                }
+                *data = replacement;
             }
         }
     }
     value["schema_version"] = serde_json::json!(8);
     Ok(())
+}
+
+/// Joins legacy free-form fields without trimming meaningful text from either field.
+fn join_legacy_text(command: &str, args: Option<&str>) -> String {
+    match args.filter(|args| !args.trim().is_empty()) {
+        Some(args) => format!("{} {}", command.trim_end(), args.trim_start()),
+        None => command.to_owned(),
+    }
+}
+
+fn query_action_text(query: &str, args: Option<&str>) -> String {
+    // This is the only argument contract implemented by Launcher `query:` actions.
+    // Arbitrary action args are deliberately not guessed into the query.
+    let query_arg = args
+        .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
+        .and_then(|value| value.get("query")?.as_str().map(str::to_owned));
+    join_legacy_text(query, query_arg.as_deref())
+}
+
+fn is_absolute_legacy_target(command: &str) -> bool {
+    command.starts_with('/')
+        || command.starts_with("\\\\")
+        || command.as_bytes().get(1) == Some(&b':')
+            && command
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+}
+
+/// Namespaces dispatched by Launcher rather than searched as user text. Keeping this
+/// list explicit prevents an ordinary query such as `meeting: tomorrow` becoming an
+/// opaque compatibility action merely because it contains a colon.
+fn is_canonical_action(command: &str) -> bool {
+    const NAMESPACES: &[&str] = &[
+        "bookmark",
+        "brightness",
+        "calendar",
+        "clipboard",
+        "clipboard_modify",
+        "cmd",
+        "dashboard",
+        "exec",
+        "fav",
+        "folder",
+        "help",
+        "history",
+        "keys",
+        "launcher",
+        "layout",
+        "link",
+        "macro",
+        "media",
+        "mg",
+        "mkmacro",
+        "mm",
+        "net",
+        "noop",
+        "note",
+        "plugin",
+        "power",
+        "process",
+        "recycle",
+        "settings",
+        "shell",
+        "snippet",
+        "stopwatch",
+        "sysinfo",
+        "system",
+        "tab",
+        "tempfile",
+        "theme",
+        "timer",
+        "todo",
+        "volume",
+        "window",
+    ];
+    let Some((namespace, suffix)) = command.split_once(':') else {
+        return false;
+    };
+    !suffix.is_empty() && NAMESPACES.contains(&namespace)
+}
+
+fn classify_legacy_launcher_command(command: &str, args: Option<&str>) -> (String, bool) {
+    if let Some(query) = command.strip_prefix("query:") {
+        return (query_action_text(query, args), false);
+    }
+    if let Some(query) = command.strip_prefix("queryexec:") {
+        // No raw-query syntax promises queryexec's immediate first-result activation.
+        return (query_action_text(query, args), true);
+    }
+    let unsafe_target = command.starts_with("http://")
+        || command.starts_with("https://")
+        || is_absolute_legacy_target(command)
+        || is_canonical_action(command);
+    (join_legacy_text(command, args), unsafe_target)
 }
 /// Splits the schema-4 ambiguous `image_result` condition into an explicit live
 /// search. Previous-result conditions did not exist in schema 4.
@@ -709,31 +809,116 @@ mod tests {
         }
     }
     #[test]
-    fn v7_launcher_command_migrates_to_lossless_compatibility_action() {
-        let mut value = serde_json::json!({
-            "schema_version": 7,
-            "macros": [{"id": 1, "name": "legacy", "steps": [{
-                "id": 2,
-                "action": {"type": "launcher_command", "data": {
-                    "command": "tool.exe", "args": "--profile work"
-                }}
-            }]}]
-        });
+    fn v7_launcher_commands_are_classified_conservatively() {
+        let cases = [
+            ("note list", None, "note list", false),
+            (
+                "search words",
+                Some("more words"),
+                "search words more words",
+                false,
+            ),
+            ("calculator", Some("  "), "calculator", false),
+            ("query:note list", None, "note list", false),
+            ("query:f list", None, "f list", false),
+            (
+                "query:note list",
+                Some(r##"{"query":"#work"}"##),
+                "note list #work",
+                false,
+            ),
+            ("queryexec:note today", None, "note today", true),
+            ("https://example.com", None, "https://example.com", true),
+            (
+                "/usr/bin/tool",
+                Some("--flag"),
+                "/usr/bin/tool --flag",
+                true,
+            ),
+            (r"C:\Tools\app.exe", None, r"C:\Tools\app.exe", true),
+            (
+                r"\\server\share\app.exe",
+                None,
+                r"\\server\share\app.exe",
+                true,
+            ),
+            (
+                "settings:dialog",
+                Some("section"),
+                "settings:dialog section",
+                true,
+            ),
+            ("volume:toggle_mute", None, "volume:toggle_mute", true),
+            ("my application name", None, "my application name", false),
+            ("meeting: tomorrow", None, "meeting: tomorrow", false),
+        ];
+        for (command, args, expected_query, expected_legacy) in cases {
+            let mut value = serde_json::json!({"schema_version":7,"macros":[{
+                "name":"legacy","steps":[{"action":{"type":"launcher_command","data":{
+                    "command":command,"args":args}}}]}]});
+            migrate_v7_to_v8(&mut value).unwrap();
+            let data = &value["macros"][0]["steps"][0]["action"]["data"];
+            assert_eq!(data["query"], expected_query, "{command}");
+            assert_eq!(
+                data.get("legacy_resolved_action").is_some(),
+                expected_legacy,
+                "{command}"
+            );
+            assert!(data.get("command").is_none());
+            assert!(data.get("args").is_none());
+            if expected_legacy {
+                assert_eq!(data["legacy_resolved_action"]["action"], command);
+                assert_eq!(
+                    data["legacy_resolved_action"]["args"],
+                    serde_json::json!(args)
+                );
+            }
+            let doc: MkMacroDocument = serde_json::from_value(value.clone()).unwrap();
+            let stable = serde_json::to_value(&doc).unwrap();
+            let decoded: MkMacroDocument = serde_json::from_value(stable.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), stable);
+        }
+    }
 
+    #[test]
+    fn malformed_v7_launcher_command_reports_location() {
+        let mut value = serde_json::json!({"schema_version":7,"macros":[{"steps":[
+            {"action":{"type":"delay","data":{"milliseconds":1}}},
+            {"action":{"type":"launcher_command","data":{"command":42}}}
+        ]}]});
+        let error = migrate_v7_to_v8(&mut value).unwrap_err().to_string();
+        assert!(error.contains("macro 0 step 1"), "{error}");
+        assert!(error.contains("command must be a string"), "{error}");
+        // Version is only advanced after every step succeeds.
+        assert_eq!(value["schema_version"], 7);
+    }
+
+    #[test]
+    fn v7_migration_visits_all_macros_and_preserves_other_actions() {
+        let untouched = serde_json::json!({"type":"text","data":{"text":"a:  b","mode":"type"}});
+        let mut value = serde_json::json!({"schema_version":7,"macros":[
+            {"steps":[
+                {"action":{"type":"launcher_command","data":{"command":"one","args":null}}},
+                {"action":untouched.clone()},
+                {"action":{"type":"launcher_command","data":{"command":"query:two","args":null}}}
+            ]},
+            {"steps":[{"action":{"type":"launcher_command","data":{
+                "command":"https://example.com","args":"--old"}}}]}
+        ]});
         migrate_v7_to_v8(&mut value).unwrap();
-        assert_eq!(value["schema_version"], 8);
-        let data = &value["macros"][0]["steps"][0]["action"]["data"];
-        assert_eq!(data["query"], "tool.exe");
-        assert!(data.get("command").is_none());
-        assert!(data.get("args").is_none());
-
-        let document: MkMacroDocument = serde_json::from_value(value).unwrap();
-        let MkAction::LauncherCommand(payload) = &document.macros[0].steps[0].action else {
-            unreachable!()
-        };
-        let legacy = payload.legacy_resolved_action.as_ref().unwrap();
-        assert_eq!(legacy.action, "tool.exe");
-        assert_eq!(legacy.args.as_deref(), Some("--profile work"));
+        assert_eq!(
+            value["macros"][0]["steps"][0]["action"]["data"]["query"],
+            "one"
+        );
+        assert_eq!(value["macros"][0]["steps"][1]["action"], untouched);
+        assert_eq!(
+            value["macros"][0]["steps"][2]["action"]["data"]["query"],
+            "two"
+        );
+        assert_eq!(
+            value["macros"][1]["steps"][0]["action"]["data"]["legacy_resolved_action"]["args"],
+            "--old"
+        );
     }
 
     #[test]
