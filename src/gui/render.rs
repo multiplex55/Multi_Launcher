@@ -1607,16 +1607,10 @@ impl eframe::App for LauncherApp {
         self.calendar_event_details = calendar_details;
         match self.confirm_modal.ui(ctx) {
             ConfirmationResult::Confirmed => {
-                if let Some(pending) = self.pending_confirm.take() {
-                    self.activate_action_confirmed(
-                        pending.action,
-                        pending.query_override,
-                        pending.source,
-                    );
-                }
+                self.resolve_pending_confirmation(true);
             }
             ConfirmationResult::Cancelled => {
-                self.pending_confirm = None;
+                self.resolve_pending_confirmation(false);
             }
             ConfirmationResult::None => {}
         }
@@ -1689,12 +1683,14 @@ mod tests {
     use eframe::egui;
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
         time::Duration,
     };
+
+    static MACRO_ACTIVATION_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -1741,6 +1737,14 @@ mod tests {
                 "rewrite" => vec![action("Rewrite", "query:rewritten")],
                 "recursive" => vec![action("Recursive", "queryexec:one")],
                 "destroy" => vec![action("Clear history", "history:clear")],
+                "delete alpha" => vec![action("Delete alpha", "note:remove:alpha")],
+                "bookmarks" => vec![action("Bookmarks", "query:bm list")],
+                "bm list" => vec![action("Example", "https://example.test")],
+                "modify clipboard" => vec![action(
+                    "Modify clipboard",
+                    "clipboard_modify:open:templates",
+                )],
+                "open help" => vec![action("Help", "help:show")],
                 "many" => vec![action("First", "help:show"), action("Second", "help:show")],
                 "open alpha" => vec![Action {
                     label: "alpha".into(),
@@ -2008,6 +2012,136 @@ mod tests {
             !app.help_window.open,
             "ambiguous results were not activated"
         );
+    }
+
+    #[test]
+    fn single_macro_destructive_result_uses_confirmation_before_exactly_one_execution() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+        app.require_confirm_destructive = true;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        assert_eq!(
+            app.handle_macro_launcher_command(&query_request(20, "destroy")),
+            LauncherCommandResponse::Activated
+        );
+        assert!(app.confirm_modal.is_open());
+        assert_eq!(app.confirm_modal.source_copy(), Some("Triggered by macro"));
+        assert_eq!(
+            app.pending_confirm.as_ref().map(|pending| pending.source),
+            Some(ActivationSource::Macro)
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(app.test_activation_trace.len(), 1);
+        app.resolve_pending_confirmation(true);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            app.handle_macro_launcher_command(&query_request(21, "destroy")),
+            LauncherCommandResponse::Activated
+        );
+        app.resolve_pending_confirmation(false);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn single_macro_query_action_runs_follow_up_search_without_literal_launch() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+        let launches = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&launches);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        assert_eq!(
+            app.handle_macro_launcher_command(&query_request(22, "bookmarks")),
+            LauncherCommandResponse::Activated
+        );
+        assert_eq!(app.query, "bm list");
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].action, "https://example.test");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.test_activation_trace
+                .iter()
+                .map(|(action, source)| (action.action.as_str(), *source))
+                .collect::<Vec<_>>(),
+            [("query:bm list", ActivationSource::Macro)]
+        );
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn single_macro_clipboard_modify_result_uses_coordinator_not_launcher() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+        let launches = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&launches);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        assert_eq!(
+            app.handle_macro_launcher_command(&query_request(23, "modify clipboard")),
+            LauncherCommandResponse::Activated
+        );
+        assert!(app.clipboard_modify_dialog.open);
+        assert_eq!(
+            app.clipboard_modify_dialog.section,
+            ClipboardModifyDialogSection::Templates
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.test_activation_trace
+                .last()
+                .map(|(action, source)| (action.action.as_str(), *source)),
+            Some(("clipboard_modify:open:templates", ActivationSource::Macro))
+        );
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn single_macro_panel_result_restores_hidden_launcher_and_focus_without_launch() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let launches = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&launches);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        assert_eq!(
+            app.handle_macro_launcher_command(&query_request(24, "open help")),
+            LauncherCommandResponse::Activated
+        );
+        assert!(app.help_window.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.test_activation_trace
+                .last()
+                .map(|(action, source)| (action.action.as_str(), *source)),
+            Some(("help:show", ActivationSource::Macro))
+        );
+        set_execute_action_hook(None);
     }
 
     fn wait_for_repaint(wakes: &AtomicUsize) {

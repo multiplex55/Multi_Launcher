@@ -436,6 +436,11 @@ pub struct LauncherApp {
     /// including the activation source, without launching an external process.
     #[cfg(test)]
     pub(crate) test_last_activation: Option<(Action, ActivationSource)>,
+    /// Complete activation trace used by dispatch tests (including recursive
+    /// query activations).  This deliberately lives at the activation seam,
+    /// rather than in the macro broker.
+    #[cfg(test)]
+    pub(crate) test_activation_trace: Vec<(Action, ActivationSource)>,
     pub usage: HashMap<String, u32>,
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
@@ -1402,6 +1407,8 @@ impl LauncherApp {
             selected: None,
             #[cfg(test)]
             test_last_activation: None,
+            #[cfg(test)]
+            test_activation_trace: Vec::new(),
             usage: usage::load_usage(USAGE_FILE).unwrap_or_default(),
             registered_hotkeys: Mutex::new(HashMap::new()),
             show_editor: false,
