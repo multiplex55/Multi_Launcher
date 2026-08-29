@@ -2371,10 +2371,10 @@ fn action_ui(
                 }
             }
         }
-        MkAction::Delay { milliseconds } => {
+        MkAction::Delay(payload) => {
             ui.horizontal(|ui| {
                 ui.label("Action duration (ms)");
-                ui.add(egui::DragValue::new(milliseconds).clamp_range(0..=86_400_000));
+                ui.add(egui::DragValue::new(&mut payload.fixed_ms).clamp_range(0..=86_400_000));
             });
         }
         MkAction::Process(p) => {
@@ -4152,7 +4152,10 @@ mod tests {
             } else {
                 let step_b = MkStep {
                     id: 2,
-                    action: MkAction::Delay { milliseconds: 77 },
+                    action: MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 77,
+                        ..Default::default()
+                    }),
                     ..step_a.clone()
                 };
                 editor.begin_edit(&step_b);
@@ -4292,7 +4295,10 @@ mod tests {
         // observed `visual overlay service is shut down` instead of BeginRectanglePick.
         dialog
             .action_editor
-            .begin_new(MkAction::Delay { milliseconds: 5 });
+            .begin_new(MkAction::Delay(MkDelayPayload {
+                fixed_ms: 5,
+                ..Default::default()
+            }));
         let mut plain = dialog.take_action_editor();
         if apply {
             assert!(plain.apply(&mut dialog).is_some());
@@ -4749,6 +4755,8 @@ mod tests {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![selected.clone()],
                 image_assets: vec![asset(4, "Original", "mkmacro_assets/4/4.png")],
@@ -4759,6 +4767,8 @@ mod tests {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![],
                 image_assets: vec![asset(77, "Other", "mkmacro_assets/40/77.png")],
@@ -4911,13 +4921,16 @@ mod tests {
         );
 
         let (_dir, mut dialog, executor) = condition_import_dialog();
-        let step_b = step(MkAction::Delay { milliseconds: 88 });
+        let step_b = step(MkAction::Delay(MkDelayPayload {
+            fixed_ms: 88,
+            ..Default::default()
+        }));
         dialog.action_editor.begin_edit(&step_b);
         executor.release();
         reduce_image_authoring_completion(&mut dialog);
         assert!(matches!(
             dialog.action_editor.draft.as_ref().unwrap().action,
-            MkAction::Delay { milliseconds: 88 }
+            MkAction::Delay(ref payload) if payload.fixed_ms == 88
         ));
         assert!(matches!(
             dialog.selected_macro().unwrap().steps[0].action,
@@ -5900,16 +5913,19 @@ mod tests {
     }
     #[test]
     fn cancel_does_not_touch_source() {
-        let source = step(MkAction::Delay { milliseconds: 12 });
+        let source = step(MkAction::Delay(MkDelayPayload {
+            fixed_ms: 12,
+            ..Default::default()
+        }));
         let bytes = serde_json::to_vec(&source).unwrap();
         let mut e = test_editor();
         e.begin_edit(&source);
         if let Some(MkStep {
-            action: MkAction::Delay { milliseconds },
+            action: MkAction::Delay(payload),
             ..
         }) = e.draft.as_mut()
         {
-            *milliseconds = 99
+            payload.fixed_ms = 99
         }
         e.cancel();
         assert_eq!(serde_json::to_vec(&source).unwrap(), bytes);

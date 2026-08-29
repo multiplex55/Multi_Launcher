@@ -21,6 +21,8 @@ fn plan(action: MkAction) -> MkExecutionPlan {
         description: String::new(),
         enabled: true,
         hotkey: None,
+        hotkey_scope: Default::default(),
+        folder_id: None,
         playback: Default::default(),
         steps: vec![s(action)],
         image_assets: vec![],

@@ -1,6 +1,6 @@
 use super::MkMacroDialog;
 use crate::mkmacro::{
-    MkStep, MonitorValidation, ValidationContext, validate_document_with_context,
+    MkDelayPayload, MkStep, MonitorValidation, ValidationContext, validate_document_with_context,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -59,10 +59,13 @@ pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) ->
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: Default::default(),
             steps: steps.clone(),
             image_assets: vec![],
         }],
+        folders: vec![],
     };
     crate::mkmacro::repair_ids(&mut d);
     *steps = d.macros.remove(0).steps;
@@ -558,7 +561,10 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: Default::default(),
-                        action: crate::mkmacro::MkAction::Delay { milliseconds: 1000 },
+                        action: crate::mkmacro::MkAction::Delay(MkDelayPayload {
+                            fixed_ms: 1000,
+                            ..Default::default()
+                        }),
                     },
                 );
             }
@@ -690,7 +696,13 @@ mod layout_tests {
         }
     }
     fn delay(id: u64) -> MkStep {
-        step(id, MkAction::Delay { milliseconds: 1 })
+        step(
+            id,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 1,
+                ..Default::default()
+            }),
+        )
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub trait VirtualDesktopBackend: Send + Sync {
     fn switch_left(&self) -> ExecResult;
     fn switch_right(&self) -> ExecResult;
     fn close_current(&self) -> ExecResult;
+    fn go_to(&self, desktop: u32) -> ExecResult;
 }
 
 pub(crate) struct UnsupportedVirtualDesktopBackend;
@@ -25,6 +26,9 @@ impl VirtualDesktopBackend for UnsupportedVirtualDesktopBackend {
     }
     fn close_current(&self) -> ExecResult {
         self.unsupported(MkVirtualDesktopAction::CloseCurrent)
+    }
+    fn go_to(&self, desktop: u32) -> ExecResult {
+        self.unsupported(MkVirtualDesktopAction::GoTo { desktop })
     }
 }
 impl UnsupportedVirtualDesktopBackend {
@@ -53,6 +57,14 @@ impl VirtualDesktopBackend for WindowsVirtualDesktopBackend {
     }
     fn close_current(&self) -> ExecResult {
         self.perform(MkVirtualDesktopAction::CloseCurrent)
+    }
+    fn go_to(&self, desktop: u32) -> ExecResult {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "Direct virtual desktop selection is not supported by the shortcut backend",
+        )
+        .context("backend", "virtual desktop")
+        .context("desktop", desktop.to_string()))
     }
 }
 #[cfg(windows)]
@@ -89,6 +101,7 @@ pub fn shortcut(action: MkVirtualDesktopAction) -> [MkKey; 3] {
         SwitchLeft => MkKey::Left,
         SwitchRight => MkKey::Right,
         CloseCurrent => MkKey::Function(4),
+        GoTo { .. } => panic!("direct desktop selection has no shell chord"),
     };
     [MkKey::Meta, MkKey::Control, terminal]
 }

@@ -739,6 +739,8 @@ mod optional_wait_validation_tests {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: MkPlayback::default(),
                 steps: vec![MkStep {
                     id: 1,
@@ -1142,6 +1144,8 @@ mod notification_action_tests {
                     description: String::new(),
                     enabled: true,
                     hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
                         id: 1,
@@ -1220,6 +1224,8 @@ mod launcher_command_action_tests {
                     description: String::new(),
                     enabled: true,
                     hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
                         id: 1,

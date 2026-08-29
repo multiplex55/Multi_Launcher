@@ -256,7 +256,13 @@ mod tests {
         }
     }
     fn delay(id: u64) -> MkStep {
-        s(id, MkAction::Delay { milliseconds: 1 })
+        s(
+            id,
+            MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                fixed_ms: 1,
+                ..Default::default()
+            }),
+        )
     }
     #[test]
     fn nested_relationships_and_lookup() {

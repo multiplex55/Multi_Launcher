@@ -658,6 +658,7 @@ mod recording_controller_tests {
         store
             .save(MkMacroDocument {
                 schema_version: SCHEMA_VERSION,
+                folders: vec![],
                 settings: Default::default(),
                 macros: [1, 2]
                     .into_iter()
@@ -667,6 +668,8 @@ mod recording_controller_tests {
                         description: String::new(),
                         enabled: true,
                         hotkey: None,
+                        hotkey_scope: Default::default(),
+                        folder_id: None,
                         playback: MkPlayback::default(),
                         steps: vec![],
                         image_assets: vec![],

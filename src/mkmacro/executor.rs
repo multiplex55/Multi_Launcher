@@ -1,9 +1,9 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 use super::{
-    CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkExecutionPlan,
-    MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey,
-    MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration, MkNotificationKind,
-    MkNotifyPayload, MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload,
+    CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkDelayMode,
+    MkExecutionPlan, MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
+    MkKey, MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration,
+    MkNotificationKind, MkNotifyPayload, MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload,
     MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
     MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
     PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, SearchRegion,
@@ -1460,6 +1460,8 @@ mod tests {
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: MkPlayback::default(),
             steps,
             image_assets: vec![],
@@ -1558,6 +1560,7 @@ mod tests {
             super::super::MkVirtualDesktopAction::SwitchLeft,
             super::super::MkVirtualDesktopAction::SwitchRight,
             super::super::MkVirtualDesktopAction::CloseCurrent,
+            super::super::MkVirtualDesktopAction::GoTo { desktop: 3 },
         ];
         for (index, action) in actions.into_iter().enumerate() {
             let control = Arc::new(RunControl::default());
@@ -1752,9 +1755,10 @@ mod tests {
             Executor::new(Arc::new(FakeBackend::default()).backends(), worker_control).execute(
                 &plan(vec![step(
                     1,
-                    MkAction::Delay {
-                        milliseconds: 60_000,
-                    },
+                    MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                        fixed_ms: 60_000,
+                        ..Default::default()
+                    }),
                 )]),
                 &|_| {},
             )
@@ -2304,14 +2308,73 @@ impl Executor {
                 }
                 Ok(())
             }
+            MkAction::ClickWithinRegion(p) => {
+                let padding = p.edge_padding_px;
+                let usable_width = p.rect.width.checked_sub(padding.saturating_mul(2));
+                let usable_height = p.rect.height.checked_sub(padding.saturating_mul(2));
+                let (Some(width), Some(height)) = (usable_width, usable_height) else {
+                    return Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::InvalidTarget,
+                        "Click region is smaller than its edge padding",
+                    ));
+                };
+                if width == 0 || height == 0 {
+                    return Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::InvalidTarget,
+                        "Click region has no usable area",
+                    ));
+                }
+                let left = i64::from(p.rect.x) + i64::from(padding);
+                let top = i64::from(p.rect.y) + i64::from(padding);
+                let point = MkPoint {
+                    x: i32::try_from(left + i64::from(rand::random_range(0..width))).map_err(
+                        |_| {
+                            ExecutionDiagnostic::new(
+                                DiagnosticKind::InvalidTarget,
+                                "Click region exceeds coordinate limits",
+                            )
+                        },
+                    )?,
+                    y: i32::try_from(top + i64::from(rand::random_range(0..height))).map_err(
+                        |_| {
+                            ExecutionDiagnostic::new(
+                                DiagnosticKind::InvalidTarget,
+                                "Click region exceeds coordinate limits",
+                            )
+                        },
+                    )?,
+                };
+                self.backends.input.move_mouse(point)?;
+                set_point(v, "mouse", point);
+                set_point(v, "last_point", point);
+                for _ in 0..p.clicks {
+                    g.down_button(p.button.clone())?;
+                    g.up_button(p.button.clone())?;
+                }
+                Ok(())
+            }
             MkAction::MouseDown(b) => g.down_button(b.clone()),
             MkAction::MouseUp(b) => g.up_button(b.clone()),
             MkAction::MouseScroll { axis, i32_delta } => {
                 self.backends.input.scroll(*axis, *i32_delta)
             }
-            MkAction::Delay { milliseconds } => self.wait(Duration::from_millis(
-                scale_playback_duration(*milliseconds, playback.speed_percent),
-            )),
+            MkAction::Delay(payload) => {
+                let milliseconds = match payload.mode {
+                    MkDelayMode::Fixed => payload.fixed_ms,
+                    MkDelayMode::RandomRange => {
+                        let (minimum, maximum) = if payload.minimum_ms <= payload.maximum_ms {
+                            (payload.minimum_ms, payload.maximum_ms)
+                        } else {
+                            (payload.maximum_ms, payload.minimum_ms)
+                        };
+                        rand::random_range(minimum..=maximum)
+                    }
+                };
+                self.wait(Duration::from_millis(scale_playback_duration(
+                    milliseconds,
+                    playback.speed_percent,
+                )))
+            }
             MkAction::Process(p) => {
                 let mut expanded = p.clone();
                 expanded.arguments = p
@@ -2389,6 +2452,9 @@ impl Executor {
                 }
                 super::MkVirtualDesktopAction::CloseCurrent => {
                     self.backends.virtual_desktop.close_current()
+                }
+                super::MkVirtualDesktopAction::GoTo { desktop } => {
+                    self.backends.virtual_desktop.go_to(*desktop)
                 }
             },
             MkAction::WindowWait(p) => self.wait_condition(
@@ -3001,6 +3067,8 @@ mod notification_sound_tests {
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: MkPlayback::default(),
             steps,
             image_assets: vec![],
@@ -3207,6 +3275,8 @@ mod notification_sound_tests {
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: MkPlayback::default(),
             steps: vec![
                 step(
@@ -3260,10 +3330,11 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::MouseMove(_)
         | MkAction::MouseDrag(_)
         | MkAction::MouseClick(_)
+        | MkAction::ClickWithinRegion(_)
         | MkAction::MouseDown(_)
         | MkAction::MouseUp(_)
         | MkAction::MouseScroll { .. }
-        | MkAction::Delay { .. }
+        | MkAction::Delay(_)
         | MkAction::Process(_)
         | MkAction::LauncherCommand(_)
         | MkAction::WindowActivate(_)
@@ -3304,6 +3375,7 @@ fn action_name(a: &MkAction) -> &'static str {
         MkAction::MouseMove(_)
         | MkAction::MouseDrag(_)
         | MkAction::MouseClick(_)
+        | MkAction::ClickWithinRegion(_)
         | MkAction::MouseDown(_)
         | MkAction::MouseUp(_)
         | MkAction::MouseScroll { .. } => "SendInput",
@@ -3579,6 +3651,9 @@ pub mod fake {
         }
         fn close_current(&self) -> ExecResult {
             self.virtual_desktop(super::super::MkVirtualDesktopAction::CloseCurrent)
+        }
+        fn go_to(&self, desktop: u32) -> ExecResult {
+            self.virtual_desktop(super::super::MkVirtualDesktopAction::GoTo { desktop })
         }
     }
     impl FakeBackend {
@@ -4043,6 +4118,8 @@ mod phase_d_tests {
             description: String::new(),
             enabled: true,
             hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: MkPlayback::default(),
             steps,
             image_assets: vec![],

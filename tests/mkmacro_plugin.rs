@@ -13,12 +13,15 @@ fn legacy_and_mkmacro_routes_coexist_and_disable_independently() {
         .save(MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 55,
                 name: "stable".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![],
                 image_assets: vec![],
@@ -44,12 +47,15 @@ fn rename_keeps_id_based_launcher_action() {
         let doc = MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 99,
                 name: name.into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![],
                 image_assets: vec![],

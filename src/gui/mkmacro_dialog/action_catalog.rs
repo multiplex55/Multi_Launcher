@@ -367,7 +367,10 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Wait for a duration",
             &["wait"],
             Timing,
-            MkAction::Delay { milliseconds: 1000 }
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 1000,
+                ..Default::default()
+            })
         ),
         d!(
             Notifications,
@@ -824,9 +827,10 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         MkAction::MouseMove(_) => EditorKind::MouseMove,
         MkAction::MouseDrag(_) => EditorKind::MouseDrag,
         MkAction::MouseClick(_) => EditorKind::MouseClick,
+        MkAction::ClickWithinRegion(_) => EditorKind::DirectInsert,
         MkAction::MouseDown(_) | MkAction::MouseUp(_) => EditorKind::MouseButton,
         MkAction::MouseScroll { .. } => EditorKind::MouseScroll,
-        MkAction::Delay { .. } => EditorKind::Timing,
+        MkAction::Delay(_) => EditorKind::Timing,
         MkAction::Process(_) => EditorKind::Process,
         MkAction::LauncherCommand(_) => EditorKind::Launcher,
         MkAction::WindowActivate(_)
@@ -1084,10 +1088,11 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::MouseMove(_) => "Mouse Move",
         MkAction::MouseDrag(_) => "Mouse Drag",
         MkAction::MouseClick(_) => "Mouse Click",
+        MkAction::ClickWithinRegion(_) => "Click Within Region",
         MkAction::MouseDown(_) => "Mouse Down",
         MkAction::MouseUp(_) => "Mouse Up",
         MkAction::MouseScroll { .. } => "Mouse Scroll",
-        MkAction::Delay { .. } => "Delay",
+        MkAction::Delay(_) => "Delay",
         MkAction::Process(_) => "Run Program",
         MkAction::LauncherCommand(_) => "Launcher Command",
         MkAction::WindowActivate(_) => "Activate Window",
@@ -1116,6 +1121,7 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
             "Close Current Virtual Desktop"
         }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { .. }) => "Go To Virtual Desktop",
         MkAction::WaitUntil { .. } => "Wait Until",
         MkAction::SetVariable { .. } => "Set Variable",
         MkAction::UnsetVariable { .. } => "Unset Variable",
@@ -1196,6 +1202,16 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             p.clicks,
             format_coordinate_target_with_assets(&p.target, assets)
         ),
+        MkAction::ClickWithinRegion(p) => format!(
+            "{} ×{} within ({}, {}) {} × {} · {} px padding",
+            mouse(&p.button),
+            p.clicks,
+            p.rect.x,
+            p.rect.y,
+            p.rect.width,
+            p.rect.height,
+            p.edge_padding_px
+        ),
         MkAction::MouseDown(b) | MkAction::MouseUp(b) => mouse(b).into(),
         MkAction::MouseScroll { axis, i32_delta } => {
             let direction = match (axis, i32_delta.is_negative()) {
@@ -1216,7 +1232,7 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
                 )
             }
         }
-        MkAction::Delay { milliseconds } => format!("{milliseconds} ms"),
+        MkAction::Delay(payload) => format!("{} ms", payload.fixed_ms),
         MkAction::Process(p) => format!("{} {}", p.program, p.arguments.join(" ")),
         MkAction::LauncherCommand(payload) => {
             if let Some(action) = &payload.legacy_resolved_action {
@@ -1337,6 +1353,9 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::CloseCurrent) => {
             "Close the current virtual desktop using native Windows behavior".into()
+        }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }) => {
+            format!("Go to virtual desktop {desktop}")
         }
         MkAction::WaitUntil { condition, wait } => {
             format_wait_until(condition, wait, asset_name, assets)

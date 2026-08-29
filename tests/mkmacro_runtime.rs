@@ -44,12 +44,15 @@ fn run_window_action(
         .save(MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 99,
                 name: "window routing".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![s(1, action)],
                 image_assets: vec![],
@@ -104,6 +107,8 @@ fn notification_sequence(policy: MkErrorPolicy) -> MkMacro {
         description: String::new(),
         enabled: true,
         hotkey: None,
+        hotkey_scope: Default::default(),
+        folder_id: None,
         playback: Default::default(),
         steps: vec![
             s(
@@ -149,6 +154,7 @@ fn run_notification_sequence(
     store
         .save(MkMacroDocument {
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             settings: Default::default(),
             macros: vec![notification_sequence(policy)],
         })
@@ -242,6 +248,7 @@ fn image_find_result_drives_following_mouse_move_without_platform_effects() {
     store
         .save(MkMacroDocument {
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
                 id: 70,
@@ -249,6 +256,8 @@ fn image_find_result_drives_following_mouse_move_without_platform_effects() {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![
                     s(1, MkAction::ImageFind(image)),
@@ -298,6 +307,7 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
     store
         .save(MkMacroDocument {
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
                 id: 7,
@@ -305,6 +315,8 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![
                     s(
@@ -374,6 +386,7 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
     store
         .save(MkMacroDocument {
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
                 id: 8,
@@ -381,6 +394,8 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![
                     s(1, MkAction::PromptInput(MkPromptInputPayload::default())),
@@ -596,12 +611,15 @@ fn window_wait_is_cancellable_without_window_mutation() {
         .save(MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 100,
                 name: "cancel wait".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![s(
                     1,
@@ -674,12 +692,15 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
         .save(MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 1,
                 name: "e2e".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![
                     s(
@@ -713,7 +734,13 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
                             clicks: 1,
                         }),
                     ),
-                    s(4, MkAction::Delay { milliseconds: 1 }),
+                    s(
+                        4,
+                        MkAction::Delay(MkDelayPayload {
+                            fixed_ms: 1,
+                            ..Default::default()
+                        }),
+                    ),
                     s(
                         5,
                         MkAction::Text(MkTextPayload {
@@ -771,20 +798,24 @@ fn stop_during_held_key_wakes_and_cleans_up() {
         .save(MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 2,
                 name: "stop".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![
                     s(1, MkAction::KeyDown(MkKey::Control)),
                     s(
                         2,
-                        MkAction::Delay {
-                            milliseconds: 60_000,
-                        },
+                        MkAction::Delay(MkDelayPayload {
+                            fixed_ms: 60_000,
+                            ..Default::default()
+                        }),
                     ),
                     s(3, MkAction::KeyPress(MkKey::Enter)),
                 ],

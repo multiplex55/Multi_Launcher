@@ -1,5 +1,5 @@
 //! Polling macro-hotkey service and authoring diagnostics.
-use super::{MkHotkey, MkKey, MkMacroDocument, MkMacroStore};
+use super::{MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore, MkWindowMatcher};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
@@ -13,6 +13,9 @@ use std::{
 /// The deliberately small boundary between hotkey polling and the operating system.
 pub trait KeyStateBackend: Send + Sync {
     fn is_down(&self, key: &MkKey) -> bool;
+    fn active_window_matches(&self, _matcher: &MkWindowMatcher) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -41,6 +44,11 @@ impl KeyStateBackend for SystemKeyStateBackend {
             MkKey::RightMeta => down(0x5C),
             _ => vk_from_primary(key).is_some_and(down),
         }
+    }
+    fn active_window_matches(&self, matcher: &MkWindowMatcher) -> bool {
+        use super::executor::WindowBackend;
+        use super::windows::Win32WindowBackend;
+        Win32WindowBackend.is_active(matcher).unwrap_or(false)
     }
 }
 
@@ -205,6 +213,7 @@ struct Binding {
     modifiers: BTreeSet<String>,
     primary: MkKey,
     triggered: bool,
+    scope: MkHotkeyScope,
 }
 fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
     let recorder = canonical_hotkey(&doc.settings.record_toggle_hotkey);
@@ -232,6 +241,7 @@ fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
                 modifiers,
                 primary,
                 triggered: false,
+                scope: m.hotkey_scope.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -378,7 +388,11 @@ fn tick<F>(
                 && (!b.modifiers.contains("SHIFT") || shift)
                 && (!b.modifiers.contains("ALT") || alt)
                 && (!b.modifiers.contains("META") || meta);
-            if down && !b.triggered {
+            let in_scope = match &b.scope {
+                MkHotkeyScope::AnyWindow => true,
+                MkHotkeyScope::ActiveWindow(matcher) => backend.active_window_matches(matcher),
+            };
+            if down && in_scope && !b.triggered {
                 b.triggered = true;
                 fire.push(b.macro_id);
             } else if !down {
@@ -407,6 +421,8 @@ mod tests {
                 key: MkKey::Character("K".into()),
                 modifiers: vec![MkKey::Control],
             }),
+            hotkey_scope: Default::default(),
+            folder_id: None,
             playback: MkPlayback::default(),
             steps: vec![],
             image_assets: vec![],
@@ -417,6 +433,7 @@ mod tests {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
+            folders: vec![],
             macros: vec![mac(9, true), mac(2, true), mac(1, true)],
         };
         assert_eq!(validate_hotkeys(&d, &[]).len(), 3);
@@ -427,6 +444,7 @@ mod tests {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
+            folders: vec![],
             macros: vec![mac(2, true), mac(1, false)],
         };
         assert_eq!(compile_bindings(&d).len(), 1);
@@ -440,6 +458,7 @@ mod tests {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
+            folders: vec![],
             macros: vec![a, b],
         };
         assert!(compile_bindings(&d).is_empty());
@@ -453,6 +472,7 @@ mod tests {
             compile_bindings(&MkMacroDocument {
                 settings: Default::default(),
                 schema_version: 1,
+                folders: vec![],
                 macros: vec![bad]
             })
             .is_empty()
@@ -463,6 +483,7 @@ mod tests {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
+            folders: vec![],
             macros: vec![mac(9, true), {
                 let mut m = mac(2, true);
                 m.hotkey.as_mut().unwrap().key = MkKey::Character("J".into());
@@ -483,6 +504,7 @@ mod tests {
                 &MkMacroDocument {
                     settings: Default::default(),
                     schema_version: 1,
+                    folders: vec![],
                     macros: vec![mac(1, true)]
                 },
                 &[("emergency stop", "CONTROL+K")]
@@ -501,6 +523,7 @@ mod tests {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
+            folders: vec![],
             macros: vec![m],
         };
         assert_eq!(
@@ -539,6 +562,7 @@ mod tests {
             .save(MkMacroDocument {
                 settings: Default::default(),
                 schema_version: 1,
+                folders: vec![],
                 macros: vec![mac(1, true)],
             })
             .unwrap();
@@ -569,6 +593,7 @@ mod tests {
             .save(MkMacroDocument {
                 settings: Default::default(),
                 schema_version: 1,
+                folders: vec![],
                 macros: vec![],
             })
             .unwrap();

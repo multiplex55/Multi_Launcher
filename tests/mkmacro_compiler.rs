@@ -17,6 +17,8 @@ fn mac(steps: Vec<MkStep>) -> MkMacro {
         description: String::new(),
         enabled: true,
         hotkey: None,
+        hotkey_scope: Default::default(),
+        folder_id: None,
         playback: Default::default(),
         steps,
         image_assets: vec![],
@@ -27,7 +29,13 @@ fn mac(steps: Vec<MkStep>) -> MkMacro {
 fn malformed_control_flow_cannot_compile() {
     let invalid = mac(vec![
         step(1, MkAction::Else),
-        step(2, MkAction::Delay { milliseconds: 1 }),
+        step(
+            2,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 1,
+                ..Default::default()
+            }),
+        ),
     ]);
     let diagnostics = compile(&invalid).unwrap_err();
     assert!(!diagnostics.is_empty());
@@ -40,7 +48,14 @@ fn malformed_control_flow_cannot_compile() {
 
 #[test]
 fn compiler_preserves_id_addressing() {
-    let plan = compile(&mac(vec![step(41, MkAction::Delay { milliseconds: 0 })])).unwrap();
+    let plan = compile(&mac(vec![step(
+        41,
+        MkAction::Delay(MkDelayPayload {
+            fixed_ms: 0,
+            ..Default::default()
+        }),
+    )]))
+    .unwrap();
     assert_eq!(plan.step_to_instruction[&41], 0);
     assert_eq!(plan.instructions[0].step.id, 41);
 }

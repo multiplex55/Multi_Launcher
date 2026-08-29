@@ -421,15 +421,45 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if version <= 7 {
         migrate_v7_to_v8(&mut value)?;
     }
-    let mut doc: MkMacroDocument = match version {
-        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => serde_json::from_value(value)
-            .context("mkmacros.json does not match the macro schema")?,
-        _ => unreachable!(),
-    };
+    if version <= 8 {
+        migrate_v8_to_v9(&mut value)?;
+    }
+    let mut doc: MkMacroDocument =
+        serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = version != SCHEMA_VERSION;
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+/// Converts the schema-8 delay object into the typed schema-9 delay payload.
+/// Other schema-9 additions use Serde defaults and need no structural migration.
+fn migrate_v8_to_v9(value: &mut serde_json::Value) -> Result<()> {
+    if let Some(macros) = value.get_mut("macros").and_then(|v| v.as_array_mut()) {
+        for mac in macros {
+            let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for step in steps {
+                let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) else {
+                    continue;
+                };
+                if action.get("type").and_then(|v| v.as_str()) != Some("delay") {
+                    continue;
+                }
+                let Some(data) = action.get_mut("data").and_then(|v| v.as_object_mut()) else {
+                    anyhow::bail!("delay action data must be an object")
+                };
+                if let Some(milliseconds) = data.remove("milliseconds") {
+                    data.insert("mode".into(), serde_json::json!("fixed"));
+                    data.insert("fixed_ms".into(), milliseconds);
+                    data.insert("minimum_ms".into(), serde_json::json!(0));
+                    data.insert("maximum_ms".into(), serde_json::json!(0));
+                }
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(9);
+    Ok(())
 }
 /// Converts schema-7 resolved Launcher actions into the temporary compatibility
 /// state used by schema 8. No Serde aliases accept the old shape outside here.
@@ -820,12 +850,15 @@ mod tests {
         MkMacroDocument {
             settings: Default::default(),
             schema_version: SCHEMA_VERSION,
+            folders: vec![],
             macros: vec![MkMacro {
                 id: 7,
                 name: "x".into(),
                 description: String::new(),
                 enabled: true,
                 hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
                     id: 9,
@@ -833,7 +866,10 @@ mod tests {
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),
-                    action: MkAction::Delay { milliseconds: 1 },
+                    action: MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 1,
+                        ..Default::default()
+                    }),
                 }],
                 image_assets: vec![],
             }],
@@ -922,7 +958,7 @@ mod tests {
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let document = store.snapshot();
-        assert_eq!(document.schema_version, 8);
+        assert_eq!(document.schema_version, SCHEMA_VERSION);
         let MkAction::LauncherCommand(payload) = &document.macros[0].steps[0].action else {
             panic!("legacy Launcher step was not migrated")
         };
@@ -932,7 +968,7 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         let data = &persisted["macros"][0]["steps"][0]["action"]["data"];
-        assert_eq!(persisted["schema_version"], 8);
+        assert_eq!(persisted["schema_version"], SCHEMA_VERSION);
         assert_eq!(data["query"], "note list");
         assert!(data.get("legacy_resolved_action").is_none());
         assert!(data.get("command").is_none());
@@ -1018,7 +1054,7 @@ mod tests {
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let first = store.snapshot();
-        assert_eq!(first.schema_version, 8);
+        assert_eq!(first.schema_version, SCHEMA_VERSION);
         store.save((*first).clone()).unwrap();
         drop(store);
 
@@ -1031,7 +1067,7 @@ mod tests {
         let second_saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(second_saved, first_saved);
-        assert_eq!(second_saved["schema_version"], 8);
+        assert_eq!(second_saved["schema_version"], SCHEMA_VERSION);
         let text = serde_json::to_string(&second_saved).unwrap();
         assert!(!text.contains("\"command\""));
         assert_eq!(text.matches("legacy_resolved_action").count(), 1);
@@ -1485,5 +1521,29 @@ mod tests {
         persist(&p, &doc).unwrap();
         assert!(!fs::read_to_string(&p).unwrap().contains("confidence"));
         assert!(!read_document(&p).unwrap().unwrap().1);
+    }
+
+    #[test]
+    fn schema_eight_delay_migrates_to_schema_nine_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        fs::write(
+            &path,
+            r#"{"schema_version":8,"macros":[{"id":1,"name":"delay","steps":[{"id":2,"action":{"type":"delay","data":{"milliseconds":42}}}]}]}"#,
+        )
+        .unwrap();
+
+        let (document, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(document.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            document.macros[0].steps[0].action,
+            MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                fixed_ms: 42,
+                ..Default::default()
+            })
+        );
+        persist(&path, &document).unwrap();
+        assert!(!read_document(&path).unwrap().unwrap().1);
     }
 }
