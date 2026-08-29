@@ -35,6 +35,13 @@ fn validate_note_new_payload(slug: &str, template: Option<&str>) -> Result<(), S
 }
 
 impl LauncherApp {
+    pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
+        let pending = self.pending_confirm.take();
+        if confirmed && let Some(pending) = pending {
+            self.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        }
+    }
+
     pub(crate) fn launcher_interaction_snapshot(&self) -> LauncherInteractionSnapshot {
         let panel_instances = Self::TRACKED_PANELS
             .iter()
@@ -81,6 +88,7 @@ impl LauncherApp {
         #[cfg(test)]
         {
             self.test_last_activation = Some((a.clone(), source));
+            self.test_activation_trace.push((a.clone(), source));
         }
         let before = self.launcher_interaction_snapshot();
         if !self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
@@ -1734,6 +1742,40 @@ mod tests {
         );
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn macro_clipboard_modify_activation_is_claimed_before_static_launch() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&launches);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+
+        app.activate_action(
+            Action {
+                label: "Clipboard templates".into(),
+                desc: "Clipboard Modify".into(),
+                action: "clipboard_modify:open:templates".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Macro,
+        );
+
+        assert!(app.clipboard_modify_dialog.open);
+        assert_eq!(
+            app.clipboard_modify_dialog.section,
+            ClipboardModifyDialogSection::Templates
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(app.test_activation_trace.len(), 1);
+        assert_eq!(app.test_activation_trace[0].1, ActivationSource::Macro);
+        set_execute_action_hook(None);
     }
 }
 

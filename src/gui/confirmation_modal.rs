@@ -120,6 +120,15 @@ impl Default for ConfirmationModal {
 }
 
 impl ConfirmationModal {
+    #[cfg(test)]
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_copy(&self) -> Option<&str> {
+        self.source_label.as_deref()
+    }
     pub fn open_custom(&mut self, description: impl Into<String>, warning: impl Into<String>) {
         self.title = "Confirm destructive action".into();
         self.description = description.into();
