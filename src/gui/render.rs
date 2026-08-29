@@ -694,13 +694,23 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
-    fn dispatch_macro_launcher_query(
+    fn dispatch_macro_launcher_command(
         &mut self,
         request: &crate::mkmacro::LauncherCommandRequest,
     ) -> crate::mkmacro::LauncherCommandResponse {
-        use crate::mkmacro::LauncherCommandResponse;
+        use crate::mkmacro::{LauncherCommandKind, LauncherCommandResponse};
 
-        self.query = request.query.clone();
+        let LauncherCommandKind::Query(query) = &request.kind else {
+            let LauncherCommandKind::ResolvedLegacy(action) = &request.kind else {
+                unreachable!()
+            };
+            let before = self.launcher_interaction_snapshot();
+            self.activate_action(action.clone(), None, ActivationSource::Macro);
+            self.restore_for_new_launcher_interaction(&before);
+            return LauncherCommandResponse::Activated;
+        };
+
+        self.query = query.clone();
         self.last_timer_query =
             self.query.starts_with("timer list") || self.query.starts_with("alarm list");
         self.selected = None;
@@ -741,7 +751,7 @@ impl LauncherApp {
             return;
         };
 
-        let response = self.dispatch_macro_launcher_query(&pending.request);
+        let response = self.dispatch_macro_launcher_command(&pending.request);
         // A stopped macro may have dropped its receiver after the GUI took the
         // request. `respond` deliberately makes that race harmless.
         let _ = pending.respond(response);
@@ -1759,9 +1769,9 @@ mod tests {
             ("one", LauncherCommandResponse::Activated),
         ] {
             let response =
-                app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
+                app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
                     id: 1,
-                    query: query.into(),
+                    kind: crate::mkmacro::LauncherCommandKind::Query(query.into()),
                 });
             assert_eq!(response, expected);
             assert_eq!(app.query, query);
@@ -1772,17 +1782,19 @@ mod tests {
         );
 
         app.help_window.open = false;
-        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
-            id: 2,
-            query: "rewrite".into(),
-        });
+        let response =
+            app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
+                id: 2,
+                kind: crate::mkmacro::LauncherCommandKind::Query("rewrite".into()),
+            });
         assert_eq!(response, LauncherCommandResponse::Activated);
         assert_eq!(app.query, "rewritten");
 
-        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
-            id: 3,
-            query: "recursive".into(),
-        });
+        let response =
+            app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
+                id: 3,
+                kind: crate::mkmacro::LauncherCommandKind::Query("recursive".into()),
+            });
         assert_eq!(response, LauncherCommandResponse::Activated);
         assert_eq!(app.query, "one");
         assert!(
@@ -1792,15 +1804,54 @@ mod tests {
     }
 
     #[test]
+    fn migrated_legacy_action_activates_gui_owned_dialog_as_macro() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let response =
+            app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
+                id: 7,
+                kind: crate::mkmacro::LauncherCommandKind::ResolvedLegacy(Action {
+                    label: "Help".into(),
+                    desc: "GUI dialog".into(),
+                    action: "help:show".into(),
+                    args: None,
+                }),
+            });
+        assert_eq!(response, LauncherCommandResponse::Activated);
+        assert!(
+            app.help_window.open,
+            "GUI-owned dialog was opened during dispatch"
+        );
+
+        app.require_confirm_destructive = true;
+        let response =
+            app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
+                id: 8,
+                kind: crate::mkmacro::LauncherCommandKind::ResolvedLegacy(Action {
+                    label: "Clear".into(),
+                    desc: String::new(),
+                    action: "history:clear".into(),
+                    args: None,
+                }),
+            });
+        assert_eq!(response, LauncherCommandResponse::Activated);
+        assert_eq!(
+            app.pending_confirm.as_ref().map(|pending| pending.source),
+            Some(ActivationSource::Macro)
+        );
+    }
+
+    #[test]
     fn macro_launcher_destructive_and_ambiguous_results_remain_interactive() {
         let ctx = egui::Context::default();
         let mut app = app_with_fake(&ctx);
         app.require_confirm_destructive = true;
 
-        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
-            id: 1,
-            query: "destroy".into(),
-        });
+        let response =
+            app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
+                id: 1,
+                kind: crate::mkmacro::LauncherCommandKind::Query("destroy".into()),
+            });
         assert_eq!(response, LauncherCommandResponse::Activated);
         assert_eq!(
             app.pending_confirm.as_ref().map(|pending| pending.source),
@@ -1808,10 +1859,11 @@ mod tests {
         );
 
         app.selected = Some(1);
-        let response = app.dispatch_macro_launcher_query(&crate::mkmacro::LauncherCommandRequest {
-            id: 2,
-            query: "many".into(),
-        });
+        let response =
+            app.dispatch_macro_launcher_command(&crate::mkmacro::LauncherCommandRequest {
+                id: 2,
+                kind: crate::mkmacro::LauncherCommandKind::Query("many".into()),
+            });
         assert_eq!(
             response,
             LauncherCommandResponse::PresentedForSelection { result_count: 2 }
@@ -1869,7 +1921,8 @@ mod tests {
         assert_eq!(app.query, "before polling");
 
         let submit_broker = Arc::clone(&broker);
-        let submitter = thread::spawn(move || submit_broker.submit("", &RunControl::default()));
+        let submitter =
+            thread::spawn(move || submit_broker.submit_query("", &RunControl::default()));
         wait_for_repaint(&wakes);
         assert_eq!(app.query, "before polling");
 
@@ -1906,7 +1959,8 @@ mod tests {
         let control = Arc::new(RunControl::default());
         let submit_broker = Arc::clone(&broker);
         let submit_control = Arc::clone(&control);
-        let submitter = thread::spawn(move || submit_broker.submit("missing", &submit_control));
+        let submitter =
+            thread::spawn(move || submit_broker.submit_query("missing", &submit_control));
         let pending = loop {
             if let Some(pending) = broker.take_pending() {
                 break pending;
@@ -1917,7 +1971,7 @@ mod tests {
         assert!(submitter.join().unwrap().is_err());
 
         let mut app = new_app(&ctx);
-        let response = app.dispatch_macro_launcher_query(&pending.request);
+        let response = app.dispatch_macro_launcher_command(&pending.request);
         assert_eq!(response, LauncherCommandResponse::NoResults);
         assert!(!pending.respond(response));
     }
