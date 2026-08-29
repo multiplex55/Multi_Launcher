@@ -3419,7 +3419,7 @@ pub mod fake {
         pub cursor: Mutex<MkPoint>,
         pub prompt_responses: Mutex<Vec<PromptResponse>>,
         pub processes: Mutex<Vec<MkProcessPayload>>,
-        pub commands: Mutex<Vec<String>>,
+        pub launcher_queries: Mutex<Vec<String>>,
         pub legacy_actions: Mutex<Vec<crate::actions::Action>>,
         pub command_controls: Mutex<Vec<usize>>,
         pub prompts: Mutex<Vec<PromptRequest>>,
@@ -3440,7 +3440,7 @@ pub mod fake {
                 cursor: Mutex::new(MkPoint { x: 0, y: 0 }),
                 prompt_responses: Mutex::new(Vec::new()),
                 processes: Mutex::new(Vec::new()),
-                commands: Mutex::new(Vec::new()),
+                launcher_queries: Mutex::new(Vec::new()),
                 legacy_actions: Mutex::new(Vec::new()),
                 command_controls: Mutex::new(Vec::new()),
                 prompts: Mutex::new(Vec::new()),
@@ -3764,7 +3764,7 @@ pub mod fake {
             self.event(format!("process:{}", p.program))
         }
         fn command(&self, c: &str, control: &RunControl) -> ExecResult {
-            self.commands.lock().unwrap().push(c.into());
+            self.launcher_queries.lock().unwrap().push(c.into());
             self.command_controls
                 .lock()
                 .unwrap()
@@ -4559,7 +4559,7 @@ mod phase_d_tests {
     }
 
     #[test]
-    fn process_and_launcher_fields_expand_without_changing_boundaries() {
+    fn process_fields_expand_without_changing_process_boundaries() {
         let f = Arc::new(FakeBackend::default());
         let original_process = MkProcessPayload {
             program: "tool-${value}".into(),
@@ -4585,13 +4585,6 @@ mod phase_d_tests {
                     },
                 ),
                 s(3, original_action.clone()),
-                s(
-                    4,
-                    MkAction::LauncherCommand(MkLauncherCommandPayload {
-                        query: "canonical-${value} open ${value}".into(),
-                        legacy_resolved_action: None,
-                    }),
-                ),
             ],
             f.clone(),
         )
@@ -4604,14 +4597,11 @@ mod phase_d_tests {
             Some("/work/project")
         );
         assert_eq!(original_action, MkAction::Process(original_process));
-        assert_eq!(
-            f.commands.lock().unwrap()[0],
-            "canonical-two words open two words"
-        );
+        assert!(f.launcher_queries.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn launcher_command_submits_current_variable_as_one_raw_query() {
+    fn newly_authored_launcher_command_interpolates_one_complete_raw_query() {
         let f = Arc::new(FakeBackend::default());
         let control = Arc::new(RunControl::default());
         control.reset();
@@ -4621,14 +4611,14 @@ mod phase_d_tests {
                     s(
                         1,
                         MkAction::SetVariable {
-                            name: "note_name".into(),
-                            value: MkValue::String("alpha".into()),
+                            name: "value".into(),
+                            value: MkValue::String("two words".into()),
                         },
                     ),
                     s(
                         2,
                         MkAction::LauncherCommand(MkLauncherCommandPayload {
-                            query: "note open ${note_name}".into(),
+                            query: "note open ${value}".into(),
                             legacy_resolved_action: None,
                         }),
                     ),
@@ -4637,13 +4627,16 @@ mod phase_d_tests {
             )
             .unwrap();
 
-        assert_eq!(f.commands.lock().unwrap().as_slice(), ["note open alpha"]);
+        assert_eq!(
+            f.launcher_queries.lock().unwrap().as_slice(),
+            ["note open two words"]
+        );
         assert!(
-            !f.commands
+            !f.launcher_queries
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|query| query == "note open ${note_name}")
+                .any(|query| query == "note open ${value}")
         );
         assert!(f.legacy_actions.lock().unwrap().is_empty());
         assert_eq!(f.processes.lock().unwrap().len(), 0);
@@ -4654,7 +4647,7 @@ mod phase_d_tests {
     }
 
     #[test]
-    fn migrated_launcher_action_is_interpolated_and_submitted_to_gui_boundary() {
+    fn schema_v7_migrated_launcher_action_uses_compatibility_gui_boundary() {
         let f = Arc::new(FakeBackend::default());
         run(
             vec![
@@ -4681,7 +4674,7 @@ mod phase_d_tests {
             f.clone(),
         )
         .unwrap();
-        assert!(f.commands.lock().unwrap().is_empty());
+        assert!(f.launcher_queries.lock().unwrap().is_empty());
         assert!(f.processes.lock().unwrap().is_empty());
         assert_eq!(
             f.legacy_actions.lock().unwrap().as_slice(),
@@ -4718,15 +4711,17 @@ mod phase_d_tests {
         )
         .unwrap();
 
-        let commands = f.commands.lock().unwrap();
+        let queries = f.launcher_queries.lock().unwrap();
         assert_eq!(
-            commands.len(),
+            queries.len(),
             1,
             "the query is submitted once, not tokenized"
         );
-        assert_eq!(commands[0], "note open Daily Work Notes");
-        assert!(!commands[0].contains(['\'', '"', '\\']));
+        assert_eq!(queries[0], "note open Daily Work Notes");
+        assert!(queries[0].contains("Daily Work Notes"));
+        assert!(!queries[0].contains(['\'', '"', '\\']));
         assert!(f.legacy_actions.lock().unwrap().is_empty());
+        assert!(f.processes.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -4756,7 +4751,7 @@ mod phase_d_tests {
         }
 
         assert_eq!(
-            f.commands.lock().unwrap().as_slice(),
+            f.launcher_queries.lock().unwrap().as_slice(),
             ["note open alpha", "note open beta"]
         );
         assert!(f.legacy_actions.lock().unwrap().is_empty());
@@ -4789,7 +4784,7 @@ mod phase_d_tests {
             error.context.get("variable").map(String::as_str),
             Some("note_name")
         );
-        assert!(f.commands.lock().unwrap().is_empty());
+        assert!(f.launcher_queries.lock().unwrap().is_empty());
         assert!(f.legacy_actions.lock().unwrap().is_empty());
         assert!(f.events().is_empty());
     }
@@ -4810,7 +4805,7 @@ mod phase_d_tests {
         .unwrap();
 
         assert_eq!(
-            f.commands.lock().unwrap().as_slice(),
+            f.launcher_queries.lock().unwrap().as_slice(),
             ["note open ${note_name}"]
         );
     }
@@ -4832,7 +4827,7 @@ mod phase_d_tests {
         )
         .unwrap();
         assert_eq!(f.processes.lock().unwrap().len(), 1);
-        assert!(f.commands.lock().unwrap().is_empty());
+        assert!(f.launcher_queries.lock().unwrap().is_empty());
     }
 
     #[test]
