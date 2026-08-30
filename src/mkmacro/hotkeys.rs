@@ -266,15 +266,16 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
             .iter()
             .map(|(name, chord)| ((*name).to_string(), (*chord).to_string())),
     );
-    let mut frequencies = HashMap::new();
+    let mut unrestricted_frequencies = HashMap::new();
     for h in doc
         .macros
         .iter()
         .filter(|m| m.enabled)
+        .filter(|m| matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow))
         .filter_map(|m| m.hotkey.as_ref())
     {
         if let Some(chord) = compiled_canonical_hotkey(h) {
-            *frequencies.entry(chord).or_insert(0usize) += 1;
+            *unrestricted_frequencies.entry(chord).or_insert(0usize) += 1;
         }
     }
     let mut out = Vec::new();
@@ -283,10 +284,19 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
         let Some(c) = compiled_canonical_hotkey(h) else {
             continue;
         };
-        if frequencies.get(&c).copied().unwrap_or_default() > 1 {
+        if matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow)
+            && unrestricted_frequencies
+                .get(&c)
+                .copied()
+                .unwrap_or_default()
+                > 1
+        {
             out.push(HotkeyDiagnostic {
                 macro_id: m.id,
-                message: "hotkey is duplicated by another enabled macro".into(),
+                message: format!(
+                    "Multiple unrestricted macros use {}. Only one global fallback is allowed.",
+                    diagnostic_chord(&c)
+                ),
             });
         }
         if let Some(name) = reserved.by_chord.get(&c) {
@@ -297,6 +307,20 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
         }
     }
     out
+}
+
+fn diagnostic_chord(canonical_chord: &str) -> String {
+    canonical_chord
+        .split('+')
+        .map(|part| match part {
+            "CONTROL" => "Ctrl",
+            "SHIFT" => "Shift",
+            "ALT" => "Alt",
+            "META" => "Meta",
+            part => part,
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,7 +350,9 @@ struct HotkeyGroup {
     canonical_chord: String,
     modifiers: BTreeSet<String>,
     primary: MkKey,
-    candidates: Vec<HotkeyCandidate>,
+    contextual_candidates: Vec<HotkeyCandidate>,
+    unrestricted_candidates: Vec<HotkeyCandidate>,
+    unarmed_candidates: Vec<HotkeyCandidate>,
     triggered: bool,
 }
 
@@ -368,9 +394,10 @@ fn valid_hotkey_scope(scope: &MkHotkeyScope) -> bool {
 
 /// Compiles one polling group for each usable physical chord.
 ///
-/// Duplicate chords are intentionally retained as contextual candidates. The
-/// reserved set is a hard conflict because each reserved chord has another
-/// owner and must never be dispatched as a macro hotkey.
+/// Contextual candidates and unrestricted fallback candidates are compiled
+/// into separate tiers. Multiple unrestricted candidates remain attached to
+/// the group for diagnostics, but they do not form a fallback tier and are
+/// never dispatched.
 fn compile_hotkey_groups_with_reserved(
     doc: &MkMacroDocument,
     reserved: &NormalizedReservedChords,
@@ -385,8 +412,7 @@ fn compile_hotkey_groups_with_reserved(
             continue;
         };
         let canonical_chord = canonical_hotkey(&normalized_hotkey(&modifiers, &primary));
-        if reserved.by_chord.contains_key(&canonical_chord) || !valid_hotkey_scope(&m.hotkey_scope)
-        {
+        if reserved.by_chord.contains_key(&canonical_chord) {
             continue;
         }
 
@@ -396,19 +422,36 @@ fn compile_hotkey_groups_with_reserved(
                 canonical_chord,
                 modifiers,
                 primary,
-                candidates: Vec::new(),
+                contextual_candidates: Vec::new(),
+                unrestricted_candidates: Vec::new(),
+                unarmed_candidates: Vec::new(),
                 triggered: false,
             });
-        group.candidates.push(HotkeyCandidate {
+        let candidate = HotkeyCandidate {
             macro_id: m.id,
             display_name: m.name.clone(),
             scope: m.hotkey_scope.clone(),
-        });
+        };
+        if !valid_hotkey_scope(&m.hotkey_scope) {
+            group.unarmed_candidates.push(candidate);
+        } else if matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow) {
+            group.unrestricted_candidates.push(candidate);
+        } else {
+            group.contextual_candidates.push(candidate);
+        }
     }
 
     let mut groups = groups.into_values().collect::<Vec<_>>();
     for group in &mut groups {
-        group.candidates.sort_by_key(|candidate| candidate.macro_id);
+        group
+            .contextual_candidates
+            .sort_by_key(|candidate| candidate.macro_id);
+        group
+            .unrestricted_candidates
+            .sort_by_key(|candidate| candidate.macro_id);
+        group
+            .unarmed_candidates
+            .sort_by_key(|candidate| candidate.macro_id);
     }
     groups
 }
@@ -438,7 +481,7 @@ fn resolve_hotkey_group(
     let mut contextual_matches = Vec::new();
     let mut matcher_failure = None;
 
-    for candidate in &group.candidates {
+    for candidate in &group.contextual_candidates {
         let MkHotkeyScope::ActiveWindow(matcher) = &candidate.scope else {
             continue;
         };
@@ -469,15 +512,9 @@ fn resolve_hotkey_group(
         return HotkeyResolution::Ambiguous(candidate_summaries(contextual_matches));
     }
 
-    let unrestricted = group
-        .candidates
-        .iter()
-        .filter(|candidate| matches!(candidate.scope, MkHotkeyScope::AnyWindow))
-        .collect::<Vec<_>>();
-    match unrestricted.as_slice() {
-        [] => HotkeyResolution::NoMatch,
+    match group.unrestricted_candidates.as_slice() {
         [candidate] => HotkeyResolution::Run(candidate.macro_id),
-        _ => HotkeyResolution::Ambiguous(candidate_summaries(unrestricted)),
+        _ => HotkeyResolution::NoMatch,
     }
 }
 
@@ -725,7 +762,7 @@ fn tick<F>(
         .into_iter()
         .map(|group| {
             let resolution = if group
-                .candidates
+                .contextual_candidates
                 .iter()
                 .any(|candidate| matches!(candidate.scope, MkHotkeyScope::ActiveWindow(_)))
             {
@@ -819,7 +856,7 @@ mod tests {
         assert_eq!(groups[0].primary, MkKey::Character("K".into()));
         assert_eq!(
             groups[0]
-                .candidates
+                .unrestricted_candidates
                 .iter()
                 .map(|candidate| candidate.macro_id)
                 .collect::<Vec<_>>(),
@@ -864,7 +901,7 @@ mod tests {
         let groups = compile_hotkey_groups(&d);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].canonical_chord, "CONTROL+K");
-        assert_eq!(groups[0].candidates.len(), 2);
+        assert_eq!(groups[0].unrestricted_candidates.len(), 2);
     }
     #[test]
     fn disabled_missing_and_malformed_hotkeys_are_not_candidates() {
@@ -886,7 +923,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(
             groups[0]
-                .candidates
+                .unrestricted_candidates
                 .iter()
                 .map(|candidate| candidate.macro_id)
                 .collect::<Vec<_>>(),
@@ -916,7 +953,7 @@ mod tests {
         };
         let groups = compile_hotkey_groups(&d);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].candidates[0].macro_id, 4);
+        assert_eq!(groups[0].contextual_candidates[0].macro_id, 4);
     }
 
     #[test]
@@ -1151,7 +1188,7 @@ mod tests {
         );
 
         let mut reversed = groups[0].clone();
-        reversed.candidates.reverse();
+        reversed.contextual_candidates.reverse();
         assert_eq!(
             resolve_hotkey_group(&reversed, Some(&foreground)),
             HotkeyResolution::Run(9)
@@ -1174,7 +1211,7 @@ mod tests {
         );
 
         let mut reversed = groups[0].clone();
-        reversed.candidates.reverse();
+        reversed.contextual_candidates.reverse();
         assert_eq!(
             resolve_hotkey_group(&reversed, Some(&foreground)),
             HotkeyResolution::Run(9)
@@ -1194,6 +1231,8 @@ mod tests {
             ],
         };
         let groups = compile_hotkey_groups(&d);
+        assert!(validate_hotkeys(&d, &[]).is_empty());
+
         let foreground = window("Editor");
         let expected = HotkeyResolution::Ambiguous(vec![
             CandidateSummary {
@@ -1211,7 +1250,7 @@ mod tests {
         );
 
         let mut reversed = groups[0].clone();
-        reversed.candidates.reverse();
+        reversed.contextual_candidates.reverse();
         assert_eq!(resolve_hotkey_group(&reversed, Some(&foreground)), expected);
     }
 
@@ -1231,7 +1270,7 @@ mod tests {
         );
 
         let mut reversed = groups[0].clone();
-        reversed.candidates.reverse();
+        reversed.contextual_candidates.reverse();
         assert_eq!(
             resolve_hotkey_group(&reversed, Some(&foreground)),
             HotkeyResolution::Run(2)
@@ -1259,29 +1298,61 @@ mod tests {
     }
 
     #[test]
-    fn multiple_unrestricted_candidates_are_never_selected_by_order() {
+    fn duplicate_unrestricted_candidates_have_no_fallback_when_context_does_not_match() {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
             folders: vec![],
-            macros: vec![mac(9, true), mac(2, true)],
+            macros: vec![mac(9, true), mac(2, true), scoped_mac(4, "Editor")],
         };
         let groups = compile_hotkey_groups(&d);
-        let expected = HotkeyResolution::Ambiguous(vec![
-            CandidateSummary {
-                display_name: "2".into(),
-                macro_id: 2,
-            },
-            CandidateSummary {
-                display_name: "9".into(),
-                macro_id: 9,
-            },
-        ]);
-        assert_eq!(resolve_hotkey_group(&groups[0], None), expected);
-
-        let mut reversed = groups[0].clone();
-        reversed.candidates.reverse();
-        assert_eq!(resolve_hotkey_group(&reversed, None), expected);
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&window("Terminal"))),
+            HotkeyResolution::NoMatch
+        );
+        assert_eq!(
+            validate_hotkeys(&d, &[]),
+            vec![
+                HotkeyDiagnostic {
+                    macro_id: 9,
+                    message: "Multiple unrestricted macros use Ctrl+K. Only one global fallback is allowed.".into(),
+                },
+                HotkeyDiagnostic {
+                    macro_id: 2,
+                    message: "Multiple unrestricted macros use Ctrl+K. Only one global fallback is allowed.".into(),
+                },
+            ]
+        );
+    }
+    #[test]
+    fn duplicate_unrestricted_candidates_do_not_block_matching_contextual_candidate() {
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![mac(2, true), mac(4, true), scoped_mac(9, "Editor")],
+        };
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(
+            groups[0]
+                .contextual_candidates
+                .iter()
+                .map(|candidate| candidate.macro_id)
+                .collect::<Vec<_>>(),
+            vec![9]
+        );
+        assert_eq!(
+            groups[0]
+                .unrestricted_candidates
+                .iter()
+                .map(|candidate| candidate.macro_id)
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&window("Editor"))),
+            HotkeyResolution::Run(9)
+        );
     }
 
     #[test]
@@ -1290,21 +1361,20 @@ mod tests {
             canonical_chord: "CONTROL+K".into(),
             modifiers: ["CONTROL".into()].into_iter().collect(),
             primary: MkKey::Character("K".into()),
-            candidates: vec![
-                HotkeyCandidate {
-                    macro_id: 9,
-                    display_name: "broken".into(),
-                    scope: MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-                        title_regex: Some("[".into()),
-                        ..Default::default()
-                    }),
-                },
-                HotkeyCandidate {
-                    macro_id: 2,
-                    display_name: "fallback".into(),
-                    scope: MkHotkeyScope::AnyWindow,
-                },
-            ],
+            contextual_candidates: vec![HotkeyCandidate {
+                macro_id: 9,
+                display_name: "broken".into(),
+                scope: MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+                    title_regex: Some("[".into()),
+                    ..Default::default()
+                }),
+            }],
+            unrestricted_candidates: vec![HotkeyCandidate {
+                macro_id: 2,
+                display_name: "fallback".into(),
+                scope: MkHotkeyScope::AnyWindow,
+            }],
+            unarmed_candidates: vec![],
             triggered: false,
         };
         assert!(matches!(
@@ -1455,5 +1525,54 @@ mod tests {
             .unwrap();
         tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
         assert_eq!(*fired.lock().unwrap(), vec![1, 1]);
+    }
+    #[test]
+    fn disabling_one_duplicate_unrestricted_restores_remaining_fallback_after_snapshot_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                settings: Default::default(),
+                schema_version: 1,
+                folders: vec![],
+                macros: vec![mac(1, true), mac(2, true)],
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let snapshot = store.snapshot();
+        let state = Mutex::new(PollState {
+            groups: compile_hotkey_groups(&snapshot),
+            snapshot,
+            reserved: Vec::new(),
+        });
+        let keys = Fake(RwLock::new(vec![
+            MkKey::Control,
+            MkKey::Character("K".into()),
+        ]));
+        let fired = Mutex::new(Vec::new());
+        let cb = |id| fired.lock().unwrap().push(id);
+
+        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
+        assert!(fired.lock().unwrap().is_empty());
+
+        keys.0.write().unwrap().clear();
+        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
+        let mut updated = (*store.snapshot()).clone();
+        updated
+            .macros
+            .iter_mut()
+            .find(|macro_| macro_.id == 2)
+            .unwrap()
+            .enabled = false;
+        assert!(validate_hotkeys(&updated, &[]).is_empty());
+        store.save(updated).unwrap();
+        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
+
+        keys.0
+            .write()
+            .unwrap()
+            .extend([MkKey::Control, MkKey::Character("K".into())]);
+        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
+        assert_eq!(*fired.lock().unwrap(), vec![1]);
     }
 }
