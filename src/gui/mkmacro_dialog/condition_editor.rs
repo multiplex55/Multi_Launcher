@@ -1,7 +1,8 @@
 //! Recursive editor and pure mutation operations for macro conditions.
 
-use super::action_editor::{TargetEditorContext, matcher_ui, target_ui, value_ui};
+use super::action_editor::{TargetEditorContext, target_ui, value_ui};
 use super::image_asset_picker::ImageAssetUiContext;
+use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::{
     AlphaPolicy, MkCompareOp, MkCondition, MkCoordinateTarget, MkImageAsset,
@@ -262,7 +263,7 @@ pub(super) fn condition_ui_with_assets(
                 value_ui(ui, value);
             }
             MkCondition::WindowExists { matcher } | MkCondition::WindowActive { matcher } => {
-                if matcher_ui(ui, matcher) {
+                if matcher_ui(ui, matcher).pick_window {
                     requested = Some(ConditionEditorRequest::WindowMatcher {
                         path: ConditionPath::root(),
                     });

@@ -4,6 +4,7 @@
 //! the modal, which makes closing/cancelling it a genuinely lossless operation.
 pub use super::image_authoring_destination::ConditionOperationDestination;
 use super::variable_catalog::{VariableCatalog, VariableDescriptor, VariableValueType};
+pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::{
     MkMacroDialog,
     key_capture::{CapturedChord, captured_chord, key_name},
@@ -1629,37 +1630,6 @@ pub fn apply_picked_window(payload: &mut MkWindowPayload, picked: &PickedWindow)
     payload.matcher = picked.matcher.clone();
 }
 
-fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) -> bool {
-    let before = value.clone();
-    let v = value.get_or_insert_with(String::new);
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.text_edit_singleline(v);
-    });
-    if value.as_ref().is_some_and(|x| x.is_empty()) {
-        *value = None;
-    }
-    *value != before
-}
-
-pub(super) fn matcher_fields_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> bool {
-    let mut changed = false;
-    changed |= optional_field(ui, "Executable", &mut m.process);
-    changed |= optional_field(ui, "Title contains", &mut m.title);
-    changed |= optional_field(ui, "Title regex", &mut m.title_regex);
-    changed |= optional_field(ui, "Class", &mut m.class);
-    changed
-}
-
-pub(super) fn matcher_ui_with_change(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> (bool, bool) {
-    let changed = matcher_fields_ui(ui, m);
-    let choose_window = ui.button("Choose Window…").clicked();
-    (changed, choose_window)
-}
-
-pub(super) fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> bool {
-    matcher_ui_with_change(ui, m).1
-}
 #[derive(Default)]
 pub(super) struct TargetUiOutcome {
     pick_position: bool,
@@ -1961,7 +1931,7 @@ fn target_ui_with_variables(
         }
         MkCoordinateTarget::WindowClient { matcher, point } => {
             ui.heading("Window");
-            let choose = matcher_ui(ui, matcher);
+            let choose = matcher_ui(ui, matcher).pick_window;
             ui.heading("Position");
             ui.horizontal(|ui| {
                 ui.label("X");
@@ -2568,7 +2538,7 @@ fn action_ui(
             ui.checkbox(&mut p.wait, "Wait for completion");
         }
         MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
-            if matcher_ui(ui, &mut p.matcher) {
+            if matcher_ui(ui, &mut p.matcher).pick_window {
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
             if let Some(w) = &mut p.wait {
@@ -2589,12 +2559,12 @@ fn action_ui(
             }
         }
         MkAction::WindowClose(m) => {
-            if matcher_ui(ui, m) {
+            if matcher_ui(ui, m).pick_window {
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
         }
         MkAction::WindowMoveResize(p) => {
-            if matcher_ui(ui, &mut p.matcher) {
+            if matcher_ui(ui, &mut p.matcher).pick_window {
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
             let mut moving = p.x.is_some() && p.y.is_some();
@@ -2642,7 +2612,7 @@ fn action_ui(
             }
         }
         MkAction::WindowState { matcher, state } => {
-            if matcher_ui(ui, matcher) {
+            if matcher_ui(ui, matcher).pick_window {
                 window_pick = Some(super::window_picker::MatcherPath::Action);
             }
             egui::ComboBox::from_label("Window state")
@@ -2976,7 +2946,7 @@ fn action_ui(
                     });
                 }
                 SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
-                    matcher_ui(ui, matcher);
+                    let _ = matcher_ui(ui, matcher);
                 }
                 SearchRegion::Desktop => {}
             }

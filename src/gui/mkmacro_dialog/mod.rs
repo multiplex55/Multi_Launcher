@@ -18,6 +18,7 @@ pub mod uia_editor;
 pub mod variable_catalog;
 pub mod visual_capture_workflow;
 pub mod visual_overlay;
+mod window_matcher_editor;
 pub mod window_picker;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};

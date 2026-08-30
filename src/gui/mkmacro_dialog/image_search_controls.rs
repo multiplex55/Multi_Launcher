@@ -1,4 +1,5 @@
 //! Search fields shared by image actions and live image conditions.
+use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::{
     AlphaPolicy, MkImagePayload, MkImageSearchCondition, MkWindowMatcher, MonitorDescriptor,
     ReturnPoint, ScreenRect, SearchRegion,
@@ -186,7 +187,7 @@ pub fn show_search_region_fields(
             } else {
                 &mut state.client_matcher
             };
-            if super::action_editor::matcher_ui(ui, m) || ui.button("Pick Window").clicked() {
+            if matcher_ui(ui, m).pick_window {
                 out = Some(SearchRegionRequest::PickWindow);
             }
         }

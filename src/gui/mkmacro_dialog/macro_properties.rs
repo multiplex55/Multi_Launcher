@@ -1,5 +1,6 @@
 use super::MkMacroDialog;
 use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, hotkey_name};
+pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::window_picker::{MatcherDestination, MatcherEditRequest};
 use crate::mkmacro::{MkHotkeyScope, MkWindowMatcher};
 use eframe::egui;
@@ -122,10 +123,9 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     if matches!(m.hotkey_scope, MkHotkeyScope::ActiveWindow(_)) {
         let mut matcher_ui_changed = false;
         changed |= edit_active_matcher(&mut m.hotkey_scope, |matcher| {
-            let (fields_changed, picked) =
-                super::action_editor::matcher_ui_with_change(ui, matcher);
-            matcher_ui_changed |= fields_changed;
-            if picked {
+            let outcome = matcher_ui(ui, matcher);
+            matcher_ui_changed |= outcome.changed;
+            if outcome.pick_window {
                 picker_original = Some(matcher.clone());
             }
         });
