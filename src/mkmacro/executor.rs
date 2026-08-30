@@ -1779,11 +1779,26 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(*fake.virtual_desktop_calls.lock().unwrap(), actions);
+        assert_eq!(
+            fake.virtual_desktop_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|action| {
+                    matches!(
+                        action,
+                        super::super::MkVirtualDesktopAction::GoTo { desktop: 3 }
+                    )
+                })
+                .count(),
+            1
+        );
         assert!(
             fake.events()
                 .iter()
                 .all(|event| event.starts_with("virtual_desktop:"))
         );
+        assert!(fake.events().iter().all(|event| !event.starts_with("key_")));
 
         let diagnostic = ExecutionDiagnostic::new(DiagnosticKind::Backend, "desktop refused")
             .context("operation", "create");
@@ -1810,6 +1825,37 @@ mod tests {
         assert_eq!(
             error.context.get("attempts_exhausted"),
             Some(&"true".into())
+        );
+
+        let go_to_diagnostic = ExecutionDiagnostic::new(DiagnosticKind::Backend, "desktop refused")
+            .context("operation", "go_to");
+        fake.fail(
+            "virtual_desktop:GoTo { desktop: 11 }",
+            go_to_diagnostic.clone(),
+        );
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let error = Executor::new(fake.clone().backends(), control)
+            .execute(
+                &plan(vec![step(
+                    10,
+                    MkAction::VirtualDesktop(super::super::MkVirtualDesktopAction::GoTo {
+                        desktop: 11,
+                    }),
+                )]),
+                &|_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, go_to_diagnostic.kind);
+        assert_eq!(error.message, go_to_diagnostic.message);
+        assert_eq!(error.context.get("operation"), Some(&"go_to".into()));
+        assert_eq!(
+            error.context.get("action"),
+            Some(&"GoTo { desktop: 11 }".into())
+        );
+        assert_eq!(
+            error.context.get("backend_operation"),
+            Some(&"virtual desktop".into())
         );
     }
 
@@ -2687,21 +2733,24 @@ impl Executor {
             MkAction::WindowState { matcher, state } => {
                 self.backends.window.set_state(matcher, *state)
             }
-            MkAction::VirtualDesktop(action) => match action {
-                super::MkVirtualDesktopAction::Create => self.backends.virtual_desktop.create(),
-                super::MkVirtualDesktopAction::SwitchLeft => {
-                    self.backends.virtual_desktop.switch_left()
-                }
-                super::MkVirtualDesktopAction::SwitchRight => {
-                    self.backends.virtual_desktop.switch_right()
-                }
-                super::MkVirtualDesktopAction::CloseCurrent => {
-                    self.backends.virtual_desktop.close_current()
-                }
-                super::MkVirtualDesktopAction::GoTo { desktop } => {
-                    self.backends.virtual_desktop.go_to(*desktop)
-                }
-            },
+            MkAction::VirtualDesktop(action) => {
+                let result = match action {
+                    super::MkVirtualDesktopAction::Create => self.backends.virtual_desktop.create(),
+                    super::MkVirtualDesktopAction::SwitchLeft => {
+                        self.backends.virtual_desktop.switch_left()
+                    }
+                    super::MkVirtualDesktopAction::SwitchRight => {
+                        self.backends.virtual_desktop.switch_right()
+                    }
+                    super::MkVirtualDesktopAction::CloseCurrent => {
+                        self.backends.virtual_desktop.close_current()
+                    }
+                    super::MkVirtualDesktopAction::GoTo { desktop } => {
+                        self.backends.virtual_desktop.go_to(*desktop)
+                    }
+                };
+                result.map_err(|error| error.context("action", format!("{action:?}")))
+            }
             MkAction::WindowWait(p) => self.wait_condition(
                 macro_id,
                 &MkCondition::WindowExists {

@@ -29,6 +29,7 @@ impl VirtualDesktopBackend for UnsupportedVirtualDesktopBackend {
     }
     fn go_to(&self, desktop: u32) -> ExecResult {
         self.unsupported(MkVirtualDesktopAction::GoTo { desktop })
+            .map_err(|error| error.context("desktop", desktop.to_string()))
     }
 }
 impl UnsupportedVirtualDesktopBackend {
@@ -47,29 +48,35 @@ pub(crate) struct WindowsVirtualDesktopBackend(pub Arc<dyn InputBackend>);
 #[cfg(windows)]
 impl VirtualDesktopBackend for WindowsVirtualDesktopBackend {
     fn create(&self) -> ExecResult {
-        self.perform(MkVirtualDesktopAction::Create)
+        self.perform(ShortcutAction::Create)
     }
     fn switch_left(&self) -> ExecResult {
-        self.perform(MkVirtualDesktopAction::SwitchLeft)
+        self.perform(ShortcutAction::SwitchLeft)
     }
     fn switch_right(&self) -> ExecResult {
-        self.perform(MkVirtualDesktopAction::SwitchRight)
+        self.perform(ShortcutAction::SwitchRight)
     }
     fn close_current(&self) -> ExecResult {
-        self.perform(MkVirtualDesktopAction::CloseCurrent)
+        self.perform(ShortcutAction::CloseCurrent)
     }
     fn go_to(&self, desktop: u32) -> ExecResult {
-        Err(ExecutionDiagnostic::new(
-            DiagnosticKind::UnsupportedOperation,
-            "Direct virtual desktop selection is not supported by the shortcut backend",
-        )
-        .context("backend", "virtual desktop")
-        .context("desktop", desktop.to_string()))
+        crate::window_manager::switch_to_virtual_desktop(desktop).map_err(|error| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::ComFailure,
+                format!("Failed to switch to virtual desktop {desktop}: {error}"),
+            )
+            .context("backend", "virtual desktop")
+            .context(
+                "action",
+                format!("{:?}", MkVirtualDesktopAction::GoTo { desktop }),
+            )
+            .context("desktop", desktop.to_string())
+        })
     }
 }
 #[cfg(windows)]
 impl WindowsVirtualDesktopBackend {
-    fn perform(&self, action: MkVirtualDesktopAction) -> ExecResult {
+    fn perform(&self, action: ShortcutAction) -> ExecResult {
         let keys = shortcut(action);
         let mut pressed = Vec::new();
         for key in &keys {
@@ -94,14 +101,20 @@ impl WindowsVirtualDesktopBackend {
 }
 
 /// Returns the documented Windows shell chord for an operation, modifiers first.
-pub fn shortcut(action: MkVirtualDesktopAction) -> [MkKey; 3] {
-    use MkVirtualDesktopAction::*;
+#[derive(Debug, Clone, Copy)]
+enum ShortcutAction {
+    Create,
+    SwitchLeft,
+    SwitchRight,
+    CloseCurrent,
+}
+
+fn shortcut(action: ShortcutAction) -> [MkKey; 3] {
     let terminal = match action {
-        Create => MkKey::Character("D".into()),
-        SwitchLeft => MkKey::Left,
-        SwitchRight => MkKey::Right,
-        CloseCurrent => MkKey::Function(4),
-        GoTo { .. } => panic!("direct desktop selection has no shell chord"),
+        ShortcutAction::Create => MkKey::Character("D".into()),
+        ShortcutAction::SwitchLeft => MkKey::Left,
+        ShortcutAction::SwitchRight => MkKey::Right,
+        ShortcutAction::CloseCurrent => MkKey::Function(4),
     };
     [MkKey::Meta, MkKey::Control, terminal]
 }
@@ -113,20 +126,73 @@ mod tests {
     #[test]
     fn maps_all_shell_shortcuts_exactly() {
         assert_eq!(
-            shortcut(MkVirtualDesktopAction::Create),
+            shortcut(ShortcutAction::Create),
             [MkKey::Meta, MkKey::Control, MkKey::Character("D".into())]
         );
         assert_eq!(
-            shortcut(MkVirtualDesktopAction::SwitchLeft),
+            shortcut(ShortcutAction::SwitchLeft),
             [MkKey::Meta, MkKey::Control, MkKey::Left]
         );
         assert_eq!(
-            shortcut(MkVirtualDesktopAction::SwitchRight),
+            shortcut(ShortcutAction::SwitchRight),
             [MkKey::Meta, MkKey::Control, MkKey::Right]
         );
         assert_eq!(
-            shortcut(MkVirtualDesktopAction::CloseCurrent),
+            shortcut(ShortcutAction::CloseCurrent),
             [MkKey::Meta, MkKey::Control, MkKey::Function(4)]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_operations_emit_exact_chords() {
+        let input = Arc::new(crate::mkmacro::executor::fake::FakeBackend::default());
+        let backend = WindowsVirtualDesktopBackend(input.clone());
+
+        backend.create().unwrap();
+        backend.switch_left().unwrap();
+        backend.switch_right().unwrap();
+        backend.close_current().unwrap();
+
+        assert_eq!(
+            input.events(),
+            vec![
+                "key_down:Meta",
+                "key_down:Control",
+                "key_down:Character(\"D\")",
+                "key_up:Character(\"D\")",
+                "key_up:Control",
+                "key_up:Meta",
+                "key_down:Meta",
+                "key_down:Control",
+                "key_down:Left",
+                "key_up:Left",
+                "key_up:Control",
+                "key_up:Meta",
+                "key_down:Meta",
+                "key_down:Control",
+                "key_down:Right",
+                "key_up:Right",
+                "key_up:Control",
+                "key_up:Meta",
+                "key_down:Meta",
+                "key_down:Control",
+                "key_down:Function(4)",
+                "key_up:Function(4)",
+                "key_up:Control",
+                "key_up:Meta",
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_go_to_includes_requested_desktop() {
+        let error = UnsupportedVirtualDesktopBackend.go_to(7).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
+        assert_eq!(
+            error.context.get("action").map(String::as_str),
+            Some("GoTo { desktop: 7 }")
+        );
+        assert_eq!(error.context.get("desktop").map(String::as_str), Some("7"));
     }
 }

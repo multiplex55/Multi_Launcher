@@ -290,6 +290,65 @@ mod virtual_desktop {
             }
             .and_then(|| unsafe { windows::core::Type::from_abi(result) })
         }
+
+        pub unsafe fn switch_desktop(
+            &self,
+            hwnd_or_mon: isize,
+            desktop: &IVirtualDesktop,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                (Interface::vtable(self).SwitchDesktop)(
+                    Interface::as_raw(self),
+                    hwnd_or_mon,
+                    Interface::as_raw(desktop),
+                )
+            }
+            .ok()
+        }
+    }
+}
+
+/// Switch to a virtual desktop by its one-based position in the Windows
+/// virtual-desktop list.
+#[cfg(windows)]
+pub fn switch_to_virtual_desktop(desktop_number: u32) -> Result<(), String> {
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    };
+
+    if desktop_number == 0 {
+        return Err("virtual desktop number must be at least 1".into());
+    }
+
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|error| error.to_string())?;
+
+        let result = (|| {
+            let manager = CoCreateInstance::<_, virtual_desktop::IVirtualDesktopManagerInternal>(
+                &windows::core::GUID::from_u128(0xc5e0cdca_7b6e_41b2_9fc4_d93975cc467b),
+                None,
+                CLSCTX_ALL,
+            )
+            .map_err(|error| error.to_string())?;
+            let desktops = manager.get_desktops(0).map_err(|error| error.to_string())?;
+            let count = desktops.GetCount().map_err(|error| error.to_string())?;
+            if desktop_number > count {
+                return Err(format!(
+                    "virtual desktop {desktop_number} is out of range; {count} desktop(s) available"
+                ));
+            }
+            let desktop = desktops
+                .GetAt(desktop_number - 1)
+                .map_err(|error| error.to_string())?;
+            manager
+                .switch_desktop(0, &desktop)
+                .map_err(|error| error.to_string())
+        })();
+
+        CoUninitialize();
+        result
     }
 }
 
