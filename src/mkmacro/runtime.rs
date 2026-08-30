@@ -467,10 +467,29 @@ static RECORDING_OPTIONS: Lazy<RwLock<NormalizationConfig>> =
 static RECORDING_STATUS: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
 static PENDING_RECORDINGS: Lazy<Mutex<Vec<RecordingResult>>> = Lazy::new(|| Mutex::new(Vec::new()));
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
-    set_shared_store_with_backends(store.clone(), production_backends_with_store(store))
+    set_shared_store_with_backends_and_reserved(
+        store.clone(),
+        production_backends_with_store(store),
+        &[],
+    )
+}
+pub fn set_shared_store_with_reserved(store: Arc<MkMacroStore>, reserved: &[(&str, &str)]) {
+    set_shared_store_with_backends_and_reserved(
+        store.clone(),
+        production_backends_with_store(store),
+        reserved,
+    )
 }
 /// Installs a shared runtime with injected effects (intended for tests).
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {
+    set_shared_store_with_backends_and_reserved(store, backends, &[])
+}
+/// Installs a shared runtime with injected effects and reserved launcher chords.
+pub fn set_shared_store_with_backends_and_reserved(
+    store: Arc<MkMacroStore>,
+    backends: Backends,
+    reserved: &[(&str, &str)],
+) {
     // Stop the old poller before replacing the runtime it dispatches into.
     if let Some(old) = HOTKEYS.write().unwrap().take() {
         old.shutdown()
@@ -496,9 +515,9 @@ pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backen
         Arc::new(SystemRecorderClock::default()),
         guard,
     )));
-    *HOTKEYS.write().unwrap() = Some(Arc::new(super::hotkeys::MkMacroHotkeyService::new(
-        store.clone(),
-    )));
+    *HOTKEYS.write().unwrap() = Some(Arc::new(
+        super::hotkeys::MkMacroHotkeyService::new_with_reserved(store.clone(), reserved),
+    ));
     *RECORDER_HOTKEYS.write().unwrap() = Some(Arc::new(
         super::recorder_hotkeys::RecorderHotkeyService::system(store),
     ));

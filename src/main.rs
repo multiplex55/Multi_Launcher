@@ -3,7 +3,7 @@
 
 use multi_launcher::actions::{Action, load_actions};
 use multi_launcher::gui::LauncherApp;
-use multi_launcher::hotkey::HotkeyTrigger;
+use multi_launcher::hotkey::{HotkeyTrigger, parse_hotkey};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
 use multi_launcher::visibility::handle_visibility_trigger;
@@ -46,6 +46,31 @@ fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::Vie
 
 static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
 static EVENT_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
+
+fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
+    let mut reserved = Vec::new();
+    let launcher = settings
+        .hotkey
+        .as_deref()
+        .filter(|hotkey| parse_hotkey(hotkey).is_some())
+        .unwrap_or("F2");
+    reserved.push(("launcher toggle".into(), launcher.into()));
+    if let Some(hotkey) = settings
+        .quit_hotkey
+        .as_deref()
+        .filter(|hotkey| parse_hotkey(hotkey).is_some())
+    {
+        reserved.push(("quit launcher".into(), hotkey.into()));
+    }
+    if let Some(hotkey) = settings
+        .help_hotkey
+        .as_deref()
+        .filter(|hotkey| parse_hotkey(hotkey).is_some())
+    {
+        reserved.push(("help launcher".into(), hotkey.into()));
+    }
+    reserved
+}
 
 pub fn request_hotkey_restart(settings: Settings) {
     match RESTART_TX.lock() {
@@ -93,7 +118,12 @@ fn spawn_gui(
     {
         tracing::warn!(?err, "failed to save clipboard modify enablement migration");
     }
-    let mut plugins = PluginManager::new();
+    let reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
+    let reserved_launcher_hotkey_refs = reserved_launcher_hotkeys
+        .iter()
+        .map(|(name, hotkey)| (name.as_str(), hotkey.as_str()))
+        .collect::<Vec<_>>();
+    let mut plugins = PluginManager::new_with_reserved_hotkeys(&reserved_launcher_hotkey_refs);
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
     let mut plugin_settings = settings.plugin_settings.clone();

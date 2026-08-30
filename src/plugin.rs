@@ -146,6 +146,24 @@ impl PluginManager {
         }
     }
 
+    /// Creates the manager while reserving chords owned by the launcher.
+    pub fn new_with_reserved_hotkeys(reserved: &[(&str, &str)]) -> Self {
+        let store = Arc::new(
+            crate::mkmacro::MkMacroStore::open(".")
+                .expect("open mkmacro store")
+                .0,
+        );
+        crate::mkmacro::runtime::set_shared_store_with_reserved(Arc::clone(&store), reserved);
+        Self {
+            plugins: Vec::new(),
+            services: PluginInternalServices {
+                clipboard_modifier_catalog: shared_default_catalog(),
+                mkmacro_store: store,
+            },
+            libs: Vec::new(),
+        }
+    }
+
     pub fn internal_services(&self) -> &PluginInternalServices {
         &self.services
     }
