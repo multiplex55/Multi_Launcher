@@ -2,7 +2,7 @@ use super::MkMacroDialog;
 use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, hotkey_name};
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::window_picker::{MatcherDestination, MatcherEditRequest};
-use crate::mkmacro::{MkHotkeyScope, MkWindowMatcher};
+use crate::mkmacro::{DiagnosticSeverity, MkHotkeyScope, MkWindowMatcher};
 use eframe::egui;
 
 fn clear_hotkey(hotkey: &mut Option<crate::mkmacro::MkHotkey>) -> bool {
@@ -66,7 +66,10 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     let control = crate::mkmacro::hotkeys::canonical_hotkey(&d.draft.settings.record_toggle_hotkey);
     let conflicts =
         crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[("mkmacro record toggle", &control)]);
-    if !conflicts.is_empty() {
+    if conflicts.iter().any(|diagnostic| {
+        diagnostic.severity == DiagnosticSeverity::Fatal
+            && diagnostic.message.starts_with("hotkey conflicts with ")
+    }) {
         ui.colored_label(
             egui::Color32::YELLOW,
             "hotkey conflicts with an enabled macro",
@@ -171,12 +174,16 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             }
         }
     }
-    if let Some(w) =
+    for diagnostic in
         crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[("mkmacro record toggle", &control)])
             .into_iter()
-            .find(|x| Some(x.macro_id) == d.selected_macro_id)
+            .filter(|x| Some(x.macro_id) == d.selected_macro_id)
     {
-        ui.colored_label(egui::Color32::YELLOW, w.message);
+        let color = match diagnostic.severity {
+            DiagnosticSeverity::Warning => egui::Color32::YELLOW,
+            DiagnosticSeverity::Fatal => egui::Color32::RED,
+        };
+        ui.colored_label(color, diagnostic.message);
     }
     if changed {
         d.mark_dirty();

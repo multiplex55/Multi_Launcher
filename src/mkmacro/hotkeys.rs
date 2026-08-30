@@ -1,10 +1,10 @@
 //! Polling macro-hotkey service and authoring diagnostics.
 use super::{
-    ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore,
-    MkWindowMatcher, WindowCandidate, candidate_matches,
+    DiagnosticSeverity, ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument,
+    MkMacroStore, MkWindowMatcher, WindowCandidate, candidate_matches,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -102,6 +102,7 @@ fn vk_from_primary(key: &MkKey) -> Option<i32> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeyDiagnostic {
+    pub severity: DiagnosticSeverity,
     pub macro_id: u64,
     pub message: String,
 }
@@ -266,49 +267,89 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
             .iter()
             .map(|(name, chord)| ((*name).to_string(), (*chord).to_string())),
     );
-    let mut unrestricted_frequencies = HashMap::new();
-    for h in doc
-        .macros
-        .iter()
-        .filter(|m| m.enabled)
-        .filter(|m| matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow))
-        .filter_map(|m| m.hotkey.as_ref())
-    {
-        if let Some(chord) = compiled_canonical_hotkey(h) {
-            *unrestricted_frequencies.entry(chord).or_insert(0usize) += 1;
-        }
-    }
     let mut out = Vec::new();
+    let mut groups = BTreeMap::<_, Vec<_>>::new();
     for m in doc.macros.iter().filter(|m| m.enabled) {
         let Some(h) = &m.hotkey else { continue };
         let Some(c) = compiled_canonical_hotkey(h) else {
+            out.push(HotkeyDiagnostic {
+                severity: DiagnosticSeverity::Fatal,
+                macro_id: m.id,
+                message: "Malformed hotkey: use a supported primary key and only modifiers in the modifier list.".into(),
+            });
             continue;
         };
-        if matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow)
-            && unrestricted_frequencies
-                .get(&c)
-                .copied()
-                .unwrap_or_default()
-                > 1
-        {
-            out.push(HotkeyDiagnostic {
-                macro_id: m.id,
-                message: format!(
-                    "Multiple unrestricted macros use {}. Only one global fallback is allowed.",
-                    diagnostic_chord(&c)
-                ),
-            });
-        }
         if let Some(name) = reserved.by_chord.get(&c) {
             out.push(HotkeyDiagnostic {
+                severity: DiagnosticSeverity::Fatal,
                 macro_id: m.id,
                 message: format!("hotkey conflicts with {name}"),
             });
+        }
+        // Reserved chords still participate in duplicate analysis: these are
+        // independent problems.
+        groups.entry(c).or_default().push(m);
+    }
+    for (chord, candidates) in groups {
+        let unrestricted = candidates
+            .iter()
+            .filter(|m| matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow))
+            .collect::<Vec<_>>();
+        if unrestricted.len() > 1 {
+            for m in unrestricted {
+                out.push(HotkeyDiagnostic {
+                    severity: DiagnosticSeverity::Fatal,
+                    macro_id: m.id,
+                    message: format!(
+                        "Multiple unrestricted macros use {}. Only one global fallback is allowed.",
+                        diagnostic_chord(&chord)
+                    ),
+                });
+            }
+        }
+        let contextual = candidates
+            .iter()
+            .filter(|m| valid_hotkey_scope(&m.hotkey_scope))
+            .filter_map(|m| match &m.hotkey_scope {
+                MkHotkeyScope::ActiveWindow(matcher) => Some((m.id, normalized_matcher(matcher))),
+                MkHotkeyScope::AnyWindow => None,
+            })
+            .collect::<Vec<_>>();
+        for (index, (macro_id, matcher)) in contextual.iter().enumerate() {
+            if contextual
+                .iter()
+                .enumerate()
+                .any(|(other_index, (_, other))| index != other_index && matcher == other)
+            {
+                out.push(HotkeyDiagnostic {
+                    severity: DiagnosticSeverity::Fatal,
+                    macro_id: *macro_id,
+                    message: "Window-specific macros sharing this hotkey have identical matchers and are always ambiguous when they match. Document order does not resolve the ambiguity; none will run.".into(),
+                });
+            }
+            // Distinct structures can still overlap. Do not infer exclusivity
+            // from process, title substring, regex, or class constraints.
+            if contextual.iter().any(|(_, other)| matcher != other) {
+                out.push(HotkeyDiagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    macro_id: *macro_id,
+                    message: "Multiple window-specific macros share this hotkey. If more than one matcher matches the active window, none will run.".into(),
+                });
+            }
         }
     }
     out
 }
 
+fn normalized_matcher(matcher: &MkWindowMatcher) -> MkWindowMatcher {
+    let nonempty = |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
+    MkWindowMatcher {
+        title: nonempty(&matcher.title),
+        title_regex: nonempty(&matcher.title_regex),
+        process: nonempty(&matcher.process),
+        class: nonempty(&matcher.class),
+    }
+}
 fn diagnostic_chord(canonical_chord: &str) -> String {
     canonical_chord
         .split('+')
@@ -841,6 +882,257 @@ mod tests {
             image_assets: vec![],
         }
     }
+    fn process_mac(id: u64, process: &str) -> MkMacro {
+        let mut m = mac(id, true);
+        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            process: Some(process.into()),
+            ..Default::default()
+        });
+        m
+    }
+
+    fn validation_document(macros: Vec<MkMacro>) -> MkMacroDocument {
+        MkMacroDocument {
+            macros,
+            ..Default::default()
+        }
+    }
+
+    fn assert_overlap_warnings(doc: &MkMacroDocument, ids: &[u64]) {
+        let diagnostics = validate_hotkeys(doc, &[]);
+        assert_eq!(diagnostics.len(), ids.len(), "{diagnostics:?}");
+        for (diagnostic, id) in diagnostics.iter().zip(ids) {
+            assert_eq!(diagnostic.macro_id, *id);
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+            assert_eq!(
+                diagnostic.message,
+                "Multiple window-specific macros share this hotkey. If more than one matcher matches the active window, none will run."
+            );
+        }
+    }
+
+    #[test]
+    fn validation_firefox_and_visual_studio_warn_without_errors() {
+        let mut studio = process_mac(2, "devenv.exe");
+        // Physical aliases and character case must still form the same group.
+        studio.hotkey.as_mut().unwrap().modifiers = vec![MkKey::RightControl];
+        studio.hotkey.as_mut().unwrap().key = MkKey::Character("k".into());
+        assert_overlap_warnings(
+            &validation_document(vec![process_mac(1, "firefox.exe"), studio]),
+            &[1, 2],
+        );
+    }
+
+    #[test]
+    fn validation_firefox_and_one_global_fallback_have_no_duplicate_diagnostic() {
+        let doc = validation_document(vec![process_mac(1, "firefox.exe"), mac(2, true)]);
+        assert!(validate_hotkeys(&doc, &[]).is_empty());
+    }
+
+    #[test]
+    fn validation_two_globals_have_errors_on_both() {
+        let doc = validation_document(vec![mac(1, true), mac(2, true)]);
+        let diagnostics = validate_hotkeys(&doc, &[]);
+        assert_eq!(diagnostics.len(), 2);
+        for (diagnostic, id) in diagnostics.iter().zip([1, 2]) {
+            assert_eq!(diagnostic.macro_id, id);
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Fatal);
+            assert!(
+                diagnostic
+                    .message
+                    .contains("Only one global fallback is allowed")
+            );
+        }
+    }
+
+    #[test]
+    fn validation_identical_firefox_matchers_are_errors_regardless_of_order() {
+        let mut doc = validation_document(vec![
+            process_mac(1, "firefox.exe"),
+            process_mac(2, "firefox.exe"),
+        ]);
+        for ids in [[1, 2], [2, 1]] {
+            let diagnostics = validate_hotkeys(&doc, &[]);
+            assert_eq!(diagnostics.len(), 2);
+            for (diagnostic, id) in diagnostics.iter().zip(ids) {
+                assert_eq!(diagnostic.macro_id, id);
+                assert_eq!(diagnostic.severity, DiagnosticSeverity::Fatal);
+                assert!(diagnostic.message.contains("identical matchers"));
+                assert!(diagnostic.message.contains("always ambiguous"));
+                assert!(
+                    diagnostic
+                        .message
+                        .contains("Document order does not resolve")
+                );
+            }
+            doc.macros.reverse();
+        }
+    }
+
+    #[test]
+    fn validation_normalizes_empty_matcher_fields_without_changing_document() {
+        for field in ["title", "title_regex", "process", "class"] {
+            for empty in ["", " \t\n\u{2003}"] {
+                let mut first = process_mac(1, "firefox.exe");
+                if field == "process" {
+                    first = scoped_mac(1, "Firefox");
+                }
+                let mut second = first.clone();
+                second.id = 2;
+                let MkHotkeyScope::ActiveWindow(matcher) = &mut second.hotkey_scope else {
+                    unreachable!()
+                };
+                let value = match field {
+                    "title" => &mut matcher.title,
+                    "title_regex" => &mut matcher.title_regex,
+                    "process" => &mut matcher.process,
+                    "class" => &mut matcher.class,
+                    _ => unreachable!(),
+                };
+                *value = Some(empty.into());
+                let doc = validation_document(vec![first, second]);
+                let before = doc.clone();
+                let diagnostics = validate_hotkeys(&doc, &[]);
+                assert_eq!(diagnostics.len(), 2, "{field}: {empty:?}");
+                assert!(diagnostics.iter().all(|d| {
+                    d.severity == DiagnosticSeverity::Fatal
+                        && d.message.contains("identical matchers")
+                }));
+                assert_eq!(doc, before);
+            }
+        }
+    }
+
+    #[test]
+    fn validation_process_firefox_and_title_youtube_warn_about_potential_overlap() {
+        assert_overlap_warnings(
+            &validation_document(vec![
+                process_mac(1, "firefox.exe"),
+                scoped_mac(2, "YouTube"),
+            ]),
+            &[1, 2],
+        );
+    }
+
+    #[test]
+    fn validation_distinct_regex_class_and_nonempty_title_constraints_only_warn() {
+        let mut regex = mac(3, true);
+        regex.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title_regex: Some("Firefox.*".into()),
+            ..Default::default()
+        });
+        let mut class = mac(4, true);
+        class.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            class: Some("MozillaWindowClass".into()),
+            ..Default::default()
+        });
+        assert_overlap_warnings(
+            &validation_document(vec![
+                scoped_mac(1, "Firefox"),
+                scoped_mac(2, " Firefox "),
+                regex,
+                class,
+            ]),
+            &[1, 2, 3, 4],
+        );
+    }
+
+    #[test]
+    fn validation_disabled_macros_do_not_affect_diagnostics() {
+        let mut doc = validation_document(vec![
+            process_mac(1, "firefox.exe"),
+            mac(2, true),
+            process_mac(3, "firefox.exe"),
+            process_mac(4, "devenv.exe"),
+            mac(5, true),
+            mac(6, true),
+            mac(7, true),
+        ]);
+        doc.macros[5].hotkey.as_mut().unwrap().key = MkKey::Function(9);
+        doc.macros[6].hotkey.as_mut().unwrap().key = MkKey::Control;
+        for m in &mut doc.macros[2..] {
+            m.enabled = false;
+        }
+        assert!(validate_hotkeys(&doc, &[]).is_empty());
+    }
+
+    #[test]
+    fn validation_invalid_contextual_matchers_do_not_cause_overlap_warnings() {
+        let mut empty = mac(2, true);
+        empty.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher::default());
+        let mut invalid = process_mac(3, "firefox.exe");
+        let MkHotkeyScope::ActiveWindow(matcher) = &mut invalid.hotkey_scope else {
+            unreachable!()
+        };
+        matcher.title_regex = Some("[".into());
+        let doc = validation_document(vec![process_mac(1, "firefox.exe"), empty, invalid]);
+        assert!(validate_hotkeys(&doc, &[]).is_empty());
+    }
+
+    #[test]
+    fn validation_duplicate_errors_and_distinct_warnings_coexist_without_affecting_fallback() {
+        let doc = validation_document(vec![
+            process_mac(1, "firefox.exe"),
+            process_mac(2, "firefox.exe"),
+            process_mac(3, "devenv.exe"),
+            mac(4, true),
+        ]);
+        let diagnostics = validate_hotkeys(&doc, &[]);
+        assert_eq!(diagnostics.len(), 5);
+        for id in [1, 2] {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.macro_id == id && d.severity == DiagnosticSeverity::Fatal)
+            );
+        }
+        for id in [1, 2, 3] {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.macro_id == id && d.severity == DiagnosticSeverity::Warning)
+            );
+        }
+        assert!(diagnostics.iter().all(|d| d.macro_id != 4));
+    }
+
+    #[test]
+    fn validation_preserves_reserved_and_malformed_errors_alongside_duplicates() {
+        let mut malformed = mac(5, true);
+        malformed
+            .hotkey
+            .as_mut()
+            .unwrap()
+            .modifiers
+            .push(MkKey::Character("X".into()));
+        let doc = validation_document(vec![
+            mac(1, true),
+            mac(2, true),
+            process_mac(3, "firefox.exe"),
+            process_mac(4, "firefox.exe"),
+            malformed,
+        ]);
+        let diagnostics = validate_hotkeys(&doc, &[("launcher", "Ctrl+K")]);
+        assert_eq!(diagnostics.len(), 9, "{diagnostics:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.severity == DiagnosticSeverity::Fatal)
+        );
+        for id in 1..=4 {
+            assert_eq!(diagnostics.iter().filter(|d| d.macro_id == id).count(), 2);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.macro_id == id && d.message == "hotkey conflicts with launcher")
+            );
+        }
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.macro_id == 5 && d.message.starts_with("Malformed hotkey"))
+        );
+    }
     #[test]
     fn three_shared_macros_compile_into_one_group_with_one_edge_flag() {
         let d = MkMacroDocument {
@@ -988,6 +1280,7 @@ mod tests {
         assert_eq!(
             validate_hotkeys(&d, &[]),
             vec![HotkeyDiagnostic {
+                severity: DiagnosticSeverity::Fatal,
                 macro_id: 7,
                 message: "hotkey conflicts with the recording toggle".into(),
             }]
@@ -1097,6 +1390,7 @@ mod tests {
         assert_eq!(
             validate_hotkeys(&d, &[("launcher", " f9 ")]),
             vec![HotkeyDiagnostic {
+                severity: DiagnosticSeverity::Fatal,
                 macro_id: 15,
                 message: "hotkey conflicts with the recording toggle".into(),
             }]
@@ -1231,7 +1525,7 @@ mod tests {
             ],
         };
         let groups = compile_hotkey_groups(&d);
-        assert!(validate_hotkeys(&d, &[]).is_empty());
+        assert_eq!(validate_hotkeys(&d, &[]).len(), 2);
 
         let foreground = window("Editor");
         let expected = HotkeyResolution::Ambiguous(vec![
@@ -1314,10 +1608,12 @@ mod tests {
             validate_hotkeys(&d, &[]),
             vec![
                 HotkeyDiagnostic {
+                    severity: DiagnosticSeverity::Fatal,
                     macro_id: 9,
                     message: "Multiple unrestricted macros use Ctrl+K. Only one global fallback is allowed.".into(),
                 },
                 HotkeyDiagnostic {
+                    severity: DiagnosticSeverity::Fatal,
                     macro_id: 2,
                     message: "Multiple unrestricted macros use Ctrl+K. Only one global fallback is allowed.".into(),
                 },
