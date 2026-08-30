@@ -1,4 +1,5 @@
 //! Polling macro-hotkey service and authoring diagnostics.
+use super::validation::{MatcherValidationError, validate_window_matcher};
 use super::{
     ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore,
     MkWindowMatcher, WindowCandidate, candidate_matches,
@@ -278,11 +279,14 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
     let mut groups = BTreeMap::<_, Vec<_>>::new();
     for m in doc.macros.iter().filter(|m| m.enabled) {
         let Some(h) = &m.hotkey else { continue };
-        if !valid_hotkey_scope(&m.hotkey_scope) {
+        if let Err(error) = validate_hotkey_scope(&m.hotkey_scope) {
             out.push(HotkeyDiagnostic {
                 severity: HotkeyDiagnosticSeverity::Error,
                 macro_id: m.id,
-                message: "Invalid active-window hotkey matcher: provide at least one nonempty constraint and a valid title regex. This hotkey will not run.".into(),
+                message: format!(
+                    "Invalid active-window hotkey matcher: {} This hotkey will not run.",
+                    error.message
+                ),
             });
         }
         let Some(c) = compiled_canonical_hotkey(h) else {
@@ -323,7 +327,7 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
         }
         let contextual = candidates
             .iter()
-            .filter(|m| valid_hotkey_scope(&m.hotkey_scope))
+            .filter(|m| validate_hotkey_scope(&m.hotkey_scope).is_ok())
             .filter_map(|m| match &m.hotkey_scope {
                 MkHotkeyScope::ActiveWindow(matcher) => Some((m.id, normalized_matcher(matcher))),
                 MkHotkeyScope::AnyWindow => None,
@@ -428,22 +432,10 @@ fn normalized_hotkey(modifiers: &BTreeSet<String>, primary: &MkKey) -> MkHotkey 
     }
 }
 
-fn valid_hotkey_scope(scope: &MkHotkeyScope) -> bool {
+fn validate_hotkey_scope(scope: &MkHotkeyScope) -> Result<(), MatcherValidationError> {
     match scope {
-        MkHotkeyScope::AnyWindow => true,
-        MkHotkeyScope::ActiveWindow(matcher) => {
-            let usable = |value: &Option<String>| {
-                value.as_ref().is_some_and(|value| !value.trim().is_empty())
-            };
-            (usable(&matcher.title)
-                || usable(&matcher.title_regex)
-                || usable(&matcher.process)
-                || usable(&matcher.class))
-                && matcher
-                    .title_regex
-                    .as_ref()
-                    .is_none_or(|regex| regex::Regex::new(regex).is_ok())
-        }
+        MkHotkeyScope::AnyWindow => Ok(()),
+        MkHotkeyScope::ActiveWindow(matcher) => validate_window_matcher(matcher),
     }
 }
 
@@ -453,6 +445,8 @@ fn valid_hotkey_scope(scope: &MkHotkeyScope) -> bool {
 /// into separate tiers. Multiple unrestricted candidates remain attached to
 /// the group for diagnostics, but they do not form a fallback tier and are
 /// never dispatched.
+/// Statically invalid contextual matchers are unarmed individually. They cannot
+/// match or block valid contextual peers or the single unrestricted fallback.
 fn compile_hotkey_groups_with_reserved(
     doc: &MkMacroDocument,
     reserved: &NormalizedReservedChords,
@@ -487,7 +481,7 @@ fn compile_hotkey_groups_with_reserved(
             display_name: m.name.clone(),
             scope: m.hotkey_scope.clone(),
         };
-        if !valid_hotkey_scope(&m.hotkey_scope) {
+        if validate_hotkey_scope(&m.hotkey_scope).is_err() {
             group.unarmed_candidates.push(candidate);
         } else if matches!(m.hotkey_scope, MkHotkeyScope::AnyWindow) {
             group.unrestricted_candidates.push(candidate);
@@ -1094,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_empty_whitespace_and_invalid_regex_matchers_are_errors() {
+    fn invalid_matchers_are_diagnosed_and_unarmed_without_blocking_peers_or_fallback() {
         for matcher in [
             MkWindowMatcher::default(),
             MkWindowMatcher {
@@ -1108,6 +1102,11 @@ mod tests {
                 ..Default::default()
             },
         ] {
+            let expected_detail = if matcher.title_regex.as_deref() == Some("[") {
+                "unclosed character class"
+            } else {
+                "Enter at least one non-whitespace window criterion"
+            };
             let mut m = mac(1, true);
             m.hotkey_scope = MkHotkeyScope::ActiveWindow(matcher);
             let mut doc = validation_document(vec![m]);
@@ -1121,11 +1120,94 @@ mod tests {
                     .starts_with("Invalid active-window hotkey matcher")
             );
 
+            assert!(diagnostics[0].message.contains(expected_detail));
+            let groups = compile_hotkey_groups(&doc);
+            assert_eq!(groups.len(), 1);
+            assert!(groups[0].contextual_candidates.is_empty());
+            assert_eq!(groups[0].unarmed_candidates.len(), 1);
+            assert_eq!(groups[0].unarmed_candidates[0].macro_id, 1);
+            assert_eq!(
+                resolve_hotkey_group(&groups[0], Some(&window("Editor"))),
+                HotkeyResolution::NoMatch
+            );
+
+            // A statically invalid matcher cannot win over or suppress a fallback,
+            // even when there is no foreground window.
+            let mut with_fallback = doc.clone();
+            with_fallback.macros.push(mac(2, true));
+            let groups = compile_hotkey_groups(&with_fallback);
+            for foreground in [None, Some(window("Editor"))] {
+                assert_eq!(
+                    resolve_hotkey_group(&groups[0], foreground.as_ref()),
+                    HotkeyResolution::Run(2)
+                );
+            }
+
+            with_fallback.macros.push(scoped_mac(3, "Editor"));
+            for _ in 0..2 {
+                let groups = compile_hotkey_groups(&with_fallback);
+                assert_eq!(groups[0].contextual_candidates.len(), 1);
+                assert_eq!(groups[0].contextual_candidates[0].macro_id, 3);
+                assert_eq!(validate_hotkeys(&with_fallback, &[]), diagnostics);
+                assert_eq!(
+                    resolve_hotkey_group(&groups[0], Some(&window("Editor"))),
+                    HotkeyResolution::Run(3)
+                );
+                assert_eq!(
+                    resolve_hotkey_group(&groups[0], Some(&window("Terminal"))),
+                    HotkeyResolution::Run(2)
+                );
+                with_fallback.macros.reverse();
+            }
+
             doc.macros[0].enabled = false;
             assert!(validate_hotkeys(&doc, &[]).is_empty());
             doc.macros[0].enabled = true;
             doc.macros[0].hotkey = None;
             assert!(validate_hotkeys(&doc, &[]).is_empty());
+        }
+    }
+
+    #[test]
+    fn each_individual_matcher_criterion_is_armed_with_existing_matching_semantics() {
+        for (field, value, nonmatch) in [
+            ("process", "EDITOR.EXE", "other.exe"),
+            ("process", "c:/apps/EDITOR.EXE", "C:/Other/editor.exe"),
+            ("title", "dit", "editor"),
+            ("title_regex", "^E.*r$", "^Terminal$"),
+            ("class", "editorclass", "Editor"),
+        ] {
+            let set = |value: &str| {
+                let mut matcher = MkWindowMatcher::default();
+                let slot = match field {
+                    "process" => &mut matcher.process,
+                    "title" => &mut matcher.title,
+                    "title_regex" => &mut matcher.title_regex,
+                    "class" => &mut matcher.class,
+                    _ => unreachable!(),
+                };
+                *slot = Some(value.into());
+                matcher
+            };
+            for (value, expected) in [
+                (value, HotkeyResolution::Run(1)),
+                (nonmatch, HotkeyResolution::NoMatch),
+            ] {
+                let mut m = mac(1, true);
+                m.hotkey_scope = MkHotkeyScope::ActiveWindow(set(value));
+                let doc = validation_document(vec![m]);
+                let before = doc.clone();
+                assert!(validate_hotkeys(&doc, &[]).is_empty(), "{field}: {value}");
+                let groups = compile_hotkey_groups(&doc);
+                assert_eq!(doc, before);
+                assert_eq!(groups[0].contextual_candidates.len(), 1);
+                assert!(groups[0].unarmed_candidates.is_empty());
+                assert_eq!(
+                    resolve_hotkey_group(&groups[0], Some(&window("Editor"))),
+                    expected,
+                    "{field}: {value}"
+                );
+            }
         }
     }
 
@@ -1735,7 +1817,7 @@ mod tests {
     }
 
     #[test]
-    fn matcher_failure_blocks_fallback() {
+    fn unexpected_matcher_failure_in_manually_built_group_blocks_fallback() {
         let group = HotkeyGroup {
             canonical_chord: "CONTROL+K".into(),
             modifiers: ["CONTROL".into()].into_iter().collect(),

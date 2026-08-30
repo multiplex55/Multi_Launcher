@@ -1079,21 +1079,37 @@ mod optional_wait_validation_tests {
         }
     }
 }
-fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MatcherValidationError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// Checks matcher configuration without a window snapshot or GUI dependency.
+/// Whitespace-only fields count as absent; nonempty criteria are left unchanged
+/// so process paths, title substrings, regexes, and class names keep their semantics.
+pub(crate) fn validate_window_matcher(x: &MkWindowMatcher) -> Result<(), MatcherValidationError> {
     let usable = |value: &Option<String>| value.as_ref().is_some_and(|v| !v.trim().is_empty());
     if !usable(&x.title) && !usable(&x.title_regex) && !usable(&x.process) && !usable(&x.class) {
-        push(
-            o,
-            m,
-            s,
-            "empty_window_matcher",
-            "Enter at least one window matcher",
-        )
-    };
-    if let Some(r) = &x.title_regex
-        && Regex::new(r).is_err()
+        return Err(MatcherValidationError {
+            code: "empty_window_matcher",
+            message: "Enter at least one non-whitespace window criterion: process, title, title regex, or class.".into(),
+        });
+    }
+    if let Some(r) = x.title_regex.as_ref().filter(|r| !r.trim().is_empty())
+        && let Err(reason) = Regex::new(r)
     {
-        push(o, m, s, "invalid_regex", "Window title regex is invalid")
+        return Err(MatcherValidationError {
+            code: "invalid_regex",
+            message: format!("Window title regex is invalid: {reason}"),
+        });
+    }
+    Ok(())
+}
+
+fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
+    if let Err(error) = validate_window_matcher(x) {
+        push(o, m, s, error.code, error.message);
     }
 }
 fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDiagnostic>) {
@@ -1339,6 +1355,52 @@ mod coordinate_target_tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn matcher_validation_preserves_action_diagnostics_and_ignores_blank_fields() {
+        for matcher in [
+            MkWindowMatcher::default(),
+            MkWindowMatcher {
+                title: Some(" \t\n".into()),
+                title_regex: Some("\u{2003}".into()),
+                process: Some(String::new()),
+                class: Some(" ".into()),
+            },
+            MkWindowMatcher {
+                title_regex: Some("[".into()),
+                ..Default::default()
+            },
+        ] {
+            let expected = validate_window_matcher(&matcher).unwrap_err();
+            let actual = diagnostics(matcher);
+            assert_eq!(actual.len(), 1);
+            assert_eq!(actual[0].severity, DiagnosticSeverity::Fatal);
+            assert_eq!(actual[0].macro_id, 1);
+            assert_eq!(actual[0].step_id, Some(2));
+            assert_eq!(actual[0].code, expected.code);
+            assert_eq!(actual[0].message, expected.message);
+        }
+        for field in ["process", "title", "title_regex", "class"] {
+            let mut matcher = MkWindowMatcher {
+                title: Some(" \t".into()),
+                title_regex: Some("\n".into()),
+                process: Some("\u{2003}".into()),
+                class: Some(String::new()),
+            };
+            let slot = match field {
+                "process" => &mut matcher.process,
+                "title" => &mut matcher.title,
+                "title_regex" => &mut matcher.title_regex,
+                "class" => &mut matcher.class,
+                _ => unreachable!(),
+            };
+            *slot = Some("Editor".into());
+            let before = matcher.clone();
+            assert!(validate_window_matcher(&matcher).is_ok(), "{field}");
+            assert_eq!(matcher, before);
+            assert!(diagnostics(matcher).is_empty(), "{field}");
+        }
     }
 
     #[test]
