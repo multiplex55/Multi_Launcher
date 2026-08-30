@@ -621,7 +621,10 @@ mod tests {
         assert_eq!(results, 2);
     }
     fn drain_until_terminal(coordinator: &mut SearchCoordinator) -> Vec<SearchEvent> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Production searches spawn external processes, which can be slow to start
+        // while the full test suite is running in parallel.
+        let timeout = Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + timeout;
         let mut all_events = Vec::new();
         loop {
             let events = coordinator.drain_current_events();
@@ -634,8 +637,16 @@ mod tests {
                 )
             });
             all_events.extend(events);
-            if terminal || std::time::Instant::now() >= deadline {
+            if terminal {
                 return all_events;
+            }
+            if std::time::Instant::now() >= deadline {
+                coordinator.cancel_active();
+                panic!(
+                    "search did not finish within {timeout:?}; status: {:?}; diagnostics: {:?}; events: {all_events:?}",
+                    coordinator.active_status(),
+                    coordinator.diagnostics(),
+                );
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -740,11 +751,18 @@ mod tests {
 
     #[test]
     fn production_content_search_uses_ripgrep_and_returns_result_when_available() {
+        let Ok(executable) =
+            crate::file_search::ripgrep::resolve_ripgrep_executable(std::path::Path::new("rg"))
+        else {
+            eprintln!("skipping ripgrep integration test: ripgrep is unavailable");
+            return;
+        };
         let temp = tempfile::tempdir().expect("tempdir");
         let expected = temp.path().join("content-hit.txt");
         std::fs::write(&expected, "alpha needle omega\n").expect("write file");
         std::fs::write(temp.path().join("miss.txt"), "alpha omega\n").expect("write miss file");
         let settings = FileSearchSettings {
+            ripgrep_executable_path: executable,
             max_search_results: 10,
             ..FileSearchSettings::default()
         };
@@ -770,7 +788,11 @@ mod tests {
         });
 
         let events = drain_until_terminal(&mut coordinator);
-        assert_eq!(coordinator.last_backend(), Some(SearchBackend::Ripgrep));
+        assert_eq!(
+            coordinator.last_backend(),
+            Some(SearchBackend::Ripgrep),
+            "events: {events:?}"
+        );
         assert!(
             events.iter().any(|event| matches!(
                 event,
