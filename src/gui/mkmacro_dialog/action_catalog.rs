@@ -336,6 +336,19 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Mouse,
+            "Click Within Region",
+            "Click a randomly selected position inside a screen rectangle.",
+            &["click", "mouse", "region", "rectangle", "random", "padding"],
+            MouseClick,
+            MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+                rect: ScreenRect::new(0, 0, 100, 100),
+                button: MkMouseButton::Left,
+                clicks: 1,
+                edge_padding_px: 0,
+            })
+        ),
+        d!(
+            Mouse,
             "Mouse Down",
             "Hold a mouse button",
             &["mouse"],
@@ -827,7 +840,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         MkAction::MouseMove(_) => EditorKind::MouseMove,
         MkAction::MouseDrag(_) => EditorKind::MouseDrag,
         MkAction::MouseClick(_) => EditorKind::MouseClick,
-        MkAction::ClickWithinRegion(_) => EditorKind::DirectInsert,
+        MkAction::ClickWithinRegion(_) => EditorKind::MouseClick,
         MkAction::MouseDown(_) | MkAction::MouseUp(_) => EditorKind::MouseButton,
         MkAction::MouseScroll { .. } => EditorKind::MouseScroll,
         MkAction::Delay(_) => EditorKind::Timing,
@@ -1751,6 +1764,48 @@ mod paste_tests {
         assert!(details.contains("Horizontal Left"));
         assert!(details.contains("2 notch(es)"));
         assert!(details.contains("-240 wheel units"));
+    }
+
+    #[test]
+    fn click_within_region_is_a_mouse_catalog_action_with_complete_metadata() {
+        let descriptors = descriptors();
+        let mouse_click_index = descriptors
+            .iter()
+            .position(|descriptor| descriptor.name == "Mouse Click")
+            .unwrap();
+        let descriptor = &descriptors[mouse_click_index + 1];
+
+        assert_eq!(descriptor.name, "Click Within Region");
+        assert_eq!(descriptor.category, ActionCategory::Mouse);
+        assert_eq!(
+            descriptor.description,
+            "Click a randomly selected position inside a screen rectangle."
+        );
+        assert_eq!(descriptor.editor, EditorKind::MouseClick);
+        assert!(matches!(
+            (descriptor.make_default)(),
+            MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+                rect,
+                button: MkMouseButton::Left,
+                clicks: 1,
+                edge_padding_px: 0,
+            }) if rect == ScreenRect::new(0, 0, 100, 100)
+        ));
+
+        let action = (descriptor.make_default)();
+        assert_eq!(action_name(&action), "Click Within Region");
+        assert_eq!(editor_for_action(&action), EditorKind::MouseClick);
+        assert!(editor_route_recognizes(&action, descriptor.editor));
+        assert!(matches!(
+            descriptor.editor.contract(),
+            Some(EditorContract::Configurable { field_count: 1.. })
+        ));
+        assert!(matches(&descriptor, "rectangle"));
+        assert!(matches(&descriptor, "padding"));
+        assert_eq!(
+            action_details(&action),
+            "Left ×1 within (0, 0) 100 × 100 · 0 px padding"
+        );
     }
 
     #[test]

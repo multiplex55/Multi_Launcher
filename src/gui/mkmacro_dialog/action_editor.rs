@@ -2311,6 +2311,40 @@ fn action_ui(
                 ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
             });
         }
+        MkAction::ClickWithinRegion(p) => {
+            ui.label("Screen rectangle");
+            ui.horizontal(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut p.rect.x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut p.rect.y));
+                ui.label("Width");
+                ui.add(egui::DragValue::new(&mut p.rect.width));
+                ui.label("Height");
+                ui.add(egui::DragValue::new(&mut p.rect.height));
+            });
+            egui::ComboBox::from_label("Button")
+                .selected_text(format!("{:?}", p.button))
+                .show_ui(ui, |ui| {
+                    for b in [
+                        MkMouseButton::Left,
+                        MkMouseButton::Right,
+                        MkMouseButton::Middle,
+                        MkMouseButton::X1,
+                        MkMouseButton::X2,
+                    ] {
+                        ui.selectable_value(&mut p.button, b.clone(), format!("{b:?}"));
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.label("Click count");
+                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Edge padding (px)");
+                ui.add(egui::DragValue::new(&mut p.edge_padding_px));
+            });
+        }
         MkAction::MouseDown(button) | MkAction::MouseUp(button) => {
             egui::ComboBox::from_label("Button")
                 .selected_text(format!("{button:?}"))
