@@ -80,6 +80,17 @@ impl From<crate::multi_manager::win::EnumeratedWindow> for WindowCandidate {
         }
     }
 }
+impl From<crate::multi_manager::win::CapturedWindow> for WindowCandidate {
+    fn from(w: crate::multi_manager::win::CapturedWindow) -> Self {
+        Self {
+            handle: w.hwnd,
+            title: w.title,
+            executable: w.executable,
+            process_path: w.process_path,
+            class_name: w.class_name,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmbiguityPolicy {
     Error,
@@ -193,16 +204,7 @@ impl WindowBackend for Win32WindowBackend {
         let Some(w) = crate::multi_manager::win::active_window() else {
             return Ok(false);
         };
-        candidate_matches(
-            m,
-            &WindowCandidate {
-                handle: w.hwnd,
-                title: w.title,
-                executable: w.executable,
-                process_path: w.process_path,
-                class_name: w.class_name,
-            },
-        )
+        candidate_matches(m, &WindowCandidate::from(w))
     }
     fn activate(&self, p: &MkWindowPayload) -> ExecResult {
         activate_handle(self.one(&p.matcher)?.handle)

@@ -1,5 +1,8 @@
 //! Polling macro-hotkey service and authoring diagnostics.
-use super::{MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore, MkWindowMatcher};
+use super::{
+    ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore,
+    MkWindowMatcher, WindowCandidate, candidate_matches,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
@@ -13,9 +16,14 @@ use std::{
 /// The deliberately small boundary between hotkey polling and the operating system.
 pub trait KeyStateBackend: Send + Sync {
     fn is_down(&self, key: &MkKey) -> bool;
-    fn active_window_matches(&self, _matcher: &MkWindowMatcher) -> bool {
-        false
-    }
+}
+
+/// Error returned when the foreground-window snapshot cannot be obtained.
+pub type ActiveWindowError = ExecutionDiagnostic;
+
+/// The deliberately small boundary between hotkey polling and foreground-window discovery.
+pub trait ActiveWindowBackend: Send + Sync {
+    fn active_window(&self) -> Result<Option<WindowCandidate>, ActiveWindowError>;
 }
 
 #[derive(Default)]
@@ -45,17 +53,21 @@ impl KeyStateBackend for SystemKeyStateBackend {
             _ => vk_from_primary(key).is_some_and(down),
         }
     }
-    fn active_window_matches(&self, matcher: &MkWindowMatcher) -> bool {
-        use super::executor::WindowBackend;
-        use super::windows::Win32WindowBackend;
-        Win32WindowBackend.is_active(matcher).unwrap_or(false)
-    }
 }
 
 #[cfg(not(windows))]
 impl KeyStateBackend for SystemKeyStateBackend {
     fn is_down(&self, _key: &MkKey) -> bool {
         false
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SystemActiveWindowBackend;
+
+impl ActiveWindowBackend for SystemActiveWindowBackend {
+    fn active_window(&self) -> Result<Option<WindowCandidate>, ActiveWindowError> {
+        Ok(crate::multi_manager::win::active_window().map(WindowCandidate::from))
     }
 }
 
@@ -428,7 +440,8 @@ pub struct MkMacroHotkeyService {
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
     state: Arc<Mutex<PollState>>,
-    backend: Arc<dyn KeyStateBackend>,
+    key_state_backend: Arc<dyn KeyStateBackend>,
+    active_window_backend: Arc<dyn ActiveWindowBackend>,
     trigger: Arc<Trigger>,
 }
 impl MkMacroHotkeyService {
@@ -436,7 +449,12 @@ impl MkMacroHotkeyService {
         Self::new_with_reserved(store, &[])
     }
     pub fn new_with_reserved(store: Arc<MkMacroStore>, reserved: &[(&str, &str)]) -> Self {
-        Self::with_backend_and_reserved(store, Arc::new(SystemKeyStateBackend), reserved)
+        Self::with_backends_and_reserved(
+            store,
+            Arc::new(SystemKeyStateBackend),
+            Arc::new(SystemActiveWindowBackend),
+            reserved,
+        )
     }
     pub fn with_backend(store: Arc<MkMacroStore>, backend: Arc<dyn KeyStateBackend>) -> Self {
         Self::with_backend_and_reserved(store, backend, &[])
@@ -446,13 +464,34 @@ impl MkMacroHotkeyService {
         backend: Arc<dyn KeyStateBackend>,
         reserved: &[(&str, &str)],
     ) -> Self {
+        Self::with_backends_and_reserved(
+            store,
+            backend,
+            Arc::new(SystemActiveWindowBackend),
+            reserved,
+        )
+    }
+    pub fn with_backends(
+        store: Arc<MkMacroStore>,
+        key_state_backend: Arc<dyn KeyStateBackend>,
+        active_window_backend: Arc<dyn ActiveWindowBackend>,
+    ) -> Self {
+        Self::with_backends_and_reserved(store, key_state_backend, active_window_backend, &[])
+    }
+    pub fn with_backends_and_reserved(
+        store: Arc<MkMacroStore>,
+        key_state_backend: Arc<dyn KeyStateBackend>,
+        active_window_backend: Arc<dyn ActiveWindowBackend>,
+        reserved: &[(&str, &str)],
+    ) -> Self {
         let reserved = reserved
             .iter()
             .map(|(name, chord)| ((*name).to_string(), (*chord).to_string()))
             .collect();
         Self::start(
             store,
-            backend,
+            key_state_backend,
+            active_window_backend,
             reserved,
             Arc::new(|id| {
                 let _ = crate::mkmacro::runtime::run(id);
@@ -461,7 +500,8 @@ impl MkMacroHotkeyService {
     }
     fn start(
         store: Arc<MkMacroStore>,
-        backend: Arc<dyn KeyStateBackend>,
+        key_state_backend: Arc<dyn KeyStateBackend>,
+        active_window_backend: Arc<dyn ActiveWindowBackend>,
         reserved: Vec<(String, String)>,
         trigger: Arc<Trigger>,
     ) -> Self {
@@ -473,11 +513,19 @@ impl MkMacroHotkeyService {
             reserved,
         }));
         let stop = Arc::new(AtomicBool::new(false));
-        let (worker_store, worker_stop, worker_state, worker_backend, worker_trigger) = (
+        let (
+            worker_store,
+            worker_stop,
+            worker_state,
+            worker_key_state_backend,
+            worker_active_window_backend,
+            worker_trigger,
+        ) = (
             store.clone(),
             stop.clone(),
             state.clone(),
-            backend.clone(),
+            key_state_backend.clone(),
+            active_window_backend.clone(),
             trigger.clone(),
         );
         let worker = thread::Builder::new()
@@ -487,7 +535,8 @@ impl MkMacroHotkeyService {
                     tick(
                         &worker_store,
                         &worker_state,
-                        worker_backend.as_ref(),
+                        worker_key_state_backend.as_ref(),
+                        worker_active_window_backend.as_ref(),
                         worker_trigger.as_ref(),
                     );
                     thread::sleep(Duration::from_millis(20));
@@ -499,7 +548,8 @@ impl MkMacroHotkeyService {
             stop,
             worker: Mutex::new(Some(worker)),
             state,
-            backend,
+            key_state_backend,
+            active_window_backend,
             trigger,
         }
     }
@@ -519,7 +569,8 @@ impl Drop for MkMacroHotkeyService {
 fn tick<F>(
     store: &MkMacroStore,
     state: &Mutex<PollState>,
-    backend: &dyn KeyStateBackend,
+    key_state_backend: &dyn KeyStateBackend,
+    active_window_backend: &dyn ActiveWindowBackend,
     trigger: &F,
 ) where
     F: Fn(u64) + ?Sized,
@@ -534,14 +585,17 @@ fn tick<F>(
             state.groups = compile_hotkey_groups_with_reserved(&snapshot, &normalized_reserved);
             state.snapshot = snapshot;
         }
-        let ctrl = backend.is_down(&MkKey::Control);
-        let shift = backend.is_down(&MkKey::Shift);
-        let alt = backend.is_down(&MkKey::Alt);
-        let meta = backend.is_down(&MkKey::Meta);
+        let ctrl = key_state_backend.is_down(&MkKey::Control);
+        let shift = key_state_backend.is_down(&MkKey::Shift);
+        let alt = key_state_backend.is_down(&MkKey::Alt);
+        let meta = key_state_backend.is_down(&MkKey::Meta);
         let mut primary_states: Vec<(MkKey, bool)> = Vec::new();
         for group in &state.groups {
             if !primary_states.iter().any(|(key, _)| key == &group.primary) {
-                primary_states.push((group.primary.clone(), backend.is_down(&group.primary)));
+                primary_states.push((
+                    group.primary.clone(),
+                    key_state_backend.is_down(&group.primary),
+                ));
             }
         }
         for group in &mut state.groups {
@@ -564,10 +618,10 @@ fn tick<F>(
                 continue;
             }
             group.triggered = true;
-            match resolve_candidate(group, backend) {
-                CandidateResolution::None => {}
-                CandidateResolution::Unique(candidate) => fire.push(candidate.macro_id),
-                CandidateResolution::Ambiguous(candidates) => {
+            match resolve_candidate(group, active_window_backend) {
+                Ok(CandidateResolution::None) => {}
+                Ok(CandidateResolution::Unique(candidate)) => fire.push(candidate.macro_id),
+                Ok(CandidateResolution::Ambiguous(candidates)) => {
                     let candidates = candidates
                         .iter()
                         .map(|candidate| {
@@ -579,6 +633,13 @@ fn tick<F>(
                         chord = %group.canonical_chord,
                         candidates = %candidates,
                         "macro hotkey is ambiguous; no macro triggered"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        chord = %group.canonical_chord,
+                        error = %error,
+                        "active-window backend failed; no macro triggered"
                     );
                 }
             }
@@ -598,28 +659,45 @@ enum CandidateResolution<'a> {
 
 fn resolve_candidate<'a>(
     group: &'a HotkeyGroup,
-    backend: &dyn KeyStateBackend,
-) -> CandidateResolution<'a> {
-    let matches = group
+    active_window_backend: &dyn ActiveWindowBackend,
+) -> Result<CandidateResolution<'a>, ActiveWindowError> {
+    let active_window = if group
         .candidates
         .iter()
-        .filter(|candidate| match &candidate.scope {
+        .any(|candidate| matches!(&candidate.scope, MkHotkeyScope::ActiveWindow(_)))
+    {
+        active_window_backend.active_window()?
+    } else {
+        None
+    };
+    let mut matches = Vec::new();
+    for candidate in &group.candidates {
+        let matched = match &candidate.scope {
             MkHotkeyScope::AnyWindow => true,
-            MkHotkeyScope::ActiveWindow(matcher) => backend.active_window_matches(matcher),
-        })
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
+            MkHotkeyScope::ActiveWindow(matcher) => match active_window.as_ref() {
+                Some(window) => candidate_matches(matcher, window)?,
+                None => false,
+            },
+        };
+        if matched {
+            matches.push(candidate);
+        }
+    }
+    Ok(match matches.as_slice() {
         [] => CandidateResolution::None,
         [candidate] => CandidateResolution::Unique(candidate),
         _ => CandidateResolution::Ambiguous(matches),
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkMacro, MkPlayback};
-    use std::sync::RwLock;
+    use crate::mkmacro::{DiagnosticKind, MkMacro, MkPlayback};
+    use std::sync::{
+        Arc, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    };
     fn mac(id: u64, on: bool) -> MkMacro {
         MkMacro {
             id,
@@ -917,15 +995,34 @@ mod tests {
             self.0.read().unwrap().contains(k)
         }
     }
-    struct ContextFake {
-        active_title: String,
+    struct ActiveWindowFake {
+        snapshot: Mutex<Result<Option<WindowCandidate>, ActiveWindowError>>,
+        query_count: AtomicUsize,
     }
-    impl KeyStateBackend for ContextFake {
-        fn is_down(&self, _: &MkKey) -> bool {
-            false
+    impl ActiveWindowFake {
+        fn with_title(title: &str) -> Self {
+            Self {
+                snapshot: Mutex::new(Ok(Some(WindowCandidate {
+                    handle: 1,
+                    title: title.into(),
+                    executable: "editor.exe".into(),
+                    process_path: r"C:\Apps\editor.exe".into(),
+                    class_name: "EditorClass".into(),
+                }))),
+                query_count: AtomicUsize::new(0),
+            }
         }
-        fn active_window_matches(&self, matcher: &MkWindowMatcher) -> bool {
-            matcher.title.as_deref() == Some(self.active_title.as_str())
+        fn with_result(result: Result<Option<WindowCandidate>, ActiveWindowError>) -> Self {
+            Self {
+                snapshot: Mutex::new(result),
+                query_count: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl ActiveWindowBackend for ActiveWindowFake {
+        fn active_window(&self) -> Result<Option<WindowCandidate>, ActiveWindowError> {
+            self.query_count.fetch_add(1, Ordering::SeqCst);
+            self.snapshot.lock().unwrap().clone()
         }
     }
     #[test]
@@ -951,11 +1048,9 @@ mod tests {
         assert!(matches!(
             resolve_candidate(
                 &groups[0],
-                &ContextFake {
-                    active_title: "Editor".into()
-                }
+                &ActiveWindowFake::with_title("Editor")
             ),
-            CandidateResolution::Unique(candidate) if candidate.macro_id == 9
+            Ok(CandidateResolution::Unique(candidate)) if candidate.macro_id == 9
         ));
 
         let mut reversed = groups[0].clone();
@@ -963,12 +1058,105 @@ mod tests {
         assert!(matches!(
             resolve_candidate(
                 &reversed,
-                &ContextFake {
-                    active_title: "Editor".into()
-                }
+                &ActiveWindowFake::with_title("Editor")
             ),
-            CandidateResolution::Unique(candidate) if candidate.macro_id == 9
+            Ok(CandidateResolution::Unique(candidate)) if candidate.macro_id == 9
         ));
+    }
+    #[test]
+    fn contextual_candidates_share_one_active_window_snapshot_per_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let mut editor = mac(9, true);
+        editor.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        });
+        let mut terminal = mac(2, true);
+        terminal.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Terminal".into()),
+            ..Default::default()
+        });
+        store
+            .save(MkMacroDocument {
+                settings: Default::default(),
+                schema_version: 1,
+                folders: vec![],
+                macros: vec![editor, terminal],
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let snapshot = store.snapshot();
+        let state = Mutex::new(PollState {
+            groups: compile_hotkey_groups(&snapshot),
+            snapshot,
+            reserved: Vec::new(),
+        });
+        let keys = Fake(RwLock::new(vec![
+            MkKey::Control,
+            MkKey::Character("K".into()),
+        ]));
+        let active_window = ActiveWindowFake::with_title("Editor");
+        let fired = Mutex::new(Vec::new());
+        tick(&store, &state, &keys, &active_window, &|id| {
+            fired.lock().unwrap().push(id)
+        });
+        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 1);
+        assert_eq!(*fired.lock().unwrap(), vec![9]);
+    }
+    #[test]
+    fn active_window_backend_error_blocks_contextual_and_fallback_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let mut contextual = mac(9, true);
+        contextual.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        });
+        let fallback = mac(2, true);
+        store
+            .save(MkMacroDocument {
+                settings: Default::default(),
+                schema_version: 1,
+                folders: vec![],
+                macros: vec![contextual, fallback],
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let snapshot = store.snapshot();
+        let state = Mutex::new(PollState {
+            groups: compile_hotkey_groups(&snapshot),
+            snapshot,
+            reserved: Vec::new(),
+        });
+        let keys = Fake(RwLock::new(vec![
+            MkKey::Control,
+            MkKey::Character("K".into()),
+        ]));
+        let active_window = ActiveWindowFake::with_result(Err(ExecutionDiagnostic::new(
+            DiagnosticKind::Backend,
+            "foreground query failed",
+        )));
+        let fired = Mutex::new(Vec::new());
+        tick(&store, &state, &keys, &active_window, &|id| {
+            fired.lock().unwrap().push(id)
+        });
+        assert!(fired.lock().unwrap().is_empty());
+        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 1);
+
+        keys.0.write().unwrap().clear();
+        tick(&store, &state, &keys, &active_window, &|id| {
+            fired.lock().unwrap().push(id)
+        });
+        *active_window.snapshot.lock().unwrap() = Ok(None);
+        keys.0
+            .write()
+            .unwrap()
+            .extend([MkKey::Control, MkKey::Character("K".into())]);
+        tick(&store, &state, &keys, &active_window, &|id| {
+            fired.lock().unwrap().push(id)
+        });
+        assert_eq!(*fired.lock().unwrap(), vec![2]);
     }
     #[test]
     fn tick_has_edges_and_rebuilds() {
@@ -995,16 +1183,16 @@ mod tests {
         ]));
         let fired = Mutex::new(vec![]);
         let cb = |id| fired.lock().unwrap().push(id);
-        tick(&store, &state, &fake, &cb);
-        tick(&store, &state, &fake, &cb);
+        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
+        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
         assert_eq!(*fired.lock().unwrap(), vec![1]);
         fake.0.write().unwrap().clear();
-        tick(&store, &state, &fake, &cb);
+        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
         fake.0
             .write()
             .unwrap()
             .extend([MkKey::Control, MkKey::Character("K".into())]);
-        tick(&store, &state, &fake, &cb);
+        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
         assert_eq!(*fired.lock().unwrap(), vec![1, 1]);
         store
             .save(MkMacroDocument {
@@ -1014,7 +1202,7 @@ mod tests {
                 macros: vec![],
             })
             .unwrap();
-        tick(&store, &state, &fake, &cb);
+        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
         assert_eq!(*fired.lock().unwrap(), vec![1, 1]);
     }
 }
