@@ -2136,6 +2136,15 @@ fn click_within_region_validation_error(p: &MkClickWithinRegionPayload) -> Optio
     None
 }
 
+const VIRTUAL_DESKTOP_NUMBER_LABEL: &str = "Desktop Number";
+const VIRTUAL_DESKTOP_NUMBERING_HELP: &str = "Desktop numbering starts at 1.";
+const VIRTUAL_DESKTOP_EXISTENCE_HELP: &str =
+    "The action fails if that desktop does not currently exist.";
+
+fn clamp_virtual_desktop_number(desktop: &mut u32) {
+    *desktop = (*desktop).max(1);
+}
+
 fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
@@ -2626,6 +2635,15 @@ fn action_ui(
                     ui.selectable_value(state, MkWindowState::Maximize, "Maximize");
                     ui.selectable_value(state, MkWindowState::Restore, "Restore");
                 });
+        }
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }) => {
+            clamp_virtual_desktop_number(desktop);
+            ui.horizontal(|ui| {
+                ui.label(VIRTUAL_DESKTOP_NUMBER_LABEL);
+                ui.add(egui::DragValue::new(desktop).clamp_range(1..=u32::MAX));
+            });
+            ui.small(VIRTUAL_DESKTOP_NUMBERING_HELP);
+            ui.small(VIRTUAL_DESKTOP_EXISTENCE_HELP);
         }
         MkAction::SetVariable { name, value } => {
             ui.horizontal(|ui| {
@@ -6975,5 +6993,38 @@ mod tests {
             assert!(editor.draft.is_none());
             assert_eq!(editor.active_point_pick, None);
         }
+    }
+
+    #[test]
+    fn editing_virtual_desktop_preserves_one_based_number_without_conversion() {
+        let mut editor = test_editor();
+        let source = MkStep {
+            id: 42,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::default(),
+            action: MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 3 }),
+        };
+
+        editor.begin_edit(&source);
+
+        assert_eq!(
+            editor.editor,
+            Some(super::super::action_catalog::EditorKind::VirtualDesktop)
+        );
+        assert!(matches!(
+            editor.draft.as_ref().map(|step| &step.action),
+            Some(MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo {
+                desktop: 3
+            }))
+        ));
+    }
+
+    #[test]
+    fn virtual_desktop_authoring_clamps_zero_to_one() {
+        let mut desktop = 0;
+        clamp_virtual_desktop_number(&mut desktop);
+        assert_eq!(desktop, 1);
     }
 }

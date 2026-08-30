@@ -78,6 +78,7 @@ pub struct MkMacroDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::MkVirtualDesktopAction;
     use crate::mkmacro::{
         AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition, MkCoordinateTarget,
         MkHotkey, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
@@ -1246,19 +1247,23 @@ mod tests {
     }
 
     #[test]
-    fn virtual_desktops_are_direct_windows_actions() {
+    fn virtual_desktops_have_explicit_windows_action_routes() {
         let descriptors = action_catalog::descriptors();
-        let rows: Vec<_> = descriptors
+        let direct_rows: Vec<_> = descriptors
             .iter()
-            .filter(|descriptor| matches!((descriptor.make_default)(), MkAction::VirtualDesktop(_)))
+            .filter(|descriptor| {
+                descriptor.editor == action_catalog::EditorKind::DirectInsert
+                    && matches!((descriptor.make_default)(), MkAction::VirtualDesktop(_))
+            })
             .collect();
-        assert_eq!(rows.len(), 4);
-        assert!(rows.iter().all(|descriptor| {
+        assert_eq!(direct_rows.len(), 4);
+        assert!(direct_rows.iter().all(|descriptor| {
             descriptor.category == action_catalog::ActionCategory::Windows
                 && descriptor.editor == action_catalog::EditorKind::DirectInsert
         }));
         assert_eq!(
-            rows.iter()
+            direct_rows
+                .iter()
                 .map(|descriptor| descriptor.name)
                 .collect::<Vec<_>>(),
             [
@@ -1268,6 +1273,16 @@ mod tests {
                 "Close Current Virtual Desktop",
             ]
         );
+        let go_to = descriptors
+            .iter()
+            .find(|descriptor| descriptor.name == "Go To Virtual Desktop")
+            .expect("Go To Virtual Desktop");
+        assert_eq!(go_to.category, action_catalog::ActionCategory::Windows);
+        assert_eq!(go_to.editor, action_catalog::EditorKind::VirtualDesktop);
+        assert!(matches!(
+            (go_to.make_default)(),
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 1 })
+        ));
     }
 
     #[test]

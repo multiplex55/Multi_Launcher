@@ -303,6 +303,17 @@ pub fn validate_document_with_context(
                     }
                 }
                 MkAction::Delay(payload) => delay(payload, m.id, sid, &mut out),
+                MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }) => {
+                    if *desktop == 0 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_virtual_desktop_number",
+                            "Virtual desktop number must be at least 1",
+                        );
+                    }
+                }
                 MkAction::If(c) => {
                     condition(c, m.id, sid, asset_root, &mut out);
                     stack.push(("if", false))
@@ -1688,5 +1699,55 @@ mod click_within_region_validation_tests {
     #[test]
     fn negative_coordinates_do_not_make_a_valid_region_invalid() {
         assert!(diagnostics(ScreenRect::new(-100, -50, 20, 20), 1, 5).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod virtual_desktop_validation_tests {
+    use super::*;
+
+    fn diagnostics(desktop: u32) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    id: 1,
+                    name: "test".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
+                    playback: MkPlayback::default(),
+                    steps: vec![MkStep {
+                        id: 1,
+                        enabled: true,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: MkErrorPolicy::default(),
+                        action: MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }),
+                    }],
+                    image_assets: vec![],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn persisted_zero_virtual_desktop_number_is_rejected() {
+        let found = diagnostics(0);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "invalid_virtual_desktop_number");
+        assert_eq!(
+            found[0].message,
+            "Virtual desktop number must be at least 1"
+        );
+    }
+
+    #[test]
+    fn one_based_virtual_desktop_number_is_valid() {
+        assert!(diagnostics(1).is_empty());
+        assert!(diagnostics(3).is_empty());
     }
 }

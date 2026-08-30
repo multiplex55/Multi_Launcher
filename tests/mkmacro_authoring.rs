@@ -19,28 +19,39 @@ fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
             MkVirtualDesktopAction::Create,
             "create",
             "Create a new virtual desktop",
+            action_catalog::EditorKind::DirectInsert,
         ),
         (
             "Switch Virtual Desktop Left",
             MkVirtualDesktopAction::SwitchLeft,
             "previous",
             "Switch virtual desktop left",
+            action_catalog::EditorKind::DirectInsert,
         ),
         (
             "Switch Virtual Desktop Right",
             MkVirtualDesktopAction::SwitchRight,
             "next",
             "Switch virtual desktop right",
+            action_catalog::EditorKind::DirectInsert,
         ),
         (
             "Close Current Virtual Desktop",
             MkVirtualDesktopAction::CloseCurrent,
             "close",
             "Close the current virtual desktop using native Windows behavior",
+            action_catalog::EditorKind::DirectInsert,
+        ),
+        (
+            "Go To Virtual Desktop",
+            MkVirtualDesktopAction::GoTo { desktop: 1 },
+            "go",
+            "Go to virtual desktop 1",
+            action_catalog::EditorKind::VirtualDesktop,
         ),
     ];
     let visible: Vec<_> = action_catalog::visible_descriptors().collect();
-    for (name, operation, query, summary) in expected {
+    for (name, operation, query, summary, editor) in expected {
         let descriptor = visible.iter().find(|entry| entry.name == name).expect(name);
         assert!(action_catalog::matches(descriptor, query));
         let action = (descriptor.make_default)();
@@ -48,7 +59,7 @@ fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
         assert_eq!(action_catalog::action_name(&action), name);
         assert_eq!(action_catalog::action_details(&action), summary);
         assert_eq!(descriptor.category, action_catalog::ActionCategory::Windows);
-        assert_eq!(descriptor.editor, action_catalog::EditorKind::DirectInsert);
+        assert_eq!(descriptor.editor, editor);
     }
 }
 
@@ -178,6 +189,7 @@ fn catalog_window_desktop_prompt_and_image_inventory_is_intentional() {
             "Switch Virtual Desktop Left",
             "Switch Virtual Desktop Right",
             "Close Current Virtual Desktop",
+            "Go To Virtual Desktop",
             "Maximize Window",
             "Restore Window",
         ]

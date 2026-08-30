@@ -83,6 +83,7 @@ pub enum EditorKind {
     Window,
     Process,
     Launcher,
+    VirtualDesktop,
     Image,
     Screenshot,
     Pixel,
@@ -533,6 +534,14 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Windows,
+            "Go To Virtual Desktop",
+            "Go directly to a Windows virtual desktop by its 1-based number",
+            &["desktop", "workspace", "go", "goto", "number"],
+            VirtualDesktop,
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 1 })
+        ),
+        d!(
+            Windows,
             "Maximize Window",
             "Maximize a matching window",
             &["window", "maximize"],
@@ -851,6 +860,7 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::WindowWait(_)
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. } => EditorKind::Window,
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { .. }) => EditorKind::VirtualDesktop,
         MkAction::VirtualDesktop(_) => EditorKind::DirectInsert,
         MkAction::If(_) | MkAction::WhileStart { .. } | MkAction::WaitUntil { .. } => {
             EditorKind::Condition
@@ -926,7 +936,8 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Variable
         | EditorKind::PromptInput
         | EditorKind::Notify
-        | EditorKind::PlaySound => Some(EditorCompleteness {
+        | EditorKind::PlaySound
+        | EditorKind::VirtualDesktop => Some(EditorCompleteness {
             has_primary_control: true,
             intentionally_disabled: false,
             placeholder_copy: None,
@@ -983,7 +994,12 @@ pub fn requires_no_configuration(action: &MkAction) -> bool {
             | MkAction::WhileEnd
             | MkAction::Break
             | MkAction::Continue
-            | MkAction::VirtualDesktop(_)
+            | MkAction::VirtualDesktop(
+                MkVirtualDesktopAction::Create
+                    | MkVirtualDesktopAction::SwitchLeft
+                    | MkVirtualDesktopAction::SwitchRight
+                    | MkVirtualDesktopAction::CloseCurrent,
+            )
     )
 }
 
@@ -1025,6 +1041,7 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         | EditorKind::MouseScroll
         | EditorKind::Process
         | EditorKind::Launcher
+        | EditorKind::VirtualDesktop
         | EditorKind::Condition
         | EditorKind::Repeat
         | EditorKind::Variable => Some(EditorContract::Configurable { field_count: 1 }),
@@ -2448,5 +2465,43 @@ mod launcher_command_default_tests {
         payload.legacy_resolved_action = None;
         assert_eq!(action_details(&action), "note open ${note_name}");
         assert!(!action_details(&action).contains("args"));
+    }
+}
+
+#[cfg(test)]
+mod virtual_desktop_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn go_to_virtual_desktop_has_a_configurable_windows_catalog_entry() {
+        let rows: Vec<_> = descriptors()
+            .into_iter()
+            .filter(|descriptor| matches!((descriptor.make_default)(), MkAction::VirtualDesktop(_)))
+            .collect();
+        assert_eq!(
+            rows.iter().map(|row| row.name).collect::<Vec<_>>(),
+            [
+                "Create Virtual Desktop",
+                "Switch Virtual Desktop Left",
+                "Switch Virtual Desktop Right",
+                "Close Current Virtual Desktop",
+                "Go To Virtual Desktop",
+            ]
+        );
+        let descriptor = rows.last().unwrap();
+        assert_eq!(descriptor.category, ActionCategory::Windows);
+        assert_eq!(descriptor.editor, EditorKind::VirtualDesktop);
+        assert_eq!(
+            (descriptor.make_default)(),
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 1 })
+        );
+        assert!(!descriptor.name.contains("Switch Desktop"));
+    }
+
+    #[test]
+    fn go_to_virtual_desktop_summary_includes_its_one_based_number() {
+        let action = MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 3 });
+        assert_eq!(action_name(&action), "Go To Virtual Desktop");
+        assert_eq!(action_details(&action), "Go to virtual desktop 3");
     }
 }
