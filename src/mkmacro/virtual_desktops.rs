@@ -60,17 +60,14 @@ impl VirtualDesktopBackend for WindowsVirtualDesktopBackend {
         self.perform(ShortcutAction::CloseCurrent)
     }
     fn go_to(&self, desktop: u32) -> ExecResult {
-        crate::window_manager::switch_to_virtual_desktop(desktop).map_err(|error| {
-            ExecutionDiagnostic::new(
-                DiagnosticKind::ComFailure,
-                format!("Failed to switch to virtual desktop {desktop}: {error}"),
-            )
-            .context("backend", "virtual desktop")
-            .context(
-                "action",
-                format!("{:?}", MkVirtualDesktopAction::GoTo { desktop }),
-            )
-            .context("desktop", desktop.to_string())
+        crate::window_manager::switch_virtual_desktop_by_number(desktop).map_err(|error| {
+            error
+                .context("backend", "virtual desktop")
+                .context(
+                    "action",
+                    format!("{:?}", MkVirtualDesktopAction::GoTo { desktop }),
+                )
+                .context("desktop", desktop.to_string())
         })
     }
 }
