@@ -307,6 +307,21 @@ struct HotkeyCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateSummary {
+    pub(crate) display_name: String,
+    pub(crate) macro_id: u64,
+}
+
+impl CandidateSummary {
+    fn from_candidate(candidate: &HotkeyCandidate) -> Self {
+        Self {
+            display_name: candidate.display_name.clone(),
+            macro_id: candidate.macro_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HotkeyGroup {
     canonical_chord: String,
     modifiers: BTreeSet<String>,
@@ -401,6 +416,80 @@ fn compile_hotkey_groups_with_reserved(
 fn compile_hotkey_groups(doc: &MkMacroDocument) -> Vec<HotkeyGroup> {
     let reserved = normalize_reserved_chords(doc, std::iter::empty());
     compile_hotkey_groups_with_reserved(doc, &reserved)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HotkeyResolution {
+    Run(u64),
+    NoMatch,
+    Ambiguous(Vec<CandidateSummary>),
+    BackendFailure(ExecutionDiagnostic),
+}
+
+/// Resolves one already-compiled chord against one foreground-window snapshot.
+///
+/// This function deliberately has no backend or logging dependency. Contextual
+/// candidates are resolved as a separate tier from unrestricted candidates, so
+/// a global fallback can never steal a chord from a matching contextual macro.
+fn resolve_hotkey_group(
+    group: &HotkeyGroup,
+    foreground: Option<&WindowCandidate>,
+) -> HotkeyResolution {
+    let mut contextual_matches = Vec::new();
+    let mut matcher_failure = None;
+
+    for candidate in &group.candidates {
+        let MkHotkeyScope::ActiveWindow(matcher) = &candidate.scope else {
+            continue;
+        };
+        let Some(foreground) = foreground else {
+            continue;
+        };
+        match candidate_matches(matcher, foreground) {
+            Ok(true) => contextual_matches.push(candidate),
+            Ok(false) => {}
+            Err(error) => {
+                // Continue evaluating the remaining contextual candidates so
+                // every matcher gets the same snapshot, but never fall back
+                // after a matcher failure.
+                matcher_failure
+                    .get_or_insert(error.context("macro_id", candidate.macro_id.to_string()));
+            }
+        }
+    }
+
+    if let Some(error) = matcher_failure {
+        return HotkeyResolution::BackendFailure(error);
+    }
+
+    if let [candidate] = contextual_matches.as_slice() {
+        return HotkeyResolution::Run(candidate.macro_id);
+    }
+    if !contextual_matches.is_empty() {
+        return HotkeyResolution::Ambiguous(candidate_summaries(contextual_matches));
+    }
+
+    let unrestricted = group
+        .candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.scope, MkHotkeyScope::AnyWindow))
+        .collect::<Vec<_>>();
+    match unrestricted.as_slice() {
+        [] => HotkeyResolution::NoMatch,
+        [candidate] => HotkeyResolution::Run(candidate.macro_id),
+        _ => HotkeyResolution::Ambiguous(candidate_summaries(unrestricted)),
+    }
+}
+
+fn candidate_summaries<'a>(
+    candidates: impl IntoIterator<Item = &'a HotkeyCandidate>,
+) -> Vec<CandidateSummary> {
+    let mut summaries = candidates
+        .into_iter()
+        .map(CandidateSummary::from_candidate)
+        .collect::<Vec<_>>();
+    summaries.sort_by_key(|candidate| candidate.macro_id);
+    summaries
 }
 
 /// Windows virtual-key representation used for recorder-control suppression.
@@ -576,13 +665,21 @@ fn tick<F>(
     F: Fn(u64) + ?Sized,
 {
     let snapshot = store.snapshot();
-    let mut fire = Vec::new();
-    {
+    let edge_groups = {
         let mut state = state.lock().unwrap();
         if !Arc::ptr_eq(&snapshot, &state.snapshot) {
             let normalized_reserved =
                 normalize_reserved_chords(&snapshot, state.reserved.iter().cloned());
+            let previously_triggered = state
+                .groups
+                .iter()
+                .filter(|group| group.triggered)
+                .map(|group| group.canonical_chord.clone())
+                .collect::<BTreeSet<_>>();
             state.groups = compile_hotkey_groups_with_reserved(&snapshot, &normalized_reserved);
+            for group in &mut state.groups {
+                group.triggered = previously_triggered.contains(&group.canonical_chord);
+            }
             state.snapshot = snapshot;
         }
         let ctrl = key_state_backend.is_down(&MkKey::Control);
@@ -598,6 +695,7 @@ fn tick<F>(
                 ));
             }
         }
+        let mut edge_groups = Vec::new();
         for group in &mut state.groups {
             // Like the Launcher listener, required modifiers are inclusive: extra modifiers are allowed.
             let primary_down = primary_states
@@ -618,76 +716,67 @@ fn tick<F>(
                 continue;
             }
             group.triggered = true;
-            match resolve_candidate(group, active_window_backend) {
-                Ok(CandidateResolution::None) => {}
-                Ok(CandidateResolution::Unique(candidate)) => fire.push(candidate.macro_id),
-                Ok(CandidateResolution::Ambiguous(candidates)) => {
-                    let candidates = candidates
-                        .iter()
-                        .map(|candidate| {
-                            format!("{} ({})", candidate.display_name, candidate.macro_id)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    tracing::warn!(
-                        chord = %group.canonical_chord,
-                        candidates = %candidates,
-                        "macro hotkey is ambiguous; no macro triggered"
-                    );
+            edge_groups.push(group.clone());
+        }
+        edge_groups
+    };
+
+    let resolutions = edge_groups
+        .into_iter()
+        .map(|group| {
+            let resolution = if group
+                .candidates
+                .iter()
+                .any(|candidate| matches!(candidate.scope, MkHotkeyScope::ActiveWindow(_)))
+            {
+                match active_window_backend.active_window() {
+                    Ok(foreground) => resolve_hotkey_group(&group, foreground.as_ref()),
+                    Err(error) => HotkeyResolution::BackendFailure(error),
                 }
-                Err(error) => {
-                    tracing::error!(
-                        chord = %group.canonical_chord,
-                        error = %error,
-                        "active-window backend failed; no macro triggered"
-                    );
-                }
+            } else {
+                resolve_hotkey_group(&group, None)
+            };
+            (group.canonical_chord, resolution)
+        })
+        .collect::<Vec<_>>();
+
+    // The state lock is released before resolving external effects, logging,
+    // or admitting a macro to the runtime. Each of these operations may
+    // re-enter the service or store.
+    for (chord, resolution) in resolutions {
+        match resolution {
+            HotkeyResolution::Run(macro_id) => trigger(macro_id),
+            HotkeyResolution::NoMatch => {}
+            HotkeyResolution::Ambiguous(candidates) => {
+                report_ambiguity(&chord, &candidates);
+            }
+            HotkeyResolution::BackendFailure(error) => {
+                report_resolution_failure(&chord, &error);
             }
         }
     }
-    // Never hold the service/store state lock across runtime admission.
-    for id in fire {
-        trigger(id);
+}
+
+fn report_ambiguity(chord: &str, candidates: &[CandidateSummary]) {
+    tracing::warn!(chord = %chord, "Ambiguous mkmacro hotkey {chord}");
+    for candidate in candidates {
+        tracing::warn!(
+            chord = %chord,
+            macro_id = candidate.macro_id,
+            macro_name = %candidate.display_name,
+            "  candidate {} ({})",
+            candidate.display_name,
+            candidate.macro_id
+        );
     }
 }
 
-enum CandidateResolution<'a> {
-    None,
-    Unique(&'a HotkeyCandidate),
-    Ambiguous(Vec<&'a HotkeyCandidate>),
-}
-
-fn resolve_candidate<'a>(
-    group: &'a HotkeyGroup,
-    active_window_backend: &dyn ActiveWindowBackend,
-) -> Result<CandidateResolution<'a>, ActiveWindowError> {
-    let active_window = if group
-        .candidates
-        .iter()
-        .any(|candidate| matches!(&candidate.scope, MkHotkeyScope::ActiveWindow(_)))
-    {
-        active_window_backend.active_window()?
-    } else {
-        None
-    };
-    let mut matches = Vec::new();
-    for candidate in &group.candidates {
-        let matched = match &candidate.scope {
-            MkHotkeyScope::AnyWindow => true,
-            MkHotkeyScope::ActiveWindow(matcher) => match active_window.as_ref() {
-                Some(window) => candidate_matches(matcher, window)?,
-                None => false,
-            },
-        };
-        if matched {
-            matches.push(candidate);
-        }
-    }
-    Ok(match matches.as_slice() {
-        [] => CandidateResolution::None,
-        [candidate] => CandidateResolution::Unique(candidate),
-        _ => CandidateResolution::Ambiguous(matches),
-    })
+fn report_resolution_failure(chord: &str, error: &ExecutionDiagnostic) {
+    tracing::error!(
+        chord = %chord,
+        error = %error,
+        "mkmacro hotkey resolution failed; no macro triggered"
+    );
 }
 
 #[cfg(test)]
@@ -1025,42 +1114,204 @@ mod tests {
             self.snapshot.lock().unwrap().clone()
         }
     }
+
+    fn window(title: &str) -> WindowCandidate {
+        WindowCandidate {
+            handle: 1,
+            title: title.into(),
+            executable: "editor.exe".into(),
+            process_path: r"C:\Apps\editor.exe".into(),
+            class_name: "EditorClass".into(),
+        }
+    }
+
+    fn scoped_mac(id: u64, title: &str) -> MkMacro {
+        let mut m = mac(id, true);
+        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some(title.into()),
+            ..Default::default()
+        });
+        m
+    }
+
     #[test]
-    fn candidate_order_does_not_choose_between_contextual_candidates() {
-        let mut editor = mac(9, true);
-        editor.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            title: Some("Editor".into()),
-            ..Default::default()
-        });
-        let mut terminal = mac(2, true);
-        terminal.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            title: Some("Terminal".into()),
-            ..Default::default()
-        });
+    fn pure_resolver_matches_contextual_candidate_regardless_of_order() {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
             folders: vec![],
-            macros: vec![editor, terminal],
+            macros: vec![scoped_mac(9, "Editor"), scoped_mac(2, "Terminal")],
         };
         let groups = compile_hotkey_groups(&d);
         assert_eq!(groups.len(), 1);
-        assert!(matches!(
-            resolve_candidate(
-                &groups[0],
-                &ActiveWindowFake::with_title("Editor")
-            ),
-            Ok(CandidateResolution::Unique(candidate)) if candidate.macro_id == 9
-        ));
+        let foreground = window("Editor");
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&foreground)),
+            HotkeyResolution::Run(9)
+        );
 
         let mut reversed = groups[0].clone();
         reversed.candidates.reverse();
+        assert_eq!(
+            resolve_hotkey_group(&reversed, Some(&foreground)),
+            HotkeyResolution::Run(9)
+        );
+    }
+
+    #[test]
+    fn contextual_match_has_precedence_over_unrestricted_fallback() {
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![mac(2, true), scoped_mac(9, "Editor")],
+        };
+        let groups = compile_hotkey_groups(&d);
+        let foreground = window("Editor");
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&foreground)),
+            HotkeyResolution::Run(9)
+        );
+
+        let mut reversed = groups[0].clone();
+        reversed.candidates.reverse();
+        assert_eq!(
+            resolve_hotkey_group(&reversed, Some(&foreground)),
+            HotkeyResolution::Run(9)
+        );
+    }
+
+    #[test]
+    fn multiple_contextual_matches_are_ambiguous_and_order_independent() {
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![
+                scoped_mac(9, "Editor"),
+                scoped_mac(2, "Editor"),
+                mac(4, true),
+            ],
+        };
+        let groups = compile_hotkey_groups(&d);
+        let foreground = window("Editor");
+        let expected = HotkeyResolution::Ambiguous(vec![
+            CandidateSummary {
+                display_name: "2".into(),
+                macro_id: 2,
+            },
+            CandidateSummary {
+                display_name: "9".into(),
+                macro_id: 9,
+            },
+        ]);
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&foreground)),
+            expected
+        );
+
+        let mut reversed = groups[0].clone();
+        reversed.candidates.reverse();
+        assert_eq!(resolve_hotkey_group(&reversed, Some(&foreground)), expected);
+    }
+
+    #[test]
+    fn one_unrestricted_candidate_is_the_fallback_when_context_does_not_match() {
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![scoped_mac(9, "Editor"), mac(2, true)],
+        };
+        let groups = compile_hotkey_groups(&d);
+        let foreground = window("Terminal");
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&foreground)),
+            HotkeyResolution::Run(2)
+        );
+
+        let mut reversed = groups[0].clone();
+        reversed.candidates.reverse();
+        assert_eq!(
+            resolve_hotkey_group(&reversed, Some(&foreground)),
+            HotkeyResolution::Run(2)
+        );
+    }
+
+    #[test]
+    fn no_contextual_or_unrestricted_match_is_no_match() {
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![scoped_mac(9, "Editor")],
+        };
+        let groups = compile_hotkey_groups(&d);
+        let foreground = window("Terminal");
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], Some(&foreground)),
+            HotkeyResolution::NoMatch
+        );
+        assert_eq!(
+            resolve_hotkey_group(&groups[0], None),
+            HotkeyResolution::NoMatch
+        );
+    }
+
+    #[test]
+    fn multiple_unrestricted_candidates_are_never_selected_by_order() {
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![mac(9, true), mac(2, true)],
+        };
+        let groups = compile_hotkey_groups(&d);
+        let expected = HotkeyResolution::Ambiguous(vec![
+            CandidateSummary {
+                display_name: "2".into(),
+                macro_id: 2,
+            },
+            CandidateSummary {
+                display_name: "9".into(),
+                macro_id: 9,
+            },
+        ]);
+        assert_eq!(resolve_hotkey_group(&groups[0], None), expected);
+
+        let mut reversed = groups[0].clone();
+        reversed.candidates.reverse();
+        assert_eq!(resolve_hotkey_group(&reversed, None), expected);
+    }
+
+    #[test]
+    fn matcher_failure_blocks_fallback() {
+        let group = HotkeyGroup {
+            canonical_chord: "CONTROL+K".into(),
+            modifiers: ["CONTROL".into()].into_iter().collect(),
+            primary: MkKey::Character("K".into()),
+            candidates: vec![
+                HotkeyCandidate {
+                    macro_id: 9,
+                    display_name: "broken".into(),
+                    scope: MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+                        title_regex: Some("[".into()),
+                        ..Default::default()
+                    }),
+                },
+                HotkeyCandidate {
+                    macro_id: 2,
+                    display_name: "fallback".into(),
+                    scope: MkHotkeyScope::AnyWindow,
+                },
+            ],
+            triggered: false,
+        };
         assert!(matches!(
-            resolve_candidate(
-                &reversed,
-                &ActiveWindowFake::with_title("Editor")
-            ),
-            Ok(CandidateResolution::Unique(candidate)) if candidate.macro_id == 9
+            resolve_hotkey_group(&group, Some(&window("Editor"))),
+            HotkeyResolution::BackendFailure(error)
+                if error.kind == DiagnosticKind::InvalidTarget
+                    && error.context.get("macro_id") == Some(&"9".to_string())
         ));
     }
     #[test]
