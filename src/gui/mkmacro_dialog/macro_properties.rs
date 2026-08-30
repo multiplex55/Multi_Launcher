@@ -2,8 +2,24 @@ use super::MkMacroDialog;
 use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, hotkey_name};
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::window_picker::{MatcherDestination, MatcherEditRequest};
-use crate::mkmacro::{DiagnosticSeverity, MkHotkeyScope, MkWindowMatcher};
+use crate::mkmacro::hotkeys::{HotkeyDiagnostic, HotkeyDiagnosticSeverity};
+use crate::mkmacro::{MkHotkeyScope, MkWindowMatcher};
 use eframe::egui;
+
+// Pure presentation mapping: no UI context is needed to test severity colors.
+fn hotkey_diagnostic_color(severity: HotkeyDiagnosticSeverity) -> egui::Color32 {
+    match severity {
+        HotkeyDiagnosticSeverity::Error => egui::Color32::RED,
+        HotkeyDiagnosticSeverity::Warning => egui::Color32::YELLOW,
+    }
+}
+
+fn has_recording_toggle_conflict(diagnostics: &[HotkeyDiagnostic]) -> bool {
+    diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == HotkeyDiagnosticSeverity::Error
+            && diagnostic.message == "hotkey conflicts with the recording toggle"
+    })
+}
 
 fn clear_hotkey(hotkey: &mut Option<crate::mkmacro::MkHotkey>) -> bool {
     hotkey.take().is_some()
@@ -63,15 +79,10 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             }
         }
     }
-    let control = crate::mkmacro::hotkeys::canonical_hotkey(&d.draft.settings.record_toggle_hotkey);
-    let conflicts =
-        crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[("mkmacro record toggle", &control)]);
-    if conflicts.iter().any(|diagnostic| {
-        diagnostic.severity == DiagnosticSeverity::Fatal
-            && diagnostic.message.starts_with("hotkey conflicts with ")
-    }) {
+    let conflicts = crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[]);
+    if has_recording_toggle_conflict(&conflicts) {
         ui.colored_label(
-            egui::Color32::YELLOW,
+            hotkey_diagnostic_color(HotkeyDiagnosticSeverity::Error),
             "hotkey conflicts with an enabled macro",
         );
     }
@@ -174,16 +185,14 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             }
         }
     }
-    for diagnostic in
-        crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[("mkmacro record toggle", &control)])
-            .into_iter()
-            .filter(|x| Some(x.macro_id) == d.selected_macro_id)
+    for diagnostic in crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[])
+        .into_iter()
+        .filter(|x| Some(x.macro_id) == d.selected_macro_id)
     {
-        let color = match diagnostic.severity {
-            DiagnosticSeverity::Warning => egui::Color32::YELLOW,
-            DiagnosticSeverity::Fatal => egui::Color32::RED,
-        };
-        ui.colored_label(color, diagnostic.message);
+        ui.colored_label(
+            hotkey_diagnostic_color(diagnostic.severity),
+            diagnostic.message,
+        );
     }
     if changed {
         d.mark_dirty();
@@ -195,6 +204,48 @@ mod tests {
     use super::*;
     use crate::mkmacro::{MkHotkey, MkKey};
 
+    #[test]
+    fn hotkey_severity_maps_to_error_red_and_warning_yellow() {
+        assert_eq!(
+            hotkey_diagnostic_color(HotkeyDiagnosticSeverity::Error),
+            egui::Color32::RED
+        );
+        assert_eq!(
+            hotkey_diagnostic_color(HotkeyDiagnosticSeverity::Warning),
+            egui::Color32::YELLOW
+        );
+    }
+
+    #[test]
+    fn recorder_summary_requires_a_recording_toggle_error() {
+        let mut diagnostics = vec![
+            HotkeyDiagnostic {
+                severity: HotkeyDiagnosticSeverity::Warning,
+                macro_id: 1,
+                message: "Multiple window-specific macros share this hotkey.".into(),
+            },
+            HotkeyDiagnostic {
+                severity: HotkeyDiagnosticSeverity::Error,
+                macro_id: 2,
+                message: "hotkey conflicts with launcher".into(),
+            },
+            HotkeyDiagnostic {
+                severity: HotkeyDiagnosticSeverity::Error,
+                macro_id: 3,
+                message: "Malformed hotkey".into(),
+            },
+        ];
+        assert!(!has_recording_toggle_conflict(&[]));
+        assert!(!has_recording_toggle_conflict(&diagnostics));
+        diagnostics.push(HotkeyDiagnostic {
+            severity: HotkeyDiagnosticSeverity::Warning,
+            macro_id: 4,
+            message: "hotkey conflicts with the recording toggle".into(),
+        });
+        assert!(!has_recording_toggle_conflict(&diagnostics));
+        diagnostics.last_mut().unwrap().severity = HotkeyDiagnosticSeverity::Error;
+        assert!(has_recording_toggle_conflict(&diagnostics));
+    }
     #[test]
     fn enabling_scope_creates_a_default_matcher() {
         let mut scope = MkHotkeyScope::AnyWindow;
