@@ -2253,7 +2253,7 @@ impl MkMacroDialog {
             }
         }
         toolbar::show(ui, self);
-        if self.draft.macros.is_empty() {
+        if self.draft.macros.is_empty() && self.draft.folders.is_empty() {
             let body_size = ui.available_size();
             ui.allocate_ui_with_layout(
                 body_size,
