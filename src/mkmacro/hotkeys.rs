@@ -879,26 +879,62 @@ mod tests {
             name: id.to_string(),
             description: String::new(),
             enabled: on,
-            hotkey: Some(MkHotkey {
-                key: MkKey::Character("K".into()),
-                modifiers: vec![MkKey::Control],
-            }),
-            hotkey_scope: Default::default(),
+            hotkey: Some(ctrl_k()),
+            hotkey_scope: any_window(),
             folder_id: None,
             playback: MkPlayback::default(),
             steps: vec![],
             image_assets: vec![],
         }
     }
-    fn process_mac(id: u64, process: &str) -> MkMacro {
+    fn ctrl_k() -> MkHotkey {
+        MkHotkey {
+            key: MkKey::Character("K".into()),
+            modifiers: vec![MkKey::Control],
+        }
+    }
+
+    fn any_window() -> MkHotkeyScope {
+        MkHotkeyScope::AnyWindow
+    }
+
+    fn contextual_mac(id: u64, matcher: MkWindowMatcher) -> MkMacro {
         let mut m = mac(id, true);
-        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            process: Some(process.into()),
-            ..Default::default()
-        });
+        m.hotkey_scope = MkHotkeyScope::ActiveWindow(matcher);
         m
     }
 
+    fn process_mac(id: u64, process: &str) -> MkMacro {
+        contextual_mac(id, process_matcher(process))
+    }
+
+    fn process_matcher(process: &str) -> MkWindowMatcher {
+        MkWindowMatcher {
+            process: Some(process.into()),
+            ..Default::default()
+        }
+    }
+
+    fn title_matcher(title: &str) -> MkWindowMatcher {
+        MkWindowMatcher {
+            title: Some(title.into()),
+            ..Default::default()
+        }
+    }
+
+    fn regex_matcher(regex: &str) -> MkWindowMatcher {
+        MkWindowMatcher {
+            title_regex: Some(regex.into()),
+            ..Default::default()
+        }
+    }
+
+    fn class_matcher(class: &str) -> MkWindowMatcher {
+        MkWindowMatcher {
+            class: Some(class.into()),
+            ..Default::default()
+        }
+    }
     fn validation_document(macros: Vec<MkMacro>) -> MkMacroDocument {
         MkMacroDocument {
             macros,
@@ -1533,7 +1569,7 @@ mod tests {
             .unwrap();
         let service = MkMacroHotkeyService::with_backend_and_reserved(
             Arc::new(store),
-            Arc::new(Fake(RwLock::new(Vec::new()))),
+            Arc::new(FakeKeyStateBackend::default()),
             &[("launcher", "control + k")],
         );
         assert!(service.state.lock().unwrap().groups.is_empty());
@@ -1574,43 +1610,167 @@ mod tests {
         assert_eq!(primary_virtual_key(&MkKey::Character("é".into())), None);
         assert_eq!(primary_virtual_key(&MkKey::Character("AB".into())), None);
     }
-    struct Fake(RwLock<Vec<MkKey>>);
-    impl KeyStateBackend for Fake {
-        fn is_down(&self, k: &MkKey) -> bool {
-            self.0.read().unwrap().contains(k)
+    #[derive(Default)]
+    struct FakeKeyStateBackend(RwLock<Vec<MkKey>>);
+
+    impl FakeKeyStateBackend {
+        fn set_pressed(&self, keys: Vec<MkKey>) {
+            *self.0.write().unwrap() = keys;
+        }
+
+        fn press_ctrl_k(&self) {
+            self.set_pressed(vec![MkKey::Control, MkKey::Character("K".into())]);
+        }
+
+        fn release_primary(&self) {
+            // Keep Ctrl down so this tests primary-key rearming specifically.
+            self.set_pressed(vec![MkKey::Control]);
         }
     }
-    struct ActiveWindowFake {
+
+    impl KeyStateBackend for FakeKeyStateBackend {
+        fn is_down(&self, key: &MkKey) -> bool {
+            self.0.read().unwrap().contains(key)
+        }
+    }
+
+    struct FakeActiveWindowBackend {
         snapshot: Mutex<Result<Option<WindowCandidate>, ActiveWindowError>>,
         query_count: AtomicUsize,
     }
-    impl ActiveWindowFake {
-        fn with_title(title: &str) -> Self {
-            Self {
-                snapshot: Mutex::new(Ok(Some(WindowCandidate {
-                    handle: 1,
-                    title: title.into(),
-                    executable: "editor.exe".into(),
-                    process_path: r"C:\Apps\editor.exe".into(),
-                    class_name: "EditorClass".into(),
-                }))),
-                query_count: AtomicUsize::new(0),
-            }
-        }
+
+    impl FakeActiveWindowBackend {
         fn with_result(result: Result<Option<WindowCandidate>, ActiveWindowError>) -> Self {
             Self {
                 snapshot: Mutex::new(result),
                 query_count: AtomicUsize::new(0),
             }
         }
+
+        fn set_result(&self, result: Result<Option<WindowCandidate>, ActiveWindowError>) {
+            *self.snapshot.lock().unwrap() = result;
+        }
+
+        fn queries(&self) -> usize {
+            self.query_count.load(Ordering::SeqCst)
+        }
     }
-    impl ActiveWindowBackend for ActiveWindowFake {
+
+    impl ActiveWindowBackend for FakeActiveWindowBackend {
         fn active_window(&self) -> Result<Option<WindowCandidate>, ActiveWindowError> {
             self.query_count.fetch_add(1, Ordering::SeqCst);
             self.snapshot.lock().unwrap().clone()
         }
     }
 
+    #[derive(Default)]
+    struct TriggerRecorder(Mutex<Vec<u64>>);
+
+    impl TriggerRecorder {
+        fn record(&self, macro_id: u64) {
+            self.0.lock().unwrap().push(macro_id);
+        }
+
+        fn ids(&self) -> Vec<u64> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    // Exercise the worker's tick function with persistent state and a real store,
+    // but no polling thread or wall-clock waits.
+    struct TickHarness {
+        store: MkMacroStore,
+        state: Mutex<PollState>,
+        keys: FakeKeyStateBackend,
+        foreground: FakeActiveWindowBackend,
+        fired: TriggerRecorder,
+        _directory: tempfile::TempDir,
+    }
+
+    impl TickHarness {
+        fn new(macros: Vec<MkMacro>, foreground: Option<WindowCandidate>) -> Self {
+            Self::with_reserved(validation_document(macros), foreground, Vec::new())
+        }
+
+        fn with_reserved(
+            doc: MkMacroDocument,
+            foreground: Option<WindowCandidate>,
+            reserved: Vec<(String, String)>,
+        ) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+            store.save(doc).unwrap();
+            let snapshot = store.snapshot();
+            let normalized = normalize_reserved_chords(&snapshot, reserved.iter().cloned());
+            let state = Mutex::new(PollState {
+                groups: compile_hotkey_groups_with_reserved(&snapshot, &normalized),
+                snapshot,
+                reserved,
+            });
+            Self {
+                store,
+                state,
+                keys: FakeKeyStateBackend::default(),
+                foreground: FakeActiveWindowBackend::with_result(Ok(foreground)),
+                fired: TriggerRecorder::default(),
+                _directory: directory,
+            }
+        }
+
+        fn tick(&self) {
+            tick(
+                &self.store,
+                &self.state,
+                &self.keys,
+                &self.foreground,
+                &|id| self.fired.record(id),
+            );
+        }
+
+        fn press(&self) {
+            self.keys.press_ctrl_k();
+            self.tick();
+        }
+
+        fn release(&self) {
+            self.keys.release_primary();
+            self.tick();
+        }
+
+        fn groups(&self) -> Vec<HotkeyGroup> {
+            self.state.lock().unwrap().groups.clone()
+        }
+    }
+
+    fn firefox() -> WindowCandidate {
+        WindowCandidate {
+            handle: 1,
+            title: "YouTube - Mozilla Firefox".into(),
+            executable: "firefox.exe".into(),
+            process_path: r"C:\Apps\Firefox\firefox.exe".into(),
+            class_name: "MozillaWindowClass".into(),
+        }
+    }
+
+    fn visual_studio() -> WindowCandidate {
+        WindowCandidate {
+            handle: 2,
+            title: "Multi_Launcher - Microsoft Visual Studio".into(),
+            executable: "devenv.exe".into(),
+            process_path: r"C:\Apps\Visual Studio\devenv.exe".into(),
+            class_name: "HwndWrapper".into(),
+        }
+    }
+
+    fn notepad() -> WindowCandidate {
+        WindowCandidate {
+            handle: 3,
+            title: "Untitled - Notepad".into(),
+            executable: "notepad.exe".into(),
+            process_path: r"C:\Windows\System32\notepad.exe".into(),
+            class_name: "Notepad".into(),
+        }
+    }
     fn window(title: &str) -> WindowCandidate {
         WindowCandidate {
             handle: 1,
@@ -1622,12 +1782,7 @@ mod tests {
     }
 
     fn scoped_mac(id: u64, title: &str) -> MkMacro {
-        let mut m = mac(id, true);
-        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            title: Some(title.into()),
-            ..Default::default()
-        });
-        m
+        contextual_mac(id, title_matcher(title))
     }
 
     #[test]
@@ -1876,26 +2031,18 @@ mod tests {
             })
             .unwrap();
         let store = Arc::new(store);
-        let active_window = ActiveWindowFake::with_result(Ok(None));
-        let keys = Fake(RwLock::new(Vec::new()));
-        let chord = vec![MkKey::Control, MkKey::Character("K".into())];
+        let active_window = FakeActiveWindowBackend::with_result(Ok(None));
+        let keys = FakeKeyStateBackend::default();
         let snapshot = store.snapshot();
         let state = Mutex::new(PollState {
             groups: compile_hotkey_groups(&snapshot),
             snapshot,
             reserved: Vec::new(),
         });
-        let fired = Mutex::new(Vec::new());
-        let trigger = |id| fired.lock().unwrap().push(id);
-        let notepad = WindowCandidate {
-            handle: 1,
-            title: "Untitled - Notepad".into(),
-            executable: "notepad.exe".into(),
-            process_path: r"C:\Windows\System32\notepad.exe".into(),
-            class_name: "Notepad".into(),
-        };
-        for foreground in [Some(notepad), None] {
-            *active_window.snapshot.lock().unwrap() = Ok(foreground);
+        let fired = TriggerRecorder::default();
+        let trigger = |id| fired.record(id);
+        for foreground in [Some(notepad()), None] {
+            active_window.set_result(Ok(foreground));
             let effects = Arc::new(FakeBackend::default());
             let runtime = MacroRuntime::new(store.clone(), effects.clone().backends());
             assert_eq!(
@@ -1919,217 +2066,425 @@ mod tests {
             assert_eq!(effects.events(), ["text:scoped macro executed"]);
             assert!(effects.window_calls.lock().unwrap().is_empty());
 
-            *keys.0.write().unwrap() = chord.clone();
+            keys.press_ctrl_k();
             tick(&store, &state, &keys, &active_window, &trigger);
-            assert!(fired.lock().unwrap().is_empty());
-            keys.0.write().unwrap().clear();
+            assert!(fired.ids().is_empty());
+            keys.release_primary();
             tick(&store, &state, &keys, &active_window, &trigger);
         }
-        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 2);
+        assert_eq!(active_window.queries(), 2);
 
         // Positive control: the same enabled macro and chord fire in Firefox.
-        *active_window.snapshot.lock().unwrap() = Ok(Some(WindowCandidate {
-            handle: 2,
-            title: "Mozilla Firefox".into(),
-            executable: "firefox.exe".into(),
-            process_path: r"C:\Apps\Firefox\firefox.exe".into(),
-            class_name: "MozillaWindowClass".into(),
-        }));
-        *keys.0.write().unwrap() = chord;
+        active_window.set_result(Ok(Some(firefox())));
+        keys.press_ctrl_k();
         tick(&store, &state, &keys, &active_window, &trigger);
-        assert_eq!(*fired.lock().unwrap(), vec![9]);
-        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 3);
+        assert_eq!(fired.ids(), vec![9]);
+        assert_eq!(active_window.queries(), 3);
     }
 
     #[test]
-    fn contextual_candidates_share_one_active_window_snapshot_per_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let mut editor = mac(9, true);
-        editor.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            title: Some("Editor".into()),
-            ..Default::default()
-        });
-        let mut terminal = mac(2, true);
-        terminal.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            title: Some("Terminal".into()),
-            ..Default::default()
-        });
-        store
-            .save(MkMacroDocument {
-                settings: Default::default(),
-                schema_version: 1,
-                folders: vec![],
-                macros: vec![editor, terminal],
-            })
-            .unwrap();
-        let store = Arc::new(store);
-        let snapshot = store.snapshot();
-        let state = Mutex::new(PollState {
-            groups: compile_hotkey_groups(&snapshot),
-            snapshot,
-            reserved: Vec::new(),
-        });
-        let keys = Fake(RwLock::new(vec![
-            MkKey::Control,
-            MkKey::Character("K".into()),
-        ]));
-        let active_window = ActiveWindowFake::with_title("Editor");
-        let fired = Mutex::new(Vec::new());
-        tick(&store, &state, &keys, &active_window, &|id| {
-            fired.lock().unwrap().push(id)
-        });
-        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 1);
-        assert_eq!(*fired.lock().unwrap(), vec![9]);
+    fn firefox_active_dispatches_only_firefox_from_a_shared_chord() {
+        let h = TickHarness::new(
+            vec![
+                process_mac(91, "firefox.exe"),
+                process_mac(23, "devenv.exe"),
+            ],
+            Some(firefox()),
+        );
+        assert_eq!(h.groups().len(), 1);
+        assert_eq!(h.groups()[0].contextual_candidates.len(), 2);
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        assert_eq!(h.foreground.queries(), 1);
     }
+
     #[test]
-    fn active_window_backend_error_blocks_contextual_and_fallback_candidates() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let mut contextual = mac(9, true);
-        contextual.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
-            title: Some("Editor".into()),
-            ..Default::default()
-        });
-        let fallback = mac(2, true);
-        store
-            .save(MkMacroDocument {
-                settings: Default::default(),
-                schema_version: 1,
-                folders: vec![],
-                macros: vec![contextual, fallback],
-            })
-            .unwrap();
-        let store = Arc::new(store);
-        let snapshot = store.snapshot();
-        let state = Mutex::new(PollState {
-            groups: compile_hotkey_groups(&snapshot),
-            snapshot,
-            reserved: Vec::new(),
-        });
-        let keys = Fake(RwLock::new(vec![
-            MkKey::Control,
-            MkKey::Character("K".into()),
-        ]));
-        let active_window = ActiveWindowFake::with_result(Err(ExecutionDiagnostic::new(
+    fn notepad_active_dispatches_only_global_fallback() {
+        let h = TickHarness::new(
+            vec![
+                process_mac(91, "firefox.exe"),
+                process_mac(23, "devenv.exe"),
+                mac(47, true),
+            ],
+            Some(notepad()),
+        );
+        h.press();
+        assert_eq!(h.fired.ids(), vec![47]);
+    }
+
+    #[test]
+    fn firefox_context_takes_precedence_over_global_fallback_on_tick() {
+        let h = TickHarness::new(
+            vec![mac(47, true), process_mac(91, "firefox.exe")],
+            Some(firefox()),
+        );
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+    }
+
+    #[test]
+    fn overlapping_process_and_title_are_ambiguous_with_both_identities() {
+        let mut browser = process_mac(91, "firefox.exe");
+        browser.name = "Firefox controls".into();
+        let mut video = scoped_mac(23, "YouTube");
+        video.name = "YouTube controls".into();
+        let h = TickHarness::new(vec![browser, mac(47, true), video], Some(firefox()));
+        let expected = HotkeyResolution::Ambiguous(vec![
+            CandidateSummary {
+                macro_id: 23,
+                display_name: "YouTube controls".into(),
+            },
+            CandidateSummary {
+                macro_id: 91,
+                display_name: "Firefox controls".into(),
+            },
+        ]);
+        let mut group = h.groups().remove(0);
+        assert_eq!(resolve_hotkey_group(&group, Some(&firefox())), expected);
+        group.contextual_candidates.reverse();
+        assert_eq!(resolve_hotkey_group(&group, Some(&firefox())), expected);
+        h.press();
+        h.tick();
+        assert!(h.fired.ids().is_empty());
+        assert_eq!(h.foreground.queries(), 1);
+    }
+
+    #[test]
+    fn unmatched_context_without_fallback_never_fires() {
+        let h = TickHarness::new(
+            vec![
+                process_mac(91, "firefox.exe"),
+                process_mac(23, "devenv.exe"),
+            ],
+            Some(notepad()),
+        );
+        h.press();
+        h.tick();
+        assert!(h.fired.ids().is_empty());
+        assert_eq!(h.foreground.queries(), 1);
+    }
+
+    #[test]
+    fn held_chord_fires_once_and_primary_release_rearms_it() {
+        let h = TickHarness::new(vec![process_mac(91, "firefox.exe")], Some(firefox()));
+        h.tick();
+        assert_eq!(h.foreground.queries(), 0);
+        h.press();
+        for _ in 0..5 {
+            h.tick();
+        }
+        assert_eq!(h.fired.ids(), vec![91]);
+        assert_eq!(h.foreground.queries(), 1);
+        h.release();
+        assert!(!h.groups()[0].triggered);
+        assert_eq!(h.foreground.queries(), 1);
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 91]);
+        assert_eq!(h.foreground.queries(), 2);
+    }
+
+    #[test]
+    fn foreground_change_while_held_waits_for_release_and_repress() {
+        let h = TickHarness::new(
+            vec![
+                process_mac(91, "firefox.exe"),
+                process_mac(23, "devenv.exe"),
+                mac(47, true),
+            ],
+            Some(firefox()),
+        );
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        h.foreground.set_result(Ok(Some(visual_studio())));
+        for _ in 0..5 {
+            h.tick();
+        }
+        assert_eq!(h.fired.ids(), vec![91]);
+        // One foreground query per pressed edge, not per candidate or held tick.
+        assert_eq!(h.foreground.queries(), 1);
+        h.release();
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 23]);
+        assert_eq!(h.foreground.queries(), 2);
+    }
+
+    #[test]
+    fn no_match_edge_is_consumed_until_primary_release() {
+        let h = TickHarness::new(vec![process_mac(91, "firefox.exe")], Some(notepad()));
+        h.press();
+        h.foreground.set_result(Ok(Some(firefox())));
+        h.tick();
+        assert!(h.fired.ids().is_empty());
+        assert_eq!(h.foreground.queries(), 1);
+        h.release();
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        assert_eq!(h.foreground.queries(), 2);
+    }
+
+    #[test]
+    fn disabled_contextual_and_global_macros_are_absent_and_never_fire() {
+        let mut disabled_context = process_mac(23, "firefox.exe");
+        disabled_context.enabled = false;
+        let h = TickHarness::new(
+            vec![
+                disabled_context,
+                mac(47, false),
+                process_mac(91, "firefox.exe"),
+            ],
+            Some(firefox()),
+        );
+        let groups = h.groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0]
+                .contextual_candidates
+                .iter()
+                .map(|c| c.macro_id)
+                .collect::<Vec<_>>(),
+            vec![91]
+        );
+        assert!(groups[0].unrestricted_candidates.is_empty());
+        assert!(groups[0].unarmed_candidates.is_empty());
+        h.press();
+        h.release();
+        h.foreground.set_result(Ok(Some(notepad())));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+    }
+
+    #[test]
+    fn saved_matcher_refreshes_snapshot_and_preserves_held_edge_without_reconstruction() {
+        let h = TickHarness::new(vec![process_mac(91, "firefox.exe")], Some(firefox()));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        let before = h.state.lock().unwrap().snapshot.clone();
+        let mut updated = (*before).clone();
+        updated.macros[0].hotkey_scope = MkHotkeyScope::ActiveWindow(process_matcher("devenv.exe"));
+        h.store.save(updated).unwrap();
+        let published = h.store.snapshot();
+        assert!(!Arc::ptr_eq(&before, &published));
+        assert!(Arc::ptr_eq(&before, &h.state.lock().unwrap().snapshot));
+        h.tick();
+        let observed = h.state.lock().unwrap().snapshot.clone();
+        // The real file watcher may republish equivalent contents in another Arc.
+        assert!(!Arc::ptr_eq(&before, &observed));
+        assert_eq!(*observed, *published);
+        assert!(h.groups()[0].triggered);
+        assert_eq!(h.fired.ids(), vec![91]);
+        assert_eq!(h.foreground.queries(), 1);
+        // The old Firefox matcher must no longer dispatch after the refresh.
+        h.release();
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        h.release();
+        h.foreground.set_result(Ok(Some(visual_studio())));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 91]);
+        assert_eq!(h.foreground.queries(), 3);
+    }
+
+    #[test]
+    fn duplicate_contextual_matchers_never_dispatch_or_fall_back() {
+        let h = TickHarness::new(
+            vec![
+                process_mac(91, "firefox.exe"),
+                process_mac(23, "firefox.exe"),
+                mac(47, true),
+            ],
+            Some(firefox()),
+        );
+        assert_eq!(
+            resolve_hotkey_group(&h.groups()[0], Some(&firefox())),
+            HotkeyResolution::Ambiguous(vec![
+                CandidateSummary {
+                    macro_id: 23,
+                    display_name: "23".into()
+                },
+                CandidateSummary {
+                    macro_id: 91,
+                    display_name: "91".into()
+                },
+            ])
+        );
+        h.press();
+        h.tick();
+        assert!(h.fired.ids().is_empty());
+        assert_eq!(h.foreground.queries(), 1);
+    }
+
+    #[test]
+    fn disabling_duplicate_fallback_refreshes_candidates_without_reconstruction() {
+        let h = TickHarness::new(
+            vec![mac(23, true), mac(47, true), process_mac(91, "firefox.exe")],
+            Some(notepad()),
+        );
+        h.press();
+        assert!(h.fired.ids().is_empty());
+        h.release();
+        h.foreground.set_result(Ok(Some(firefox())));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        h.release();
+        let mut updated = (*h.store.snapshot()).clone();
+        updated.macros[0].enabled = false;
+        h.store.save(updated).unwrap();
+        h.tick();
+        assert_eq!(
+            h.groups()[0]
+                .unrestricted_candidates
+                .iter()
+                .map(|c| c.macro_id)
+                .collect::<Vec<_>>(),
+            vec![47]
+        );
+        h.foreground.set_result(Ok(Some(notepad())));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 47]);
+    }
+
+    #[test]
+    fn invalid_matchers_are_unarmed_on_tick_without_blocking_valid_candidates() {
+        let h = TickHarness::new(
+            vec![
+                contextual_mac(11, MkWindowMatcher::default()),
+                contextual_mac(23, regex_matcher("[")),
+                process_mac(91, "firefox.exe"),
+                mac(47, true),
+            ],
+            Some(firefox()),
+        );
+        let group = h.groups().remove(0);
+        assert_eq!(
+            group
+                .contextual_candidates
+                .iter()
+                .map(|c| c.macro_id)
+                .collect::<Vec<_>>(),
+            vec![91]
+        );
+        assert_eq!(
+            group
+                .unarmed_candidates
+                .iter()
+                .map(|c| c.macro_id)
+                .collect::<Vec<_>>(),
+            vec![11, 23]
+        );
+        h.press();
+        h.release();
+        h.foreground.set_result(Ok(Some(notepad())));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 47]);
+    }
+
+    #[test]
+    fn regex_and_class_matchers_dispatch_against_foreground_candidates() {
+        for matcher in [
+            regex_matcher("^YouTube.*Firefox$"),
+            class_matcher("MozillaWindowClass"),
+        ] {
+            let h = TickHarness::new(vec![contextual_mac(91, matcher)], Some(firefox()));
+            h.press();
+            h.release();
+            h.foreground.set_result(Ok(Some(notepad())));
+            h.press();
+            assert_eq!(h.fired.ids(), vec![91]);
+        }
+    }
+
+    #[test]
+    fn recorder_and_caller_reserved_groups_never_poll_foreground_or_dispatch() {
+        for recorder in [true, false] {
+            let mut doc = validation_document(vec![process_mac(91, "firefox.exe"), mac(47, true)]);
+            let reserved = if recorder {
+                doc.settings.record_toggle_hotkey = ctrl_k();
+                Vec::new()
+            } else {
+                vec![("launcher".into(), " k + RightControl ".into())]
+            };
+            let h = TickHarness::with_reserved(doc, Some(firefox()), reserved);
+            assert!(h.groups().is_empty());
+            h.press();
+            h.tick();
+            // Reservations must also survive snapshot recompilation.
+            h.store.save((*h.store.snapshot()).clone()).unwrap();
+            h.tick();
+            h.release();
+            h.press();
+            assert!(h.groups().is_empty());
+            assert!(h.fired.ids().is_empty());
+            assert_eq!(h.foreground.queries(), 0);
+        }
+    }
+
+    #[test]
+    fn absent_foreground_uses_only_a_single_global_fallback() {
+        for fallback in [false, true] {
+            let mut macros = vec![process_mac(91, "firefox.exe")];
+            if fallback {
+                macros.push(mac(47, true));
+            }
+            let h = TickHarness::new(macros, None);
+            h.press();
+            h.tick();
+            assert_eq!(h.fired.ids(), if fallback { vec![47] } else { vec![] });
+            assert_eq!(h.foreground.queries(), 1);
+        }
+    }
+
+    #[test]
+    fn active_window_backend_error_blocks_context_and_fallback_until_new_edge() {
+        let h = TickHarness::new(
+            vec![process_mac(91, "firefox.exe"), mac(47, true)],
+            Some(firefox()),
+        );
+        h.foreground.set_result(Err(ExecutionDiagnostic::new(
             DiagnosticKind::Backend,
             "foreground query failed",
         )));
-        let fired = Mutex::new(Vec::new());
-        tick(&store, &state, &keys, &active_window, &|id| {
-            fired.lock().unwrap().push(id)
-        });
-        assert!(fired.lock().unwrap().is_empty());
-        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 1);
+        h.press();
+        h.tick();
+        assert!(h.fired.ids().is_empty());
+        assert_eq!(h.foreground.queries(), 1);
+        h.foreground.set_result(Ok(Some(firefox())));
+        h.tick();
+        assert!(h.fired.ids().is_empty());
+        assert_eq!(h.foreground.queries(), 1);
+        h.release();
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        h.release();
+        h.foreground.set_result(Ok(None));
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 47]);
+        assert_eq!(h.foreground.queries(), 3);
+    }
 
-        keys.0.write().unwrap().clear();
-        tick(&store, &state, &keys, &active_window, &|id| {
-            fired.lock().unwrap().push(id)
-        });
-        *active_window.snapshot.lock().unwrap() = Ok(None);
-        keys.0
-            .write()
-            .unwrap()
-            .extend([MkKey::Control, MkKey::Character("K".into())]);
-        tick(&store, &state, &keys, &active_window, &|id| {
-            fired.lock().unwrap().push(id)
-        });
-        assert_eq!(*fired.lock().unwrap(), vec![2]);
+    #[test]
+    fn removing_all_candidates_through_store_refresh_removes_the_group() {
+        let h = TickHarness::new(vec![process_mac(91, "firefox.exe")], Some(firefox()));
+        h.press();
+        let mut updated = (*h.store.snapshot()).clone();
+        updated.macros.clear();
+        h.store.save(updated).unwrap();
+        h.tick();
+        assert!(h.groups().is_empty());
+        h.release();
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91]);
+        assert_eq!(h.foreground.queries(), 1);
     }
     #[test]
-    fn tick_has_edges_and_rebuilds() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        store
-            .save(MkMacroDocument {
-                settings: Default::default(),
-                schema_version: 1,
-                folders: vec![],
-                macros: vec![mac(1, true)],
-            })
-            .unwrap();
-        let store = Arc::new(store);
-        let snap = store.snapshot();
-        let state = Mutex::new(PollState {
-            groups: compile_hotkey_groups(&snap),
-            snapshot: snap,
-            reserved: Vec::new(),
-        });
-        let fake = Fake(RwLock::new(vec![
-            MkKey::Control,
-            MkKey::Character("K".into()),
-        ]));
-        let fired = Mutex::new(vec![]);
-        let cb = |id| fired.lock().unwrap().push(id);
-        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
-        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
-        assert_eq!(*fired.lock().unwrap(), vec![1]);
-        fake.0.write().unwrap().clear();
-        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
-        fake.0
-            .write()
-            .unwrap()
-            .extend([MkKey::Control, MkKey::Character("K".into())]);
-        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
-        assert_eq!(*fired.lock().unwrap(), vec![1, 1]);
-        store
-            .save(MkMacroDocument {
-                settings: Default::default(),
-                schema_version: 1,
-                folders: vec![],
-                macros: vec![],
-            })
-            .unwrap();
-        tick(&store, &state, &fake, &SystemActiveWindowBackend, &cb);
-        assert_eq!(*fired.lock().unwrap(), vec![1, 1]);
-    }
-    #[test]
-    fn disabling_one_duplicate_unrestricted_restores_remaining_fallback_after_snapshot_rebuild() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        store
-            .save(MkMacroDocument {
-                settings: Default::default(),
-                schema_version: 1,
-                folders: vec![],
-                macros: vec![mac(1, true), mac(2, true)],
-            })
-            .unwrap();
-        let store = Arc::new(store);
-        let snapshot = store.snapshot();
-        let state = Mutex::new(PollState {
-            groups: compile_hotkey_groups(&snapshot),
-            snapshot,
-            reserved: Vec::new(),
-        });
-        let keys = Fake(RwLock::new(vec![
-            MkKey::Control,
-            MkKey::Character("K".into()),
-        ]));
-        let fired = Mutex::new(Vec::new());
-        let cb = |id| fired.lock().unwrap().push(id);
-
-        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
-        assert!(fired.lock().unwrap().is_empty());
-
-        keys.0.write().unwrap().clear();
-        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
-        let mut updated = (*store.snapshot()).clone();
-        updated
-            .macros
-            .iter_mut()
-            .find(|macro_| macro_.id == 2)
-            .unwrap()
-            .enabled = false;
-        assert!(validate_hotkeys(&updated, &[]).is_empty());
-        store.save(updated).unwrap();
-        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
-
-        keys.0
-            .write()
-            .unwrap()
-            .extend([MkKey::Control, MkKey::Character("K".into())]);
-        tick(&store, &state, &keys, &SystemActiveWindowBackend, &cb);
-        assert_eq!(*fired.lock().unwrap(), vec![1]);
+    fn global_only_group_does_not_query_foreground_backend() {
+        let h = TickHarness::new(vec![mac(47, true)], None);
+        h.foreground.set_result(Err(ExecutionDiagnostic::new(
+            DiagnosticKind::Backend,
+            "foreground must not be queried",
+        )));
+        h.press();
+        h.tick();
+        assert_eq!(h.fired.ids(), vec![47]);
+        assert_eq!(h.foreground.queries(), 0);
     }
 }
