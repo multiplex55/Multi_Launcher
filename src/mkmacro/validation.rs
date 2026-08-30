@@ -656,6 +656,44 @@ pub fn validate_document_with_context(
                     target(&p.target, m.id, sid, asset_root, &mut out);
                     validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
                 }
+                MkAction::ClickWithinRegion(p) => {
+                    if let Err(error) = p.rect.validate_capture() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_click_region",
+                            format!("Click region rectangle is invalid: {error:?}"),
+                        );
+                    }
+                    if p.clicks == 0 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_click_count",
+                            "Click region click count must be at least 1",
+                        );
+                    }
+                    let padding = p.edge_padding_px.saturating_mul(2);
+                    if p.rect
+                        .width
+                        .checked_sub(padding)
+                        .is_none_or(|width| width == 0)
+                        || p.rect
+                            .height
+                            .checked_sub(padding)
+                            .is_none_or(|height| height == 0)
+                    {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_click_region_padding",
+                            "Click region edge padding leaves no usable area",
+                        );
+                    }
+                }
                 MkAction::MouseDrag(p) => {
                     target(&p.from, m.id, sid, asset_root, &mut out);
                     target(&p.to, m.id, sid, asset_root, &mut out);

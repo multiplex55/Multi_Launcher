@@ -109,6 +109,7 @@ pub struct ActionEditorState {
 enum PreviewRequest {
     Notification(ResolvedNotification),
     Sound(String),
+    Region(ScreenRect),
 }
 
 fn production_notification_preview(notification: &ResolvedNotification) -> Result<(), String> {
@@ -137,6 +138,7 @@ pub enum InsertionIntent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VisualRegionDestination {
     CaptureScreenshotRegion,
+    ClickWithinRegion,
     ImageActionSearchRegion,
     ImageActionReferenceAsset,
     ConditionSearchRegion(ConditionOperationDestination),
@@ -146,6 +148,7 @@ pub enum VisualRegionDestination {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpectedVisualAction {
     CaptureScreenshot,
+    ClickWithinRegion,
     ImageFind,
     ImageClick,
     Condition,
@@ -615,6 +618,7 @@ impl ActionEditorState {
             | Some(MkAction::WaitUntil { .. }) => ExpectedVisualAction::Condition,
             Some(MkAction::WaitForVisualChange(_)) => ExpectedVisualAction::WaitForVisualChange,
             Some(MkAction::CaptureScreenshot(_)) => ExpectedVisualAction::CaptureScreenshot,
+            Some(MkAction::ClickWithinRegion(_)) => ExpectedVisualAction::ClickWithinRegion,
             _ => anyhow::bail!("draft does not support rectangle selection"),
         };
         let compatible = matches!(
@@ -638,6 +642,10 @@ impl ActionEditorState {
             ) | (
                 VisualRegionDestination::CaptureScreenshotRegion,
                 ExpectedVisualAction::CaptureScreenshot,
+                super::visual_overlay::RectanglePurpose::SearchRegion
+            ) | (
+                VisualRegionDestination::ClickWithinRegion,
+                ExpectedVisualAction::ClickWithinRegion,
                 super::visual_overlay::RectanglePurpose::SearchRegion
             )
         );
@@ -859,6 +867,9 @@ impl ActionEditorState {
                             ExpectedVisualAction::CaptureScreenshot => {
                                 matches!(step.action, MkAction::CaptureScreenshot(_))
                             }
+                            ExpectedVisualAction::ClickWithinRegion => {
+                                matches!(step.action, MkAction::ClickWithinRegion(_))
+                            }
                         });
                 if !valid {
                     return;
@@ -901,6 +912,20 @@ impl ActionEditorState {
                             region_editor.rectangle = rect;
                             region_editor.kind =
                                 super::image_search_editor::SearchRegionKind::Rectangle;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VisualRegionDestination::ClickWithinRegion => {
+                        if let Some(MkStep {
+                            action: MkAction::ClickWithinRegion(payload),
+                            ..
+                        }) = &mut self.draft
+                        {
+                            // Region selection owns only this field. Button, click
+                            // count, and padding remain authored values.
+                            payload.rect = rect;
                             true
                         } else {
                             false
@@ -2082,6 +2107,35 @@ pub(super) fn value_ui(ui: &mut egui::Ui, value: &mut MkValue) {
     }
 }
 
+// These ranges keep normal authoring responsive while leaving an out-of-range
+// value loaded from disk visible for validation instead of silently repairing it.
+const CLICK_REGION_COORDINATE_RANGE: std::ops::RangeInclusive<i32> = -10_000_000..=10_000_000;
+const CLICK_REGION_DIMENSION_RANGE: std::ops::RangeInclusive<u32> = 1..=100_000_000;
+const CLICK_REGION_CLICKS_RANGE: std::ops::RangeInclusive<u32> = 1..=1_000_000;
+const CLICK_REGION_PADDING_RANGE: std::ops::RangeInclusive<u32> = 0..=100_000_000;
+
+fn click_within_region_validation_error(p: &MkClickWithinRegionPayload) -> Option<String> {
+    if let Err(error) = p.rect.validate_capture() {
+        return Some(format!("Rectangle is invalid: {error:?}"));
+    }
+    if p.clicks == 0 {
+        return Some("Clicks must be at least 1".into());
+    }
+    let padding = p.edge_padding_px.saturating_mul(2);
+    if p.rect
+        .width
+        .checked_sub(padding)
+        .is_none_or(|width| width == 0)
+        || p.rect
+            .height
+            .checked_sub(padding)
+            .is_none_or(|height| height == 0)
+    {
+        return Some("Edge padding leaves no usable area inside the rectangle".into());
+    }
+    None
+}
+
 fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
@@ -2107,7 +2161,7 @@ fn action_ui(
     let mut pick = None;
     let mut window_pick = None;
     let mut launcher_pick = None;
-    let image_request = None;
+    let mut image_request = None;
     let mut condition_image_request = None;
     let mut preview_request = None;
     let mut point_pick = false;
@@ -2315,14 +2369,35 @@ fn action_ui(
             ui.label("Screen rectangle");
             ui.horizontal(|ui| {
                 ui.label("X");
-                ui.add(egui::DragValue::new(&mut p.rect.x));
+                ui.add(
+                    egui::DragValue::new(&mut p.rect.x).clamp_range(CLICK_REGION_COORDINATE_RANGE),
+                );
                 ui.label("Y");
-                ui.add(egui::DragValue::new(&mut p.rect.y));
+                ui.add(
+                    egui::DragValue::new(&mut p.rect.y).clamp_range(CLICK_REGION_COORDINATE_RANGE),
+                );
                 ui.label("Width");
-                ui.add(egui::DragValue::new(&mut p.rect.width));
+                ui.add(
+                    egui::DragValue::new(&mut p.rect.width)
+                        .clamp_range(CLICK_REGION_DIMENSION_RANGE),
+                );
                 ui.label("Height");
-                ui.add(egui::DragValue::new(&mut p.rect.height));
+                ui.add(
+                    egui::DragValue::new(&mut p.rect.height)
+                        .clamp_range(CLICK_REGION_DIMENSION_RANGE),
+                );
             });
+            ui.horizontal(|ui| {
+                if ui.button("Select Region").clicked() {
+                    image_request = Some(ImageAuthoringRequest::PickClickWithinRegion);
+                }
+                if ui.button("Preview Region").clicked() {
+                    preview_request = Some(PreviewRequest::Region(p.rect));
+                }
+            });
+            if let Some(error) = click_within_region_validation_error(p) {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
             egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
                 .show_ui(ui, |ui| {
@@ -2338,11 +2413,14 @@ fn action_ui(
                 });
             ui.horizontal(|ui| {
                 ui.label("Click count");
-                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
+                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(CLICK_REGION_CLICKS_RANGE));
             });
             ui.horizontal(|ui| {
                 ui.label("Edge padding (px)");
-                ui.add(egui::DragValue::new(&mut p.edge_padding_px));
+                ui.add(
+                    egui::DragValue::new(&mut p.edge_padding_px)
+                        .clamp_range(CLICK_REGION_PADDING_RANGE),
+                );
             });
         }
         MkAction::MouseDown(button) | MkAction::MouseUp(button) => {
@@ -2938,6 +3016,9 @@ fn dispatch_preview(state: &mut ActionEditorState, request: PreviewRequest) {
             state.capture_message = (state.notification_preview)(&notification).err();
         }
         PreviewRequest::Sound(sound) => (state.sound_preview)(&sound),
+        PreviewRequest::Region(rect) => {
+            state.preview_region(SearchRegion::Rectangle { rect });
+        }
     }
 }
 
@@ -2990,6 +3071,7 @@ enum ImageAuthoringRequest {
     Import,
     CaptureRectangle,
     PickRectangle,
+    PickClickWithinRegion,
 }
 
 impl ImageAuthoringRequest {
@@ -2998,7 +3080,9 @@ impl ImageAuthoringRequest {
         match self {
             Self::Import => None,
             Self::CaptureRectangle => Some(RectanglePurpose::ReferenceImageCapture),
-            Self::PickRectangle => Some(RectanglePurpose::SearchRegion),
+            Self::PickRectangle | Self::PickClickWithinRegion => {
+                Some(RectanglePurpose::SearchRegion)
+            }
         }
     }
 }
@@ -3490,6 +3574,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     && !matches!(&step.action, MkAction::PlaySound(p) if !play_sound_is_supported(&p.sound))
                     && image_output_names_valid(&step.action)
                     && !matches!(
+                        &step.action,
+                        MkAction::ClickWithinRegion(payload)
+                            if click_within_region_validation_error(payload).is_some()
+                    )
+                    && !matches!(
                         super::action_catalog::draft_validation_contract(&step.action),
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
                     )
@@ -3531,11 +3620,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .transpose()
                 .map(|_| ()),
             request @ (ImageAuthoringRequest::CaptureRectangle
-            | ImageAuthoringRequest::PickRectangle) => {
+            | ImageAuthoringRequest::PickRectangle
+            | ImageAuthoringRequest::PickClickWithinRegion) => {
                 let destination = if wait_visual_region_request {
                     VisualRegionDestination::WaitForVisualChangeRegion
                 } else if screenshot_region_request {
                     VisualRegionDestination::CaptureScreenshotRegion
+                } else if matches!(request, ImageAuthoringRequest::PickClickWithinRegion) {
+                    VisualRegionDestination::ClickWithinRegion
                 } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
                     VisualRegionDestination::ImageActionReferenceAsset
                 } else {
@@ -4016,6 +4108,15 @@ mod tests {
         })
     }
 
+    fn click_within_region_action(rect: ScreenRect) -> MkAction {
+        MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+            rect,
+            button: MkMouseButton::Middle,
+            clicks: 7,
+            edge_padding_px: 13,
+        })
+    }
+
     #[derive(Default)]
     struct PickerState {
         next_id: u64,
@@ -4073,6 +4174,16 @@ mod tests {
                 macro_id,
                 super::super::visual_overlay::RectanglePurpose::SearchRegion,
                 VisualRegionDestination::CaptureScreenshotRegion,
+            )
+            .unwrap();
+    }
+
+    fn select_click_within_region(editor: &mut ActionEditorState, macro_id: u64) {
+        editor
+            .request_rectangle_selection(
+                macro_id,
+                super::super::visual_overlay::RectanglePurpose::SearchRegion,
+                VisualRegionDestination::ClickWithinRegion,
             )
             .unwrap();
     }
@@ -4149,6 +4260,153 @@ mod tests {
         );
         select_screenshot_region(&mut editor, 17);
         assert!(editor.pending_visual_region.is_some());
+    }
+
+    #[test]
+    fn click_within_region_picker_updates_only_the_rectangle() {
+        let old_rect = ScreenRect::new(-900, 20, 301, 207);
+        let new_rect = ScreenRect::new(45, -330, 640, 480);
+        let mut editor = test_editor();
+        editor.begin_edit(&step(click_within_region_action(old_rect)));
+        let picker = install_fake_picker(&mut editor);
+        select_click_within_region(&mut editor, 17);
+        let operation_id = match editor.visual_capture.as_ref().unwrap().state() {
+            super::super::visual_capture_workflow::WorkflowState::Selecting {
+                operation_id,
+                ..
+            } => *operation_id,
+            state => panic!("unexpected picker state: {state:?}"),
+        };
+        picker.lock().unwrap().events.push_back(
+            super::super::visual_capture_workflow::SelectionEvent::Confirmed {
+                operation_id,
+                rect: new_rect,
+            },
+        );
+        editor.tick_visual_capture(Some(17));
+
+        let MkAction::ClickWithinRegion(payload) = &editor.draft.as_ref().unwrap().action else {
+            unreachable!()
+        };
+        assert_eq!(payload.rect, new_rect);
+        assert_eq!(payload.button, MkMouseButton::Middle);
+        assert_eq!(payload.clicks, 7);
+        assert_eq!(payload.edge_padding_px, 13);
+        assert!(editor.pending_visual_region.is_none());
+    }
+
+    #[test]
+    fn click_within_region_picker_cancellation_preserves_the_entire_rectangle() {
+        let old_rect = ScreenRect::new(-900, 20, 301, 207);
+        let mut editor = test_editor();
+        editor.begin_edit(&step(click_within_region_action(old_rect)));
+        let picker = install_fake_picker(&mut editor);
+        select_click_within_region(&mut editor, 17);
+        let operation_id = picker.lock().unwrap().next_id;
+        picker.lock().unwrap().events.push_back(
+            super::super::visual_capture_workflow::SelectionEvent::Cancelled { operation_id },
+        );
+        editor.tick_visual_capture(Some(17));
+
+        let MkAction::ClickWithinRegion(payload) = &editor.draft.as_ref().unwrap().action else {
+            unreachable!()
+        };
+        assert_eq!(payload.rect, old_rect);
+        assert_eq!(payload.button, MkMouseButton::Middle);
+        assert_eq!(payload.clicks, 7);
+        assert_eq!(payload.edge_padding_px, 13);
+        assert!(editor.pending_visual_region.is_none());
+    }
+
+    #[test]
+    fn editing_all_click_within_region_payload_controls_preserves_unrelated_step_fields() {
+        let mut edited = step(click_within_region_action(ScreenRect::new(-1, -2, 3, 4)));
+        edited.enabled = false;
+        edited.repeat = 9;
+        edited.delay_after_ms = 123;
+        edited.on_error = MkErrorPolicy::Continue;
+        let unrelated = (
+            edited.enabled,
+            edited.repeat,
+            edited.delay_after_ms,
+            edited.on_error.clone(),
+        );
+        let MkAction::ClickWithinRegion(payload) = &mut edited.action else {
+            unreachable!()
+        };
+        payload.rect = ScreenRect::new(-700, -800, 900, 1000);
+        payload.button = MkMouseButton::X2;
+        payload.clicks = 42;
+        payload.edge_padding_px = 25;
+        assert_eq!(
+            (
+                edited.enabled,
+                edited.repeat,
+                edited.delay_after_ms,
+                edited.on_error
+            ),
+            unrelated
+        );
+        assert_eq!(payload.rect, ScreenRect::new(-700, -800, 900, 1000));
+        assert_eq!(payload.button, MkMouseButton::X2);
+        assert_eq!(payload.clicks, 42);
+        assert_eq!(payload.edge_padding_px, 25);
+    }
+
+    #[test]
+    fn click_within_region_picker_ignores_stale_or_mismatched_results() {
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+
+        let old_rect = ScreenRect::new(-30, -20, 10, 11);
+        let selected = ScreenRect::new(500, 400, 30, 20);
+        let mut editor = test_editor();
+        editor.begin_edit(&step(click_within_region_action(old_rect)));
+        let generation = editor.draft_generation;
+        let token = DraftToken {
+            macro_id: 17,
+            draft_generation: generation,
+        };
+
+        editor.pending_visual_region = Some(PendingVisualRegionOperation {
+            destination: VisualRegionDestination::CaptureScreenshotRegion,
+            macro_id: 17,
+            step_id: editor.editing_id,
+            draft_generation: generation,
+            expected_action: ExpectedVisualAction::ClickWithinRegion,
+        });
+        editor.apply_visual_capture_outcome(
+            Some(17),
+            WorkflowOutcome::Region {
+                token,
+                rect: selected,
+            },
+        );
+        assert_eq!(
+            editor.draft.as_ref().unwrap().action,
+            click_within_region_action(old_rect)
+        );
+
+        editor.pending_visual_region = Some(PendingVisualRegionOperation {
+            destination: VisualRegionDestination::ClickWithinRegion,
+            macro_id: 17,
+            step_id: editor.editing_id,
+            draft_generation: generation,
+            expected_action: ExpectedVisualAction::ClickWithinRegion,
+        });
+        editor.apply_visual_capture_outcome(
+            Some(17),
+            WorkflowOutcome::Region {
+                token: DraftToken {
+                    macro_id: 17,
+                    draft_generation: generation.wrapping_add(1),
+                },
+                rect: selected,
+            },
+        );
+        assert_eq!(
+            editor.draft.as_ref().unwrap().action,
+            click_within_region_action(old_rect)
+        );
     }
 
     #[test]
@@ -4575,6 +4833,20 @@ mod tests {
                 PreviewCall::Window(client, WindowAreaKind::ClientArea)
             ]
         );
+    }
+
+    #[test]
+    fn click_within_region_preview_forwards_the_exact_signed_rectangle() {
+        let fake = FakePreview::default();
+        let rect = ScreenRect::new(-1920, -240, 1280, 1024);
+        dispatch_region_preview(
+            &SearchRegion::Rectangle { rect },
+            &Ok(vec![]),
+            &resolve(ScreenRect::new(0, 0, 1, 1)),
+            &fake,
+        )
+        .unwrap();
+        assert_eq!(*fake.0.lock().unwrap(), vec![PreviewCall::Rectangle(rect)]);
     }
 
     #[test]
