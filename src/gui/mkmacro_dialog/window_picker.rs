@@ -9,6 +9,9 @@ pub enum MatcherDestination {
         draft_generation: u64,
         path: MatcherPath,
     },
+    MacroHotkeyScope {
+        macro_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

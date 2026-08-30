@@ -22,8 +22,8 @@ pub mod window_picker;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
-    DiagnosticSeverity, MkMacro, MkMacroDocument, MkMacroStore, NormalizationConfig, RecordedStep,
-    repair_ids, validate_document,
+    DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroStore, MkWindowMatcher,
+    NormalizationConfig, RecordedStep, repair_ids, validate_document,
 };
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
@@ -1495,6 +1495,33 @@ impl MkMacroDialog {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
+
+    fn apply_hotkey_scope_matcher(&mut self, macro_id: u64, matcher: MkWindowMatcher) -> bool {
+        if self.selected_macro_id != Some(macro_id) {
+            return false;
+        }
+        let changed = self
+            .draft
+            .macros
+            .iter_mut()
+            .find(|macro_| macro_.id == macro_id)
+            .map(|macro_| {
+                let next = MkHotkeyScope::ActiveWindow(matcher);
+                if macro_.hotkey_scope != next {
+                    macro_.hotkey_scope = next;
+                    true
+                } else {
+                    false
+                }
+            });
+        let Some(changed) = changed else {
+            return false;
+        };
+        if changed {
+            self.mark_dirty();
+        }
+        true
+    }
     /// Rename intent shared by non-widget controllers and the dialog.
     pub fn rename_selected(&mut self, name: impl Into<String>) -> bool {
         let name = name.into();
@@ -1794,11 +1821,15 @@ impl MkMacroDialog {
         if self.window_picker.confirm_ready {
             self.window_picker.confirm_ready = false;
             if let Some((request, matcher)) = self.window_picker.take_confirmation() {
-                if !self.action_editor.apply_window_matcher(
-                    &request,
-                    matcher,
-                    self.selected_macro_id,
-                ) {
+                let applied = match &request.destination {
+                    window_picker::MatcherDestination::MacroHotkeyScope { macro_id } => {
+                        self.apply_hotkey_scope_matcher(*macro_id, matcher)
+                    }
+                    window_picker::MatcherDestination::Action { .. } => self
+                        .action_editor
+                        .apply_window_matcher(&request, matcher, self.selected_macro_id),
+                };
+                if !applied {
                     self.command_error =
                         Some("The matcher target no longer exists; no changes were made".into());
                 }

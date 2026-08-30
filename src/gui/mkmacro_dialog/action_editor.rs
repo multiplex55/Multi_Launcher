@@ -685,7 +685,10 @@ impl ActionEditorState {
             macro_id,
             draft_generation,
             path,
-        } = &request.destination;
+        } = &request.destination
+        else {
+            return false;
+        };
         if Some(*macro_id) != current_macro_id || *draft_generation != self.draft_generation {
             return false;
         }
@@ -1626,7 +1629,8 @@ pub fn apply_picked_window(payload: &mut MkWindowPayload, picked: &PickedWindow)
     payload.matcher = picked.matcher.clone();
 }
 
-fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
+fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) -> bool {
+    let before = value.clone();
     let v = value.get_or_insert_with(String::new);
     ui.horizontal(|ui| {
         ui.label(label);
@@ -1635,13 +1639,26 @@ fn optional_field(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     if value.as_ref().is_some_and(|x| x.is_empty()) {
         *value = None;
     }
+    *value != before
 }
+
+pub(super) fn matcher_fields_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> bool {
+    let mut changed = false;
+    changed |= optional_field(ui, "Executable", &mut m.process);
+    changed |= optional_field(ui, "Title contains", &mut m.title);
+    changed |= optional_field(ui, "Title regex", &mut m.title_regex);
+    changed |= optional_field(ui, "Class", &mut m.class);
+    changed
+}
+
+pub(super) fn matcher_ui_with_change(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> (bool, bool) {
+    let changed = matcher_fields_ui(ui, m);
+    let choose_window = ui.button("Choose Window…").clicked();
+    (changed, choose_window)
+}
+
 pub(super) fn matcher_ui(ui: &mut egui::Ui, m: &mut MkWindowMatcher) -> bool {
-    optional_field(ui, "Executable", &mut m.process);
-    optional_field(ui, "Title contains", &mut m.title);
-    optional_field(ui, "Title regex", &mut m.title_regex);
-    optional_field(ui, "Class", &mut m.class);
-    ui.button("Choose Window…").clicked()
+    matcher_ui_with_change(ui, m).1
 }
 #[derive(Default)]
 pub(super) struct TargetUiOutcome {
@@ -5956,7 +5973,10 @@ mod tests {
             let mut stale = request.clone();
             let super::super::window_picker::MatcherDestination::Action {
                 draft_generation, ..
-            } = &mut stale.destination;
+            } = &mut stale.destination
+            else {
+                panic!("stale request must target an action matcher");
+            };
             *draft_generation = draft_generation.wrapping_add(1);
             assert!(
                 !editor.apply_window_matcher(&stale, MkWindowMatcher::default(), Some(5)),
