@@ -802,45 +802,90 @@ fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<()> {
     Ok(())
 }
 pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
-    let mut used = HashSet::new();
-    let mut next = 1u64;
+    let mut max_id = 0u64;
     for m in &d.macros {
-        if m.id > 0 {
-            next = next.max(m.id.saturating_add(1))
-        }
-    }
-    for m in &d.macros {
+        max_id = max_id.max(m.id);
         for s in &m.steps {
-            if s.id > 0 {
-                next = next.max(s.id.saturating_add(1))
-            }
+            max_id = max_id.max(s.id);
         }
     }
+    let mut next = max_id.checked_add(1).unwrap_or(1);
     let mut changed = false;
+    let mut used = HashSet::new();
     for m in &mut d.macros {
         if m.id == 0 || !used.insert(m.id) {
-            while used.contains(&next) || next == 0 {
-                next = next.saturating_add(1)
+            if let Some(replacement) = next_unused_id(&used, &mut next) {
+                m.id = replacement;
+                used.insert(replacement);
+                changed = true
             }
-            m.id = next;
-            used.insert(next);
-            next = next.saturating_add(1);
-            changed = true
         }
         let mut steps = HashSet::new();
         for s in &mut m.steps {
             if s.id == 0 || !steps.insert(s.id) {
-                while steps.contains(&next) || next == 0 {
-                    next = next.saturating_add(1)
+                if let Some(replacement) = next_unused_id(&steps, &mut next) {
+                    s.id = replacement;
+                    steps.insert(replacement);
+                    changed = true
                 }
-                s.id = next;
-                steps.insert(next);
-                next = next.saturating_add(1);
-                changed = true
             }
         }
     }
+
+    // Folder IDs are a separate namespace. In particular, a folder may have the
+    // same numeric ID as a macro or step without being repaired.
+    let mut max_folder_id = 0u64;
+    for folder in &d.folders {
+        if folder.id > 0 {
+            max_folder_id = max_folder_id.max(folder.id);
+        }
+    }
+    let mut next_folder_id = max_folder_id.checked_add(1).unwrap_or(1);
+    let mut used_folder_ids = HashSet::new();
+    for folder in &mut d.folders {
+        if folder.id == 0 || !used_folder_ids.insert(folder.id) {
+            if let Some(replacement) = next_unused_id(&used_folder_ids, &mut next_folder_id) {
+                folder.id = replacement;
+                used_folder_ids.insert(replacement);
+                changed = true;
+            }
+        }
+    }
+
+    let valid_folder_ids: HashSet<u64> = d
+        .folders
+        .iter()
+        .filter_map(|folder| (folder.id > 0).then_some(folder.id))
+        .collect();
+    for m in &mut d.macros {
+        if m.folder_id
+            .is_some_and(|folder_id| !valid_folder_ids.contains(&folder_id))
+        {
+            m.folder_id = None;
+            changed = true;
+        }
+    }
+
     changed
+}
+
+/// Returns the next unused positive ID and advances the cursor. Wrapping to 1
+/// after `u64::MAX` makes a saturated high-water mark safe when lower IDs are
+/// available, while the cycle check prevents an exhausted namespace from
+/// spinning forever.
+fn next_unused_id(used: &HashSet<u64>, next: &mut u64) -> Option<u64> {
+    let start = (*next).max(1);
+    let mut candidate = start;
+    loop {
+        if !used.contains(&candidate) {
+            *next = candidate.checked_add(1).unwrap_or(1);
+            return Some(candidate);
+        }
+        candidate = candidate.checked_add(1).unwrap_or(1);
+        if candidate == start {
+            return None;
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1465,6 +1510,104 @@ mod tests {
         assert!(d.macros.iter().all(|m| m.id > 0));
         assert_ne!(d.macros[0].id, d.macros[1].id);
         assert_ne!(d.macros[0].steps[0].id, d.macros[0].steps[1].id)
+    }
+    #[test]
+    fn repairs_folder_ids_and_memberships_without_losing_content() {
+        let mut d = document();
+        let mut valid = d.macros[0].clone();
+        valid.id = 42;
+        valid.name = "valid".into();
+        valid.steps[0].id = 42;
+        valid.folder_id = Some(42);
+        let mut dangling = d.macros[0].clone();
+        dangling.id = 100;
+        dangling.name = "dangling".into();
+        dangling.steps[0].id = 101;
+        dangling.folder_id = Some(999);
+        let mut unfiled = d.macros[0].clone();
+        unfiled.id = 200;
+        unfiled.name = "unfiled".into();
+        unfiled.steps[0].id = 201;
+        unfiled.folder_id = None;
+        d.macros = vec![valid, dangling, unfiled];
+        let original_macros = d.macros.clone();
+        d.folders = vec![
+            MkMacroFolder {
+                id: 0,
+                name: "zero one".into(),
+            },
+            MkMacroFolder {
+                id: 0,
+                name: "zero two".into(),
+            },
+            MkMacroFolder {
+                id: 42,
+                name: "valid folder".into(),
+            },
+            MkMacroFolder {
+                id: 42,
+                name: "duplicate folder".into(),
+            },
+            MkMacroFolder {
+                id: 7,
+                name: "another valid folder".into(),
+            },
+        ];
+
+        assert!(repair_ids(&mut d));
+        let folder_ids: Vec<u64> = d.folders.iter().map(|folder| folder.id).collect();
+        assert_eq!(folder_ids, vec![43, 44, 42, 45, 7]);
+        assert!(folder_ids.iter().all(|id| *id > 0));
+        assert_eq!(
+            folder_ids.iter().collect::<HashSet<_>>().len(),
+            folder_ids.len()
+        );
+        assert_eq!(d.macros[0].folder_id, Some(42));
+        assert_eq!(d.macros[1].folder_id, None);
+        assert_eq!(d.macros[2].folder_id, None);
+        assert_eq!(d.macros[0].id, 42);
+        assert_eq!(d.macros[0].steps[0].id, 42);
+        assert_eq!(d.macros.len(), original_macros.len());
+        for (actual, original) in d.macros.iter().zip(original_macros.iter()) {
+            assert_eq!(actual.steps, original.steps);
+            assert_eq!(actual.name, original.name);
+            assert_eq!(actual.description, original.description);
+            assert_eq!(actual.enabled, original.enabled);
+        }
+
+        let repaired = d.clone();
+        assert!(!repair_ids(&mut d));
+        assert_eq!(d, repaired);
+    }
+
+    #[test]
+    fn folder_id_repair_wraps_safely_after_u64_max() {
+        let mut d = document();
+        d.macros[0].folder_id = Some(u64::MAX);
+        d.folders = vec![
+            MkMacroFolder {
+                id: u64::MAX,
+                name: "max".into(),
+            },
+            MkMacroFolder {
+                id: u64::MAX,
+                name: "duplicate max".into(),
+            },
+            MkMacroFolder {
+                id: 0,
+                name: "zero".into(),
+            },
+        ];
+
+        assert!(repair_ids(&mut d));
+        assert_eq!(
+            d.folders.iter().map(|folder| folder.id).collect::<Vec<_>>(),
+            vec![u64::MAX, 1, 2]
+        );
+        assert_eq!(d.macros[0].folder_id, Some(u64::MAX));
+        let repaired = d.clone();
+        assert!(!repair_ids(&mut d));
+        assert_eq!(d, repaired);
     }
     #[test]
     fn assets_are_contained() {
