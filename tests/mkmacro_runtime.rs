@@ -841,3 +841,85 @@ fn stop_during_held_key_wakes_and_cleans_up() {
     assert_eq!(snap.steps[&2], StepState::Failed);
     assert_eq!(snap.steps[&3], StepState::Pending);
 }
+
+#[test]
+fn explicit_run_commands_execute_despite_unmatched_hotkey_scope() {
+    let dir = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store
+        .save(MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            settings: Default::default(),
+            folders: vec![],
+            macros: vec![MkMacro {
+                id: 701,
+                name: "Firefox hotkey only".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: Some(MkHotkey {
+                    key: MkKey::Character("K".into()),
+                    modifiers: vec![MkKey::Control],
+                }),
+                hotkey_scope: MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+                    process: Some("firefox.exe".into()),
+                    ..Default::default()
+                }),
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![s(
+                    1,
+                    MkAction::Text(MkTextPayload {
+                        text: "scoped macro executed".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                )],
+                image_assets: vec![],
+            }],
+        })
+        .unwrap();
+    let fake = Arc::new(FakeBackend::default());
+    // No foreground window matches. Execution must never query this condition.
+    fake.conditions
+        .lock()
+        .unwrap()
+        .insert("window_active".into(), false);
+    let store = Arc::new(store);
+    for command in [
+        RuntimeCommand::Run(701),
+        RuntimeCommand::RunFrom(701, 1),
+        RuntimeCommand::RunSelection(701, vec![1]),
+    ] {
+        let runtime = MacroRuntime::new(store.clone(), fake.clone().backends());
+        assert_eq!(runtime.command(command), CommandResult::Accepted);
+        let snapshot = wait(&runtime, RuntimeState::Completed);
+        assert_eq!(snapshot.steps[&1], StepState::Success);
+        assert!(snapshot.latest_failure.is_none());
+    }
+    assert_eq!(fake.events(), vec!["text:scoped macro executed"; 3]);
+    assert!(fake.window_calls.lock().unwrap().is_empty());
+
+    // Also cover the public entry point used by the toolbar and launcher.
+    // Reserve this chord so the system poller cannot interfere with the test.
+    runtime::set_shared_store_with_backends_and_reserved(
+        store,
+        fake.clone().backends(),
+        &[("test", "CTRL+K")],
+    );
+    runtime::run(701).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = runtime::snapshot().unwrap();
+        if snapshot.state == RuntimeState::Completed {
+            assert_eq!(snapshot.steps[&1], StepState::Success);
+            assert!(snapshot.latest_failure.is_none());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "runtime did not complete: {snapshot:?}"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(fake.events(), vec!["text:scoped macro executed"; 4]);
+    assert!(fake.window_calls.lock().unwrap().is_empty());
+}

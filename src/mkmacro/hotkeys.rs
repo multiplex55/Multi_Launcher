@@ -1846,6 +1846,102 @@ mod tests {
         ));
     }
     #[test]
+    fn scope_blocks_hotkey_dispatch_but_not_direct_execution() {
+        use crate::mkmacro::{
+            CommandResult, MacroRuntime, MkAction, MkStep, MkTextMode, MkTextPayload,
+            RuntimeCommand, RuntimeState, StepState, executor::fake::FakeBackend,
+        };
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let mut macro_ = process_mac(9, "firefox.exe");
+        macro_.steps = vec![MkStep {
+            id: 1,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::Text(MkTextPayload {
+                text: "scoped macro executed".into(),
+                mode: MkTextMode::Type,
+            }),
+        }];
+        store
+            .save(MkMacroDocument {
+                schema_version: crate::mkmacro::SCHEMA_VERSION,
+                settings: Default::default(),
+                folders: vec![],
+                macros: vec![macro_],
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let active_window = ActiveWindowFake::with_result(Ok(None));
+        let keys = Fake(RwLock::new(Vec::new()));
+        let chord = vec![MkKey::Control, MkKey::Character("K".into())];
+        let snapshot = store.snapshot();
+        let state = Mutex::new(PollState {
+            groups: compile_hotkey_groups(&snapshot),
+            snapshot,
+            reserved: Vec::new(),
+        });
+        let fired = Mutex::new(Vec::new());
+        let trigger = |id| fired.lock().unwrap().push(id);
+        let notepad = WindowCandidate {
+            handle: 1,
+            title: "Untitled - Notepad".into(),
+            executable: "notepad.exe".into(),
+            process_path: r"C:\Windows\System32\notepad.exe".into(),
+            class_name: "Notepad".into(),
+        };
+        for foreground in [Some(notepad), None] {
+            *active_window.snapshot.lock().unwrap() = Ok(foreground);
+            let effects = Arc::new(FakeBackend::default());
+            let runtime = MacroRuntime::new(store.clone(), effects.clone().backends());
+            assert_eq!(
+                runtime.command(RuntimeCommand::Run(9)),
+                CommandResult::Accepted
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let snapshot = runtime.snapshot();
+                if snapshot.state == RuntimeState::Completed {
+                    assert_eq!(snapshot.steps[&1], StepState::Success);
+                    assert!(snapshot.latest_failure.is_none());
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "runtime did not complete: {snapshot:?}"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(effects.events(), ["text:scoped macro executed"]);
+            assert!(effects.window_calls.lock().unwrap().is_empty());
+
+            *keys.0.write().unwrap() = chord.clone();
+            tick(&store, &state, &keys, &active_window, &trigger);
+            assert!(fired.lock().unwrap().is_empty());
+            keys.0.write().unwrap().clear();
+            tick(&store, &state, &keys, &active_window, &trigger);
+        }
+        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 2);
+
+        // Positive control: the same enabled macro and chord fire in Firefox.
+        *active_window.snapshot.lock().unwrap() = Ok(Some(WindowCandidate {
+            handle: 2,
+            title: "Mozilla Firefox".into(),
+            executable: "firefox.exe".into(),
+            process_path: r"C:\Apps\Firefox\firefox.exe".into(),
+            class_name: "MozillaWindowClass".into(),
+        }));
+        *keys.0.write().unwrap() = chord;
+        tick(&store, &state, &keys, &active_window, &trigger);
+        assert_eq!(*fired.lock().unwrap(), vec![9]);
+        assert_eq!(active_window.query_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
     fn contextual_candidates_share_one_active_window_snapshot_per_group() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();

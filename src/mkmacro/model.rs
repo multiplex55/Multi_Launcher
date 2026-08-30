@@ -102,6 +102,11 @@ pub struct MkHotkey {
     #[serde(default)]
     pub modifiers: Vec<MkKey>,
 }
+/// A hotkey-dispatch constraint, not a macro execution permission.
+///
+/// Only the hotkey service checks the foreground window against this scope.
+/// Compilation, direct runtime/toolbar Run commands, and macro invocation do
+/// not require a matching foreground window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MkHotkeyScope {

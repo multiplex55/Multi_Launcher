@@ -59,3 +59,23 @@ fn compiler_preserves_id_addressing() {
     assert_eq!(plan.step_to_instruction[&41], 0);
     assert_eq!(plan.instructions[0].step.id, 41);
 }
+
+#[test]
+fn hotkey_scope_does_not_change_compiler_admission_or_plan() {
+    let mut macro_ = mac(vec![step(41, MkAction::KeyPress(MkKey::Enter))]);
+    let unscoped = compile(&macro_).unwrap();
+    macro_.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+        process: Some("firefox.exe".into()),
+        ..Default::default()
+    });
+    let scoped = compile(&macro_).unwrap();
+    assert_eq!(scoped.macro_id, unscoped.macro_id);
+    assert_eq!(scoped.playback, unscoped.playback);
+    assert_eq!(scoped.step_to_instruction, unscoped.step_to_instruction);
+    assert_eq!(scoped.instructions.len(), unscoped.instructions.len());
+    for (actual, expected) in scoped.instructions.iter().zip(unscoped.instructions.iter()) {
+        assert_eq!(actual.step, expected.step);
+        assert_eq!(actual.jump, expected.jump);
+        assert_eq!(actual.depth, expected.depth);
+    }
+}

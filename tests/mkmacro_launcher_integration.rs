@@ -303,4 +303,104 @@ fn real_registration_search_broker_and_gui_activation_cover_builtin_routes() {
         broker.take_pending().is_none(),
         "macro submitted more than one request"
     );
+
+    legacy_parent_invokes_scoped_child_without_foreground_match();
+}
+
+fn legacy_parent_invokes_scoped_child_without_foreground_match() {
+    use multi_launcher::mkmacro::{executor::fake::FakeBackend, *};
+    use multi_launcher::plugins::macros::{
+        MACROS_FILE, MacroEntry, MacroStep, run_macro, save_macros, search_first_action,
+        take_error_messages,
+    };
+    use std::time::{Duration, Instant};
+
+    // Initialize legacy query routing before installing injected runtime effects;
+    // its first plugin registration installs a production shared runtime.
+    let _ = search_first_action("mkmacro:run:702");
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store
+        .save(MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            settings: Default::default(),
+            folders: vec![],
+            macros: vec![MkMacro {
+                id: 702,
+                name: "Firefox child".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: Some(MkHotkey {
+                    key: MkKey::Character("K".into()),
+                    modifiers: vec![MkKey::Control],
+                }),
+                hotkey_scope: MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+                    process: Some("firefox.exe".into()),
+                    ..Default::default()
+                }),
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![MkStep {
+                    id: 1,
+                    enabled: true,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: Default::default(),
+                    action: MkAction::Text(MkTextPayload {
+                        text: "child executed".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                }],
+                image_assets: vec![],
+            }],
+        })
+        .unwrap();
+    let fake = Arc::new(FakeBackend::default());
+    fake.conditions
+        .lock()
+        .unwrap()
+        .insert("window_active".into(), false);
+    runtime::set_shared_store_with_backends_and_reserved(
+        Arc::new(store),
+        fake.clone().backends(),
+        &[("test", "CTRL+K")],
+    );
+    save_macros(
+        MACROS_FILE,
+        &[MacroEntry {
+            label: "parent".into(),
+            desc: String::new(),
+            auto_delay_ms: None,
+            steps: vec![MacroStep {
+                label: "invoke scoped child".into(),
+                command: "mkmacro:run:702".into(),
+                args: None,
+                delay_ms: 0,
+            }],
+        }],
+    )
+    .unwrap();
+    take_error_messages();
+    run_macro("parent").unwrap();
+    assert!(
+        take_error_messages().is_empty(),
+        "parent could not launch child"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = runtime::snapshot().unwrap();
+        if snapshot.state == RuntimeState::Completed {
+            assert_eq!(snapshot.macro_id, Some(702));
+            assert_eq!(snapshot.steps[&1], StepState::Success);
+            assert!(snapshot.latest_failure.is_none());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child did not complete: {snapshot:?}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(fake.events(), ["text:child executed"]);
+    assert!(fake.window_calls.lock().unwrap().is_empty());
 }
