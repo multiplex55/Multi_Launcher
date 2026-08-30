@@ -504,6 +504,13 @@ pub enum MkDelayMode {
     #[serde(rename = "random_range")]
     RandomRange,
 }
+/// Maximum delay duration accepted by macro authoring and execution validation.
+pub const MAX_DELAY_MS: u64 = 86_400_000;
+
+/// Delay fields are persisted together for schema compatibility, but only the
+/// fields selected by `mode` are semantically active. Validation bounds
+/// `fixed_ms` in fixed mode and both range endpoints in random-range mode;
+/// inactive fields are intentionally ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkDelayPayload {
     #[serde(default, rename = "mode")]

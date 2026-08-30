@@ -44,6 +44,52 @@ fn push(
         message: msg.into(),
     })
 }
+fn delay(p: &MkDelayPayload, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
+    match p.mode {
+        MkDelayMode::Fixed => {
+            if p.fixed_ms > MAX_DELAY_MS {
+                push(
+                    o,
+                    m,
+                    s,
+                    "invalid_delay_fixed",
+                    format!(
+                        "Fixed delay {} ms exceeds maximum {} ms",
+                        p.fixed_ms, MAX_DELAY_MS
+                    ),
+                );
+            }
+        }
+        MkDelayMode::RandomRange => {
+            if p.minimum_ms > p.maximum_ms {
+                push(
+                    o,
+                    m,
+                    s,
+                    "invalid_delay_range",
+                    format!(
+                        "Random delay minimum_ms ({}) must not exceed maximum_ms ({})",
+                        p.minimum_ms, p.maximum_ms
+                    ),
+                );
+            }
+            for (field, value) in [("minimum_ms", p.minimum_ms), ("maximum_ms", p.maximum_ms)] {
+                if value > MAX_DELAY_MS {
+                    push(
+                        o,
+                        m,
+                        s,
+                        "invalid_delay_range_endpoint",
+                        format!(
+                            "Random delay {field} value {value} ms exceeds maximum {} ms",
+                            MAX_DELAY_MS
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
 fn interpolation_syntax(template: &str) -> Result<(), &'static str> {
     let mut cursor = 0;
     while cursor < template.len() {
@@ -256,6 +302,7 @@ pub fn validate_document_with_context(
                         );
                     }
                 }
+                MkAction::Delay(payload) => delay(payload, m.id, sid, &mut out),
                 MkAction::If(c) => {
                     condition(c, m.id, sid, asset_root, &mut out);
                     stack.push(("if", false))
@@ -756,6 +803,163 @@ pub fn validate_document_with_context(
     }
     out
 }
+
+#[cfg(test)]
+mod delay_validation_tests {
+    use super::*;
+
+    fn diagnostics(payload: MkDelayPayload) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    id: 1,
+                    name: "test".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
+                    playback: MkPlayback::default(),
+                    steps: vec![MkStep {
+                        id: 1,
+                        enabled: true,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: MkErrorPolicy::default(),
+                        action: MkAction::Delay(payload),
+                    }],
+                    image_assets: vec![],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn fixed_zero_is_valid() {
+        assert!(
+            diagnostics(MkDelayPayload {
+                fixed_ms: 0,
+                ..Default::default()
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn fixed_maximum_is_valid() {
+        assert!(
+            diagnostics(MkDelayPayload {
+                fixed_ms: MAX_DELAY_MS,
+                ..Default::default()
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn fixed_over_maximum_is_rejected() {
+        let found = diagnostics(MkDelayPayload {
+            fixed_ms: MAX_DELAY_MS + 1,
+            ..Default::default()
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "invalid_delay_fixed");
+        assert!(found[0].message.contains(&(MAX_DELAY_MS + 1).to_string()));
+    }
+
+    #[test]
+    fn random_zero_range_is_valid() {
+        assert!(
+            diagnostics(MkDelayPayload {
+                mode: MkDelayMode::RandomRange,
+                minimum_ms: 0,
+                maximum_ms: 0,
+                ..Default::default()
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn random_equal_nonzero_endpoints_are_valid() {
+        assert!(
+            diagnostics(MkDelayPayload {
+                mode: MkDelayMode::RandomRange,
+                minimum_ms: 25,
+                maximum_ms: 25,
+                ..Default::default()
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn random_ordered_range_is_valid() {
+        assert!(
+            diagnostics(MkDelayPayload {
+                mode: MkDelayMode::RandomRange,
+                minimum_ms: 10,
+                maximum_ms: 25,
+                ..Default::default()
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn random_reversed_endpoints_are_rejected_with_both_values() {
+        let minimum_ms = 25;
+        let maximum_ms = 10;
+        let found = diagnostics(MkDelayPayload {
+            mode: MkDelayMode::RandomRange,
+            minimum_ms,
+            maximum_ms,
+            ..Default::default()
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "invalid_delay_range");
+        assert!(found[0].message.contains(&minimum_ms.to_string()));
+        assert!(found[0].message.contains(&maximum_ms.to_string()));
+    }
+
+    #[test]
+    fn random_endpoint_over_maximum_is_rejected() {
+        let found = diagnostics(MkDelayPayload {
+            mode: MkDelayMode::RandomRange,
+            minimum_ms: 0,
+            maximum_ms: MAX_DELAY_MS + 1,
+            ..Default::default()
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "invalid_delay_range_endpoint");
+        assert!(found[0].message.contains(&(MAX_DELAY_MS + 1).to_string()));
+    }
+
+    #[test]
+    fn inactive_fields_are_not_validated() {
+        assert!(
+            diagnostics(MkDelayPayload {
+                mode: MkDelayMode::Fixed,
+                fixed_ms: 0,
+                minimum_ms: u64::MAX,
+                maximum_ms: u64::MAX,
+            })
+            .is_empty()
+        );
+        assert!(
+            diagnostics(MkDelayPayload {
+                mode: MkDelayMode::RandomRange,
+                fixed_ms: u64::MAX,
+                minimum_ms: 0,
+                maximum_ms: 0,
+            })
+            .is_empty()
+        );
+    }
+}
+
 fn wait(w: &MkWaitOptions, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
     if w.poll_interval_ms == 0 || (w.timeout_ms > 0 && w.poll_interval_ms > w.timeout_ms) {
         push(

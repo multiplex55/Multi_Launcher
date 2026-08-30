@@ -2485,9 +2485,25 @@ fn action_ui(
         }
         MkAction::Delay(payload) => {
             ui.horizontal(|ui| {
-                ui.label("Action duration (ms)");
-                ui.add(egui::DragValue::new(&mut payload.fixed_ms).clamp_range(0..=86_400_000));
+                ui.label("Mode");
+                ui.selectable_value(&mut payload.mode, MkDelayMode::Fixed, "Fixed");
+                ui.selectable_value(&mut payload.mode, MkDelayMode::RandomRange, "Random range");
             });
+            let range = 0..=MAX_DELAY_MS;
+            let (first_label, first_value) = match payload.mode {
+                MkDelayMode::Fixed => ("Duration (ms)", &mut payload.fixed_ms),
+                MkDelayMode::RandomRange => ("Minimum (ms)", &mut payload.minimum_ms),
+            };
+            ui.horizontal(|ui| {
+                ui.label(first_label);
+                ui.add(egui::DragValue::new(first_value).clamp_range(range.clone()));
+            });
+            if payload.mode == MkDelayMode::RandomRange {
+                ui.horizontal(|ui| {
+                    ui.label("Maximum (ms)");
+                    ui.add(egui::DragValue::new(&mut payload.maximum_ms).clamp_range(range));
+                });
+            }
         }
         MkAction::Process(p) => {
             ui.horizontal(|ui| {
