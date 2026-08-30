@@ -198,55 +198,103 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
     out
 }
 
-/// Legacy stable ID mapping retained for callers; duplicate bindings are omitted.
-pub fn rebuild_hotkey_map(doc: &MkMacroDocument, first_registration_id: i32) -> BTreeMap<i32, u64> {
-    let bindings = compile_bindings(doc);
-    bindings
-        .into_iter()
-        .enumerate()
-        .map(|(i, b)| (first_registration_id + i as i32, b.macro_id))
-        .collect()
-}
-
-struct Binding {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HotkeyCandidate {
     macro_id: u64,
-    modifiers: BTreeSet<String>,
-    primary: MkKey,
-    triggered: bool,
+    display_name: String,
     scope: MkHotkeyScope,
 }
-fn compile_bindings(doc: &MkMacroDocument) -> Vec<Binding> {
-    let recorder = canonical_hotkey(&doc.settings.record_toggle_hotkey);
-    let mut frequency = HashMap::new();
-    for m in doc.macros.iter().filter(|m| m.enabled) {
-        if let Some(h) = &m.hotkey {
-            *frequency.entry(canonical_hotkey(h)).or_insert(0usize) += 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HotkeyGroup {
+    canonical_chord: String,
+    modifiers: BTreeSet<String>,
+    primary: MkKey,
+    candidates: Vec<HotkeyCandidate>,
+    triggered: bool,
+}
+
+fn normalized_hotkey(modifiers: &BTreeSet<String>, primary: &MkKey) -> MkHotkey {
+    let modifiers = modifiers
+        .iter()
+        .map(|modifier| match modifier.as_str() {
+            "CONTROL" => MkKey::Control,
+            "SHIFT" => MkKey::Shift,
+            "ALT" => MkKey::Alt,
+            "META" => MkKey::Meta,
+            _ => unreachable!("compile_hotkey produced an unknown modifier"),
+        })
+        .collect();
+    MkHotkey {
+        key: primary.clone(),
+        modifiers,
+    }
+}
+
+fn valid_hotkey_scope(scope: &MkHotkeyScope) -> bool {
+    match scope {
+        MkHotkeyScope::AnyWindow => true,
+        MkHotkeyScope::ActiveWindow(matcher) => {
+            let usable = |value: &Option<String>| {
+                value.as_ref().is_some_and(|value| !value.trim().is_empty())
+            };
+            (usable(&matcher.title)
+                || usable(&matcher.title_regex)
+                || usable(&matcher.process)
+                || usable(&matcher.class))
+                && matcher
+                    .title_regex
+                    .as_ref()
+                    .is_none_or(|regex| regex::Regex::new(regex).is_ok())
         }
     }
-    let mut out = doc
-        .macros
-        .iter()
-        .filter(|m| m.enabled)
-        .filter_map(|m| {
-            let h = m.hotkey.as_ref()?;
-            if canonical_hotkey(h) == recorder {
-                return None;
-            }
-            if frequency[&canonical_hotkey(h)] != 1 {
-                return None;
-            }
-            let (modifiers, primary) = compile_hotkey(h)?;
-            Some(Binding {
-                macro_id: m.id,
+}
+
+/// Compiles one polling group for each usable physical chord.
+///
+/// Duplicate chords are intentionally retained as contextual candidates. The
+/// recorder toggle is a hard conflict because it has a separate owner and
+/// must never be dispatched as a macro hotkey.
+fn compile_hotkey_groups(doc: &MkMacroDocument) -> Vec<HotkeyGroup> {
+    let recorder = compile_hotkey(&doc.settings.record_toggle_hotkey)
+        .map(|(modifiers, primary)| canonical_hotkey(&normalized_hotkey(&modifiers, &primary)));
+    let mut groups = BTreeMap::<String, HotkeyGroup>::new();
+
+    for m in doc.macros.iter().filter(|m| m.enabled) {
+        let Some(hotkey) = m.hotkey.as_ref() else {
+            continue;
+        };
+        let Some((modifiers, primary)) = compile_hotkey(hotkey) else {
+            continue;
+        };
+        let canonical_chord = canonical_hotkey(&normalized_hotkey(&modifiers, &primary));
+        if recorder.as_deref() == Some(canonical_chord.as_str())
+            || !valid_hotkey_scope(&m.hotkey_scope)
+        {
+            continue;
+        }
+
+        let group = groups
+            .entry(canonical_chord.clone())
+            .or_insert_with(|| HotkeyGroup {
+                canonical_chord,
                 modifiers,
                 primary,
+                candidates: Vec::new(),
                 triggered: false,
-                scope: m.hotkey_scope.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    out.sort_by_key(|b| b.macro_id);
-    out
+            });
+        group.candidates.push(HotkeyCandidate {
+            macro_id: m.id,
+            display_name: m.name.clone(),
+            scope: m.hotkey_scope.clone(),
+        });
+    }
+
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.candidates.sort_by_key(|candidate| candidate.macro_id);
+    }
+    groups
 }
 
 /// Windows virtual-key representation used for recorder-control suppression.
@@ -276,7 +324,7 @@ pub(crate) fn primary_virtual_key(key: &MkKey) -> Option<u32> {
 
 struct PollState {
     snapshot: Arc<MkMacroDocument>,
-    bindings: Vec<Binding>,
+    groups: Vec<HotkeyGroup>,
 }
 type Trigger = dyn Fn(u64) + Send + Sync;
 
@@ -308,7 +356,7 @@ impl MkMacroHotkeyService {
     ) -> Self {
         let snapshot = store.snapshot();
         let state = Arc::new(Mutex::new(PollState {
-            bindings: compile_bindings(&snapshot),
+            groups: compile_hotkey_groups(&snapshot),
             snapshot,
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -368,41 +416,87 @@ fn tick<F>(
     {
         let mut state = state.lock().unwrap();
         if !Arc::ptr_eq(&snapshot, &state.snapshot) {
-            state.bindings = compile_bindings(&snapshot);
+            state.groups = compile_hotkey_groups(&snapshot);
             state.snapshot = snapshot;
         }
         let ctrl = backend.is_down(&MkKey::Control);
         let shift = backend.is_down(&MkKey::Shift);
         let alt = backend.is_down(&MkKey::Alt);
         let meta = backend.is_down(&MkKey::Meta);
-        let mut keys: Vec<(MkKey, bool)> = Vec::new();
-        for b in &state.bindings {
-            if !keys.iter().any(|(k, _)| k == &b.primary) {
-                keys.push((b.primary.clone(), backend.is_down(&b.primary)));
+        let mut primary_states: Vec<(MkKey, bool)> = Vec::new();
+        for group in &state.groups {
+            if !primary_states.iter().any(|(key, _)| key == &group.primary) {
+                primary_states.push((group.primary.clone(), backend.is_down(&group.primary)));
             }
         }
-        for b in &mut state.bindings {
+        for group in &mut state.groups {
             // Like the Launcher listener, required modifiers are inclusive: extra modifiers are allowed.
-            let down = keys.iter().find(|(k, _)| k == &b.primary).unwrap().1
-                && (!b.modifiers.contains("CONTROL") || ctrl)
-                && (!b.modifiers.contains("SHIFT") || shift)
-                && (!b.modifiers.contains("ALT") || alt)
-                && (!b.modifiers.contains("META") || meta);
-            let in_scope = match &b.scope {
-                MkHotkeyScope::AnyWindow => true,
-                MkHotkeyScope::ActiveWindow(matcher) => backend.active_window_matches(matcher),
-            };
-            if down && in_scope && !b.triggered {
-                b.triggered = true;
-                fire.push(b.macro_id);
-            } else if !down {
-                b.triggered = false;
+            let primary_down = primary_states
+                .iter()
+                .find(|(key, _)| key == &group.primary)
+                .map(|(_, down)| *down)
+                .unwrap_or(false);
+            let down = primary_down
+                && (!group.modifiers.contains("CONTROL") || ctrl)
+                && (!group.modifiers.contains("SHIFT") || shift)
+                && (!group.modifiers.contains("ALT") || alt)
+                && (!group.modifiers.contains("META") || meta);
+            if !down {
+                group.triggered = false;
+                continue;
+            }
+            if group.triggered {
+                continue;
+            }
+            group.triggered = true;
+            match resolve_candidate(group, backend) {
+                CandidateResolution::None => {}
+                CandidateResolution::Unique(candidate) => fire.push(candidate.macro_id),
+                CandidateResolution::Ambiguous(candidates) => {
+                    let candidates = candidates
+                        .iter()
+                        .map(|candidate| {
+                            format!("{} ({})", candidate.display_name, candidate.macro_id)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    tracing::warn!(
+                        chord = %group.canonical_chord,
+                        candidates = %candidates,
+                        "macro hotkey is ambiguous; no macro triggered"
+                    );
+                }
             }
         }
     }
     // Never hold the service/store state lock across runtime admission.
     for id in fire {
         trigger(id);
+    }
+}
+
+enum CandidateResolution<'a> {
+    None,
+    Unique(&'a HotkeyCandidate),
+    Ambiguous(Vec<&'a HotkeyCandidate>),
+}
+
+fn resolve_candidate<'a>(
+    group: &'a HotkeyGroup,
+    backend: &dyn KeyStateBackend,
+) -> CandidateResolution<'a> {
+    let matches = group
+        .candidates
+        .iter()
+        .filter(|candidate| match &candidate.scope {
+            MkHotkeyScope::AnyWindow => true,
+            MkHotkeyScope::ActiveWindow(matcher) => backend.active_window_matches(matcher),
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => CandidateResolution::None,
+        [candidate] => CandidateResolution::Unique(candidate),
+        _ => CandidateResolution::Ambiguous(matches),
     }
 }
 
@@ -429,7 +523,7 @@ mod tests {
         }
     }
     #[test]
-    fn every_duplicate_is_diagnosed_and_unarmed() {
+    fn three_shared_macros_compile_into_one_group_with_one_edge_flag() {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
@@ -437,20 +531,44 @@ mod tests {
             macros: vec![mac(9, true), mac(2, true), mac(1, true)],
         };
         assert_eq!(validate_hotkeys(&d, &[]).len(), 3);
-        assert!(compile_bindings(&d).is_empty());
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].canonical_chord, "CONTROL+K");
+        assert_eq!(groups[0].primary, MkKey::Character("K".into()));
+        assert_eq!(
+            groups[0]
+                .candidates
+                .iter()
+                .map(|candidate| candidate.macro_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 9]
+        );
+        assert!(!groups[0].triggered);
     }
     #[test]
-    fn disabled_duplicate_does_not_conflict() {
+    fn different_chords_form_different_groups() {
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
             folders: vec![],
-            macros: vec![mac(2, true), mac(1, false)],
+            macros: vec![mac(2, true), {
+                let mut m = mac(1, true);
+                m.hotkey.as_mut().unwrap().key = MkKey::Character("J".into());
+                m
+            }],
         };
-        assert_eq!(compile_bindings(&d).len(), 1);
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.canonical_chord.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CONTROL+J", "CONTROL+K"]
+        );
     }
     #[test]
-    fn aliases_and_malformed_are_handled() {
+    fn left_and_right_modifier_aliases_share_a_group() {
         let mut a = mac(1, true);
         a.hotkey.as_mut().unwrap().modifiers = vec![MkKey::RightControl];
         let mut b = mac(2, true);
@@ -461,42 +579,64 @@ mod tests {
             folders: vec![],
             macros: vec![a, b],
         };
-        assert!(compile_bindings(&d).is_empty());
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].canonical_chord, "CONTROL+K");
+        assert_eq!(groups[0].candidates.len(), 2);
+    }
+    #[test]
+    fn disabled_missing_and_malformed_hotkeys_are_not_candidates() {
         let mut bad = mac(3, true);
         bad.hotkey
             .as_mut()
             .unwrap()
             .modifiers
             .push(MkKey::Character("X".into()));
-        assert!(
-            compile_bindings(&MkMacroDocument {
-                settings: Default::default(),
-                schema_version: 1,
-                folders: vec![],
-                macros: vec![bad]
-            })
-            .is_empty()
-        );
-    }
-    #[test]
-    fn deterministic_rebuild() {
+        let mut missing = mac(4, true);
+        missing.hotkey = None;
         let d = MkMacroDocument {
             settings: Default::default(),
             schema_version: 1,
             folders: vec![],
-            macros: vec![mac(9, true), {
-                let mut m = mac(2, true);
-                m.hotkey.as_mut().unwrap().key = MkKey::Character("J".into());
-                m
-            }],
+            macros: vec![mac(2, true), mac(1, false), bad, missing],
         };
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(groups.len(), 1);
         assert_eq!(
-            rebuild_hotkey_map(&d, 100)
-                .into_values()
+            groups[0]
+                .candidates
+                .iter()
+                .map(|candidate| candidate.macro_id)
                 .collect::<Vec<_>>(),
-            vec![2, 9]
+            vec![2]
         );
     }
+
+    #[test]
+    fn invalid_contextual_scopes_are_not_candidates() {
+        let mut empty = mac(2, true);
+        empty.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher::default());
+        let mut malformed_regex = mac(3, true);
+        malformed_regex.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title_regex: Some("[".into()),
+            ..Default::default()
+        });
+        let mut valid = mac(4, true);
+        valid.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        });
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![empty, malformed_regex, valid],
+        };
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].candidates[0].macro_id, 4);
+    }
+
     #[test]
     fn reserved_conflict() {
         assert_eq!(
@@ -533,7 +673,7 @@ mod tests {
                 message: "hotkey conflicts with the recording toggle".into(),
             }]
         );
-        assert!(compile_bindings(&d).is_empty());
+        assert!(compile_hotkey_groups(&d).is_empty());
     }
     #[test]
     fn primary_virtual_keys_accept_only_supported_ascii_characters() {
@@ -554,6 +694,59 @@ mod tests {
             self.0.read().unwrap().contains(k)
         }
     }
+    struct ContextFake {
+        active_title: String,
+    }
+    impl KeyStateBackend for ContextFake {
+        fn is_down(&self, _: &MkKey) -> bool {
+            false
+        }
+        fn active_window_matches(&self, matcher: &MkWindowMatcher) -> bool {
+            matcher.title.as_deref() == Some(self.active_title.as_str())
+        }
+    }
+    #[test]
+    fn candidate_order_does_not_choose_between_contextual_candidates() {
+        let mut editor = mac(9, true);
+        editor.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        });
+        let mut terminal = mac(2, true);
+        terminal.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Terminal".into()),
+            ..Default::default()
+        });
+        let d = MkMacroDocument {
+            settings: Default::default(),
+            schema_version: 1,
+            folders: vec![],
+            macros: vec![editor, terminal],
+        };
+        let groups = compile_hotkey_groups(&d);
+        assert_eq!(groups.len(), 1);
+        assert!(matches!(
+            resolve_candidate(
+                &groups[0],
+                &ContextFake {
+                    active_title: "Editor".into()
+                }
+            ),
+            CandidateResolution::Unique(candidate) if candidate.macro_id == 9
+        ));
+
+        let mut reversed = groups[0].clone();
+        reversed.candidates.reverse();
+        assert!(matches!(
+            resolve_candidate(
+                &reversed,
+                &ContextFake {
+                    active_title: "Editor".into()
+                }
+            ),
+            CandidateResolution::Unique(candidate) if candidate.macro_id == 9
+        ));
+    }
     #[test]
     fn tick_has_edges_and_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
@@ -569,7 +762,7 @@ mod tests {
         let store = Arc::new(store);
         let snap = store.snapshot();
         let state = Mutex::new(PollState {
-            bindings: compile_bindings(&snap),
+            groups: compile_hotkey_groups(&snap),
             snapshot: snap,
         });
         let fake = Fake(RwLock::new(vec![
