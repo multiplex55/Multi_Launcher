@@ -657,13 +657,34 @@ pub fn validate_document_with_context(
                     validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
                 }
                 MkAction::ClickWithinRegion(p) => {
-                    if let Err(error) = p.rect.validate_capture() {
+                    if p.rect.width == 0 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_click_region_width",
+                            "Click region width must be positive",
+                        );
+                    }
+                    if p.rect.height == 0 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_click_region_height",
+                            "Click region height must be positive",
+                        );
+                    }
+                    if p.rect.width > 0
+                        && p.rect.height > 0
+                        && let Err(error) = p.rect.validate_capture()
+                    {
                         push(
                             &mut out,
                             m.id,
                             sid,
                             "invalid_click_region",
-                            format!("Click region rectangle is invalid: {error:?}"),
+                            format!("Click region rectangle is invalid: {error}"),
                         );
                     }
                     if p.clicks == 0 {
@@ -675,22 +696,28 @@ pub fn validate_document_with_context(
                             "Click region click count must be at least 1",
                         );
                     }
-                    let padding = p.edge_padding_px.saturating_mul(2);
-                    if p.rect
-                        .width
-                        .checked_sub(padding)
-                        .is_none_or(|width| width == 0)
-                        || p.rect
-                            .height
-                            .checked_sub(padding)
-                            .is_none_or(|height| height == 0)
+                    // Widen before doubling and subtracting so malformed persisted values
+                    // cannot wrap around and appear to leave a usable area.
+                    let padding = u64::from(p.edge_padding_px);
+                    let double_padding = padding * 2;
+                    let width = u64::from(p.rect.width);
+                    let height = u64::from(p.rect.height);
+                    let usable_width = width.checked_sub(double_padding);
+                    let usable_height = height.checked_sub(double_padding);
+                    if p.rect.width > 0
+                        && p.rect.height > 0
+                        && (usable_width.is_none_or(|width| width < 1)
+                            || usable_height.is_none_or(|height| height < 1))
                     {
                         push(
                             &mut out,
                             m.id,
                             sid,
                             "invalid_click_region_padding",
-                            "Click region edge padding leaves no usable area",
+                            format!(
+                                "Edge padding {} leaves no clickable area inside a {}×{} rectangle.",
+                                p.edge_padding_px, p.rect.width, p.rect.height
+                            ),
                         );
                     }
                 }
@@ -1332,5 +1359,130 @@ mod launcher_command_action_tests {
         let found = diagnostics(legacy(" \t"));
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].code, "invalid_legacy_launcher_action");
+    }
+}
+
+#[cfg(test)]
+mod click_within_region_validation_tests {
+    use super::*;
+    use crate::mkmacro::ScreenRect;
+
+    fn diagnostics(rect: ScreenRect, clicks: u32, edge_padding_px: u32) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    id: 1,
+                    name: "test".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
+                    playback: MkPlayback::default(),
+                    steps: vec![MkStep {
+                        id: 1,
+                        enabled: true,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: MkErrorPolicy::default(),
+                        action: MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+                            rect,
+                            button: MkMouseButton::Left,
+                            clicks,
+                            edge_padding_px,
+                        }),
+                    }],
+                    image_assets: vec![],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    fn codes(diagnostics: &[MkDiagnostic]) -> Vec<&'static str> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    }
+
+    #[test]
+    fn zero_padding_regions_are_valid() {
+        for rect in [
+            ScreenRect::new(0, 0, 100, 80),
+            ScreenRect::new(10, 20, 1, 1),
+        ] {
+            assert!(
+                diagnostics(rect, 1, 0).is_empty(),
+                "unexpected diagnostics for {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn padded_region_is_valid_when_both_usable_dimensions_remain() {
+        assert!(diagnostics(ScreenRect::new(0, 0, 100, 80), 1, 10).is_empty());
+    }
+
+    #[test]
+    fn one_by_one_region_is_valid_at_zero_padding() {
+        assert!(diagnostics(ScreenRect::new(0, 0, 1, 1), 1, 0).is_empty());
+    }
+
+    #[test]
+    fn zero_width_has_a_field_specific_diagnostic() {
+        let found = diagnostics(ScreenRect::new(10, 20, 0, 80), 1, 0);
+        assert!(codes(&found).contains(&"invalid_click_region_width"));
+        assert!(
+            found
+                .iter()
+                .any(|diagnostic| diagnostic.message == "Click region width must be positive")
+        );
+    }
+
+    #[test]
+    fn zero_height_has_a_field_specific_diagnostic() {
+        let found = diagnostics(ScreenRect::new(10, 20, 100, 0), 1, 0);
+        assert!(codes(&found).contains(&"invalid_click_region_height"));
+        assert!(
+            found
+                .iter()
+                .any(|diagnostic| diagnostic.message == "Click region height must be positive")
+        );
+    }
+
+    #[test]
+    fn zero_clicks_are_rejected() {
+        let found = diagnostics(ScreenRect::new(0, 0, 100, 80), 0, 0);
+        assert_eq!(codes(&found), ["invalid_click_count"]);
+    }
+
+    #[test]
+    fn padding_can_be_invalid_on_only_one_axis() {
+        let found = diagnostics(ScreenRect::new(0, 0, 100, 80), 1, 50);
+        assert_eq!(codes(&found), ["invalid_click_region_padding"]);
+        assert_eq!(
+            found[0].message,
+            "Edge padding 50 leaves no clickable area inside a 100×80 rectangle."
+        );
+    }
+
+    #[test]
+    fn very_large_padding_is_rejected_without_overflow() {
+        let found = diagnostics(ScreenRect::new(0, 0, 100, 80), 1, u32::MAX);
+        assert_eq!(codes(&found), ["invalid_click_region_padding"]);
+        assert_eq!(
+            found[0].message,
+            format!(
+                "Edge padding {} leaves no clickable area inside a 100×80 rectangle.",
+                u32::MAX
+            )
+        );
+    }
+
+    #[test]
+    fn negative_coordinates_do_not_make_a_valid_region_invalid() {
+        assert!(diagnostics(ScreenRect::new(-100, -50, 20, 20), 1, 5).is_empty());
     }
 }
