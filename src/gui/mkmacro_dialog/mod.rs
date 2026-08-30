@@ -142,6 +142,143 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         (dir, MkMacroDialog::new(Arc::new(store)))
     }
+
+    fn picker_matcher(title: &str) -> MkWindowMatcher {
+        MkWindowMatcher {
+            title: Some(title.into()),
+            ..Default::default()
+        }
+    }
+
+    fn picker_macro(id: u64, hotkey_scope: MkHotkeyScope) -> MkMacro {
+        MkMacro {
+            id,
+            name: format!("Macro {id}"),
+            description: format!("Description {id}"),
+            enabled: true,
+            hotkey: Some(MkHotkey {
+                key: MkKey::Function(1),
+                modifiers: vec![MkKey::Control],
+            }),
+            hotkey_scope,
+            folder_id: Some(9),
+            playback: Default::default(),
+            steps: vec![],
+            image_assets: vec![],
+        }
+    }
+
+    fn picker_request(
+        macro_id: u64,
+        original: MkWindowMatcher,
+    ) -> window_picker::MatcherEditRequest {
+        window_picker::MatcherEditRequest {
+            destination: window_picker::MatcherDestination::MacroHotkey { macro_id },
+            original,
+        }
+    }
+
+    #[test]
+    fn picker_confirmation_targets_stable_macro_id_after_selection_changes() {
+        let (_dir, mut d) = dialog();
+        let original_17 = picker_matcher("Original 17");
+        let original_22 = picker_matcher("Original 22");
+        let before_17 = picker_macro(17, MkHotkeyScope::ActiveWindow(original_17.clone()));
+        let before_22 = picker_macro(22, MkHotkeyScope::ActiveWindow(original_22.clone()));
+        d.draft.macros = vec![before_17.clone(), before_22.clone()];
+        d.selected_macro_id = Some(22);
+
+        let replacement = picker_matcher("Picked 17");
+        let request = picker_request(17, original_17);
+        assert!(d.apply_window_picker_confirmation(&request, replacement.clone()));
+
+        let mut expected_17 = before_17;
+        expected_17.hotkey_scope = MkHotkeyScope::ActiveWindow(replacement);
+        assert_eq!(d.draft.macros[0], expected_17);
+        assert_eq!(d.draft.macros[1], before_22);
+        assert!(d.dirty);
+    }
+
+    #[test]
+    fn picker_confirmation_discards_deleted_macro() {
+        let (_dir, mut d) = dialog();
+        let original_17 = picker_matcher("Original 17");
+        let before_22 = picker_macro(
+            22,
+            MkHotkeyScope::ActiveWindow(picker_matcher("Original 22")),
+        );
+        d.draft.macros = vec![
+            picker_macro(17, MkHotkeyScope::ActiveWindow(original_17.clone())),
+            before_22.clone(),
+        ];
+        d.draft.macros.retain(|macro_| macro_.id != 17);
+        d.selected_macro_id = Some(22);
+
+        assert!(!d.apply_window_picker_confirmation(
+            &picker_request(17, original_17),
+            picker_matcher("Picked 17"),
+        ));
+        assert_eq!(d.draft.macros, vec![before_22]);
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn picker_confirmation_discards_macro_that_switched_to_any_window() {
+        let (_dir, mut d) = dialog();
+        let original_17 = picker_matcher("Original 17");
+        let before_17 = picker_macro(17, MkHotkeyScope::AnyWindow);
+        d.draft.macros = vec![before_17.clone()];
+        d.selected_macro_id = Some(22);
+
+        assert!(!d.apply_window_picker_confirmation(
+            &picker_request(17, original_17),
+            picker_matcher("Picked 17"),
+        ));
+        assert_eq!(d.draft.macros, vec![before_17]);
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn picker_confirmation_replaces_matching_active_window_matcher_and_marks_dirty() {
+        let (_dir, mut d) = dialog();
+        let original = picker_matcher("Original");
+        d.draft.macros = vec![picker_macro(
+            17,
+            MkHotkeyScope::ActiveWindow(original.clone()),
+        )];
+        d.selected_macro_id = None;
+
+        let replacement = picker_matcher("Picked");
+        assert!(
+            d.apply_window_picker_confirmation(&picker_request(17, original), replacement.clone(),)
+        );
+        assert_eq!(
+            d.draft.macros[0].hotkey_scope,
+            MkHotkeyScope::ActiveWindow(replacement),
+        );
+        assert!(d.dirty);
+    }
+
+    #[test]
+    fn picker_confirmation_of_identical_matcher_does_not_mark_dirty() {
+        let (_dir, mut d) = dialog();
+        let original = picker_matcher("Original");
+        d.draft.macros = vec![picker_macro(
+            17,
+            MkHotkeyScope::ActiveWindow(original.clone()),
+        )];
+        d.selected_macro_id = Some(22);
+
+        assert!(
+            d.apply_window_picker_confirmation(&picker_request(17, original.clone()), original,)
+        );
+        assert_eq!(
+            d.draft.macros[0].hotkey_scope,
+            MkHotkeyScope::ActiveWindow(picker_matcher("Original")),
+        );
+        assert!(!d.dirty);
+    }
+
     #[test]
     fn image_shortcuts_insert_around_stable_nested_anchor_and_report_change() {
         let (_dir, mut d) = dialog();
@@ -1497,30 +1634,39 @@ impl MkMacroDialog {
     }
 
     fn apply_hotkey_scope_matcher(&mut self, macro_id: u64, matcher: MkWindowMatcher) -> bool {
-        if self.selected_macro_id != Some(macro_id) {
-            return false;
-        }
-        let changed = self
-            .draft
-            .macros
-            .iter_mut()
-            .find(|macro_| macro_.id == macro_id)
-            .map(|macro_| {
-                let next = MkHotkeyScope::ActiveWindow(matcher);
-                if macro_.hotkey_scope != next {
-                    macro_.hotkey_scope = next;
-                    true
-                } else {
-                    false
-                }
-            });
-        let Some(changed) = changed else {
-            return false;
+        let changed = {
+            let Some(macro_) = self.draft.macros.iter_mut().find(|m| m.id == macro_id) else {
+                return false;
+            };
+            let MkHotkeyScope::ActiveWindow(current) = &mut macro_.hotkey_scope else {
+                return false;
+            };
+            if *current == matcher {
+                false
+            } else {
+                *current = matcher;
+                true
+            }
         };
         if changed {
             self.mark_dirty();
         }
         true
+    }
+
+    fn apply_window_picker_confirmation(
+        &mut self,
+        request: &window_picker::MatcherEditRequest,
+        matcher: MkWindowMatcher,
+    ) -> bool {
+        match &request.destination {
+            window_picker::MatcherDestination::Action { .. } => self
+                .action_editor
+                .apply_window_matcher(request, matcher, self.selected_macro_id),
+            window_picker::MatcherDestination::MacroHotkey { macro_id } => {
+                self.apply_hotkey_scope_matcher(*macro_id, matcher)
+            }
+        }
     }
     /// Rename intent shared by non-widget controllers and the dialog.
     pub fn rename_selected(&mut self, name: impl Into<String>) -> bool {
@@ -1821,14 +1967,7 @@ impl MkMacroDialog {
         if self.window_picker.confirm_ready {
             self.window_picker.confirm_ready = false;
             if let Some((request, matcher)) = self.window_picker.take_confirmation() {
-                let applied = match &request.destination {
-                    window_picker::MatcherDestination::MacroHotkeyScope { macro_id } => {
-                        self.apply_hotkey_scope_matcher(*macro_id, matcher)
-                    }
-                    window_picker::MatcherDestination::Action { .. } => self
-                        .action_editor
-                        .apply_window_matcher(&request, matcher, self.selected_macro_id),
-                };
+                let applied = self.apply_window_picker_confirmation(&request, matcher);
                 if !applied {
                     self.command_error =
                         Some("The matcher target no longer exists; no changes were made".into());

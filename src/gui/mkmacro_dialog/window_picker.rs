@@ -9,7 +9,7 @@ pub enum MatcherDestination {
         draft_generation: u64,
         path: MatcherPath,
     },
-    MacroHotkeyScope {
+    MacroHotkey {
         macro_id: u64,
     },
 }

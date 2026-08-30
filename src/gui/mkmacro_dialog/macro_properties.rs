@@ -73,7 +73,6 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     }
     ui.separator();
     let capturing = d.hotkey_capture;
-    let selected_macro_id = d.selected_macro_id;
     let mut changed = false;
     let mut capture = None;
     let mut clear = false;
@@ -82,6 +81,7 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         ui.label("Select a macro");
         return;
     };
+    let macro_id = m.id;
     ui.heading("Macro Properties");
     changed |= ui.text_edit_singleline(&mut m.name).changed();
     changed |= ui
@@ -154,9 +154,9 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         changed |= clear_hotkey(&mut m.hotkey);
     }
     let _ = m;
-    if let (Some(macro_id), Some(original)) = (selected_macro_id, picker_original) {
+    if let Some(original) = picker_original {
         d.window_picker.open(MatcherEditRequest {
-            destination: MatcherDestination::MacroHotkeyScope { macro_id },
+            destination: MatcherDestination::MacroHotkey { macro_id },
             original,
         });
     }
