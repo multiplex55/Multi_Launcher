@@ -6,9 +6,10 @@ use super::{
     MkNotificationKind, MkNotifyPayload, MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload,
     MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
     MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
-    PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, SearchRegion,
-    interpolate,
+    PromptRequest, PromptResponse, RuntimeVariables, ScreenCaptureBackend, ScreenRect,
+    SearchRegion, interpolate,
 };
+use rand::RngExt;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -1484,6 +1485,208 @@ mod tests {
         assert_eq!(add_sampled_random_delay(10, 7), 17);
         assert_eq!(add_sampled_random_delay(u64::MAX, 1), u64::MAX);
     }
+    struct FixedRng(u64);
+
+    impl rand::TryRng for FixedRng {
+        type Error = std::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.0 as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(self.0)
+        }
+
+        fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            let word = self.0.to_ne_bytes();
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = word[index % word.len()];
+            }
+            Ok(())
+        }
+    }
+
+    fn click_within_action(
+        rect: super::super::ScreenRect,
+        clicks: u32,
+        edge_padding_px: u32,
+    ) -> MkAction {
+        MkAction::ClickWithinRegion(super::super::MkClickWithinRegionPayload {
+            rect,
+            button: MkMouseButton::Left,
+            clicks,
+            edge_padding_px,
+        })
+    }
+
+    fn runtime_coordinate(vars: &RuntimeVariables, name: &str) -> i32 {
+        match vars.get(name) {
+            Some(MkValue::Number(value)) => *value as i32,
+            other => panic!("expected runtime coordinate {name}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usable_region_bounds_are_inclusive_and_padding_is_edge_based() {
+        assert_eq!(
+            usable_region(super::super::ScreenRect::new(100, 200, 400, 300), 0).unwrap(),
+            UsableRegion {
+                min_x: 100,
+                max_x: 499,
+                min_y: 200,
+                max_y: 499,
+            }
+        );
+        assert_eq!(
+            usable_region(super::super::ScreenRect::new(100, 200, 400, 300), 10).unwrap(),
+            UsableRegion {
+                min_x: 110,
+                max_x: 489,
+                min_y: 210,
+                max_y: 489,
+            }
+        );
+    }
+
+    #[test]
+    fn one_by_one_region_samples_its_only_point() {
+        let region = usable_region(super::super::ScreenRect::new(-7, 11, 1, 1), 0).unwrap();
+        assert_eq!(
+            sample_point(region, &mut FixedRng(0)),
+            MkPoint { x: -7, y: 11 }
+        );
+        assert_eq!(
+            sample_point(region, &mut FixedRng(u64::MAX)),
+            MkPoint { x: -7, y: 11 }
+        );
+    }
+
+    #[test]
+    fn negative_origins_and_invalid_padding_are_handled_without_wrapping() {
+        assert_eq!(
+            usable_region(super::super::ScreenRect::new(-100, -50, 20, 20), 5).unwrap(),
+            UsableRegion {
+                min_x: -95,
+                max_x: -86,
+                min_y: -45,
+                max_y: -36,
+            }
+        );
+        let error =
+            usable_region(super::super::ScreenRect::new(100, 200, 400, 300), 200).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+    }
+
+    #[test]
+    fn sampling_includes_both_endpoints() {
+        let region = usable_region(super::super::ScreenRect::new(100, 200, 400, 300), 0).unwrap();
+        assert_eq!(
+            sample_point(region, &mut FixedRng(0)),
+            MkPoint { x: 100, y: 200 }
+        );
+        assert_eq!(
+            sample_point(region, &mut FixedRng(u64::MAX)),
+            MkPoint { x: 499, y: 499 }
+        );
+    }
+
+    #[test]
+    fn click_within_region_moves_once_and_reuses_one_sample_for_two_clicks() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let mut vars = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        executor
+            .action(
+                1,
+                &click_within_action(super::super::ScreenRect::new(100, 200, 400, 300), 2, 10),
+                &MkPlayback::default(),
+                &mut vars,
+                &mut guard,
+            )
+            .unwrap();
+
+        let events = fake.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("move:"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| *event == "button_down:Left")
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| *event == "button_up:Left")
+                .count(),
+            2
+        );
+        let x = runtime_coordinate(&vars, "mouse.x");
+        let y = runtime_coordinate(&vars, "mouse.y");
+        assert!((110..=489).contains(&x));
+        assert!((210..=489).contains(&y));
+        assert_eq!(runtime_coordinate(&vars, "last_point.x"), x);
+        assert_eq!(runtime_coordinate(&vars, "last_point.y"), y);
+    }
+
+    #[test]
+    fn click_within_region_does_not_apply_playback_random_offset() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let mut vars = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        let playback = MkPlayback {
+            random_offset_px: u32::MAX,
+            ..MkPlayback::default()
+        };
+        executor
+            .action(
+                1,
+                &click_within_action(super::super::ScreenRect::new(100, 200, 1, 1), 1, 0),
+                &playback,
+                &mut vars,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(
+            fake.events(),
+            vec!["move:100,200", "button_down:Left", "button_up:Left"]
+        );
+    }
+
+    #[test]
+    fn invalid_persisted_click_region_returns_a_diagnostic() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let mut vars = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        let error = executor
+            .action(
+                1,
+                &click_within_action(super::super::ScreenRect::new(100, 200, 0, 1), 1, 0),
+                &MkPlayback::default(),
+                &mut vars,
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+        assert!(fake.events().is_empty());
+    }
+
     #[test]
     fn sequential_order_and_owned_input_cleanup() {
         let fake = Arc::new(FakeBackend::default());
@@ -1961,6 +2164,87 @@ fn offset_point(point: MkPoint, x: i64, y: i64) -> MkPoint {
     }
 }
 
+/// Inclusive, point-coordinate bounds left inside a click rectangle after
+/// applying the same padding to each edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsableRegion {
+    pub min_x: i32,
+    pub max_x: i32,
+    pub min_y: i32,
+    pub max_y: i32,
+}
+
+/// Computes a rectangle's usable inclusive bounds without allowing malformed
+/// persisted geometry to wrap around or create an invalid random range.
+pub fn usable_region(rect: ScreenRect, padding: u32) -> ExecResult<UsableRegion> {
+    if rect.width == 0 || rect.height == 0 {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            "Click region has no usable area",
+        ));
+    }
+
+    let padding = i128::from(padding);
+    let bounds = |origin: i32, dimension: u32| -> ExecResult<(i32, i32)> {
+        let origin = i128::from(origin);
+        let dimension = i128::from(dimension);
+        let min = origin.checked_add(padding).ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Click region exceeds arithmetic limits",
+            )
+        })?;
+        let max = origin
+            .checked_add(dimension)
+            .and_then(|value| value.checked_sub(1))
+            .and_then(|value| value.checked_sub(padding))
+            .ok_or_else(|| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "Click region exceeds arithmetic limits",
+                )
+            })?;
+        if min > max {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Click region is smaller than its edge padding",
+            ));
+        }
+        Ok((
+            i32::try_from(min).map_err(|_| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "Click region exceeds coordinate limits",
+                )
+            })?,
+            i32::try_from(max).map_err(|_| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    "Click region exceeds coordinate limits",
+                )
+            })?,
+        ))
+    };
+
+    let (min_x, max_x) = bounds(rect.x, rect.width)?;
+    let (min_y, max_y) = bounds(rect.y, rect.height)?;
+    Ok(UsableRegion {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+    })
+}
+
+/// Samples each coordinate independently and uniformly from its inclusive
+/// usable range. An RNG is injectable so execution can be tested deterministically.
+pub fn sample_point<R: rand::Rng + ?Sized>(region: UsableRegion, rng: &mut R) -> MkPoint {
+    MkPoint {
+        x: rng.random_range(region.min_x..=region.max_x),
+        y: rng.random_range(region.min_y..=region.max_y),
+    }
+}
+
 /// Combines an already-scaled normal delay with a deterministic sampled value.
 pub fn add_sampled_random_delay(normal: u64, sampled: u64) -> u64 {
     normal.saturating_add(sampled)
@@ -2299,59 +2583,20 @@ impl Executor {
             }
             MkAction::MouseClick(p) => {
                 let point = self.finalize_target(&p.target, playback, v, "Mouse Click")?;
-                set_point(v, "last_point", point);
-                self.backends.input.move_mouse(point)?;
-                set_point(v, "mouse", point);
-                for _ in 0..p.clicks {
-                    g.down_button(p.button.clone())?;
-                    g.up_button(p.button.clone())?
-                }
-                Ok(())
+                self.click_at(point, p.button.clone(), p.clicks, v, g)
             }
             MkAction::ClickWithinRegion(p) => {
-                let padding = p.edge_padding_px;
-                let usable_width = p.rect.width.checked_sub(padding.saturating_mul(2));
-                let usable_height = p.rect.height.checked_sub(padding.saturating_mul(2));
-                let (Some(width), Some(height)) = (usable_width, usable_height) else {
+                if p.clicks == 0 {
                     return Err(ExecutionDiagnostic::new(
                         DiagnosticKind::InvalidTarget,
-                        "Click region is smaller than its edge padding",
-                    ));
-                };
-                if width == 0 || height == 0 {
-                    return Err(ExecutionDiagnostic::new(
-                        DiagnosticKind::InvalidTarget,
-                        "Click region has no usable area",
+                        "Click region click count must be at least 1",
                     ));
                 }
-                let left = i64::from(p.rect.x) + i64::from(padding);
-                let top = i64::from(p.rect.y) + i64::from(padding);
-                let point = MkPoint {
-                    x: i32::try_from(left + i64::from(rand::random_range(0..width))).map_err(
-                        |_| {
-                            ExecutionDiagnostic::new(
-                                DiagnosticKind::InvalidTarget,
-                                "Click region exceeds coordinate limits",
-                            )
-                        },
-                    )?,
-                    y: i32::try_from(top + i64::from(rand::random_range(0..height))).map_err(
-                        |_| {
-                            ExecutionDiagnostic::new(
-                                DiagnosticKind::InvalidTarget,
-                                "Click region exceeds coordinate limits",
-                            )
-                        },
-                    )?,
-                };
-                self.backends.input.move_mouse(point)?;
-                set_point(v, "mouse", point);
-                set_point(v, "last_point", point);
-                for _ in 0..p.clicks {
-                    g.down_button(p.button.clone())?;
-                    g.up_button(p.button.clone())?;
-                }
-                Ok(())
+                let region = usable_region(p.rect, p.edge_padding_px)?;
+                let mut rng = rand::rng();
+                let point = sample_point(region, &mut rng);
+                // A second offset would violate the rectangle boundary guarantee.
+                self.click_at(point, p.button.clone(), p.clicks, v, g)
             }
             MkAction::MouseDown(b) => g.down_button(b.clone()),
             MkAction::MouseUp(b) => g.up_button(b.clone()),
@@ -2641,6 +2886,23 @@ impl Executor {
             sample_offset(playback.random_offset_px),
         );
         self.backends.screen.finalize_point(randomized)
+    }
+    fn click_at(
+        &self,
+        point: MkPoint,
+        button: MkMouseButton,
+        clicks: u32,
+        v: &mut RuntimeVariables,
+        g: &mut InputCleanupGuard,
+    ) -> ExecResult {
+        set_point(v, "last_point", point);
+        self.backends.input.move_mouse(point)?;
+        set_point(v, "mouse", point);
+        for _ in 0..clicks {
+            g.down_button(button.clone())?;
+            g.up_button(button.clone())?;
+        }
+        Ok(())
     }
     fn move_to(
         &self,
