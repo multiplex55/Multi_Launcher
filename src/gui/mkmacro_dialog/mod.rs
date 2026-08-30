@@ -26,6 +26,7 @@ use crate::mkmacro::{
     DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroStore, MkWindowMatcher,
     NormalizationConfig, RecordedStep, repair_ids, validate_document,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
 use visual_capture_workflow::SharedVisualOverlayController;
@@ -56,6 +57,13 @@ pub struct MkMacroDialog {
     pub selected_macro_id: Option<u64>,
     pub selection: Selection,
     pub search: String,
+    /// Process-local presentation state; never participates in draft dirty tracking.
+    pub collapsed_folders: HashSet<u64>,
+    pub pending_folder_rename: Option<u64>,
+    pub folder_rename_text: String,
+    pub pending_delete_folder: Option<u64>,
+    pub folder_delete_confirmation: ConfirmationModal,
+    pub folder_error: Option<String>,
     pub delete_confirmation: ConfirmationModal,
     pub unwrap_confirmation: ConfirmationModal,
     pub pending_unwrap_block: Option<u64>,
@@ -142,6 +150,213 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         (dir, MkMacroDialog::new(Arc::new(store)))
+    }
+
+    fn folder_dialog() -> (tempfile::TempDir, MkMacroDialog) {
+        let (dir, mut d) = dialog();
+        d.draft.folders = vec![crate::mkmacro::MkMacroFolder {
+            id: 42,
+            name: "Utilities".into(),
+        }];
+        d.save().unwrap();
+        (dir, d)
+    }
+
+    fn assert_no_pending_folder_operations(d: &MkMacroDialog) {
+        assert_eq!(d.pending_folder_rename, None);
+        assert!(d.folder_rename_text.is_empty());
+        assert_eq!(d.pending_delete_folder, None);
+        assert!(!d.folder_delete_confirmation.is_open());
+        assert_eq!(d.folder_error, None);
+    }
+
+    #[test]
+    fn folder_collapse_changes_only_presentation_state() {
+        let (_dir, mut d) = folder_dialog();
+        d.begin_folder_rename(42);
+        d.folder_rename_text = "Uncommitted rename".into();
+        d.request_delete_folder(42);
+        d.folder_error = Some("Existing validation error".into());
+        d.search = "Utilities".into();
+        let draft = d.draft.clone();
+        let baseline = d.baseline.clone();
+        let store = d.store.snapshot();
+        for collapsed in [true, false] {
+            d.toggle_folder_collapsed(42);
+            assert_eq!(d.is_folder_collapsed(42), collapsed);
+            assert_eq!(d.collapsed_folders.len(), usize::from(collapsed));
+            assert_eq!(d.draft, draft);
+            assert!(Arc::ptr_eq(&d.baseline, &baseline));
+            assert!(Arc::ptr_eq(&d.store.snapshot(), &store));
+            assert!(!d.dirty);
+            assert!(!d.conflict);
+            assert_eq!(d.selected_macro_id, None);
+            assert_eq!(d.search, "Utilities");
+            assert_eq!(d.pending_folder_rename, Some(42));
+            assert_eq!(d.folder_rename_text, "Uncommitted rename");
+            assert_eq!(d.pending_delete_folder, Some(42));
+            assert!(d.folder_delete_confirmation.is_open());
+            assert_eq!(d.folder_error.as_deref(), Some("Existing validation error"));
+        }
+        d.mark_dirty();
+        d.toggle_folder_collapsed(42);
+        assert!(
+            d.dirty,
+            "collapse must also preserve an already dirty draft"
+        );
+    }
+
+    #[test]
+    fn folder_reload_and_discard_clear_pending_operations_and_stale_collapse() {
+        for close in [false, true] {
+            let (_dir, mut d) = folder_dialog();
+            d.draft.folders.push(crate::mkmacro::MkMacroFolder {
+                id: 99,
+                name: "Draft only".into(),
+            });
+            d.mark_dirty();
+            d.toggle_folder_collapsed(42);
+            d.toggle_folder_collapsed(99);
+            d.begin_folder_rename(99);
+            d.request_delete_folder(99);
+            d.folder_error = Some("Invalid name".into());
+            assert!(if close {
+                d.close_with_decision(DirtyDecision::Discard)
+            } else {
+                d.reload_with_decision(DirtyDecision::Discard)
+            });
+            assert_no_pending_folder_operations(&d);
+            assert_eq!(d.collapsed_folders, HashSet::from([42]));
+            assert_eq!(d.draft, *d.baseline);
+            assert!(!d.dirty);
+        }
+    }
+
+    #[test]
+    fn folder_reload_cancels_even_still_valid_pending_operations() {
+        let (_dir, mut d) = folder_dialog();
+        d.begin_folder_rename(42);
+        d.request_delete_folder(42);
+        assert!(d.reload_with_decision(DirtyDecision::Discard));
+        assert_no_pending_folder_operations(&d);
+    }
+
+    #[test]
+    fn folder_close_paths_cancel_operations_but_preserve_collapse_on_reopen() {
+        for close_children in [false, true] {
+            let (_dir, mut d) = folder_dialog();
+            d.open();
+            d.toggle_folder_collapsed(42);
+            d.begin_folder_rename(42);
+            d.request_delete_folder(42);
+            if close_children {
+                d.open = false;
+                d.close_children();
+            } else {
+                assert!(d.close_with_decision(DirtyDecision::KeepEditing));
+            }
+            assert_no_pending_folder_operations(&d);
+            d.open();
+            assert!(d.is_folder_collapsed(42));
+            assert!(!d.dirty);
+        }
+    }
+
+    #[test]
+    fn folder_keep_editing_preserves_pending_operations() {
+        let (_dir, mut d) = folder_dialog();
+        d.begin_folder_rename(42);
+        d.request_delete_folder(42);
+        d.mark_dirty();
+        assert!(!d.reload_with_decision(DirtyDecision::KeepEditing));
+        assert!(!d.close_with_decision(DirtyDecision::KeepEditing));
+        assert_eq!(d.pending_folder_rename, Some(42));
+        assert_eq!(d.pending_delete_folder, Some(42));
+        assert!(d.folder_delete_confirmation.is_open());
+    }
+
+    #[test]
+    fn folder_sync_prunes_against_draft_even_without_external_changes() {
+        let (_dir, mut d) = folder_dialog();
+        d.toggle_folder_collapsed(42);
+        d.begin_folder_rename(42);
+        d.request_delete_folder(42);
+        d.draft.folders.clear();
+        d.mark_dirty();
+        d.sync_external();
+        assert!(d.collapsed_folders.is_empty());
+        assert_no_pending_folder_operations(&d);
+        assert!(d.dirty);
+    }
+
+    #[test]
+    fn folder_external_reload_prunes_removed_ids_and_keeps_remaining_collapse() {
+        let (_dir, mut d) = folder_dialog();
+        d.toggle_folder_collapsed(42);
+        d.collapsed_folders.insert(99);
+        d.begin_folder_rename(42);
+        d.request_delete_folder(42);
+        let mut external = d.draft.clone();
+        external.folders[0].name = "Updated".into();
+        d.store.save(external).unwrap();
+        d.sync_external();
+        assert_eq!(d.collapsed_folders, HashSet::from([42]));
+        assert_no_pending_folder_operations(&d);
+        let mut external = d.draft.clone();
+        external.folders.clear();
+        d.store.save(external).unwrap();
+        d.sync_external();
+        assert!(d.collapsed_folders.is_empty());
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn folder_requests_validate_ids_and_rename_can_be_cancelled() {
+        let (_dir, mut d) = folder_dialog();
+        d.begin_folder_rename(42);
+        assert_eq!(d.pending_folder_rename, Some(42));
+        assert_eq!(d.folder_rename_text, "Utilities");
+        d.cancel_folder_rename();
+        assert_no_pending_folder_operations(&d);
+        d.begin_folder_rename(999);
+        d.request_delete_folder(999);
+        d.toggle_folder_collapsed(999);
+        assert_no_pending_folder_operations(&d);
+        assert!(d.collapsed_folders.is_empty());
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn folder_ui_state_is_absent_from_serialized_document() {
+        let (_dir, mut d) = folder_dialog();
+        let before = serde_json::to_value(&d.draft).unwrap();
+        d.toggle_folder_collapsed(42);
+        d.begin_folder_rename(42);
+        d.folder_rename_text = "Transient rename".into();
+        d.request_delete_folder(42);
+        d.folder_error = Some("Transient error".into());
+        let after = serde_json::to_value(&d.draft).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            after["folders"],
+            serde_json::json!([{"id": 42, "name": "Utilities"}])
+        );
+        for field in [
+            "collapsed_folders",
+            "pending_folder_rename",
+            "folder_rename_text",
+            "pending_delete_folder",
+            "folder_delete_confirmation",
+            "folder_error",
+        ] {
+            assert!(
+                after.get(field).is_none(),
+                "unexpected serialized field: {field}"
+            );
+            assert!(after["folders"][0].get(field).is_none());
+        }
+        let round_trip: MkMacroDocument = serde_json::from_value(after).unwrap();
+        assert_eq!(round_trip, d.draft);
     }
 
     fn picker_matcher(title: &str) -> MkWindowMatcher {
@@ -1586,6 +1801,12 @@ impl MkMacroDialog {
             selected_macro_id: None,
             selection: Default::default(),
             search: String::new(),
+            collapsed_folders: HashSet::new(),
+            pending_folder_rename: None,
+            folder_rename_text: String::new(),
+            pending_delete_folder: None,
+            folder_delete_confirmation: Default::default(),
+            folder_error: None,
             delete_confirmation: Default::default(),
             unwrap_confirmation: Default::default(),
             pending_unwrap_block: None,
@@ -1617,11 +1838,13 @@ impl MkMacroDialog {
             } else {
                 self.draft = (*current).clone();
                 self.baseline = current;
+                self.cancel_folder_operations();
                 if self.selected_macro().is_none() {
                     self.set_selected_macro(None);
                 }
             }
         }
+        self.prune_folder_ui_state();
     }
     pub fn save(&mut self) -> anyhow::Result<()> {
         repair_ids(&mut self.draft);
@@ -1632,6 +1855,90 @@ impl MkMacroDialog {
     }
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    pub fn is_folder_collapsed(&self, folder_id: u64) -> bool {
+        self.collapsed_folders.contains(&folder_id)
+    }
+
+    /// Collapse is presentation-only and must not mark the draft dirty.
+    pub fn toggle_folder_collapsed(&mut self, folder_id: u64) {
+        if !self
+            .draft
+            .folders
+            .iter()
+            .any(|folder| folder.id == folder_id)
+        {
+            return;
+        }
+        if !self.collapsed_folders.remove(&folder_id) {
+            self.collapsed_folders.insert(folder_id);
+        }
+    }
+
+    pub fn begin_folder_rename(&mut self, folder_id: u64) {
+        self.cancel_folder_rename();
+        if let Some(folder) = self
+            .draft
+            .folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+        {
+            self.pending_folder_rename = Some(folder_id);
+            self.folder_rename_text = folder.name.clone();
+        }
+    }
+
+    pub fn cancel_folder_rename(&mut self) {
+        self.pending_folder_rename = None;
+        self.folder_rename_text.clear();
+        self.folder_error = None;
+    }
+
+    pub fn request_delete_folder(&mut self, folder_id: u64) {
+        self.cancel_folder_deletion();
+        self.folder_error = None;
+        if let Some(folder) = self
+            .draft
+            .folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+        {
+            self.pending_delete_folder = Some(folder_id);
+            self.folder_delete_confirmation.open_custom(
+                format!("Delete folder \"{}\"?", folder.name),
+                "Only the folder organization will be removed. Macros will be kept.",
+            );
+        }
+    }
+
+    fn cancel_folder_deletion(&mut self) {
+        self.pending_delete_folder = None;
+        self.folder_delete_confirmation = ConfirmationModal::default();
+    }
+
+    fn cancel_folder_operations(&mut self) {
+        self.cancel_folder_rename();
+        self.cancel_folder_deletion();
+    }
+
+    /// Preserve collapse state only for folders in the current draft, including
+    /// during an external conflict where the dirty draft remains authoritative.
+    fn prune_folder_ui_state(&mut self) {
+        let folder_ids: HashSet<_> = self.draft.folders.iter().map(|folder| folder.id).collect();
+        self.collapsed_folders.retain(|id| folder_ids.contains(id));
+        if self
+            .pending_folder_rename
+            .is_some_and(|id| !folder_ids.contains(&id))
+        {
+            self.cancel_folder_rename();
+        }
+        if self
+            .pending_delete_folder
+            .is_some_and(|id| !folder_ids.contains(&id))
+        {
+            self.cancel_folder_deletion();
+        }
     }
 
     fn apply_hotkey_scope_matcher(&mut self, macro_id: u64, matcher: MkWindowMatcher) -> bool {
@@ -1694,6 +2001,8 @@ impl MkMacroDialog {
             self.dirty = false;
             self.conflict = false;
         }
+        self.cancel_folder_operations();
+        self.prune_folder_ui_state();
         self.action_editor.cancel();
         self.open = false;
         self.set_selected_macro(None);
@@ -1708,6 +2017,8 @@ impl MkMacroDialog {
         self.baseline = current;
         self.dirty = false;
         self.conflict = false;
+        self.cancel_folder_operations();
+        self.prune_folder_ui_state();
         true
     }
     /// Applies normalized recorder output atomically. A missing target leaves the draft untouched.
@@ -1920,6 +2231,7 @@ impl MkMacroDialog {
         }
     }
     fn close_children(&mut self) {
+        self.cancel_folder_operations();
         self.action_catalog_visible = false;
         self.action_editor.cancel();
         self.structural_insertion = None;
