@@ -2112,16 +2112,7 @@ fn click_within_region_validation_error(p: &MkClickWithinRegionPayload) -> Optio
     if p.clicks == 0 {
         return Some("Clicks must be at least 1".into());
     }
-    let padding = p.edge_padding_px.saturating_mul(2);
-    if p.rect
-        .width
-        .checked_sub(padding)
-        .is_none_or(|width| width == 0)
-        || p.rect
-            .height
-            .checked_sub(padding)
-            .is_none_or(|height| height == 0)
-    {
+    if crate::mkmacro::executor::usable_region(p.rect, p.edge_padding_px).is_err() {
         return Some("Edge padding leaves no usable area inside the rectangle".into());
     }
     None

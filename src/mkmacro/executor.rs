@@ -1591,52 +1591,228 @@ mod tests {
         );
     }
 
-    #[test]
-    fn click_within_region_moves_once_and_reuses_one_sample_for_two_clicks() {
-        let fake = Arc::new(FakeBackend::default());
-        let control = Arc::new(RunControl::default());
-        control.reset();
-        let executor = Executor::new(fake.clone().backends(), control);
-        let mut vars = RuntimeVariables::new();
-        let mut guard = InputCleanupGuard::new(fake.clone());
-        executor
-            .action(
-                1,
-                &click_within_action(super::super::ScreenRect::new(100, 200, 400, 300), 2, 10),
-                &MkPlayback::default(),
-                &mut vars,
-                &mut guard,
-            )
-            .unwrap();
+    fn assert_recorded_moves_within(events: &[String], region: UsableRegion) -> Vec<MkPoint> {
+        events
+            .iter()
+            .filter_map(|event| event.strip_prefix("move:"))
+            .map(|coordinates| {
+                let (x, y) = coordinates.split_once(',').unwrap();
+                let point = MkPoint {
+                    x: x.parse().unwrap(),
+                    y: y.parse().unwrap(),
+                };
+                assert!((region.min_x..=region.max_x).contains(&point.x));
+                assert!((region.min_y..=region.max_y).contains(&point.y));
+                point
+            })
+            .collect()
+    }
 
-        let events = fake.events();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.starts_with("move:"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| *event == "button_down:Left")
-                .count(),
-            2
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| *event == "button_up:Left")
-                .count(),
-            2
-        );
-        let x = runtime_coordinate(&vars, "mouse.x");
-        let y = runtime_coordinate(&vars, "mouse.y");
-        assert!((110..=489).contains(&x));
-        assert!((210..=489).contains(&y));
-        assert_eq!(runtime_coordinate(&vars, "last_point.x"), x);
-        assert_eq!(runtime_coordinate(&vars, "last_point.y"), y);
+    #[test]
+    fn click_within_region_repeated_execution_uses_inclusive_samples_and_balanced_left_clicks() {
+        // Both halves of the word are at the midpoint for either RNG word size.
+        const MIDDLE: u64 = 0x8000_0000_8000_0000;
+        for (rect, padding, minimum, maximum, interior) in [
+            (
+                ScreenRect::new(100, 200, 400, 300),
+                10,
+                MkPoint { x: 110, y: 210 },
+                MkPoint { x: 489, y: 489 },
+                MkPoint { x: 300, y: 350 },
+            ),
+            (
+                ScreenRect::new(-100, -50, 20, 20),
+                5,
+                MkPoint { x: -95, y: -45 },
+                MkPoint { x: -86, y: -36 },
+                MkPoint { x: -90, y: -40 },
+            ),
+            (
+                ScreenRect::new(-7, 11, 5, 5),
+                2,
+                MkPoint { x: -5, y: 13 },
+                MkPoint { x: -5, y: 13 },
+                MkPoint { x: -5, y: 13 },
+            ),
+            (
+                ScreenRect::new(i32::MAX, i32::MIN, 1, 1),
+                0,
+                MkPoint {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                },
+                MkPoint {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                },
+                MkPoint {
+                    x: i32::MAX,
+                    y: i32::MIN,
+                },
+            ),
+        ] {
+            let region = usable_region(rect, padding).unwrap();
+            let fake = Arc::new(FakeBackend::default());
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let mut executor = Executor::new(fake.clone().backends(), control);
+            // Repeated samples are intentional: randomness is allowed to repeat.
+            let samples = Arc::new(Mutex::new(std::collections::VecDeque::from([
+                0,
+                u64::MAX,
+                MIDDLE,
+                MIDDLE,
+                0,
+                u64::MAX,
+            ])));
+            let pending = samples.clone();
+            executor.region_point_sampler = Arc::new(move |actual_region| {
+                assert_eq!(actual_region, region);
+                let word = pending
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("one sample per execution");
+                Ok(sample_point(actual_region, &mut FixedRng(word)))
+            });
+            let action = click_within_action(rect, 2, padding);
+            // Also exercise normal compilation/validation for each legal region.
+            plan(vec![step(1, action.clone())]);
+            let playback = MkPlayback {
+                random_offset_px: u32::MAX,
+                ..MkPlayback::default()
+            };
+            let mut vars = RuntimeVariables::new();
+            set_point(&mut vars, "mouse", MkPoint { x: -999, y: -999 });
+            set_point(&mut vars, "last_point", MkPoint { x: -999, y: -999 });
+            let mut guard = InputCleanupGuard::new(fake.clone());
+
+            for expected in [minimum, maximum, interior, interior, minimum, maximum] {
+                let before = fake.events().len();
+                executor
+                    .action(1, &action, &playback, &mut vars, &mut guard)
+                    .unwrap();
+                let events = fake.events();
+                let execution_events = &events[before..];
+                let moves = assert_recorded_moves_within(execution_events, region);
+                assert_eq!(
+                    moves,
+                    vec![expected],
+                    "exactly one move to the sampled point"
+                );
+                assert_eq!(
+                    execution_events,
+                    [
+                        format!("move:{},{}", expected.x, expected.y),
+                        "button_down:Left".into(),
+                        "button_up:Left".into(),
+                        "button_down:Left".into(),
+                        "button_up:Left".into(),
+                    ],
+                );
+                for prefix in ["mouse", "last_point"] {
+                    assert_eq!(
+                        runtime_coordinate(&vars, &format!("{prefix}.x")),
+                        expected.x
+                    );
+                    assert_eq!(
+                        runtime_coordinate(&vars, &format!("{prefix}.y")),
+                        expected.y
+                    );
+                }
+            }
+            assert!(samples.lock().unwrap().is_empty());
+            drop(guard);
+            assert_eq!(fake.events().len(), 6 * 5, "no buttons left for cleanup");
+        }
+    }
+
+    #[test]
+    fn click_within_region_sampling_or_movement_failure_emits_no_clicks() {
+        let rect = ScreenRect::new(100, 200, 400, 300);
+        let region = usable_region(rect, 10).unwrap();
+        let selected = MkPoint {
+            x: region.min_x,
+            y: region.min_y,
+        };
+        for fail_sampling in [true, false] {
+            let fake = Arc::new(FakeBackend::default());
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let mut executor = Executor::new(fake.clone().backends(), control);
+            let error = ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected failure");
+            let sampling_error = error.clone();
+            executor.region_point_sampler = Arc::new(move |actual_region| {
+                assert_eq!(actual_region, region);
+                if fail_sampling {
+                    Err(sampling_error.clone())
+                } else {
+                    Ok(sample_point(actual_region, &mut FixedRng(0)))
+                }
+            });
+            if !fail_sampling {
+                fake.fail(
+                    &format!("move:{},{}", selected.x, selected.y),
+                    error.clone(),
+                );
+            }
+            let mut vars = RuntimeVariables::new();
+            set_point(&mut vars, "mouse", MkPoint { x: -999, y: -999 });
+            let mut guard = InputCleanupGuard::new(fake.clone());
+            let found = executor
+                .action(
+                    1,
+                    &click_within_action(rect, 2, 10),
+                    &MkPlayback::default(),
+                    &mut vars,
+                    &mut guard,
+                )
+                .unwrap_err();
+            assert_eq!(found, error);
+            drop(guard);
+            let events = fake.events();
+            let moves = assert_recorded_moves_within(&events, region);
+            if fail_sampling {
+                assert!(events.is_empty(), "sampling failure must not move or click");
+            } else {
+                assert_eq!(moves, vec![selected]);
+                assert_eq!(events, vec![format!("move:{},{}", selected.x, selected.y)]);
+            }
+            assert_eq!(runtime_coordinate(&vars, "mouse.x"), -999);
+            assert_eq!(runtime_coordinate(&vars, "mouse.y"), -999);
+        }
+    }
+
+    #[test]
+    fn click_within_region_consumed_padding_fails_before_sampling_or_input() {
+        for (rect, padding) in [
+            (ScreenRect::new(100, 200, 20, 20), 10),
+            (ScreenRect::new(-100, -50, 21, 21), 11),
+            (ScreenRect::new(100, 200, 20, 40), 10),
+            (ScreenRect::new(100, 200, 40, 20), 10),
+            (ScreenRect::new(100, 200, 20, 20), u32::MAX),
+        ] {
+            let fake = Arc::new(FakeBackend::default());
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let mut executor = Executor::new(fake.clone().backends(), control);
+            executor.region_point_sampler = Arc::new(|_| panic!("invalid region must not sample"));
+            let mut vars = RuntimeVariables::new();
+            let mut guard = InputCleanupGuard::new(fake.clone());
+            let error = executor
+                .action(
+                    1,
+                    &click_within_action(rect, 1, padding),
+                    &MkPlayback::default(),
+                    &mut vars,
+                    &mut guard,
+                )
+                .unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+            drop(guard);
+            assert!(fake.events().is_empty());
+            assert!(vars.is_empty());
+        }
     }
 
     #[test]
@@ -2096,6 +2272,7 @@ pub struct Executor {
     backends: Backends,
     control: Arc<RunControl>,
     waiter: Arc<dyn ExecutorWaiter>,
+    region_point_sampler: Arc<dyn Fn(UsableRegion) -> ExecResult<MkPoint> + Send + Sync>,
 }
 
 /// Clock and interruptible-sleep boundary used by polling actions.  Keeping the
@@ -2223,12 +2400,12 @@ pub struct UsableRegion {
 /// Computes a rectangle's usable inclusive bounds without allowing malformed
 /// persisted geometry to wrap around or create an invalid random range.
 pub fn usable_region(rect: ScreenRect, padding: u32) -> ExecResult<UsableRegion> {
-    if rect.width == 0 || rect.height == 0 {
-        return Err(ExecutionDiagnostic::new(
+    rect.validate_capture().map_err(|error| {
+        ExecutionDiagnostic::new(
             DiagnosticKind::InvalidTarget,
-            "Click region has no usable area",
-        ));
-    }
+            format!("Click region rectangle is invalid: {error}"),
+        )
+    })?;
 
     let padding = i128::from(padding);
     let bounds = |origin: i32, dimension: u32| -> ExecResult<(i32, i32)> {
@@ -2317,6 +2494,7 @@ impl Executor {
             backends,
             control,
             waiter: Arc::new(SystemExecutorWaiter::default()),
+            region_point_sampler: Arc::new(|region| Ok(sample_point(region, &mut rand::rng()))),
         }
     }
     #[cfg(test)]
@@ -2326,9 +2504,8 @@ impl Executor {
         waiter: Arc<dyn ExecutorWaiter>,
     ) -> Self {
         Self {
-            backends,
-            control,
             waiter,
+            ..Self::new(backends, control)
         }
     }
     fn prompt_input(
@@ -2639,8 +2816,7 @@ impl Executor {
                     ));
                 }
                 let region = usable_region(p.rect, p.edge_padding_px)?;
-                let mut rng = rand::rng();
-                let point = sample_point(region, &mut rng);
+                let point = (self.region_point_sampler)(region)?;
                 // A second offset would violate the rectangle boundary guarantee.
                 self.click_at(point, p.button.clone(), p.clicks, v, g)
             }

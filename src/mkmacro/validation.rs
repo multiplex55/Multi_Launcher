@@ -754,18 +754,8 @@ pub fn validate_document_with_context(
                             "Click region click count must be at least 1",
                         );
                     }
-                    // Widen before doubling and subtracting so malformed persisted values
-                    // cannot wrap around and appear to leave a usable area.
-                    let padding = u64::from(p.edge_padding_px);
-                    let double_padding = padding * 2;
-                    let width = u64::from(p.rect.width);
-                    let height = u64::from(p.rect.height);
-                    let usable_width = width.checked_sub(double_padding);
-                    let usable_height = height.checked_sub(double_padding);
-                    if p.rect.width > 0
-                        && p.rect.height > 0
-                        && (usable_width.is_none_or(|width| width < 1)
-                            || usable_height.is_none_or(|height| height < 1))
+                    if p.rect.validate_capture().is_ok()
+                        && super::executor::usable_region(p.rect, p.edge_padding_px).is_err()
                     {
                         push(
                             &mut out,
@@ -1728,6 +1718,33 @@ mod click_within_region_validation_tests {
     #[test]
     fn one_by_one_region_is_valid_at_zero_padding() {
         assert!(diagnostics(ScreenRect::new(0, 0, 1, 1), 1, 0).is_empty());
+    }
+
+    #[test]
+    fn inclusive_padded_boundary_agrees_with_execution_geometry() {
+        for (rect, padding, valid) in [
+            (ScreenRect::new(-7, 11, 5, 5), 2, true),
+            (ScreenRect::new(i32::MAX, i32::MIN, 1, 1), 0, true),
+            (ScreenRect::new(100, 200, 20, 20), 10, false),
+            (ScreenRect::new(-100, -50, 21, 21), 11, false),
+            (ScreenRect::new(100, 200, 20, 40), 10, false),
+            (ScreenRect::new(100, 200, 40, 20), 10, false),
+            (ScreenRect::new(100, 200, 20, 20), u32::MAX, false),
+        ] {
+            let found = diagnostics(rect, 1, padding);
+            assert_eq!(
+                super::super::executor::usable_region(rect, padding).is_ok(),
+                valid
+            );
+            assert_eq!(
+                found.is_empty(),
+                valid,
+                "{rect:?}, padding {padding}: {found:?}"
+            );
+            if !valid {
+                assert_eq!(codes(&found), ["invalid_click_region_padding"]);
+            }
+        }
     }
 
     #[test]
