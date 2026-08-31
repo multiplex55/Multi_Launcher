@@ -1615,12 +1615,309 @@ mod tests {
         assert!(d.action_catalog_visible);
         assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
     }
+    // Independent expectations for every model variant, including hidden actions.
+    // Do not add a catch-all: new variants need an explicit capability decision.
+    fn expected_action_contract(action: &MkAction) -> (action_catalog::EditorKind, bool) {
+        use action_catalog::EditorKind;
+        match action {
+            MkAction::KeyDown(_)
+            | MkAction::KeyUp(_)
+            | MkAction::KeyPress(_)
+            | MkAction::Hotkey(_) => (EditorKind::Keyboard, true),
+            MkAction::Text(_) => (EditorKind::Text, true),
+            MkAction::Notify(_) => (EditorKind::Notify, cfg!(windows)),
+            MkAction::PlaySound(_) => (EditorKind::PlaySound, true),
+            MkAction::MouseMove(_) => (EditorKind::MouseMove, true),
+            MkAction::MouseDrag(_) => (EditorKind::MouseDrag, true),
+            MkAction::MouseClick(_) | MkAction::ClickWithinRegion(_) => {
+                (EditorKind::MouseClick, true)
+            }
+            MkAction::MouseDown(_) | MkAction::MouseUp(_) => (EditorKind::MouseButton, true),
+            MkAction::MouseScroll { .. } => (EditorKind::MouseScroll, true),
+            MkAction::Delay(_) => (EditorKind::Timing, true),
+            MkAction::Process(_) => (EditorKind::Process, true),
+            MkAction::LauncherCommand(_) => (EditorKind::Launcher, true),
+            MkAction::WindowActivate(_)
+            | MkAction::WindowClose(_)
+            | MkAction::WindowWait(_)
+            | MkAction::WindowMoveResize(_)
+            | MkAction::WindowState { .. } => (EditorKind::Window, true),
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { .. }) => {
+                (EditorKind::VirtualDesktop, cfg!(windows))
+            }
+            MkAction::VirtualDesktop(
+                MkVirtualDesktopAction::Create
+                | MkVirtualDesktopAction::SwitchLeft
+                | MkVirtualDesktopAction::SwitchRight
+                | MkVirtualDesktopAction::CloseCurrent,
+            ) => (EditorKind::DirectInsert, cfg!(windows)),
+            MkAction::If(_) | MkAction::WhileStart { .. } | MkAction::WaitUntil { .. } => {
+                (EditorKind::Condition, true)
+            }
+            MkAction::RepeatStart { .. } => (EditorKind::Repeat, true),
+            MkAction::SetVariable { .. } | MkAction::UnsetVariable { .. } => {
+                (EditorKind::Variable, true)
+            }
+            MkAction::PromptInput(_) => (EditorKind::PromptInput, true),
+            MkAction::Else
+            | MkAction::EndIf
+            | MkAction::RepeatEnd
+            | MkAction::WhileEnd
+            | MkAction::Break
+            | MkAction::Continue => (EditorKind::DirectInsert, true),
+            MkAction::ImageFind(_) | MkAction::ImageClick(_) => (EditorKind::Image, true),
+            MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => {
+                (EditorKind::Screenshot, true)
+            }
+            MkAction::PixelCheck { .. } | MkAction::FindPixel(_) => (EditorKind::Pixel, true),
+            MkAction::UiInvoke(_)
+            | MkAction::UiSetValue { .. }
+            | MkAction::UiReadValue { .. }
+            | MkAction::UiToggle(_)
+            | MkAction::UiSelect(_)
+            | MkAction::UiFocus(_)
+            | MkAction::UiWait(_) => (EditorKind::General, false),
+        }
+    }
+
+    fn detail_examples() -> [(MkAction, &'static str); 4] {
+        use crate::mkmacro::{MkClickWithinRegionPayload, MkDelayMode, MkDelayPayload, ScreenRect};
+        [
+            (
+                MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+                    rect: ScreenRect::new(500, 300, 400, 200),
+                    button: MkMouseButton::Left,
+                    clicks: 1,
+                    edge_padding_px: 10,
+                }),
+                "400×200 @ (500,300) · Left · random · padding 10",
+            ),
+            (
+                MkAction::Delay(MkDelayPayload {
+                    mode: MkDelayMode::RandomRange,
+                    // Inactive fixed duration must not affect this action.
+                    fixed_ms: u64::MAX,
+                    minimum_ms: 250,
+                    maximum_ms: 1250,
+                }),
+                "Random 250–1250 ms",
+            ),
+            (
+                MkAction::Delay(MkDelayPayload {
+                    mode: MkDelayMode::Fixed,
+                    fixed_ms: 1000,
+                    // Inactive range must not affect this action.
+                    minimum_ms: u64::MAX,
+                    maximum_ms: 0,
+                }),
+                "Fixed 1000 ms",
+            ),
+            (
+                MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 3 }),
+                "Desktop 3",
+            ),
+        ]
+    }
+
+    fn document_with_action(action: MkAction) -> MkMacroDocument {
+        let mut document = five_macros();
+        document.macros.truncate(1);
+        document.macros[0].steps.push(MkStep {
+            id: 1,
+            enabled: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        });
+        document
+    }
+
     #[test]
     fn names_and_details_cover_catalog() {
-        for x in action_catalog::descriptors() {
-            let a = (x.make_default)();
-            assert!(!action_catalog::action_name(&a).is_empty());
-            let _ = action_catalog::action_details(&a);
+        let descriptors = action_catalog::descriptors();
+        let representatives = descriptors
+            .iter()
+            .map(|descriptor| (descriptor.make_default)())
+            .chain(detail_examples().into_iter().map(|(action, _)| action));
+        for action in representatives {
+            let (editor, supported) = expected_action_contract(&action);
+            let name = action_catalog::action_name(&action);
+            assert!(!name.trim().is_empty(), "{action:?}: empty name");
+            let details = action_catalog::action_details(&action);
+            assert_eq!(
+                details,
+                action_catalog::action_details(&action.clone()),
+                "{name}"
+            );
+            assert_eq!(
+                details,
+                action_catalog::action_details_with_assets(&action, &[]),
+                "{name}"
+            );
+            assert_eq!(
+                details,
+                action_catalog::action_details_with_asset_name(&action, None),
+                "{name}"
+            );
+            assert_eq!(action_catalog::editor_for_action(&action), editor, "{name}");
+            assert_eq!(
+                action_catalog::editor_route_recognizes(&action, editor),
+                editor != action_catalog::EditorKind::General,
+                "{name}: hidden UI Automation has no authoring route",
+            );
+            assert_eq!(
+                crate::mkmacro::executor::has_runtime_support(&action),
+                supported,
+                "{name}: runtime classification",
+            );
+            let descriptor = descriptors.iter().find(|descriptor| {
+                action_catalog::descriptor_name_matches_action(descriptor, &action)
+            });
+            // Legacy UI Automation intentionally shares an unavailable display name.
+            if editor != action_catalog::EditorKind::General {
+                let descriptor =
+                    descriptor.unwrap_or_else(|| panic!("{name}: missing catalog entry"));
+                assert_eq!(descriptor.editor, editor, "{name}: catalog editor");
+            }
+
+            // Standalone structural markers and missing assets may be invalid,
+            // but validation and compilation must agree and neither may panic.
+            let document = document_with_action(action);
+            let diagnostics = validate_document(&document, None);
+            match crate::mkmacro::compile(&document.macros[0]) {
+                Ok(plan) => {
+                    assert!(
+                        crate::mkmacro::can_run(&diagnostics),
+                        "{name}: {diagnostics:?}"
+                    );
+                    assert_eq!(
+                        plan.instructions[0].step.action,
+                        document.macros[0].steps[0].action
+                    );
+                }
+                Err(errors) => {
+                    assert!(!crate::mkmacro::can_run(&diagnostics), "{name}: {errors:?}");
+                    assert_eq!(errors, diagnostics, "{name}");
+                }
+            }
+        }
+        for descriptor in descriptors {
+            let (editor, supported) = expected_action_contract(&(descriptor.make_default)());
+            assert_eq!(descriptor.editor, editor, "{}", descriptor.name);
+            assert_eq!(
+                descriptor.runtime,
+                if supported {
+                    action_catalog::RuntimeAvailability::Supported
+                } else {
+                    action_catalog::RuntimeAvailability::Unavailable
+                },
+                "{}",
+                descriptor.name,
+            );
+        }
+    }
+
+    #[test]
+    fn region_delay_and_desktop_details_are_exact() {
+        for (action, expected) in detail_examples() {
+            assert_eq!(action_catalog::action_details(&action), expected);
+            let document = document_with_action(action);
+            assert!(crate::mkmacro::can_run(&validate_document(&document, None)));
+            assert!(crate::mkmacro::compile(&document.macros[0]).is_ok());
+        }
+        assert_eq!(
+            action_catalog::action_name(&MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo {
+                desktop: 3,
+            })),
+            "Go To Virtual Desktop",
+        );
+    }
+
+    #[test]
+    fn region_and_desktop_unsupported_backend_diagnostics_are_explicit() {
+        use crate::mkmacro::{Backends, DiagnosticKind, Executor, RunControl};
+
+        let [(region, _), _, _, (desktop, _)] = detail_examples();
+        for (action, operation) in [(region, "SendInput"), (desktop, "virtual desktop")] {
+            let document = document_with_action(action);
+            let plan = crate::mkmacro::compile(&document.macros[0]).unwrap();
+            // Exercise unsupported backends even on Windows, without sending
+            // input or changing the user's desktop.
+            let error = Executor::new(Backends::unsupported(), Arc::new(RunControl::default()))
+                .execute(&plan, &|_| {})
+                .unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
+            assert!(!error.message.trim().is_empty());
+            assert_eq!(
+                error.context.get("backend_operation").map(String::as_str),
+                Some(operation)
+            );
+            assert_eq!(error.context.get("step_id").map(String::as_str), Some("1"));
+            if operation == "virtual desktop" {
+                assert_eq!(
+                    error.message,
+                    "Virtual desktop automation is available only on Windows"
+                );
+                assert_eq!(error.context.get("desktop").map(String::as_str), Some("3"));
+                assert_eq!(
+                    error.context.get("action").map(String::as_str),
+                    Some("GoTo { desktop: 3 }")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_region_delay_and_desktop_payloads_are_rejected() {
+        use crate::mkmacro::{
+            DiagnosticSeverity, MkClickWithinRegionPayload, MkDelayMode, MkDelayPayload, ScreenRect,
+        };
+        let mut cases = vec![
+            (
+                MkAction::Delay(MkDelayPayload {
+                    mode: MkDelayMode::RandomRange,
+                    minimum_ms: 1250,
+                    maximum_ms: 250,
+                    ..Default::default()
+                }),
+                "invalid_delay_range",
+            ),
+            (
+                MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 0 }),
+                "invalid_virtual_desktop_number",
+            ),
+        ];
+        // Exactly empty, over-padded, and overflow-prone persisted padding.
+        for padding in [100, 201, u32::MAX] {
+            cases.push((
+                MkAction::ClickWithinRegion(MkClickWithinRegionPayload {
+                    rect: ScreenRect::new(500, 300, 400, 200),
+                    button: MkMouseButton::Left,
+                    clicks: 1,
+                    edge_padding_px: padding,
+                }),
+                "invalid_click_region_padding",
+            ));
+        }
+        for (action, code) in cases {
+            let document = document_with_action(action);
+            let diagnostics = validate_document(&document, None);
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == code
+                        && diagnostic.severity == DiagnosticSeverity::Fatal
+                        && diagnostic.macro_id == 1
+                        && diagnostic.step_id == Some(1)
+                        && !diagnostic.message.trim().is_empty()
+                }),
+                "{code}: {diagnostics:?}"
+            );
+            assert!(!crate::mkmacro::can_run(&diagnostics), "{code}");
+            assert_eq!(
+                crate::mkmacro::compile(&document.macros[0]).unwrap_err(),
+                diagnostics
+            );
         }
     }
 

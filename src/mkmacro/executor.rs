@@ -3713,7 +3713,18 @@ fn action_name(a: &MkAction) -> &'static str {
         MkAction::PromptInput(_) => "prompt",
         MkAction::Notify(_) => "notification",
         MkAction::PlaySound(_) => "sound",
-        _ => "runtime",
+        MkAction::Delay(_)
+        | MkAction::SetVariable { .. }
+        | MkAction::UnsetVariable { .. }
+        | MkAction::If(_)
+        | MkAction::Else
+        | MkAction::EndIf
+        | MkAction::RepeatStart { .. }
+        | MkAction::RepeatEnd
+        | MkAction::WhileStart { .. }
+        | MkAction::WhileEnd
+        | MkAction::Break
+        | MkAction::Continue => "runtime",
     }
 }
 fn set_point(v: &mut RuntimeVariables, prefix: &str, p: MkPoint) {

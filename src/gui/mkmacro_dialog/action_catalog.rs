@@ -861,7 +861,12 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. } => EditorKind::Window,
         MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { .. }) => EditorKind::VirtualDesktop,
-        MkAction::VirtualDesktop(_) => EditorKind::DirectInsert,
+        MkAction::VirtualDesktop(
+            MkVirtualDesktopAction::Create
+            | MkVirtualDesktopAction::SwitchLeft
+            | MkVirtualDesktopAction::SwitchRight
+            | MkVirtualDesktopAction::CloseCurrent,
+        ) => EditorKind::DirectInsert,
         MkAction::If(_) | MkAction::WhileStart { .. } | MkAction::WaitUntil { .. } => {
             EditorKind::Condition
         }
@@ -1233,13 +1238,12 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             format_coordinate_target_with_assets(&p.target, assets)
         ),
         MkAction::ClickWithinRegion(p) => format!(
-            "{} ×{} within ({}, {}) {} × {} · {} px padding",
-            mouse(&p.button),
-            p.clicks,
-            p.rect.x,
-            p.rect.y,
+            "{}×{} @ ({},{}) · {} · random · padding {}",
             p.rect.width,
             p.rect.height,
+            p.rect.x,
+            p.rect.y,
+            mouse(&p.button),
             p.edge_padding_px
         ),
         MkAction::MouseDown(b) | MkAction::MouseUp(b) => mouse(b).into(),
@@ -1262,7 +1266,12 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
                 )
             }
         }
-        MkAction::Delay(payload) => format!("{} ms", payload.fixed_ms),
+        MkAction::Delay(payload) => match payload.mode {
+            MkDelayMode::Fixed => format!("Fixed {} ms", payload.fixed_ms),
+            MkDelayMode::RandomRange => {
+                format!("Random {}–{} ms", payload.minimum_ms, payload.maximum_ms)
+            }
+        },
         MkAction::Process(p) => format!("{} {}", p.program, p.arguments.join(" ")),
         MkAction::LauncherCommand(payload) => {
             if let Some(action) = &payload.legacy_resolved_action {
@@ -1385,7 +1394,7 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
             "Close the current virtual desktop using native Windows behavior".into()
         }
         MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }) => {
-            format!("Go to virtual desktop {desktop}")
+            format!("Desktop {desktop}")
         }
         MkAction::WaitUntil { condition, wait } => {
             format_wait_until(condition, wait, asset_name, assets)
@@ -1821,7 +1830,7 @@ mod paste_tests {
         assert!(matches(&descriptor, "padding"));
         assert_eq!(
             action_details(&action),
-            "Left ×1 within (0, 0) 100 × 100 · 0 px padding"
+            "100×100 @ (0,0) · Left · random · padding 0"
         );
     }
 
@@ -2502,6 +2511,6 @@ mod virtual_desktop_catalog_tests {
     fn go_to_virtual_desktop_summary_includes_its_one_based_number() {
         let action = MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 3 });
         assert_eq!(action_name(&action), "Go To Virtual Desktop");
-        assert_eq!(action_details(&action), "Go to virtual desktop 3");
+        assert_eq!(action_details(&action), "Desktop 3");
     }
 }

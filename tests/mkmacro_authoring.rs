@@ -46,7 +46,7 @@ fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
             "Go To Virtual Desktop",
             MkVirtualDesktopAction::GoTo { desktop: 1 },
             "go",
-            "Go to virtual desktop 1",
+            "Desktop 1",
             action_catalog::EditorKind::VirtualDesktop,
         ),
     ];

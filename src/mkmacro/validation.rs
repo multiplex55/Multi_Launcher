@@ -799,7 +799,30 @@ pub fn validate_document_with_context(
                         );
                     }
                 }
-                _ => {}
+                // These actions have no additional payload constraints. Keep
+                // this exhaustive so new actions require a validation decision.
+                MkAction::KeyDown(_)
+                | MkAction::KeyUp(_)
+                | MkAction::KeyPress(_)
+                | MkAction::Hotkey(_)
+                | MkAction::Text(_)
+                | MkAction::MouseDown(_)
+                | MkAction::MouseUp(_)
+                | MkAction::MouseScroll { .. }
+                | MkAction::Process(_)
+                | MkAction::VirtualDesktop(
+                    MkVirtualDesktopAction::Create
+                    | MkVirtualDesktopAction::SwitchLeft
+                    | MkVirtualDesktopAction::SwitchRight
+                    | MkVirtualDesktopAction::CloseCurrent,
+                )
+                | MkAction::UiInvoke(_)
+                | MkAction::UiSetValue { .. }
+                | MkAction::UiReadValue { .. }
+                | MkAction::UiToggle(_)
+                | MkAction::UiSelect(_)
+                | MkAction::UiFocus(_)
+                | MkAction::UiWait(_) => {}
             }
         }
         for (kind, _) in stack {
