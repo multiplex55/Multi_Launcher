@@ -80,11 +80,7 @@ fn apply_command(d: &mut MkMacroDialog, command: Command) {
             d.create_folder();
         }
         Command::NewMacroHere(folder_id) => {
-            if d.draft.folders.iter().any(|folder| folder.id == folder_id) {
-                d.create_macro();
-                if let Some(id) = d.selected_macro_id {
-                    d.move_macro_to_folder(id, Some(folder_id));
-                }
+            if d.create_macro_in_folder(Some(folder_id)) {
                 d.collapsed_folders.remove(&folder_id);
             }
         }
@@ -292,6 +288,29 @@ mod tests {
 
     fn ids(group: &MacroGroup<'_>) -> Vec<u64> {
         group.macros.iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn new_macro_here_creates_in_folder_and_rejects_invalid_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(dir.path()).unwrap();
+        let mut d = MkMacroDialog::new(std::sync::Arc::new(store));
+        d.draft.folders = document().folders;
+        d.collapsed_folders.insert(20);
+
+        apply_command(&mut d, Command::NewMacroHere(20));
+
+        let created = d.selected_macro().unwrap();
+        assert_eq!(created.folder_id, Some(20));
+        assert_ne!(created.id, 0);
+        assert!(!d.collapsed_folders.contains(&20));
+        let before = d.draft.clone();
+        d.dirty = false;
+        for id in [0, 99] {
+            apply_command(&mut d, Command::NewMacroHere(id));
+            assert_eq!(d.draft, before);
+            assert!(!d.dirty);
+        }
     }
 
     #[test]

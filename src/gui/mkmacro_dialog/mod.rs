@@ -786,6 +786,157 @@ mod tests {
         assert!(crate::mkmacro::compile(d.selected_macro().unwrap()).is_ok());
     }
 
+    fn assert_created_macro(d: &MkMacroDialog, folder_id: Option<u64>) {
+        let created = d.draft.macros.last().unwrap();
+        assert_ne!(created.id, 0);
+        assert_eq!(d.selected_macro_id, Some(created.id));
+        assert!(d.selection.ids.is_empty());
+        assert!(d.dirty);
+        assert_eq!(
+            created,
+            &MkMacro {
+                id: created.id,
+                name: "New Macro".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id,
+                playback: Default::default(),
+                steps: vec![],
+                image_assets: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn global_creation_is_unfiled_even_when_a_folder_macro_is_selected() {
+        let (_dir, mut d) = folder_dialog();
+        assert!(d.create_macro_in_folder(Some(42)));
+        let source = d.selected_macro().unwrap().clone();
+        d.selection.click(&[17, 18], 0, false, false);
+        d.dirty = false;
+
+        d.create_macro();
+
+        assert_created_macro(&d, None);
+        assert_eq!(d.draft.macros.len(), 2);
+        assert_eq!(d.draft.macros[0], source);
+        assert_ne!(d.selected_macro_id, Some(source.id));
+    }
+
+    #[test]
+    fn folder_context_creation_preserves_defaults_and_selects_repaired_id() {
+        let (_dir, mut d) = folder_dialog();
+        d.selection.click(&[17, 18], 0, false, false);
+        let before = d.draft.clone();
+
+        assert!(d.create_macro_in_folder(Some(42)));
+
+        assert_created_macro(&d, Some(42));
+        assert_eq!(d.draft.macros.len(), before.macros.len() + 1);
+        assert_eq!(d.draft.folders, before.folders);
+        assert!(!repair_ids(&mut d.draft));
+    }
+
+    #[test]
+    fn invalid_destination_creation_is_atomic_even_for_an_existing_zero_folder() {
+        let (_dir, mut d) = folder_dialog();
+        d.create_macro();
+        d.draft.folders.push(MkMacroFolder {
+            id: 0,
+            name: "Invalid folder".into(),
+        });
+        d.selection.click(&[17, 18], 0, false, false);
+        let before = d.draft.clone();
+        let selected = d.selected_macro_id;
+        let selection = d.selection.clone();
+
+        for dirty in [false, true] {
+            d.dirty = dirty;
+            for folder_id in [0, 999] {
+                assert!(!d.create_macro_in_folder(Some(folder_id)));
+                assert_eq!(d.draft, before);
+                assert_eq!(d.selected_macro_id, selected);
+                assert_eq!(d.selection.ids, selection.ids);
+                assert_eq!(d.dirty, dirty);
+            }
+        }
+        // Rejection must also retain the selection anchor.
+        d.selection.click(&[17, 18], 1, false, true);
+        assert_eq!(d.selection.ids, [17, 18].into_iter().collect());
+    }
+
+    #[test]
+    fn duplication_preserves_membership_source_and_folders_but_clears_only_copy_hotkey() {
+        for folder_id in [Some(42), None] {
+            let (_dir, mut d) = folder_dialog();
+            d.draft.macros = five_macros().macros;
+            d.draft.folders.push(MkMacroFolder {
+                id: 43,
+                name: "Other folder".into(),
+            });
+            d.set_selected_macro(Some(2));
+            let source = d.selected_macro_mut().unwrap();
+            source.folder_id = folder_id;
+            source.description = "Keep the source intact".into();
+            source.enabled = false;
+            source.hotkey = Some(MkHotkey {
+                key: MkKey::Function(8),
+                modifiers: vec![MkKey::Control],
+            });
+            source.hotkey_scope = MkHotkeyScope::ActiveWindow(picker_matcher("Editor"));
+            source.steps = [17, 18]
+                .into_iter()
+                .map(|id| MkStep {
+                    id,
+                    enabled: true,
+                    repeat: 2,
+                    delay_after_ms: 25,
+                    on_error: Default::default(),
+                    action: MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                        fixed_ms: id,
+                        ..Default::default()
+                    }),
+                })
+                .collect();
+            let before = d.draft.clone();
+            d.selection.click(&[17, 18], 0, false, false);
+            d.dirty = false;
+
+            d.duplicate_selected_macro();
+
+            let source = &before.macros[1];
+            let copy = d.draft.macros.last().unwrap();
+            assert_eq!(copy.folder_id, source.folder_id);
+            assert!(copy.hotkey.is_none());
+            assert!(d.draft.macros[1].hotkey.is_some());
+            assert_eq!(d.draft.macros[1].hotkey, source.hotkey);
+            assert_ne!(copy.id, 0);
+            assert!(before.macros.iter().all(|m| m.id != copy.id));
+            let copied_ids: HashSet<_> = copy.steps.iter().map(|s| s.id).collect();
+            assert_eq!(copied_ids.len(), source.steps.len());
+            assert!(!copied_ids.contains(&0));
+            assert!(source.steps.iter().all(|s| !copied_ids.contains(&s.id)));
+            let mut expected_copy = source.clone();
+            expected_copy.id = copy.id;
+            expected_copy.name.push_str(" Copy");
+            expected_copy.hotkey = None;
+            for (expected, actual) in expected_copy.steps.iter_mut().zip(&copy.steps) {
+                expected.id = actual.id;
+            }
+            assert_eq!(copy, &expected_copy);
+            assert_eq!(d.selected_macro_id, Some(copy.id));
+            assert!(d.selection.ids.is_empty());
+            assert!(d.dirty);
+            // Appending must leave every original macro and folder in document order.
+            let mut originals = d.draft.clone();
+            originals.macros.pop();
+            assert_eq!(originals, before);
+            assert!(!repair_ids(&mut d.draft));
+        }
+    }
+
     #[test]
     fn create_duplicate_and_delete_are_draft_only() {
         let (_dir, mut d) = dialog();
@@ -2311,6 +2462,15 @@ impl MkMacroDialog {
         self.draft.macros.iter_mut().find(|m| m.id == id)
     }
     pub fn create_macro(&mut self) {
+        self.create_macro_in_folder(None);
+    }
+    /// Create and select a macro, rejecting invalid destinations before changing the draft.
+    pub fn create_macro_in_folder(&mut self, folder_id: Option<u64>) -> bool {
+        if folder_id
+            .is_some_and(|id| id == 0 || !self.draft.folders.iter().any(|folder| folder.id == id))
+        {
+            return false;
+        }
         self.draft.macros.push(MkMacro {
             id: 0,
             name: "New Macro".into(),
@@ -2318,7 +2478,7 @@ impl MkMacroDialog {
             enabled: true,
             hotkey: None,
             hotkey_scope: Default::default(),
-            folder_id: None,
+            folder_id,
             playback: Default::default(),
             steps: vec![],
             image_assets: vec![],
@@ -2327,17 +2487,25 @@ impl MkMacroDialog {
         self.set_selected_macro(self.draft.macros.last().map(|m| m.id));
         self.selection.clear();
         self.mark_dirty();
+        true
     }
+    /// Clone in the same folder and append in global document order, with fresh IDs
+    /// and no hotkey on the copy. The source macro remains unchanged.
     pub fn duplicate_selected_macro(&mut self) {
-        let Some(mut copy) = self.selected_macro().cloned() else {
+        let Some(source) = self.selected_macro() else {
             return;
         };
+        let mut copy = source.clone();
         copy.id = 0;
         copy.name.push_str(" Copy");
         copy.hotkey = None;
         for step in &mut copy.steps {
             step.id = 0;
         }
+        debug_assert_eq!(
+            copy.folder_id, source.folder_id,
+            "cloning preserves folder membership"
+        );
         self.draft.macros.push(copy);
         repair_ids(&mut self.draft);
         self.set_selected_macro(self.draft.macros.last().map(|m| m.id));
