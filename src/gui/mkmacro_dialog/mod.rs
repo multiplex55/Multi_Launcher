@@ -37,6 +37,25 @@ pub enum DirtyDecision {
     Discard,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderNameError {
+    Empty,
+    Duplicate(String),
+    MissingFolder(u64),
+}
+
+impl std::fmt::Display for FolderNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "A macro folder name cannot be empty."),
+            Self::Duplicate(name) => write!(f, "A macro folder named \"{name}\" already exists."),
+            Self::MissingFolder(_) => write!(f, "This macro folder no longer exists."),
+        }
+    }
+}
+
+impl std::error::Error for FolderNameError {}
+
 /// Immutable launcher data made available to macro authoring.  This is a
 /// snapshot: authoring a macro can never edit the launcher's action list.
 #[derive(Clone, Default)]
@@ -61,6 +80,7 @@ pub struct MkMacroDialog {
     pub collapsed_folders: HashSet<u64>,
     pub pending_folder_rename: Option<u64>,
     pub folder_rename_text: String,
+    folder_rename_needs_focus: bool,
     pub pending_delete_folder: Option<u64>,
     pub folder_delete_confirmation: ConfirmationModal,
     pub folder_error: Option<String>,
@@ -231,6 +251,151 @@ mod tests {
             .map(|f| f.name.to_lowercase())
             .collect();
         assert_eq!(names.len(), d.draft.folders.len());
+    }
+
+    fn assert_rejected_folder_rename(proposed: &str, expected: FolderNameError) {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.folders.push(MkMacroFolder {
+            id: 43,
+            name: "Work".into(),
+        });
+        d.begin_folder_rename(42);
+        d.folder_rename_text = proposed.into();
+        let before = d.draft.clone();
+        assert_eq!(d.rename_folder(42, proposed), Err(expected));
+        assert_eq!(d.draft, before);
+        assert!(!d.dirty);
+        assert_eq!(d.pending_folder_rename, Some(42));
+        assert_eq!(d.folder_rename_text, proposed);
+    }
+
+    #[test]
+    fn rename_folder_rejects_empty_name() {
+        assert_rejected_folder_rename("", FolderNameError::Empty);
+        assert_eq!(
+            FolderNameError::Empty.to_string(),
+            "A macro folder name cannot be empty."
+        );
+    }
+
+    #[test]
+    fn rename_folder_rejects_whitespace_only_name() {
+        assert_rejected_folder_rename(" \t\n\u{2003}", FolderNameError::Empty);
+    }
+
+    #[test]
+    fn rename_folder_rejects_duplicate_name() {
+        assert_rejected_folder_rename("Work", FolderNameError::Duplicate("Work".into()));
+    }
+
+    #[test]
+    fn rename_folder_rejects_case_insensitive_duplicate_with_canonical_diagnostic() {
+        assert_rejected_folder_rename("  wOrK  ", FolderNameError::Duplicate("Work".into()));
+        assert_eq!(
+            FolderNameError::Duplicate("Work".into()).to_string(),
+            "A macro folder named \"Work\" already exists."
+        );
+    }
+
+    #[test]
+    fn rename_folder_matches_trimmed_unicode_names() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.folders.push(MkMacroFolder {
+            id: 43,
+            name: "  ÉCOLE  ".into(),
+        });
+        let before = d.draft.clone();
+        assert_eq!(
+            d.rename_folder(42, "école"),
+            Err(FolderNameError::Duplicate("  ÉCOLE  ".into()))
+        );
+        assert_eq!(d.draft, before);
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn rename_folder_trims_and_changes_only_name_preserving_macros_and_presentation() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        d.draft.macros[2].folder_id = Some(42);
+        d.draft.macros[2].description = "Preserve macro contents".into();
+        d.draft.macros[2].steps.push(MkStep {
+            id: 11,
+            enabled: true,
+            repeat: 2,
+            delay_after_ms: 17,
+            on_error: Default::default(),
+            action: MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                fixed_ms: 50,
+                ..Default::default()
+            }),
+        });
+        d.save().unwrap();
+        d.selected_macro_id = Some(3);
+        d.selection.click(&[11], 0, false, false);
+        d.collapsed_folders.insert(42);
+        d.begin_folder_rename(42);
+        d.folder_error = Some("Previous validation error".into());
+        let macros = d.draft.macros.clone();
+        let baseline = d.baseline.clone();
+        let mut expected = d.draft.clone();
+        expected.folders[0].name = "Work".into();
+        assert_eq!(d.rename_folder(42, " \tWork\u{2003}"), Ok(true));
+        assert_eq!(d.draft.macros, macros);
+        assert_eq!(d.draft, expected);
+        assert!(d.dirty);
+        assert!(Arc::ptr_eq(&d.baseline, &baseline));
+        assert_eq!(*d.store.snapshot(), *baseline);
+        assert_eq!(d.selected_macro_id, Some(3));
+        assert_eq!(d.selection.ids, std::collections::BTreeSet::from([11]));
+        assert_eq!(d.collapsed_folders, HashSet::from([42]));
+        assert_no_pending_folder_operations(&d);
+    }
+
+    #[test]
+    fn rename_folder_allows_case_only_and_whitespace_normalization_of_self() {
+        for (stored, proposed, expected) in [
+            ("Utilities", "UTILITIES", "UTILITIES"),
+            ("  Utilities  ", " Utilities ", "Utilities"),
+        ] {
+            let (_dir, mut d) = folder_dialog();
+            d.draft.folders[0].name = stored.into();
+            assert_eq!(d.rename_folder(42, proposed), Ok(true));
+            assert_eq!(d.draft.folders[0].name, expected);
+            assert!(d.dirty);
+        }
+    }
+
+    #[test]
+    fn rename_folder_no_op_preserves_dirty_state_and_clears_edit() {
+        for dirty in [false, true] {
+            let (_dir, mut d) = folder_dialog();
+            d.dirty = dirty;
+            d.begin_folder_rename(42);
+            d.folder_error = Some("Previous validation error".into());
+            let before = d.draft.clone();
+            assert_eq!(d.rename_folder(42, "  Utilities  "), Ok(false));
+            assert_eq!(d.draft, before);
+            assert_eq!(d.dirty, dirty);
+            assert_no_pending_folder_operations(&d);
+        }
+    }
+
+    #[test]
+    fn rename_folder_missing_id_does_not_change_draft_or_pending_edit() {
+        let (_dir, mut d) = folder_dialog();
+        d.begin_folder_rename(42);
+        let before = d.draft.clone();
+        for id in [0, 999] {
+            assert_eq!(
+                d.rename_folder(id, "Work"),
+                Err(FolderNameError::MissingFolder(id))
+            );
+            assert_eq!(d.draft, before);
+            assert!(!d.dirty);
+            assert_eq!(d.pending_folder_rename, Some(42));
+            assert_eq!(d.folder_rename_text, "Utilities");
+        }
     }
 
     #[test]
@@ -2166,6 +2331,7 @@ impl MkMacroDialog {
             collapsed_folders: HashSet::new(),
             pending_folder_rename: None,
             folder_rename_text: String::new(),
+            folder_rename_needs_focus: false,
             pending_delete_folder: None,
             folder_delete_confirmation: Default::default(),
             folder_error: None,
@@ -2286,12 +2452,46 @@ impl MkMacroDialog {
         {
             self.pending_folder_rename = Some(folder_id);
             self.folder_rename_text = folder.name.clone();
+            self.folder_rename_needs_focus = true;
         }
+    }
+
+    /// Names match using Rust's Unicode-aware `str::to_lowercase` after trimming.
+    /// Returns false for an unchanged name, without changing the dirty flag.
+    pub fn rename_folder(
+        &mut self,
+        folder_id: u64,
+        proposed_name: &str,
+    ) -> Result<bool, FolderNameError> {
+        let index = self
+            .draft
+            .folders
+            .iter()
+            .position(|folder| folder.id == folder_id)
+            .ok_or(FolderNameError::MissingFolder(folder_id))?;
+        let name = proposed_name.trim();
+        if name.is_empty() {
+            return Err(FolderNameError::Empty);
+        }
+        let normalized = name.to_lowercase();
+        if let Some(conflict) = self.draft.folders.iter().find(|folder| {
+            folder.id != folder_id && folder.name.trim().to_lowercase() == normalized
+        }) {
+            return Err(FolderNameError::Duplicate(conflict.name.clone()));
+        }
+        let changed = self.draft.folders[index].name != name;
+        if changed {
+            self.draft.folders[index].name = name.to_owned();
+            self.mark_dirty();
+        }
+        self.cancel_folder_rename();
+        Ok(changed)
     }
 
     pub fn cancel_folder_rename(&mut self) {
         self.pending_folder_rename = None;
         self.folder_rename_text.clear();
+        self.folder_rename_needs_focus = false;
         self.folder_error = None;
     }
 

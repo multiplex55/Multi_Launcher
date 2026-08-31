@@ -67,6 +67,8 @@ enum Command {
     NewFolder,
     NewMacroHere(u64),
     RenameFolder(u64),
+    CommitFolderRename(u64),
+    CancelFolderRename,
     DeleteFolder(u64),
     DuplicateMacro(u64),
     MoveMacro(u64, Option<u64>),
@@ -85,6 +87,14 @@ fn apply_command(d: &mut MkMacroDialog, command: Command) {
             }
         }
         Command::RenameFolder(id) => d.begin_folder_rename(id),
+        Command::CommitFolderRename(id) => {
+            let name = d.folder_rename_text.clone();
+            if let Err(error) = d.rename_folder(id, &name) {
+                d.folder_error = Some(error.to_string());
+                d.folder_rename_needs_focus = true;
+            }
+        }
+        Command::CancelFolderRename => d.cancel_folder_rename(),
         Command::DeleteFolder(id) => d.request_delete_folder(id),
         Command::DuplicateMacro(id) | Command::DeleteMacro(id) => {
             d.set_selected_macro(Some(id));
@@ -99,6 +109,48 @@ fn apply_command(d: &mut MkMacroDialog, command: Command) {
             d.move_macro_to_folder(id, folder_id);
         }
     }
+}
+
+/// Commit explicitly; losing focus leaves the edit and any error visible.
+fn show_folder_rename(
+    ui: &mut eframe::egui::Ui,
+    folder_id: u64,
+    text: &mut String,
+    error: Option<&str>,
+    needs_focus: bool,
+) -> Option<Command> {
+    use eframe::egui::{Key, Modifiers, TextEdit};
+    let id = ui.make_persistent_id(("folder_rename", folder_id));
+    if needs_focus {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
+    // Consume before TextEdit handles Enter/Escape and surrenders focus.
+    let mut command = None;
+    if ui.memory(|memory| memory.has_focus(id)) {
+        if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+            command = Some(Command::CancelFolderRename);
+        } else if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
+            command = Some(Command::CommitFolderRename(folder_id));
+        }
+    }
+    ui.add(
+        TextEdit::singleline(text)
+            .id(id)
+            .hint_text("Folder name")
+            .desired_width(ui.available_width()),
+    );
+    if let Some(error) = error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Rename").clicked() {
+            command = Some(Command::CommitFolderRename(folder_id));
+        }
+        if ui.button("Cancel").clicked() {
+            command = Some(Command::CancelFolderRename);
+        }
+    });
+    command
 }
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
@@ -128,6 +180,8 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         }
     });
     ui.add(eframe::egui::TextEdit::singleline(&mut d.search).hint_text("Search"));
+    let mut rename_text = d.folder_rename_text.clone();
+    let rename_needs_focus = std::mem::take(&mut d.folder_rename_needs_focus);
     let groups = grouped_macros(&d.draft);
     let search = d.search.to_lowercase();
     let mut clicked = None;
@@ -143,26 +197,38 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                 ui.push_id(identity, |ui| {
                     let expanded = if let Some(folder) = group.folder {
                         let collapsed = d.is_folder_collapsed(folder.id);
-                        let arrow = if collapsed { "▶" } else { "▼" };
-                        let response = ui.add(
-                            eframe::egui::Button::new(format!("{arrow} {}", folder.name))
-                                .frame(false),
-                        );
-                        if response.clicked() {
-                            toggled_folders.push(folder.id);
-                        }
-                        response.context_menu(|ui| {
-                            for (label, action) in [
-                                ("New Macro Here", Command::NewMacroHere(folder.id)),
-                                ("Rename Folder", Command::RenameFolder(folder.id)),
-                                ("Delete Folder", Command::DeleteFolder(folder.id)),
-                            ] {
-                                if ui.button(label).clicked() {
-                                    command = Some(action);
-                                    ui.close_menu();
-                                }
+                        if d.pending_folder_rename == Some(folder.id) {
+                            if let Some(action) = show_folder_rename(
+                                ui,
+                                folder.id,
+                                &mut rename_text,
+                                d.folder_error.as_deref(),
+                                rename_needs_focus,
+                            ) {
+                                command = Some(action);
                             }
-                        });
+                        } else {
+                            let arrow = if collapsed { "▶" } else { "▼" };
+                            let response = ui.add(
+                                eframe::egui::Button::new(format!("{arrow} {}", folder.name))
+                                    .frame(false),
+                            );
+                            if response.clicked() {
+                                toggled_folders.push(folder.id);
+                            }
+                            response.context_menu(|ui| {
+                                for (label, action) in [
+                                    ("New Macro Here", Command::NewMacroHere(folder.id)),
+                                    ("Rename Folder", Command::RenameFolder(folder.id)),
+                                    ("Delete Folder", Command::DeleteFolder(folder.id)),
+                                ] {
+                                    if ui.button(label).clicked() {
+                                        command = Some(action);
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        }
                         !collapsed
                     } else {
                         ui.strong("Unfiled");
@@ -226,6 +292,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                 });
             }
         });
+    d.folder_rename_text = rename_text;
     // Apply commands only after rendering has released its document borrows.
     for id in toggled_folders {
         d.toggle_folder_collapsed(id);
@@ -242,6 +309,101 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rename_frame(
+        ctx: &eframe::egui::Context,
+        d: &mut MkMacroDialog,
+        key: Option<eframe::egui::Key>,
+    ) {
+        use eframe::egui::{CentralPanel, Event, Modifiers, RawInput};
+        let events = key
+            .map(|key| Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            })
+            .into_iter()
+            .collect();
+        let _ = ctx.run(
+            RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                CentralPanel::default().show(ctx, |ui| show(ui, d));
+            },
+        );
+    }
+
+    #[test]
+    fn inline_rename_enter_validates_retains_errors_on_blur_and_commits_correction() {
+        use eframe::egui::{Context, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(dir.path()).unwrap();
+        let mut d = MkMacroDialog::new(std::sync::Arc::new(store));
+        d.draft = document();
+        d.selected_macro_id = Some(7);
+        d.collapsed_folders.insert(20);
+        let before = d.draft.clone();
+        let ctx = Context::default();
+        d.begin_folder_rename(20);
+        rename_frame(&ctx, &mut d, None);
+        let focus = ctx
+            .memory(|memory| memory.focused())
+            .expect("rename should gain focus");
+        for (text, error) in [
+            ("  ", "A macro folder name cannot be empty."),
+            ("alpha", "A macro folder named \"Alpha\" already exists."),
+        ] {
+            d.folder_rename_text = text.into();
+            rename_frame(&ctx, &mut d, Some(Key::Enter));
+            assert_eq!(d.pending_folder_rename, Some(20));
+            assert_eq!(d.folder_error.as_deref(), Some(error));
+            assert_eq!(d.draft, before);
+            assert!(!d.dirty);
+            rename_frame(&ctx, &mut d, None);
+            ctx.memory_mut(|memory| memory.surrender_focus(focus));
+            rename_frame(&ctx, &mut d, None);
+            assert_eq!(d.pending_folder_rename, Some(20));
+            assert_eq!(d.folder_rename_text, text);
+            assert_eq!(d.folder_error.as_deref(), Some(error));
+            assert_eq!(d.draft, before);
+            ctx.memory_mut(|memory| memory.request_focus(focus));
+        }
+        d.folder_rename_text = "  Work  ".into();
+        rename_frame(&ctx, &mut d, Some(Key::Enter));
+        assert_eq!(d.draft.folders[0].name, "Work");
+        assert_eq!(d.draft.macros, before.macros);
+        assert_eq!(d.selected_macro_id, Some(7));
+        assert!(d.collapsed_folders.contains(&20));
+        assert!(d.dirty);
+        assert_eq!(d.pending_folder_rename, None);
+        assert_eq!(d.folder_error, None);
+        assert!(d.folder_rename_text.is_empty());
+    }
+
+    #[test]
+    fn inline_rename_escape_cancels_without_mutating_draft() {
+        use eframe::egui::{Context, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(dir.path()).unwrap();
+        let mut d = MkMacroDialog::new(std::sync::Arc::new(store));
+        d.draft = document();
+        let before = d.draft.clone();
+        let ctx = Context::default();
+        d.begin_folder_rename(20);
+        rename_frame(&ctx, &mut d, None);
+        d.folder_rename_text = "Uncommitted".into();
+        d.folder_error = Some("Previous error".into());
+        rename_frame(&ctx, &mut d, Some(Key::Escape));
+        assert_eq!(d.draft, before);
+        assert!(!d.dirty);
+        assert_eq!(d.pending_folder_rename, None);
+        assert_eq!(d.folder_error, None);
+        assert!(d.folder_rename_text.is_empty());
+    }
 
     fn document() -> MkMacroDocument {
         MkMacroDocument {
