@@ -89,6 +89,10 @@ pub struct MkStep {
     pub id: u64,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Persisted authoring/debug metadata. It has no execution effect unless
+    /// the runtime explicitly uses Debug mode.
+    #[serde(default)]
+    pub breakpoint: bool,
     #[serde(default = "one")]
     pub repeat: u32,
     #[serde(default)]
@@ -1023,6 +1027,7 @@ mod launcher_command_payload_tests {
                 steps: vec![MkStep {
                     id: 2,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: MkErrorPolicy::Stop,
@@ -1224,6 +1229,7 @@ mod screenshot_region_serialization_tests {
             .map(|(id, region)| MkStep {
                 id: id as u64 + 1,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: MkErrorPolicy::Stop,
@@ -1381,6 +1387,74 @@ mod notification_serialization_tests {
             assert!(json.contains(&format!(r#""type":"{tag}""#)));
             assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
         }
+    }
+}
+
+#[cfg(test)]
+mod breakpoint_serialization_tests {
+    use super::*;
+
+    fn step(breakpoint: bool) -> MkStep {
+        MkStep {
+            id: 2,
+            enabled: true,
+            breakpoint,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: MkErrorPolicy::Stop,
+            action: MkAction::Delay(MkDelayPayload {
+                fixed_ms: 25,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn omitted_breakpoint_defaults_to_false() {
+        let mut json = serde_json::to_value(step(true)).unwrap();
+        json.as_object_mut().unwrap().remove("breakpoint");
+
+        let decoded: MkStep = serde_json::from_value(json).unwrap();
+
+        assert!(!decoded.breakpoint);
+    }
+
+    #[test]
+    fn breakpoint_values_round_trip_through_json() {
+        for breakpoint in [true, false] {
+            let expected = step(breakpoint);
+            let json = serde_json::to_string(&expected).unwrap();
+
+            assert_eq!(serde_json::from_str::<MkStep>(&json).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn breakpoint_is_serialized_as_persisted_step_data() {
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                id: 1,
+                name: "Debug authoring".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: MkHotkeyScope::default(),
+                folder_id: None,
+                playback: MkPlayback::default(),
+                steps: vec![step(true)],
+                image_assets: vec![],
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(document).unwrap();
+
+        assert_eq!(
+            json.pointer("/macros/0/steps/0/breakpoint"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(json.get("breakpoint").is_none());
+        assert!(json.pointer("/macros/0/breakpoint").is_none());
+        assert!(json.pointer("/macros/0/playback/breakpoint").is_none());
     }
 }
 

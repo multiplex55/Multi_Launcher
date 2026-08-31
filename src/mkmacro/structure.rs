@@ -249,6 +249,7 @@ mod tests {
         MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -336,6 +337,26 @@ mod tests {
         assert!(!MkAction::Break.is_block_marker());
         assert!(!MkAction::Continue.is_block_marker());
     }
+    #[test]
+    fn unwrap_discards_marker_breakpoints_and_preserves_inner_breakpoints() {
+        let mut steps = vec![
+            s(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            delay(2),
+            s(3, MkAction::Else),
+            delay(4),
+            s(5, MkAction::EndIf),
+        ];
+        for step in &mut steps {
+            step.breakpoint = true;
+        }
+
+        unwrap_block(&mut steps, 3).unwrap();
+
+        assert_eq!(steps.iter().map(|step| step.id).collect::<Vec<_>>(), [2, 4]);
+        assert!(steps.iter().all(|step| step.breakpoint));
+        assert!(steps.iter().all(|step| !step.action.is_block_marker()));
+    }
+
     #[test]
     fn mutations_delete_and_unwrap() {
         let mut v = vec![

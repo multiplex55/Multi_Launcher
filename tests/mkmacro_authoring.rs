@@ -801,6 +801,7 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
         steps: vec![MkStep {
             id: 1,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: Default::default(),

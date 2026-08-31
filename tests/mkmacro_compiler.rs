@@ -4,6 +4,7 @@ fn step(id: u64, action: MkAction) -> MkStep {
     MkStep {
         id,
         enabled: true,
+        breakpoint: false,
         repeat: 1,
         delay_after_ms: 0,
         on_error: Default::default(),

@@ -847,6 +847,7 @@ mod delay_validation_tests {
                     steps: vec![MkStep {
                         id: 1,
                         enabled: true,
+                        breakpoint: false,
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: MkErrorPolicy::default(),
@@ -1038,6 +1039,7 @@ mod optional_wait_validation_tests {
                 steps: vec![MkStep {
                     id: 1,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: MkErrorPolicy::default(),
@@ -1505,6 +1507,7 @@ mod notification_action_tests {
                     steps: vec![MkStep {
                         id: 1,
                         enabled: true,
+                        breakpoint: false,
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: MkErrorPolicy::default(),
@@ -1585,6 +1588,7 @@ mod launcher_command_action_tests {
                     steps: vec![MkStep {
                         id: 1,
                         enabled: true,
+                        breakpoint: false,
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: MkErrorPolicy::default(),
@@ -1672,6 +1676,7 @@ mod click_within_region_validation_tests {
                     steps: vec![MkStep {
                         id: 1,
                         enabled: true,
+                        breakpoint: false,
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: MkErrorPolicy::default(),
@@ -1823,6 +1828,7 @@ mod virtual_desktop_validation_tests {
                     steps: vec![MkStep {
                         id: 1,
                         enabled: true,
+                        breakpoint: false,
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: MkErrorPolicy::default(),

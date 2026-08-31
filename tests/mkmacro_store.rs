@@ -21,6 +21,7 @@ fn invalid_doc() -> MkMacroDocument {
             steps: vec![MkStep {
                 id: 8,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: Default::default(),
@@ -87,6 +88,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 steps: vec![MkStep {
                     id: 201,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),
@@ -109,6 +111,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 steps: vec![MkStep {
                     id: 202,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),
@@ -310,6 +313,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
         .map(|(i, action)| MkStep {
             id: i as u64 + 1,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,

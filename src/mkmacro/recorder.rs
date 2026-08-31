@@ -662,6 +662,7 @@ pub fn to_macro_steps(
             result.push(MkStep {
                 id: next_id,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: if i + 1 == count { s.delay_after_ms } else { 0 },
                 on_error: MkErrorPolicy::Stop,

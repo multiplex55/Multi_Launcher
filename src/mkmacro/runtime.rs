@@ -716,6 +716,7 @@ mod folder_tests {
             steps: vec![MkStep {
                 id: 11,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: Default::default(),

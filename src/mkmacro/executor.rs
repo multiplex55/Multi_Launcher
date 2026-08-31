@@ -1448,6 +1448,7 @@ mod tests {
         MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -3678,6 +3679,7 @@ mod notification_sound_tests {
         MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -4542,6 +4544,7 @@ mod phase_d_tests {
         MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,

@@ -768,6 +768,7 @@ impl ActionEditorState {
         self.draft = Some(MkStep {
             id: 0,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -3134,6 +3135,7 @@ pub(crate) fn insert_smooth_move_after(
         MkStep {
             id: 0,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -3181,6 +3183,7 @@ pub(crate) fn insert_activate_window_before(
         MkStep {
             id: 0,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -3813,6 +3816,7 @@ mod tests {
         MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -3872,6 +3876,7 @@ mod tests {
         let marker = |id, action| MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -3949,6 +3954,7 @@ mod tests {
         let marker = |id, action| MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -4230,6 +4236,7 @@ mod tests {
         editor.begin_edit(&MkStep {
             id: 808,
             enabled: false,
+            breakpoint: false,
             repeat: 3,
             delay_after_ms: 91,
             on_error: MkErrorPolicy::Continue,
@@ -4442,6 +4449,7 @@ mod tests {
             let step_a = MkStep {
                 id: 1,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: MkErrorPolicy::Stop,
@@ -4730,6 +4738,7 @@ mod tests {
                 editor.begin_edit(&MkStep {
                     id: 55,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),
@@ -5030,6 +5039,7 @@ mod tests {
         MkStep {
             id: 7,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: Default::default(),
@@ -6737,6 +6747,7 @@ mod tests {
             let step = MkStep {
                 id: 55,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: MkErrorPolicy::Stop,
@@ -6994,6 +7005,7 @@ mod tests {
         let source = MkStep {
             id: 42,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::default(),

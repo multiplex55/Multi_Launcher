@@ -2129,6 +2129,7 @@ fn step(action: MkAction) -> MkStep {
     MkStep {
         id: 0,
         enabled: true,
+        breakpoint: false,
         repeat: 1,
         delay_after_ms: 0,
         on_error: Default::default(),

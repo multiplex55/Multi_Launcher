@@ -558,6 +558,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command) {
                     MkStep {
                         id: 0,
                         enabled: true,
+                        breakpoint: false,
                         repeat: 1,
                         delay_after_ms: 0,
                         on_error: Default::default(),
@@ -689,6 +690,7 @@ mod layout_tests {
         MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,
@@ -758,6 +760,30 @@ mod layout_tests {
             delete_selection(&mut rows, &BTreeSet::from([1])).unwrap(),
             BTreeSet::new()
         );
+    }
+
+    #[test]
+    fn duplication_preserves_breakpoint_and_allocates_a_fresh_id() {
+        let mut rows = vec![delay(1), delay(2)];
+        rows[0].breakpoint = true;
+
+        let duplicated_ids = duplicate_steps_with_ids(&mut rows, &BTreeSet::from([1]));
+
+        assert_eq!(duplicated_ids.len(), 1);
+        assert_ne!(rows[1].id, rows[0].id);
+        assert!(duplicated_ids.contains(&rows[1].id));
+        assert!(rows[1].breakpoint);
+    }
+
+    #[test]
+    fn deletion_removes_the_breakpoint_with_its_step() {
+        let mut rows = vec![delay(1), delay(2), delay(3)];
+        rows[1].breakpoint = true;
+
+        delete_selection(&mut rows, &BTreeSet::from([2])).unwrap();
+
+        assert_eq!(rows.iter().map(|step| step.id).collect::<Vec<_>>(), [1, 3]);
+        assert!(rows.iter().all(|step| !step.breakpoint));
     }
 
     #[test]

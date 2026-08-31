@@ -343,6 +343,7 @@ fn legacy_parent_invokes_scoped_child_without_foreground_match() {
                 steps: vec![MkStep {
                     id: 1,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 1,
                     delay_after_ms: 0,
                     on_error: Default::default(),

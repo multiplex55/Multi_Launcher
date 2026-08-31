@@ -731,6 +731,7 @@ mod tests {
         let step = |id, action| MkStep {
             id,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: MkErrorPolicy::Stop,

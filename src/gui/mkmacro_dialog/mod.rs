@@ -322,6 +322,7 @@ mod tests {
         d.draft.macros[2].steps.push(MkStep {
             id: 11,
             enabled: true,
+            breakpoint: false,
             repeat: 2,
             delay_after_ms: 17,
             on_error: Default::default(),
@@ -416,6 +417,7 @@ mod tests {
             .map(|id| MkStep {
                 id,
                 enabled: true,
+                breakpoint: false,
                 repeat: 2,
                 delay_after_ms: 17,
                 on_error: Default::default(),
@@ -606,6 +608,7 @@ mod tests {
                 .map(|offset| MkStep {
                     id: m.id * 10 + offset,
                     enabled: offset != 2,
+                    breakpoint: false,
                     repeat: 2,
                     delay_after_ms: 17,
                     on_error: crate::mkmacro::MkErrorPolicy::Continue,
@@ -1207,6 +1210,7 @@ mod tests {
             MkStep {
                 id: 11,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: Default::default(),
@@ -1215,6 +1219,7 @@ mod tests {
             MkStep {
                 id: 12,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: Default::default(),
@@ -1223,6 +1228,7 @@ mod tests {
             MkStep {
                 id: 13,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: Default::default(),
@@ -1362,6 +1368,7 @@ mod tests {
                 .map(|id| MkStep {
                     id,
                     enabled: true,
+                    breakpoint: false,
                     repeat: 2,
                     delay_after_ms: 25,
                     on_error: Default::default(),
@@ -1422,6 +1429,7 @@ mod tests {
         d.selected_macro_mut().unwrap().steps.push(MkStep {
             id: 0,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: Default::default(),
@@ -1730,6 +1738,7 @@ mod tests {
         document.macros[0].steps.push(MkStep {
             id: 1,
             enabled: true,
+            breakpoint: false,
             repeat: 1,
             delay_after_ms: 0,
             on_error: Default::default(),
@@ -2345,6 +2354,7 @@ mod tests {
             .map(|action| MkStep {
                 id: 0,
                 enabled: true,
+                breakpoint: false,
                 repeat: 1,
                 delay_after_ms: 0,
                 on_error: Default::default(),
