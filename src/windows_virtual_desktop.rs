@@ -4,8 +4,9 @@
 //! vtable declarations and the unsafe calls that use them together so callers only need a
 //! small, structured safe boundary.
 
-use super::virtual_desktop_selection::{DesktopSelectionError, select_virtual_desktop_index};
-use crate::mkmacro::{DiagnosticKind, ExecResult, ExecutionDiagnostic};
+use crate::mkmacro::{
+    DiagnosticKind, ExecResult, ExecutionDiagnostic, NativeVirtualDesktopBackend, go_to_with_native,
+};
 use windows::Win32::UI::Shell::Common::IObjectArray;
 use windows::core::{GUID, HRESULT, HSTRING, IUnknown, IUnknown_Vtbl, Interface};
 
@@ -187,78 +188,76 @@ impl IVirtualDesktopManagerInternal {
 
 /// Switch to a virtual desktop by its one-based position in the Windows desktop list.
 pub fn switch_virtual_desktop_by_number(number: u32) -> ExecResult {
-    if number == 0 {
-        return Err(selection_failure(DesktopSelectionError::Zero));
-    }
-
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    };
-
-    let initialization = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() };
-    if let Err(error) = initialization {
-        return Err(com_failure("initialize COM apartment", error));
-    }
-
-    let result = unsafe { switch_virtual_desktop_after_initialization(number, CLSCTX_ALL) };
-    unsafe { CoUninitialize() };
-    result
+    go_to_with_native(number, NativeDesktopSession::open)
 }
 
-unsafe fn switch_virtual_desktop_after_initialization(
-    number: u32,
-    class_context: windows::Win32::System::Com::CLSCTX,
-) -> ExecResult {
-    use windows::Win32::System::Com::CoCreateInstance;
-
-    let manager = unsafe {
-        CoCreateInstance::<_, IVirtualDesktopManagerInternal>(
-            &VIRTUAL_DESKTOP_MANAGER_INTERNAL_CLSID,
-            None,
-            class_context,
-        )
-    }
-    .map_err(|error| com_failure("activate virtual desktop manager", error))?;
-
-    let desktops = unsafe { manager.get_desktops(0) }
-        .map_err(|error| com_failure("enumerate virtual desktops", error))?;
-    let desktop_count = unsafe { desktops.GetCount() }
-        .map_err(|error| com_failure("read virtual desktop count", error))?;
-    let index = select_virtual_desktop_index(number, desktop_count).map_err(selection_failure)?;
-
-    let desktop: IVirtualDesktop = unsafe { desktops.GetAt(index) }
-        .map_err(|error| com_failure("index virtual desktop", error))?;
-
-    // GetCurrentDesktop and IVirtualDesktop::GetID are available on the same internal
-    // interfaces. If either identity lookup is unavailable, SwitchDesktop remains the
-    // authoritative operation and Windows handles an already-active target as a no-op.
-    if let Ok(current) = unsafe { manager.get_current_desktop(0) }
-        && let Ok(current_id) = unsafe { current.get_id() }
-        && let Ok(target_id) = unsafe { desktop.get_id() }
-        && current_id == target_id
-    {
-        return Ok(());
-    }
-
-    unsafe { manager.switch_desktop(0, &desktop) }
-        .map_err(|error| com_failure("switch virtual desktop", error))
+// Fields drop in declaration order: release every COM interface before the apartment.
+struct NativeDesktopSession {
+    manager: IVirtualDesktopManagerInternal,
+    desktops: IObjectArray,
+    _apartment: ComApartment,
 }
 
-fn selection_failure(error: DesktopSelectionError) -> ExecutionDiagnostic {
-    match error {
-        DesktopSelectionError::Zero => ExecutionDiagnostic::new(
-            DiagnosticKind::InvalidSelection,
-            "Virtual desktop number must be at least 1",
-        )
-        .context("requested_desktop", "0")
-        .context("backend_operation", "virtual desktop"),
-        DesktopSelectionError::BeyondCount { requested, count } => ExecutionDiagnostic::new(
-            DiagnosticKind::InvalidSelection,
-            format!("Virtual desktop {requested} does not exist"),
-        )
-        .context("requested_desktop", requested.to_string())
-        .context("desktop_count", count.to_string())
-        .context("backend_operation", "virtual desktop"),
+struct ComApartment;
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+}
+
+impl NativeDesktopSession {
+    fn open() -> ExecResult<Self> {
+        use windows::Win32::System::Com::{
+            CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        };
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }
+            .map_err(|error| com_failure("initialize COM apartment", error))?;
+        let apartment = ComApartment;
+        let manager = unsafe {
+            CoCreateInstance::<_, IVirtualDesktopManagerInternal>(
+                &VIRTUAL_DESKTOP_MANAGER_INTERNAL_CLSID,
+                None,
+                CLSCTX_ALL,
+            )
+        }
+        .map_err(|error| com_failure("activate virtual desktop manager", error))?;
+        let desktops = unsafe { manager.get_desktops(0) }
+            .map_err(|error| com_failure("enumerate virtual desktops", error))?;
+        Ok(Self {
+            manager,
+            desktops,
+            _apartment: apartment,
+        })
+    }
+
+    fn desktop(&self, index: u32) -> ExecResult<IVirtualDesktop> {
+        unsafe { self.desktops.GetAt(index) }.map_err(|error| {
+            com_failure("index virtual desktop", error).context("native_index", index.to_string())
+        })
+    }
+}
+
+impl NativeVirtualDesktopBackend for NativeDesktopSession {
+    fn desktop_count(&self) -> ExecResult<u32> {
+        unsafe { self.desktops.GetCount() }
+            .map_err(|error| com_failure("read virtual desktop count", error))
+    }
+
+    fn is_current(&self, index: u32) -> ExecResult<bool> {
+        let target = self.desktop(index)?;
+        let current = unsafe { self.manager.get_current_desktop(0) }
+            .map_err(|error| com_failure("query current virtual desktop", error))?;
+        let current_id = unsafe { current.get_id() }
+            .map_err(|error| com_failure("read current virtual desktop identity", error))?;
+        let target_id = unsafe { target.get_id() }
+            .map_err(|error| com_failure("read target virtual desktop identity", error))?;
+        Ok(current_id == target_id)
+    }
+
+    fn switch_to(&self, index: u32) -> ExecResult {
+        let desktop = self.desktop(index)?;
+        unsafe { self.manager.switch_desktop(0, &desktop) }
+            .map_err(|error| com_failure("switch virtual desktop", error))
     }
 }
 
@@ -287,29 +286,6 @@ mod tests {
         assert_eq!(
             error.context.get("requested_desktop").map(String::as_str),
             Some("0")
-        );
-        assert_eq!(
-            error.context.get("backend_operation").map(String::as_str),
-            Some("virtual desktop")
-        );
-    }
-
-    #[test]
-    fn missing_desktop_diagnostic_is_structured_without_creating_one() {
-        let error = selection_failure(DesktopSelectionError::BeyondCount {
-            requested: 3,
-            count: 2,
-        });
-
-        assert_eq!(error.kind, DiagnosticKind::InvalidSelection);
-        assert_eq!(error.message, "Virtual desktop 3 does not exist");
-        assert_eq!(
-            error.context.get("requested_desktop").map(String::as_str),
-            Some("3")
-        );
-        assert_eq!(
-            error.context.get("desktop_count").map(String::as_str),
-            Some("2")
         );
         assert_eq!(
             error.context.get("backend_operation").map(String::as_str),

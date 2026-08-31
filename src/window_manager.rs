@@ -144,7 +144,7 @@ use self::windows_virtual_desktop::{IVirtualDesktop, IVirtualDesktopManagerInter
 mod windows_virtual_desktop;
 
 #[path = "virtual_desktop_selection.rs"]
-mod virtual_desktop_selection;
+pub(crate) mod virtual_desktop_selection;
 
 /// Switch to a virtual desktop by its one-based position in the Windows
 /// virtual-desktop list.
