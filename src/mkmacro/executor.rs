@@ -1507,6 +1507,131 @@ mod tests {
         }
     }
 
+    fn random_delay(minimum_ms: u64, maximum_ms: u64) -> MkAction {
+        MkAction::Delay(super::super::MkDelayPayload {
+            mode: MkDelayMode::RandomRange,
+            minimum_ms,
+            maximum_ms,
+            ..Default::default()
+        })
+    }
+
+    fn recorded_delay_executor(waiter: Arc<RecordingWaiter>) -> Executor {
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        Executor::with_waiter(Arc::new(FakeBackend::default()).backends(), control, waiter)
+    }
+
+    fn execute_delay(executor: &Executor, action: MkAction, speed_percent: u32) -> ExecResult {
+        let mut plan = plan(vec![step(1, action)]);
+        plan.playback.speed_percent = speed_percent;
+        executor.execute(&plan, &|_| {})
+    }
+
+    #[test]
+    fn random_delay_schedules_known_sample_at_100_and_200_percent() {
+        for (speed, expected_ms) in [(100, 900), (200, 450)] {
+            let waiter = Arc::new(RecordingWaiter::default());
+            let mut executor = recorded_delay_executor(waiter.clone());
+            executor.delay_sampler = Arc::new(|min, max| {
+                assert_eq!((min, max), (500, 1500));
+                Ok(900)
+            });
+            execute_delay(&executor, random_delay(500, 1500), speed).unwrap();
+            assert_eq!(waiter.sleeps(), [Duration::from_millis(expected_ms)]);
+        }
+    }
+
+    #[test]
+    fn fixed_delay_schedules_1000_ms_at_100_and_200_percent_without_sampling() {
+        for (speed, expected_ms) in [(100, 1000), (200, 500)] {
+            let waiter = Arc::new(RecordingWaiter::default());
+            let mut executor = recorded_delay_executor(waiter.clone());
+            executor.delay_sampler = Arc::new(|_, _| panic!("fixed delays must not sample"));
+            execute_delay(
+                &executor,
+                MkAction::Delay(super::super::MkDelayPayload {
+                    fixed_ms: 1000,
+                    ..Default::default()
+                }),
+                speed,
+            )
+            .unwrap();
+            assert_eq!(waiter.sleeps(), [Duration::from_millis(expected_ms)]);
+        }
+    }
+
+    #[test]
+    fn random_delay_equal_endpoints_schedule_that_value() {
+        for value in [1, 900, super::super::MAX_DELAY_MS] {
+            let waiter = Arc::new(RecordingWaiter::default());
+            let executor = recorded_delay_executor(waiter.clone());
+            execute_delay(&executor, random_delay(value, value), 100).unwrap();
+            assert_eq!(waiter.sleeps(), [Duration::from_millis(value)]);
+        }
+    }
+
+    #[test]
+    fn random_delay_sampler_reaches_both_inclusive_endpoints() {
+        assert_eq!(
+            sample_delay_range(500, 1500, &mut FixedRng(0)).unwrap(),
+            500
+        );
+        assert_eq!(
+            sample_delay_range(500, 1500, &mut FixedRng(u64::MAX)).unwrap(),
+            1500
+        );
+    }
+
+    #[test]
+    fn random_delay_reversed_range_returns_diagnostic_without_waiting() {
+        let waiter = Arc::new(RecordingWaiter::default());
+        let executor = recorded_delay_executor(waiter.clone());
+        // Bypass compilation deliberately to exercise a malformed execution plan.
+        // Validation's random_reversed_endpoints test covers authoring rejection.
+        let mut plan = plan(vec![step(1, random_delay(500, 1500))]);
+        Arc::make_mut(&mut Arc::make_mut(&mut plan.instructions)[0].step).action =
+            random_delay(1500, 500);
+        let error = executor.execute(&plan, &|_| {}).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InvalidPlan);
+        assert_eq!(error.context["minimum_ms"], "1500");
+        assert_eq!(error.context["maximum_ms"], "500");
+        assert!(waiter.sleeps().is_empty());
+    }
+
+    #[test]
+    fn zero_fixed_and_random_delays_complete_without_backend_sleep() {
+        for action in [
+            MkAction::Delay(super::super::MkDelayPayload {
+                fixed_ms: 0,
+                ..Default::default()
+            }),
+            random_delay(0, 0),
+        ] {
+            for speed in [100, 200] {
+                let waiter = Arc::new(RecordingWaiter::default());
+                let executor = recorded_delay_executor(waiter.clone());
+                execute_delay(&executor, action.clone(), speed).unwrap();
+                assert!(waiter.sleeps().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn random_delay_cancellation_at_scheduled_wait_stops_execution() {
+        let waiter = Arc::new(RecordingWaiter::stop_after(1));
+        let mut executor = recorded_delay_executor(waiter.clone());
+        executor.delay_sampler = Arc::new(|_, _| Ok(900));
+        let plan = plan(vec![
+            step(1, random_delay(500, 1500)),
+            step(2, MkAction::Delay(Default::default())),
+        ]);
+        let error = executor.execute(&plan, &|_| {}).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(error.context["step_id"], "1");
+        assert_eq!(waiter.sleeps(), [Duration::from_millis(900)]);
+    }
+
     fn click_within_action(
         rect: super::super::ScreenRect,
         clicks: u32,
@@ -2272,10 +2397,11 @@ pub struct Executor {
     backends: Backends,
     control: Arc<RunControl>,
     waiter: Arc<dyn ExecutorWaiter>,
+    delay_sampler: Arc<dyn Fn(u64, u64) -> ExecResult<u64> + Send + Sync>,
     region_point_sampler: Arc<dyn Fn(UsableRegion) -> ExecResult<MkPoint> + Send + Sync>,
 }
 
-/// Clock and interruptible-sleep boundary used by polling actions.  Keeping the
+/// Clock and interruptible-sleep boundary used by delays and polling actions. Keeping the
 /// clock and sleep on the same boundary makes deadline tests deterministic.
 trait ExecutorWaiter: Send + Sync {
     fn now(&self) -> Duration;
@@ -2480,6 +2606,24 @@ fn sample_delay(max: u64) -> u64 {
         rand::random_range(0..=max)
     }
 }
+/// Samples an inclusive delay range; reject malformed plans before calling the RNG.
+/// The RNG is injectable so endpoint behavior can be tested without chance.
+fn sample_delay_range<R: rand::Rng + ?Sized>(
+    min_ms: u64,
+    max_ms: u64,
+    rng: &mut R,
+) -> ExecResult<u64> {
+    if min_ms > max_ms {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidPlan,
+            "random delay minimum exceeds maximum",
+        )
+        .context("minimum_ms", min_ms.to_string())
+        .context("maximum_ms", max_ms.to_string()));
+    }
+    Ok(rng.random_range(min_ms..=max_ms))
+}
+
 fn sample_offset(max: u32) -> i64 {
     if max == 0 {
         0
@@ -2494,6 +2638,7 @@ impl Executor {
             backends,
             control,
             waiter: Arc::new(SystemExecutorWaiter::default()),
+            delay_sampler: Arc::new(|min, max| sample_delay_range(min, max, &mut rand::rng())),
             region_point_sampler: Arc::new(|region| Ok(sample_point(region, &mut rand::rng()))),
         }
     }
@@ -2829,18 +2974,19 @@ impl Executor {
                 let milliseconds = match payload.mode {
                     MkDelayMode::Fixed => payload.fixed_ms,
                     MkDelayMode::RandomRange => {
-                        let (minimum, maximum) = if payload.minimum_ms <= payload.maximum_ms {
-                            (payload.minimum_ms, payload.maximum_ms)
-                        } else {
-                            (payload.maximum_ms, payload.minimum_ms)
-                        };
-                        rand::random_range(minimum..=maximum)
+                        (self.delay_sampler)(payload.minimum_ms, payload.maximum_ms)?
                     }
                 };
-                self.wait(Duration::from_millis(scale_playback_duration(
+                let duration = Duration::from_millis(scale_playback_duration(
                     milliseconds,
                     playback.speed_percent,
-                )))
+                ));
+                if duration.is_zero() {
+                    // No sleep is needed, but cancellation must still be observed.
+                    self.control.checkpoint()
+                } else {
+                    self.wait(duration)
+                }
             }
             MkAction::Process(p) => {
                 let mut expanded = p.clone();
