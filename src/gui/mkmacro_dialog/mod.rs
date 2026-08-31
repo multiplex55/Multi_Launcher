@@ -234,6 +234,74 @@ mod tests {
     }
 
     #[test]
+    fn moving_macro_changes_only_folder_and_retains_macro_and_step_selection() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        let m = &mut d.draft.macros[2];
+        m.description = "Keep this description".into();
+        m.hotkey = Some(MkHotkey {
+            key: MkKey::Delete,
+            modifiers: vec![],
+        });
+        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            process: Some("editor.exe".into()),
+            ..Default::default()
+        });
+        m.steps = (11..=13)
+            .map(|id| MkStep {
+                id,
+                enabled: true,
+                repeat: 2,
+                delay_after_ms: 17,
+                on_error: Default::default(),
+                action: MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                    fixed_ms: id * 10,
+                    ..Default::default()
+                }),
+            })
+            .collect();
+        d.save().unwrap();
+        d.selected_macro_id = Some(3);
+        let rows = [11, 12, 13];
+        d.selection.click(&rows, 1, false, false);
+        d.selection.click(&rows, 2, true, false);
+
+        for destination in [Some(42), None] {
+            let mut expected = d.draft.clone();
+            expected.macros[2].folder_id = destination;
+            let selected_steps = d.selection.ids.clone();
+            let mut expected_selection = d.selection.clone();
+            assert!(!d.dirty);
+            assert!(d.move_macro_to_folder(3, destination));
+            assert!(d.dirty);
+            assert_eq!(d.draft, expected);
+            assert_eq!(d.selected_macro_id, Some(3));
+            assert_eq!(d.selection.ids, selected_steps);
+            // A subsequent shift click also verifies that the anchor survives.
+            expected_selection.click(&rows, 0, false, true);
+            d.selection.click(&rows, 0, false, true);
+            assert_eq!(d.selection.ids, expected_selection.ids);
+            d.save().unwrap();
+            assert!(!d.move_macro_to_folder(3, destination));
+            assert!(!d.dirty);
+            assert_eq!(d.draft, expected);
+        }
+    }
+
+    #[test]
+    fn choosing_unfiled_normalizes_a_dangling_folder_reference() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        d.save().unwrap();
+        d.draft.macros[2].folder_id = Some(999);
+        let mut expected = d.draft.clone();
+        expected.macros[2].folder_id = None;
+        assert!(d.move_macro_to_folder(3, None));
+        assert_eq!(d.draft, expected);
+        assert!(d.dirty);
+    }
+
+    #[test]
     fn moving_macro_to_real_folder_assigns_id_and_marks_dirty() {
         let (_dir, mut d) = folder_dialog();
         d.draft.macros = five_macros().macros;

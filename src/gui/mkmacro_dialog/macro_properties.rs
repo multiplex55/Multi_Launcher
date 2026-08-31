@@ -3,8 +3,30 @@ use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, ho
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::window_picker::{MatcherDestination, MatcherEditRequest};
 use crate::mkmacro::hotkeys::{HotkeyDiagnostic, HotkeyDiagnosticSeverity};
-use crate::mkmacro::{MkHotkeyScope, MkWindowMatcher};
+use crate::mkmacro::{MkHotkeyScope, MkMacroFolder, MkWindowMatcher};
 use eframe::egui;
+
+fn folder_choices(folders: &[MkMacroFolder]) -> Vec<(Option<u64>, String)> {
+    std::iter::once((None, "Unfiled".to_owned()))
+        .chain(
+            folders
+                .iter()
+                .map(|folder| (Some(folder.id), folder.name.clone())),
+        )
+        .collect()
+}
+
+// Resolve dangling references for presentation only; a user choice applies the change.
+fn current_folder_choice(
+    choices: &[(Option<u64>, String)],
+    folder_id: Option<u64>,
+) -> (Option<u64>, &str) {
+    choices
+        .iter()
+        .find(|(id, _)| *id == folder_id)
+        .map(|(id, name)| (*id, name.as_str()))
+        .unwrap_or((None, "Unfiled"))
+}
 
 // Pure presentation mapping: no UI context is needed to test severity colors.
 fn hotkey_diagnostic_color(severity: HotkeyDiagnosticSeverity) -> egui::Color32 {
@@ -92,6 +114,8 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     let mut capture = None;
     let mut clear = false;
     let mut picker_original = None;
+    let folders = folder_choices(&d.draft.folders);
+    let mut folder_change = None;
     let Some(m) = d.selected_macro_mut() else {
         ui.label("Select a macro");
         return;
@@ -107,6 +131,22 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         )
         .changed();
     changed |= ui.checkbox(&mut m.enabled, "Enabled").changed();
+    let (selected_folder, folder_label) = current_folder_choice(&folders, m.folder_id);
+    ui.horizontal(|ui| {
+        ui.label("Folder:");
+        egui::ComboBox::from_id_source(("macro_properties_folder", macro_id))
+            .selected_text(folder_label)
+            .show_ui(ui, |ui| {
+                for (folder_id, name) in &folders {
+                    if ui
+                        .selectable_label(selected_folder == *folder_id, name)
+                        .clicked()
+                    {
+                        folder_change = Some(*folder_id);
+                    }
+                }
+            });
+    });
     ui.horizontal(|ui| {
         ui.label("Hotkey:");
         let label = m
@@ -168,6 +208,9 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         changed |= clear_hotkey(&mut m.hotkey);
     }
     let _ = m;
+    if let Some(folder_id) = folder_change {
+        d.move_macro_to_folder(macro_id, folder_id);
+    }
     if let Some(original) = picker_original {
         d.window_picker.open(MatcherEditRequest {
             destination: MatcherDestination::MacroHotkey { macro_id },
@@ -203,6 +246,51 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
 mod tests {
     use super::*;
     use crate::mkmacro::{MkHotkey, MkKey};
+
+    #[test]
+    fn folder_choices_start_with_unfiled_and_preserve_document_order() {
+        let folders = vec![
+            MkMacroFolder {
+                id: 42,
+                name: "Zulu".into(),
+            },
+            MkMacroFolder {
+                id: 7,
+                name: "Alpha".into(),
+            },
+            MkMacroFolder {
+                id: 19,
+                name: "Zulu".into(),
+            },
+        ];
+        assert_eq!(
+            folder_choices(&folders),
+            vec![
+                (None, "Unfiled".into()),
+                (Some(42), "Zulu".into()),
+                (Some(7), "Alpha".into()),
+                (Some(19), "Zulu".into()),
+            ]
+        );
+        assert_eq!(folder_choices(&[]), vec![(None, "Unfiled".into())]);
+    }
+
+    #[test]
+    fn folder_choice_resolves_existing_and_dangling_references() {
+        let choices = folder_choices(&[MkMacroFolder {
+            id: 42,
+            name: "Utilities".into(),
+        }]);
+        assert_eq!(
+            current_folder_choice(&choices, Some(42)),
+            (Some(42), "Utilities")
+        );
+        assert_eq!(current_folder_choice(&choices, None), (None, "Unfiled"));
+        assert_eq!(
+            current_folder_choice(&choices, Some(999)),
+            (None, "Unfiled")
+        );
+    }
 
     #[test]
     fn hotkey_severity_maps_to_error_red_and_warning_yellow() {
