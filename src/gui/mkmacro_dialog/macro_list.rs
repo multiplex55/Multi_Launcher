@@ -124,21 +124,24 @@ fn show_folder_rename(
     if needs_focus {
         ui.memory_mut(|memory| memory.request_focus(id));
     }
-    // Consume before TextEdit handles Enter/Escape and surrenders focus.
+    // Consume Enter before TextEdit handles it and surrenders focus.
     let mut command = None;
-    if ui.memory(|memory| memory.has_focus(id)) {
-        if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
-            command = Some(Command::CancelFolderRename);
-        } else if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
-            command = Some(Command::CommitFolderRename(folder_id));
-        }
+    let has_focus = ui.memory(|memory| memory.has_focus(id));
+    if has_focus && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
+        command = Some(Command::CommitFolderRename(folder_id));
     }
-    ui.add(
+    let response = ui.add(
         TextEdit::singleline(text)
             .id(id)
             .hint_text("Folder name")
             .desired_width(ui.available_width()),
     );
+    // egui clears focus for Escape at frame start, before this widget runs.
+    if (has_focus || response.lost_focus())
+        && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+    {
+        command = Some(Command::CancelFolderRename);
+    }
     if let Some(error) = error {
         ui.colored_label(ui.visuals().error_fg_color, error);
     }
