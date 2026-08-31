@@ -538,6 +538,276 @@ mod tests {
         }
     }
 
+    fn folder_deletion_dialog() -> (tempfile::TempDir, MkMacroDialog) {
+        let (dir, mut d) = folder_dialog();
+        d.draft.folders.extend([
+            MkMacroFolder {
+                id: 43,
+                name: "Other".into(),
+            },
+            MkMacroFolder {
+                id: 44,
+                name: "Empty".into(),
+            },
+        ]);
+        d.draft.macros = five_macros().macros;
+        for (index, m) in d.draft.macros.iter_mut().enumerate() {
+            m.folder_id = [Some(42), Some(43), Some(42), None, Some(42)][index];
+            m.description = format!("Description {}", m.id);
+            m.enabled = index % 2 == 0;
+            m.hotkey = Some(MkHotkey {
+                key: MkKey::Function(m.id as u8),
+                modifiers: vec![MkKey::Control],
+            });
+            m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+                process: Some(format!("app{}.exe", m.id)),
+                ..Default::default()
+            });
+            m.playback.speed_percent = 150;
+            m.playback.random_delay_ms = 23;
+            m.playback.random_offset_px = 7;
+            m.steps = (1..=3)
+                .map(|offset| MkStep {
+                    id: m.id * 10 + offset,
+                    enabled: offset != 2,
+                    repeat: 2,
+                    delay_after_ms: 17,
+                    on_error: crate::mkmacro::MkErrorPolicy::Continue,
+                    action: MkAction::Delay(crate::mkmacro::MkDelayPayload {
+                        fixed_ms: offset * 10,
+                        ..Default::default()
+                    }),
+                })
+                .collect();
+            let relative_path = d
+                .store
+                .write_png_asset(
+                    m.id,
+                    1,
+                    &image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+                )
+                .unwrap();
+            m.image_assets.push(crate::mkmacro::MkImageAsset {
+                id: 1,
+                name: format!("Reference {}", m.id),
+                relative_path: relative_path.to_string_lossy().into_owned(),
+            });
+        }
+        d.save().unwrap();
+        d.selected_macro_id = Some(3);
+        d.selection.click(&[31, 32, 33], 1, false, false);
+        d.selection.click(&[31, 32, 33], 2, true, false);
+        d.collapsed_folders = HashSet::from([42, 43]);
+        (dir, d)
+    }
+
+    #[test]
+    fn folder_deletion_confirmation_shows_name_exact_count_and_preservation_warning() {
+        use eframe::egui::{Context, epaint::Shape};
+        fn collect_text(shape: &Shape, text: &mut String) {
+            match shape {
+                Shape::Text(shape) => {
+                    text.push_str(&shape.galley.job.text);
+                    text.push('\n');
+                }
+                Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (_dir, mut d) = folder_deletion_dialog();
+        let before = d.draft.clone();
+        for (id, name, count) in [(42, "Utilities", 3), (43, "Other", 1), (44, "Empty", 0)] {
+            d.request_delete_folder(id);
+            assert_eq!(d.pending_delete_folder, Some(id));
+            assert!(d.folder_delete_confirmation.is_open());
+            let ctx = Context::default();
+            // A second frame includes the window after egui's initial sizing pass.
+            let _ = ctx.run(Default::default(), |ctx| {
+                d.folder_delete_confirmation.ui(ctx);
+            });
+            let output = ctx.run(Default::default(), |ctx| {
+                d.folder_delete_confirmation.ui(ctx);
+            });
+            let mut text = String::new();
+            for shape in &output.shapes {
+                collect_text(&shape.shape, &mut text);
+            }
+            assert!(
+                text.contains(&format!("Delete folder \"{name}\"? Members: {count}.")),
+                "{text}"
+            );
+            assert!(text.contains("Members will move to Unfiled."), "{text}");
+            assert!(text.contains("No macros will be deleted."), "{text}");
+            assert_eq!(d.draft, before);
+            assert!(!d.dirty);
+        }
+    }
+
+    #[test]
+    fn folder_deletion_with_zero_members_changes_only_the_folder_list() {
+        let (_dir, mut d) = folder_deletion_dialog();
+        let mut expected = d.draft.clone();
+        expected.folders.remove(2);
+        assert!(d.delete_folder(44));
+        assert_eq!(d.draft, expected);
+        assert!(d.dirty);
+        assert_eq!(d.selected_macro_id, Some(3));
+        assert_eq!(d.collapsed_folders, HashSet::from([42, 43]));
+        d.save().unwrap();
+        assert!(!d.delete_folder(44));
+        assert!(!d.dirty);
+        assert_eq!(d.draft, expected);
+    }
+
+    #[test]
+    fn folder_deletion_preserves_all_macro_fields_assets_order_and_selection() {
+        for rename_target in [42, 43] {
+            let (_dir, mut d) = folder_deletion_dialog();
+            d.begin_folder_rename(rename_target);
+            d.folder_rename_text = "Uncommitted rename".into();
+            d.folder_error = Some("Rename error".into());
+            let before = d.draft.clone();
+            let baseline = d.baseline.clone();
+            let disk_before = fs::read(_dir.path().join(MKMACROS_FILE)).unwrap();
+            let assets: Vec<_> = before
+                .macros
+                .iter()
+                .map(|m| {
+                    let path = d.store.asset_path(m.id, 1).unwrap();
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            let mut expected_selection = d.selection.clone();
+            d.request_delete_folder(42);
+            d.handle_folder_delete_confirmation(ConfirmationResult::Confirmed);
+            let mut expected = before.clone();
+            expected.folders.remove(0);
+            for m in &mut expected.macros {
+                if m.folder_id == Some(42) {
+                    m.folder_id = None;
+                }
+            }
+            // Full structural equality covers every macro field, unrelated membership,
+            // global order, settings, and all surviving folders.
+            assert_eq!(d.draft, expected);
+            assert_eq!(d.selected_macro_id, Some(3));
+            assert_eq!(d.selection.ids, expected_selection.ids);
+            d.selection.click(&[31, 32, 33], 0, false, true);
+            expected_selection.click(&[31, 32, 33], 0, false, true);
+            assert_eq!(
+                d.selection.ids, expected_selection.ids,
+                "selection anchor survives"
+            );
+            assert_eq!(d.collapsed_folders, HashSet::from([43]));
+            if rename_target == 42 {
+                assert_eq!(d.pending_folder_rename, None);
+                assert!(d.folder_rename_text.is_empty());
+                assert!(!d.folder_rename_needs_focus);
+                assert_eq!(d.folder_error, None);
+            } else {
+                assert_eq!(d.pending_folder_rename, Some(43));
+                assert_eq!(d.folder_rename_text, "Uncommitted rename");
+                assert!(d.folder_rename_needs_focus);
+                assert_eq!(d.folder_error.as_deref(), Some("Rename error"));
+            }
+            assert_eq!(d.pending_delete_folder, None);
+            assert!(!d.folder_delete_confirmation.is_open());
+            assert!(!d.delete_confirmation.is_open());
+            assert!(d.dirty);
+            assert!(Arc::ptr_eq(&baseline, &d.baseline));
+            assert_eq!(*d.store.snapshot(), before);
+            assert_eq!(
+                fs::read(_dir.path().join(MKMACROS_FILE)).unwrap(),
+                disk_before
+            );
+            for (path, bytes) in assets {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn folder_deletion_cancellation_changes_only_pending_deletion_state() {
+        for dirty in [false, true] {
+            let (_dir, mut d) = folder_deletion_dialog();
+            d.dirty = dirty;
+            d.begin_folder_rename(42);
+            d.folder_rename_text = "Uncommitted rename".into();
+            d.folder_error = Some("Rename error".into());
+            d.search = "query".into();
+            d.request_delete_selected_macro();
+            let before = d.draft.clone();
+            let baseline = d.baseline.clone();
+            let mut selection = d.selection.clone();
+            d.request_delete_folder(42);
+            d.handle_folder_delete_confirmation(ConfirmationResult::None);
+            assert_eq!(d.pending_delete_folder, Some(42));
+            d.handle_folder_delete_confirmation(ConfirmationResult::Cancelled);
+            assert_eq!(d.pending_delete_folder, None);
+            assert!(!d.folder_delete_confirmation.is_open());
+            assert_eq!(d.draft, before);
+            assert_eq!(*d.store.snapshot(), before);
+            assert!(Arc::ptr_eq(&baseline, &d.baseline));
+            assert_eq!(d.dirty, dirty);
+            assert!(!d.conflict);
+            assert_eq!(d.selected_macro_id, Some(3));
+            assert_eq!(d.selection.ids, selection.ids);
+            d.selection.click(&[31, 32, 33], 0, false, true);
+            selection.click(&[31, 32, 33], 0, false, true);
+            assert_eq!(d.selection.ids, selection.ids);
+            assert_eq!(d.collapsed_folders, HashSet::from([42, 43]));
+            assert_eq!(d.pending_folder_rename, Some(42));
+            assert_eq!(d.folder_rename_text, "Uncommitted rename");
+            assert!(d.folder_rename_needs_focus);
+            assert_eq!(d.folder_error.as_deref(), Some("Rename error"));
+            assert_eq!(d.search, "query");
+            assert!(d.delete_confirmation.is_open());
+        }
+    }
+
+    #[test]
+    fn folder_deletion_stale_confirmation_after_external_sync_is_harmless() {
+        let (_dir, mut d) = folder_deletion_dialog();
+        d.request_delete_folder(42);
+        let mut external = d.draft.clone();
+        external.folders.remove(0);
+        for m in &mut external.macros {
+            if m.folder_id == Some(42) {
+                m.folder_id = None;
+            }
+        }
+        d.store.save(external.clone()).unwrap();
+        d.sync_external();
+        assert_eq!(d.pending_delete_folder, None);
+        d.handle_folder_delete_confirmation(ConfirmationResult::Confirmed);
+        assert_eq!(d.draft, external);
+        assert!(!d.dirty);
+        assert_eq!(d.selected_macro_id, Some(3));
+        assert!(!d.folder_delete_confirmation.is_open());
+    }
+
+    #[test]
+    fn folder_deletion_revalidates_target_before_mutating_any_members() {
+        let (_dir, mut d) = folder_deletion_dialog();
+        d.request_delete_folder(42);
+        d.draft.folders.remove(0);
+        // Even dangling membership must be untouched when the target is absent.
+        let before = d.draft.clone();
+        d.handle_folder_delete_confirmation(ConfirmationResult::Confirmed);
+        assert_eq!(d.draft, before);
+        assert!(!d.dirty);
+        assert_eq!(d.pending_delete_folder, None);
+        assert!(!d.folder_delete_confirmation.is_open());
+        d.request_delete_folder(42);
+        assert_eq!(d.pending_delete_folder, None);
+        assert!(!d.folder_delete_confirmation.is_open());
+    }
+
     fn assert_no_pending_folder_operations(d: &MkMacroDialog) {
         assert_eq!(d.pending_folder_rename, None);
         assert!(d.folder_rename_text.is_empty());
@@ -2497,7 +2767,6 @@ impl MkMacroDialog {
 
     pub fn request_delete_folder(&mut self, folder_id: u64) {
         self.cancel_folder_deletion();
-        self.folder_error = None;
         if let Some(folder) = self
             .draft
             .folders
@@ -2505,10 +2774,57 @@ impl MkMacroDialog {
             .find(|folder| folder.id == folder_id)
         {
             self.pending_delete_folder = Some(folder_id);
+            let member_count = self
+                .draft
+                .macros
+                .iter()
+                .filter(|m| m.folder_id == Some(folder_id))
+                .count();
             self.folder_delete_confirmation.open_custom(
-                format!("Delete folder \"{}\"?", folder.name),
-                "Only the folder organization will be removed. Macros will be kept.",
+                format!(
+                    "Delete folder \"{}\"? Members: {member_count}.",
+                    folder.name
+                ),
+                "Members will move to Unfiled. No macros will be deleted.",
             );
+        }
+    }
+
+    /// Remove only the folder organization, preserving macros and editor selection.
+    /// Missing folders (including stale confirmations) are a no-op.
+    pub fn delete_folder(&mut self, folder_id: u64) -> bool {
+        let Some(index) = self
+            .draft
+            .folders
+            .iter()
+            .position(|folder| folder.id == folder_id)
+        else {
+            return false;
+        };
+        for m in &mut self.draft.macros {
+            if m.folder_id == Some(folder_id) {
+                m.folder_id = None;
+            }
+        }
+        self.draft.folders.remove(index);
+        self.collapsed_folders.remove(&folder_id);
+        if self.pending_folder_rename == Some(folder_id) {
+            self.cancel_folder_rename();
+        }
+        self.mark_dirty();
+        true
+    }
+
+    fn handle_folder_delete_confirmation(&mut self, result: ConfirmationResult) {
+        match result {
+            ConfirmationResult::Confirmed => {
+                if let Some(id) = self.pending_delete_folder {
+                    self.delete_folder(id);
+                }
+                self.cancel_folder_deletion();
+            }
+            ConfirmationResult::Cancelled => self.cancel_folder_deletion(),
+            ConfirmationResult::None => {}
         }
     }
 
@@ -2907,6 +3223,8 @@ impl MkMacroDialog {
         if self.delete_confirmation.ui(ui.ctx()) == ConfirmationResult::Confirmed {
             self.delete_selected_macro();
         }
+        let folder_delete_result = self.folder_delete_confirmation.ui(ui.ctx());
+        self.handle_folder_delete_confirmation(folder_delete_result);
         match self.unwrap_confirmation.ui(ui.ctx()) {
             ConfirmationResult::Confirmed => {
                 if let Some(id) = self.pending_unwrap_block.take() {
