@@ -47,10 +47,13 @@ pub(super) fn show_empty(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                 ui.heading("Mouse/Keyboard Macros");
                 ui.label("Create reusable keyboard, mouse, window, and automation workflows.");
                 if ui
-                    .add_sized([180.0, 36.0], eframe::egui::Button::new("+ Create Macro"))
+                    .add_sized([180.0, 36.0], eframe::egui::Button::new("New Macro"))
                     .clicked()
                 {
                     d.create_macro();
+                }
+                if ui.button("New Folder").clicked() {
+                    d.create_folder();
                 }
                 ui.add_enabled(false, eframe::egui::Button::new("Record New Macro"))
                     .on_disabled_hover_text("Macro recording integration is coming soon.");
@@ -58,24 +61,74 @@ pub(super) fn show_empty(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         },
     );
 }
+#[derive(Clone, Copy)]
+enum Command {
+    NewMacro,
+    NewFolder,
+    NewMacroHere(u64),
+    RenameFolder(u64),
+    DeleteFolder(u64),
+    DuplicateMacro(u64),
+    MoveMacro(u64, Option<u64>),
+    DeleteMacro(u64),
+}
+
+fn apply_command(d: &mut MkMacroDialog, command: Command) {
+    match command {
+        Command::NewMacro => d.create_macro(),
+        Command::NewFolder => {
+            d.create_folder();
+        }
+        Command::NewMacroHere(folder_id) => {
+            if d.draft.folders.iter().any(|folder| folder.id == folder_id) {
+                d.create_macro();
+                if let Some(id) = d.selected_macro_id {
+                    d.move_macro_to_folder(id, Some(folder_id));
+                }
+                d.collapsed_folders.remove(&folder_id);
+            }
+        }
+        Command::RenameFolder(id) => d.begin_folder_rename(id),
+        Command::DeleteFolder(id) => d.request_delete_folder(id),
+        Command::DuplicateMacro(id) | Command::DeleteMacro(id) => {
+            d.set_selected_macro(Some(id));
+            d.selection.clear();
+            if matches!(command, Command::DuplicateMacro(_)) {
+                d.duplicate_selected_macro();
+            } else {
+                d.request_delete_selected_macro();
+            }
+        }
+        Command::MoveMacro(id, folder_id) => {
+            d.move_macro_to_folder(id, folder_id);
+        }
+    }
+}
+
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
+    let mut command = None;
     ui.heading("Macros");
     ui.horizontal(|ui| {
-        if ui.button("New").clicked() {
-            d.create_macro();
+        if ui.button("New Macro").clicked() {
+            command = Some(Command::NewMacro);
         }
-        let selected = d.selected_macro().is_some();
+        if ui.button("New Folder").clicked() {
+            command = Some(Command::NewFolder);
+        }
+    });
+    ui.horizontal(|ui| {
+        let selected = d.selected_macro().map(|m| m.id);
         if ui
-            .add_enabled(selected, eframe::egui::Button::new("Duplicate"))
+            .add_enabled(selected.is_some(), eframe::egui::Button::new("Duplicate"))
             .clicked()
         {
-            d.duplicate_selected_macro();
+            command = selected.map(Command::DuplicateMacro);
         }
         if ui
-            .add_enabled(selected, eframe::egui::Button::new("Delete"))
+            .add_enabled(selected.is_some(), eframe::egui::Button::new("Delete"))
             .clicked()
         {
-            d.request_delete_selected_macro();
+            command = selected.map(Command::DeleteMacro);
         }
     });
     ui.add(eframe::egui::TextEdit::singleline(&mut d.search).hint_text("Search"));
@@ -95,15 +148,25 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                     let expanded = if let Some(folder) = group.folder {
                         let collapsed = d.is_folder_collapsed(folder.id);
                         let arrow = if collapsed { "▶" } else { "▼" };
-                        if ui
-                            .add(
-                                eframe::egui::Button::new(format!("{arrow} {}", folder.name))
-                                    .frame(false),
-                            )
-                            .clicked()
-                        {
+                        let response = ui.add(
+                            eframe::egui::Button::new(format!("{arrow} {}", folder.name))
+                                .frame(false),
+                        );
+                        if response.clicked() {
                             toggled_folders.push(folder.id);
                         }
+                        response.context_menu(|ui| {
+                            for (label, action) in [
+                                ("New Macro Here", Command::NewMacroHere(folder.id)),
+                                ("Rename Folder", Command::RenameFolder(folder.id)),
+                                ("Delete Folder", Command::DeleteFolder(folder.id)),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    command = Some(action);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                         !collapsed
                     } else {
                         ui.strong("Unfiled");
@@ -112,19 +175,55 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                     if expanded {
                         ui.indent("members", |ui| {
                             for m in &group.macros {
-                                if (search.is_empty() || m.name.to_lowercase().contains(&search))
-                                    && ui
-                                        .push_id(m.id, |ui| {
-                                            ui.selectable_label(
-                                                d.selected_macro_id == Some(m.id),
-                                                &m.name,
-                                            )
-                                        })
-                                        .inner
-                                        .clicked()
-                                {
-                                    clicked = Some(m.id);
+                                if !search.is_empty() && !m.name.to_lowercase().contains(&search) {
+                                    continue;
                                 }
+                                ui.push_id(m.id, |ui| {
+                                    let response = ui.selectable_label(
+                                        d.selected_macro_id == Some(m.id),
+                                        &m.name,
+                                    );
+                                    if response.clicked() {
+                                        clicked = Some(m.id);
+                                    }
+                                    response.context_menu(|ui| {
+                                        if ui.button("Duplicate").clicked() {
+                                            command = Some(Command::DuplicateMacro(m.id));
+                                            ui.close_menu();
+                                        }
+                                        ui.menu_button("Move to Folder", |ui| {
+                                            let destinations = d
+                                                .draft
+                                                .folders
+                                                .iter()
+                                                .map(|folder| {
+                                                    (Some(folder.id), folder.name.as_str())
+                                                })
+                                                .chain(std::iter::once((None, "Unfiled")));
+                                            for (folder_id, label) in destinations {
+                                                if ui
+                                                    .add_enabled(
+                                                        m.folder_id != folder_id,
+                                                        eframe::egui::Button::new(label),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    command =
+                                                        Some(Command::MoveMacro(m.id, folder_id));
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                        if ui.button("Delete").clicked() {
+                                            command = Some(Command::DeleteMacro(m.id));
+                                            ui.close_menu();
+                                        }
+                                        // A submenu command closes the parent context menu too.
+                                        if command.is_some() {
+                                            ui.close_menu();
+                                        }
+                                    });
+                                });
                             }
                         });
                     }
@@ -138,6 +237,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     if let Some(id) = clicked {
         d.set_selected_macro(Some(id));
         d.selection.clear();
+    }
+    if let Some(command) = command {
+        apply_command(d, command);
     }
 }
 

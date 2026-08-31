@@ -23,8 +23,8 @@ pub mod window_picker;
 
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
-    DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroStore, MkWindowMatcher,
-    NormalizationConfig, RecordedStep, repair_ids, validate_document,
+    DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroFolder, MkMacroStore,
+    MkWindowMatcher, NormalizationConfig, RecordedStep, repair_ids, validate_document,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -160,6 +160,149 @@ mod tests {
         }];
         d.save().unwrap();
         (dir, d)
+    }
+
+    #[test]
+    fn new_folder_id_is_nonzero_unique_and_stable_across_creation_and_save() {
+        let (_dir, mut d) = folder_dialog();
+        let first = d.create_folder();
+        let second = d.create_folder();
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        let ids: Vec<_> = d.draft.folders.iter().map(|folder| folder.id).collect();
+        assert_eq!(ids, vec![42, first, second]);
+        assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), 3);
+        assert!(!repair_ids(&mut d.draft));
+        d.save().unwrap();
+        assert!(d.reload_with_decision(DirtyDecision::Discard));
+        assert_eq!(
+            d.draft
+                .folders
+                .iter()
+                .map(|folder| folder.id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+    }
+
+    #[test]
+    fn new_folder_marks_draft_dirty_without_changing_saved_document() {
+        let (_dir, mut d) = folder_dialog();
+        let saved = d.store.snapshot();
+        assert!(!d.dirty);
+        let id = d.create_folder();
+        assert!(d.dirty);
+        assert_eq!(
+            d.draft.folders.last().unwrap(),
+            &MkMacroFolder {
+                id,
+                name: "New Folder".into(),
+            }
+        );
+        assert_eq!(*d.store.snapshot(), *saved);
+        assert_eq!(*d.baseline, *saved);
+    }
+
+    #[test]
+    fn new_folder_names_use_first_available_case_insensitive_suffix() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.folders.extend([
+            MkMacroFolder {
+                id: 43,
+                name: "nEw fOlDeR".into(),
+            },
+            MkMacroFolder {
+                id: 44,
+                name: "NEW FOLDER 2".into(),
+            },
+            MkMacroFolder {
+                id: 45,
+                name: "New Folder 4".into(),
+            },
+        ]);
+        d.create_folder();
+        assert_eq!(d.draft.folders.last().unwrap().name, "New Folder 3");
+        d.create_folder();
+        assert_eq!(d.draft.folders.last().unwrap().name, "New Folder 5");
+        let names: HashSet<_> = d
+            .draft
+            .folders
+            .iter()
+            .map(|f| f.name.to_lowercase())
+            .collect();
+        assert_eq!(names.len(), d.draft.folders.len());
+    }
+
+    #[test]
+    fn moving_macro_to_real_folder_assigns_id_and_marks_dirty() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        d.save().unwrap();
+        let mut expected = d.draft.clone();
+        expected.macros[0].folder_id = Some(42);
+        assert!(d.move_macro_to_folder(1, Some(42)));
+        assert_eq!(d.draft, expected);
+        assert!(d.dirty);
+    }
+
+    #[test]
+    fn moving_macro_to_unfiled_clears_folder_and_marks_dirty() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        d.draft.macros[0].folder_id = Some(42);
+        d.save().unwrap();
+        let mut expected = d.draft.clone();
+        expected.macros[0].folder_id = None;
+        assert!(d.move_macro_to_folder(1, None));
+        assert_eq!(d.draft, expected);
+        assert!(d.dirty);
+    }
+
+    #[test]
+    fn moving_macro_to_current_destination_has_no_additional_mutation() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        for destination in [Some(42), None] {
+            assert!(d.move_macro_to_folder(1, destination));
+            let draft = d.draft.clone();
+            assert!(!d.move_macro_to_folder(1, destination));
+            assert_eq!(d.draft, draft);
+            assert!(d.dirty);
+            d.save().unwrap();
+            let baseline = d.baseline.clone();
+            assert!(!d.move_macro_to_folder(1, destination));
+            assert_eq!(d.draft, draft);
+            assert!(!d.dirty);
+            assert!(Arc::ptr_eq(&d.baseline, &baseline));
+        }
+    }
+
+    #[test]
+    fn moving_macro_to_missing_folder_rejects_dangling_reference() {
+        let (_dir, mut d) = folder_dialog();
+        d.draft.macros = five_macros().macros;
+        d.save().unwrap();
+        for current in [None, Some(42)] {
+            d.draft.macros[0].folder_id = current;
+            d.save().unwrap();
+            let draft = d.draft.clone();
+            for destination in [Some(999), Some(0)] {
+                assert!(!d.move_macro_to_folder(1, destination));
+                assert_eq!(d.draft, draft);
+                assert!(!d.dirty);
+            }
+        }
+    }
+
+    #[test]
+    fn moving_missing_macro_leaves_draft_unchanged() {
+        let (_dir, mut d) = folder_dialog();
+        let draft = d.draft.clone();
+        for destination in [Some(42), None] {
+            assert!(!d.move_macro_to_folder(999, destination));
+            assert_eq!(d.draft, draft);
+            assert!(!d.dirty);
+        }
     }
 
     fn assert_no_pending_folder_operations(d: &MkMacroDialog) {
@@ -1855,6 +1998,44 @@ impl MkMacroDialog {
     }
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    pub fn create_folder(&mut self) -> u64 {
+        let names: HashSet<_> = self
+            .draft
+            .folders
+            .iter()
+            .map(|folder| folder.name.to_lowercase())
+            .collect();
+        let mut name = "New Folder".to_owned();
+        let mut suffix = 2;
+        while names.contains(&name.to_lowercase()) {
+            name = format!("New Folder {suffix}");
+            suffix += 1;
+        }
+        self.draft.folders.push(MkMacroFolder { id: 0, name });
+        repair_ids(&mut self.draft);
+        let id = self.draft.folders.last().unwrap().id;
+        self.mark_dirty();
+        id
+    }
+
+    /// Returns true only when an existing macro changes to a valid destination.
+    pub fn move_macro_to_folder(&mut self, macro_id: u64, folder_id: Option<u64>) -> bool {
+        if folder_id
+            .is_some_and(|id| id == 0 || !self.draft.folders.iter().any(|folder| folder.id == id))
+        {
+            return false;
+        }
+        let Some(m) = self.draft.macros.iter_mut().find(|m| m.id == macro_id) else {
+            return false;
+        };
+        if m.folder_id == folder_id {
+            return false;
+        }
+        m.folder_id = folder_id;
+        self.mark_dirty();
+        true
     }
 
     pub fn is_folder_collapsed(&self, folder_id: u64) -> bool {
