@@ -462,6 +462,37 @@ mod tests {
     }
 
     #[test]
+    fn search_temporarily_expands_collapsed_folder_and_clearing_restores_it() {
+        let mut draft = document();
+        draft.macros[1].description = "Match this description".into();
+        draft.macros[3].description = "Match this description".into();
+        let collapsed = HashSet::from([20, 10, 99]);
+        let before = collapsed.clone();
+
+        let search_results = visible_macro_groups(&draft, "  MATCH  ", &collapsed);
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(search_results[0].folder.map(|folder| folder.id), Some(20));
+        assert!(search_results[0].expanded);
+        assert_eq!(ids(&search_results[0]), vec![7, 5]);
+        assert_eq!(collapsed, before);
+
+        let restored = visible_macro_groups(&draft, "", &collapsed);
+        assert_eq!(
+            restored
+                .iter()
+                .map(|group| group.folder.map(|folder| folder.id))
+                .collect::<Vec<_>>(),
+            vec![Some(20), Some(10), Some(30), None]
+        );
+        assert!(!restored[0].expanded);
+        assert!(restored[0].macros.is_empty());
+        assert!(!restored[1].expanded);
+        assert!(restored[1].macros.is_empty());
+        assert_eq!(ids(&restored[3]), vec![8, 4, 3]);
+        assert_eq!(collapsed, before);
+    }
+
+    #[test]
     fn rendering_search_preserves_filtered_selection_and_collapsed_state() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = crate::mkmacro::MkMacroStore::open(dir.path()).unwrap();

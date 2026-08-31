@@ -425,6 +425,11 @@ mod tests {
                 }),
             })
             .collect();
+        m.image_assets.push(crate::mkmacro::MkImageAsset {
+            id: 7,
+            name: "Preserve this asset".into(),
+            relative_path: "mkmacro_assets/3/7.png".into(),
+        });
         d.save().unwrap();
         d.selected_macro_id = Some(3);
         let rows = [11, 12, 13];

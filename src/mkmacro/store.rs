@@ -1565,14 +1565,13 @@ mod tests {
         assert_eq!(d.macros[0].folder_id, Some(42));
         assert_eq!(d.macros[1].folder_id, None);
         assert_eq!(d.macros[2].folder_id, None);
-        assert_eq!(d.macros[0].id, 42);
-        assert_eq!(d.macros[0].steps[0].id, 42);
         assert_eq!(d.macros.len(), original_macros.len());
         for (actual, original) in d.macros.iter().zip(original_macros.iter()) {
-            assert_eq!(actual.steps, original.steps);
-            assert_eq!(actual.name, original.name);
-            assert_eq!(actual.description, original.description);
-            assert_eq!(actual.enabled, original.enabled);
+            let mut expected = original.clone();
+            if expected.folder_id == Some(999) {
+                expected.folder_id = None;
+            }
+            assert_eq!(actual, &expected);
         }
 
         let repaired = d.clone();

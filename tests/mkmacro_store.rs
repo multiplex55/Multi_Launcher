@@ -1,5 +1,7 @@
+use multi_launcher::gui::MkMacroDialog;
 use multi_launcher::mkmacro::*;
 use std::fs;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn invalid_doc() -> MkMacroDocument {
@@ -442,6 +444,108 @@ fn schema_nine_load_repairs_only_dangling_folder_membership() {
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted, expected_json);
     drop(store);
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(*reopened.snapshot(), expected);
+}
+
+#[test]
+fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
+    let dir = tempdir().unwrap();
+    let original = MkMacroDocument {
+        schema_version: SCHEMA_VERSION,
+        settings: Default::default(),
+        folders: vec![
+            MkMacroFolder {
+                id: 42,
+                name: "Zebra".into(),
+            },
+            MkMacroFolder {
+                id: 7,
+                name: "Alpha".into(),
+            },
+            MkMacroFolder {
+                id: 19,
+                name: "Unused folder".into(),
+            },
+        ],
+        macros: vec![
+            MkMacro {
+                id: 81,
+                name: "Valid first folder".into(),
+                description: "Keep this reference".into(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: Some(42),
+                playback: Default::default(),
+                steps: vec![],
+                image_assets: vec![],
+            },
+            MkMacro {
+                id: 12,
+                name: "Dangling folder".into(),
+                description: "Only clear the membership".into(),
+                enabled: false,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: Some(999),
+                playback: Default::default(),
+                steps: vec![],
+                image_assets: vec![],
+            },
+            MkMacro {
+                id: 42,
+                name: "Valid second folder".into(),
+                description: "Keep this membership".into(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: Some(7),
+                playback: Default::default(),
+                steps: vec![],
+                image_assets: vec![],
+            },
+            MkMacro {
+                id: 3,
+                name: "Already unfiled".into(),
+                description: "Keep unfiled membership".into(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![],
+                image_assets: vec![],
+            },
+        ],
+    };
+    let mut expected = original.clone();
+    expected.macros[1].folder_id = None;
+
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store.save(original).unwrap();
+    drop(store);
+
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(*store.snapshot(), expected);
+
+    let mut dialog = MkMacroDialog::new(Arc::new(store));
+    dialog.collapsed_folders.insert(42);
+    dialog.begin_folder_rename(42);
+    dialog.folder_rename_text = "Uncommitted rename".into();
+    dialog.request_delete_folder(42);
+    dialog.search = "temporary search".into();
+    let before_save = dialog.draft.clone();
+    dialog.save().unwrap();
+    assert_eq!(dialog.draft, before_save);
+
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.path().join(MKMACROS_FILE)).unwrap()).unwrap();
+    assert_eq!(persisted, serde_json::to_value(&expected).unwrap());
+
+    drop(dialog);
     let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
     assert!(matches!(disposition, LoadDisposition::Loaded));
     assert_eq!(*reopened.snapshot(), expected);
