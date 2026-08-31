@@ -2083,6 +2083,72 @@ mod tests {
     }
 
     #[test]
+    fn folder_metadata_does_not_change_hotkey_registration_or_dispatch() {
+        for macro_ in [mac(91, true), process_mac(91, "firefox.exe")] {
+            let mut document = validation_document(vec![macro_]);
+            document.folders = vec![
+                crate::mkmacro::MkMacroFolder {
+                    id: 42,
+                    name: "Utilities".into(),
+                },
+                crate::mkmacro::MkMacroFolder {
+                    id: 43,
+                    name: "Work".into(),
+                },
+            ];
+            let expected = compile_hotkey_groups(&document);
+            assert_eq!(expected.len(), 1);
+            for (folder_id, name) in [
+                (None, "Utilities"),
+                (Some(42), "Utilities"),
+                (Some(42), "Renamed folder"),
+                (Some(43), "Utilities"),
+            ] {
+                document.macros[0].folder_id = folder_id;
+                document.folders[0].name = name.into();
+                assert_eq!(compile_hotkey_groups(&document), expected);
+                let h = TickHarness::with_reserved(document.clone(), Some(firefox()), vec![]);
+                assert_eq!(h.groups(), expected);
+                h.press();
+                h.tick();
+                assert_eq!(h.fired.ids(), vec![91]);
+                h.release();
+                h.press();
+                assert_eq!(h.fired.ids(), vec![91, 91]);
+            }
+        }
+    }
+
+    #[test]
+    fn moving_folders_preserves_hotkey_identity_and_held_edge() {
+        let h = TickHarness::new(vec![process_mac(91, "firefox.exe")], Some(firefox()));
+        let expected = h.groups();
+        h.press();
+        for destination in [Some(42), Some(43), None] {
+            let mut document = (*h.store.snapshot()).clone();
+            document.folders = vec![
+                crate::mkmacro::MkMacroFolder {
+                    id: 42,
+                    name: "Utilities".into(),
+                },
+                crate::mkmacro::MkMacroFolder {
+                    id: 43,
+                    name: "Work".into(),
+                },
+            ];
+            document.macros[0].folder_id = destination;
+            h.store.save(document).unwrap();
+            h.tick();
+            assert_eq!(h.fired.ids(), vec![91]);
+            assert!(h.groups()[0].triggered);
+        }
+        h.release();
+        assert_eq!(h.groups(), expected);
+        h.press();
+        assert_eq!(h.fired.ids(), vec![91, 91]);
+    }
+
+    #[test]
     fn firefox_active_dispatches_only_firefox_from_a_shared_chord() {
         let h = TickHarness::new(
             vec![

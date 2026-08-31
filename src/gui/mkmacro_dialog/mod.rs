@@ -454,6 +454,37 @@ mod tests {
     }
 
     #[test]
+    fn moving_folders_preserves_macro_id_hotkey_compilation_and_manual_run_eligibility() {
+        use crate::mkmacro::{compile, hotkeys::compile_hotkey};
+
+        let (_dir, mut d) = folder_dialog();
+        d.draft.folders.push(crate::mkmacro::MkMacroFolder {
+            id: 43,
+            name: "Work".into(),
+        });
+        d.draft.macros = five_macros().macros;
+        d.selected_macro_id = Some(1);
+        d.draft.macros[0].hotkey = Some(MkHotkey {
+            key: MkKey::Delete,
+            modifiers: vec![],
+        });
+        let expected_hotkey = compile_hotkey(d.draft.macros[0].hotkey.as_ref().unwrap());
+        assert!(expected_hotkey.is_some());
+        for enabled in [true, false] {
+            d.draft.macros[0].enabled = enabled;
+            for destination in [Some(42), Some(43), None] {
+                assert!(d.move_macro_to_folder(1, destination));
+                let m = &d.draft.macros[0];
+                assert_eq!(m.folder_id, destination);
+                assert_eq!(m.id, 1);
+                assert_eq!(compile(m).unwrap().macro_id, 1);
+                assert_eq!(compile_hotkey(m.hotkey.as_ref().unwrap()), expected_hotkey);
+                assert_eq!(d.playback_block_reason().is_none(), enabled);
+            }
+        }
+    }
+
+    #[test]
     fn choosing_unfiled_normalizes_a_dangling_folder_reference() {
         let (_dir, mut d) = folder_dialog();
         d.draft.macros = five_macros().macros;

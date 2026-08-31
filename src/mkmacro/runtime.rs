@@ -664,6 +664,135 @@ pub(crate) fn toggle_recording() {
 }
 
 #[cfg(test)]
+mod folder_tests {
+    use super::*;
+    use crate::mkmacro::{executor::fake::FakeBackend, model::*};
+    use std::time::{Duration, Instant};
+
+    fn run_document(document: MkMacroDocument, id: u64) -> (Arc<RuntimeSnapshot>, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store.save(document).unwrap();
+        let effects = Arc::new(FakeBackend::default());
+        let runtime = MacroRuntime::new(Arc::new(store), effects.clone().backends());
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(id)),
+            CommandResult::Accepted
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = runtime.snapshot();
+            if matches!(
+                snapshot.state,
+                RuntimeState::Completed | RuntimeState::Failed
+            ) {
+                return (snapshot, effects.events());
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not finish: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn folder_metadata_does_not_change_runtime_lookup_or_manual_run_eligibility() {
+        let target = MkMacro {
+            id: 91,
+            name: "Target".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: Some(MkHotkey {
+                key: MkKey::Function(8),
+                modifiers: vec![],
+            }),
+            hotkey_scope: MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+                process: Some("editor.exe".into()),
+                ..Default::default()
+            }),
+            folder_id: None,
+            playback: Default::default(),
+            steps: vec![MkStep {
+                id: 11,
+                enabled: true,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::Text(MkTextPayload {
+                    text: "target executed".into(),
+                    mode: MkTextMode::Type,
+                }),
+            }],
+            image_assets: vec![],
+        };
+        let mut decoy = target.clone();
+        decoy.id = 7;
+        decoy.name = "Decoy".into();
+        decoy.hotkey = None;
+        decoy.steps.clear();
+        let mut document = MkMacroDocument {
+            macros: vec![decoy, target],
+            folders: vec![
+                MkMacroFolder {
+                    id: 42,
+                    name: "Utilities".into(),
+                },
+                MkMacroFolder {
+                    id: 43,
+                    name: "Work".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        // A folder ID must never become a runtime target; disabled macros stay disabled.
+        for (enabled, requested_id, expected_state) in [
+            (true, 91, RuntimeState::Completed),
+            (false, 91, RuntimeState::Failed),
+            (true, 42, RuntimeState::Failed),
+        ] {
+            document.macros[1].enabled = enabled;
+            document.macros[1].folder_id = None;
+            document.folders[0].name = "Utilities".into();
+            let (expected, expected_events) = run_document(document.clone(), requested_id);
+            assert_eq!(expected.state, expected_state);
+            if expected_state == RuntimeState::Completed {
+                assert_eq!(expected.macro_id, Some(91));
+                assert_eq!(expected.steps[&11], StepState::Success);
+                assert_eq!(expected_events, ["text:target executed"]);
+            } else {
+                let kind = if enabled {
+                    DiagnosticKind::TargetNotFound
+                } else {
+                    DiagnosticKind::InvalidTarget
+                };
+                assert_eq!(expected.latest_failure.as_ref().unwrap().kind, kind);
+                assert!(expected_events.is_empty());
+            }
+            for (folder_id, name) in [
+                (None, "Utilities"),
+                (Some(42), "Utilities"),
+                (Some(42), "Renamed folder"),
+                (Some(43), "Utilities"),
+            ] {
+                document.macros[1].folder_id = folder_id;
+                document.folders[0].name = name.into();
+                let (actual, events) = run_document(document.clone(), requested_id);
+                assert_eq!(actual.state, expected.state);
+                assert_eq!(actual.macro_id, expected.macro_id);
+                assert_eq!(actual.run_id, expected.run_id);
+                assert_eq!(actual.steps, expected.steps);
+                assert_eq!(actual.completed_steps, expected.completed_steps);
+                assert_eq!(actual.total_steps, expected.total_steps);
+                assert_eq!(actual.latest_failure, expected.latest_failure);
+                assert_eq!(actual.failures, expected.failures);
+                assert_eq!(events, expected_events);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod recording_controller_tests {
     use super::*;
     use crate::mkmacro::{

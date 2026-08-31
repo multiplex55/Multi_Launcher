@@ -131,6 +131,64 @@ mod tests {
         }
     }
     #[test]
+    fn folder_metadata_does_not_change_compilation() {
+        let mut document = MkMacroDocument {
+            macros: vec![mac(vec![
+                step(11, MkAction::RepeatStart { count: 2 }),
+                step(
+                    12,
+                    MkAction::Text(MkTextPayload {
+                        text: "folder-independent".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+                step(13, MkAction::RepeatEnd),
+            ])],
+            folders: vec![
+                MkMacroFolder {
+                    id: 42,
+                    name: "Utilities".into(),
+                },
+                MkMacroFolder {
+                    id: 43,
+                    name: "Work".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let expected = compile(&document.macros[0]).unwrap();
+        let diagnostics = validate_document(&document, None);
+        assert!(can_run(&diagnostics));
+        for (folder_id, name) in [
+            (None, "Utilities"),
+            (Some(42), "Utilities"),
+            (Some(42), "Renamed folder"),
+            (Some(43), "Utilities"),
+        ] {
+            document.macros[0].folder_id = folder_id;
+            document.folders[0].name = name.into();
+            assert_eq!(validate_document(&document, None), diagnostics);
+            // Cover every field so future plan additions must be checked here too.
+            let MkExecutionPlan {
+                macro_id,
+                playback,
+                instructions,
+                step_to_instruction,
+            } = compile(&document.macros[0]).unwrap();
+            assert_eq!(macro_id, expected.macro_id);
+            assert_eq!(playback, expected.playback);
+            assert_eq!(step_to_instruction, expected.step_to_instruction);
+            assert_eq!(instructions.len(), expected.instructions.len());
+            for (actual, expected) in instructions.iter().zip(expected.instructions.iter()) {
+                let MkInstruction { step, depth, jump } = actual;
+                assert_eq!(step, &expected.step);
+                assert_eq!(depth, &expected.depth);
+                assert_eq!(jump, &expected.jump);
+            }
+        }
+    }
+
+    #[test]
     fn if_else_jumps_and_depth() {
         let p = compile(&mac(vec![
             step(1, MkAction::If(MkCondition::All { conditions: vec![] })),

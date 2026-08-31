@@ -72,6 +72,7 @@ pub struct MkMacro {
     pub hotkey: Option<MkHotkey>,
     #[serde(default)]
     pub hotkey_scope: MkHotkeyScope,
+    /// Folder membership is authoring metadata and is intentionally ignored by runtime execution.
     #[serde(default)]
     pub folder_id: Option<u64>,
     #[serde(default)]
