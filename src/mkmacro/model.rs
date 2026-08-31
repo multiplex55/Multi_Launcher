@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-// Schema 9 adds folders, scoped hotkeys, configurable delays, region clicks, and desktop selection.
-pub const SCHEMA_VERSION: u32 = 9;
+// Schema 10 adds persisted debugging breakpoints to macro steps while retaining
+// schema 9's folders, scoped hotkeys, configurable delays, region clicks, and desktop selection.
+pub const SCHEMA_VERSION: u32 = 10;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -1013,7 +1014,7 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_9_with_query_payload() {
+    fn current_document_round_trips_as_schema_10_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 id: 1,
@@ -1042,7 +1043,7 @@ mod launcher_command_payload_tests {
         };
 
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"schema_version\":9"));
+        assert!(json.contains("\"schema_version\":10"));
         assert!(json.contains(r#""data":{"query":"note list"}"#));
         assert_eq!(
             serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
@@ -1489,13 +1490,13 @@ mod wait_timeout_tests {
 }
 
 #[cfg(test)]
-mod schema_v9_serialization_tests {
+mod schema_v10_serialization_tests {
     use super::*;
 
     #[test]
-    fn document_defaults_to_schema_nine_and_no_folders() {
+    fn document_defaults_to_schema_ten_and_no_folders() {
         let document: MkMacroDocument = serde_json::from_str("{}").unwrap();
-        assert_eq!(document.schema_version, 9);
+        assert_eq!(document.schema_version, 10);
         assert!(document.folders.is_empty());
         assert!(MkMacroDocument::default().folders.is_empty());
     }

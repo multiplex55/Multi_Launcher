@@ -424,6 +424,9 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(8) {
         migrate_v8_to_v9(&mut value)?;
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(9) {
+        migrate_v9_to_v10(&mut value)?;
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
@@ -543,6 +546,38 @@ fn migrate_v8_to_v9(value: &mut serde_json::Value) -> Result<()> {
         }
     }
     object.insert("schema_version".into(), serde_json::json!(9));
+    Ok(())
+}
+
+/// Adds persisted debugging breakpoint state to every schema-9 macro step.
+fn migrate_v9_to_v10(value: &mut serde_json::Value) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 9 macro document must be an object"))?;
+
+    let Some(macros) = object.get_mut("macros").and_then(|v| v.as_array_mut()) else {
+        object.insert("schema_version".into(), serde_json::json!(10));
+        return Ok(());
+    };
+    for (macro_index, mac) in macros.iter_mut().enumerate() {
+        let macro_object = mac.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("macro {macro_index}: schema 9 macro must be an object")
+        })?;
+        let Some(steps) = macro_object.get_mut("steps").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for (step_index, step) in steps.iter_mut().enumerate() {
+            let step_object = step.as_object_mut().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "macro {macro_index} step {step_index}: schema 9 macro step must be an object"
+                )
+            })?;
+            step_object
+                .entry("breakpoint")
+                .or_insert(serde_json::Value::Bool(false));
+        }
+    }
+    object.insert("schema_version".into(), serde_json::json!(10));
     Ok(())
 }
 /// Joins legacy free-form fields without trimming meaningful text from either field.
@@ -1446,7 +1481,7 @@ mod tests {
         assert!(disk.macros.is_empty());
     }
     #[test]
-    fn old_migrates_and_future_is_rejected() {
+    fn old_migrates_and_schema_newer_than_ten_is_rejected() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(MKMACROS_FILE);
         let mut v = serde_json::to_value(document()).unwrap();
@@ -1460,8 +1495,12 @@ mod tests {
             format!(r#"{{"schema_version":{},"macros":[]}}"#, SCHEMA_VERSION + 1),
         )
         .unwrap();
-        let (_, x) = MkMacroStore::open(d.path()).unwrap();
-        assert!(matches!(x, LoadDisposition::NeedsUserRecovery { .. }))
+        let (_, disposition) = MkMacroStore::open(d.path()).unwrap();
+        let LoadDisposition::NeedsUserRecovery { error } = disposition else {
+            panic!("schema 11 should require user recovery")
+        };
+        assert!(error.contains("schema version 11"), "{error}");
+        assert!(error.contains("supported version 10"), "{error}");
     }
     #[test]
     fn version_one_mouse_move_migrates_once_to_payload() {
@@ -1739,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_seven_load_runs_both_migrations_and_round_trips_as_nine() {
+    fn schema_seven_load_runs_all_migrations_and_round_trips_as_ten() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MKMACROS_FILE);
         let value = schema_v7_document(vec![
@@ -1749,7 +1788,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let (doc, changed) = read_document(&path).unwrap().unwrap();
         assert!(changed);
-        assert_eq!(doc.schema_version, 9);
+        assert_eq!(doc.schema_version, SCHEMA_VERSION);
         assert_eq!(doc.macros[0].hotkey_scope, MkHotkeyScope::AnyWindow);
         assert_eq!(
             doc.macros[0].steps[1].action,
@@ -1787,5 +1826,166 @@ mod tests {
         );
         persist(&path, &document).unwrap();
         assert!(!read_document(&path).unwrap().unwrap().1);
+    }
+
+    #[test]
+    fn schema_nine_load_adds_breakpoints_without_changing_steps_or_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let original = serde_json::json!({
+            "schema_version": 9,
+            "folders": [],
+            "macros": [{
+                "id": 1,
+                "name": "debug migration",
+                "description": "preserve me",
+                "enabled": true,
+                "hotkey": null,
+                "hotkey_scope": {"type": "any_window"},
+                "folder_id": null,
+                "playback": {},
+                "steps": [
+                    {
+                        "id": 11,
+                        "enabled": false,
+                        "repeat": 2,
+                        "delay_after_ms": 3,
+                        "on_error": "continue",
+                        "action": {"type": "delay", "data": {
+                            "mode": "fixed", "fixed_ms": 125,
+                            "minimum_ms": 5, "maximum_ms": 250
+                        }}
+                    },
+                    {
+                        "id": 12,
+                        "enabled": true,
+                        "repeat": 4,
+                        "delay_after_ms": 6,
+                        "on_error": "stop",
+                        "action": {"type": "mouse_move", "data": {
+                            "target": {"kind": "screen", "point": {"x": -7, "y": 19}},
+                            "duration_ms": 80
+                        }}
+                    },
+                    {
+                        "id": 13,
+                        "enabled": true,
+                        "repeat": 1,
+                        "delay_after_ms": 9,
+                        "on_error": "continue",
+                        "action": {"type": "image_find", "data": {
+                            "asset_id": 21,
+                            "wait": {"timeout_ms": 500, "poll_interval_ms": 25},
+                            "region": {"type": "desktop"},
+                            "tolerance": 8,
+                            "alpha": "ignore",
+                            "return_point": "top_left",
+                            "not_found_policy": "fail",
+                            "outputs": {"found": "found", "point": "point", "x": "x", "y": "y"}
+                        }}
+                    }
+                ],
+                "image_assets": []
+            }],
+            "settings": serde_json::to_value(MkMacroSettings::default()).unwrap()
+        });
+        let original_steps = original["macros"][0]["steps"].as_array().unwrap().clone();
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+
+        let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        let loaded = store.snapshot();
+        assert_eq!(loaded.schema_version, 10);
+        assert!(loaded.macros[0].steps.iter().all(|step| !step.breakpoint));
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["schema_version"], 10);
+        for (index, original_step) in original_steps.iter().enumerate() {
+            let loaded_step = &loaded.macros[0].steps[index];
+            assert_eq!(
+                serde_json::to_value(&loaded_step.action).unwrap(),
+                original_step["action"]
+            );
+            let rewritten_step = &rewritten["macros"][0]["steps"][index];
+            for property in [
+                "id",
+                "enabled",
+                "repeat",
+                "delay_after_ms",
+                "on_error",
+                "action",
+            ] {
+                assert_eq!(
+                    rewritten_step[property], original_step[property],
+                    "step {index} property {property}"
+                );
+            }
+            assert_eq!(rewritten_step["breakpoint"], serde_json::Value::Bool(false));
+        }
+    }
+
+    #[test]
+    fn schema_nine_migration_preserves_existing_breakpoint_and_is_stable() {
+        let mut value = serde_json::json!({
+            "schema_version": 9,
+            "macros": [{"steps": [
+                {"breakpoint": true, "action": {"type": "delay", "data": {
+                    "mode": "fixed", "fixed_ms": 1, "minimum_ms": 0, "maximum_ms": 1
+                }}},
+                {"action": {"type": "mouse_move", "data": {
+                    "target": {"kind": "screen", "point": {"x": 1, "y": 2}},
+                    "duration_ms": 3
+                }}}
+            ]}]
+        });
+
+        migrate_v9_to_v10(&mut value).unwrap();
+        assert_eq!(value["macros"][0]["steps"][0]["breakpoint"], true);
+        assert_eq!(value["macros"][0]["steps"][1]["breakpoint"], false);
+        let once = value.clone();
+        migrate_v9_to_v10(&mut value).unwrap();
+        assert_eq!(value, once);
+    }
+
+    #[test]
+    fn schema_nine_empty_macros_and_missing_collections_migrate_successfully() {
+        for mut value in [
+            serde_json::json!({"schema_version": 9, "macros": []}),
+            serde_json::json!({"schema_version": 9}),
+            serde_json::json!({"schema_version": 9, "macros": [{"name": "no steps"}]}),
+        ] {
+            migrate_v9_to_v10(&mut value).unwrap();
+            assert_eq!(value["schema_version"], 10);
+        }
+    }
+
+    #[test]
+    fn schema_nine_migration_reports_context_for_malformed_entries() {
+        let mut malformed_macro = serde_json::json!({"schema_version": 9, "macros": [{}, "bad"]});
+        let error = migrate_v9_to_v10(&mut malformed_macro)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("macro 1"), "{error}");
+        assert_eq!(malformed_macro["schema_version"], 9);
+
+        let mut malformed_step = serde_json::json!({
+            "schema_version": 9,
+            "macros": [{"steps": [{"action": {}}, null]}]
+        });
+        let error = migrate_v9_to_v10(&mut malformed_step)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("macro 0 step 1"), "{error}");
+        assert_eq!(malformed_step["schema_version"], 9);
+
+        let mut malformed_root = serde_json::json!([]);
+        let error = migrate_v9_to_v10(&mut malformed_root)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("schema 9 macro document must be an object"),
+            "{error}"
+        );
     }
 }
