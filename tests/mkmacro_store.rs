@@ -348,6 +348,106 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
 }
 
 #[test]
+fn schema_eight_migrates_through_store_and_persists_canonical_schema_nine() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let fixture = include_str!("fixtures/mkmacros_v8.json");
+    fs::write(&path, fixture).unwrap();
+
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    let first = (*store.snapshot()).clone();
+    assert_eq!(first.schema_version, SCHEMA_VERSION);
+    assert_eq!(first.schema_version, 9);
+    assert!(first.folders.is_empty());
+    for mac in &first.macros {
+        assert_eq!(mac.hotkey_scope, MkHotkeyScope::AnyWindow);
+        assert_eq!(mac.folder_id, None);
+    }
+    assert_eq!(
+        first.macros[0].steps[0].action,
+        MkAction::Delay(MkDelayPayload {
+            mode: MkDelayMode::Fixed,
+            fixed_ms: 12_345,
+            minimum_ms: 0,
+            maximum_ms: 12_345,
+        })
+    );
+
+    // Start with the literal legacy fixture and change only the schema-9 fields.
+    // Full JSON equality also protects IDs, ordering, executable content, and
+    // nondefault macro/step options from accidental normalization or loss.
+    let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    expected["schema_version"] = serde_json::json!(9);
+    expected["folders"] = serde_json::json!([]);
+    for mac in expected["macros"].as_array_mut().unwrap() {
+        mac["hotkey_scope"] = serde_json::json!({"type": "any_window"});
+        mac["folder_id"] = serde_json::Value::Null;
+    }
+    expected["macros"][0]["steps"][0]["action"]["data"] = serde_json::json!({
+        "mode": "fixed", "fixed_ms": 12345, "minimum_ms": 0, "maximum_ms": 12345
+    });
+    assert_eq!(serde_json::to_value(&first).unwrap(), expected);
+
+    // Opening a legacy document itself persists the migration.
+    let after_open: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(after_open, expected);
+    assert_eq!(*store.save(first.clone()).unwrap(), first);
+    let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted, expected);
+    assert!(
+        persisted["macros"][0]["steps"][0]["action"]["data"]
+            .get("milliseconds")
+            .is_none()
+    );
+
+    drop(store);
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(*reopened.snapshot(), first);
+}
+
+#[test]
+fn schema_nine_load_repairs_only_dangling_folder_membership() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let fixture = include_str!("fixtures/mkmacros_v9_dangling_folder.json");
+    fs::write(&path, fixture).unwrap();
+    let original: MkMacroDocument = serde_json::from_str(fixture).unwrap();
+    assert_eq!(original.schema_version, 9);
+    assert_eq!(original.macros[1].folder_id, Some(999));
+    assert!(!original.folders.iter().any(|folder| folder.id == 999));
+    let mut expected = original.clone();
+    expected.macros[1].folder_id = None;
+
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    let repaired = store.snapshot();
+    assert_eq!(repaired.schema_version, SCHEMA_VERSION);
+    assert_eq!(*repaired, expected);
+    assert_eq!(repaired.macros[0].folder_id, Some(42));
+    assert_eq!(repaired.macros[1].folder_id, None);
+    assert_eq!(repaired.macros[2].folder_id, Some(7));
+    assert_eq!(repaired.macros[3].folder_id, None);
+    assert_eq!(repaired.folders, original.folders);
+    assert_eq!(
+        repaired.macros.iter().map(|mac| mac.id).collect::<Vec<_>>(),
+        original.macros.iter().map(|mac| mac.id).collect::<Vec<_>>()
+    );
+
+    // Verify the on-load repair reaches disk without changing anything else,
+    // including the deliberately unsorted arrays and the unused folder.
+    let mut expected_json: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    expected_json["macros"][1]["folder_id"] = serde_json::Value::Null;
+    let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted, expected_json);
+    drop(store);
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(*reopened.snapshot(), expected);
+}
+
+#[test]
 fn schema_newer_than_current_is_rejected() {
     let dir = tempdir().unwrap();
     fs::write(

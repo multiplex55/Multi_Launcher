@@ -1,0 +1,41 @@
+{
+  "schema_version": 9,
+  "settings": {"record_toggle_hotkey": {"key": {"function": 7}, "modifiers": ["control"]}},
+  "folders": [
+    {"id": 42, "name": "Zebra"},
+    {"id": 7, "name": "Alpha"},
+    {"id": 19, "name": "Unused folder"}
+  ],
+  "macros": [
+    {
+      "id": 81, "name": "Valid first folder", "description": "Keep this reference", "enabled": true,
+      "hotkey": {"key": {"function": 6}, "modifiers": ["control"]},
+      "hotkey_scope": {"type": "active_window", "data": {"title": "Editor", "title_regex": null, "process": null, "class": null}},
+      "folder_id": 42,
+      "playback": {"speed_percent": 125, "random_delay_ms": 17, "random_offset_px": 3},
+      "steps": [{"id": 902, "enabled": true, "repeat": 2, "delay_after_ms": 13, "on_error": "continue", "action": {"type": "delay", "data": {"mode": "random_range", "fixed_ms": 12345, "minimum_ms": 12, "maximum_ms": 345}}}],
+      "image_assets": []
+    },
+    {
+      "id": 12, "name": "Dangling folder", "description": "Only clear the membership", "enabled": false,
+      "hotkey": null, "hotkey_scope": {"type": "any_window"}, "folder_id": 999,
+      "playback": {"speed_percent": 75, "random_delay_ms": 0, "random_offset_px": 0},
+      "steps": [{"id": 603, "enabled": false, "repeat": 4, "delay_after_ms": 31, "on_error": "stop", "action": {"type": "text", "data": {"text": "Keep dangling macro content", "mode": "type"}}}],
+      "image_assets": []
+    },
+    {
+      "id": 42, "name": "Valid second folder", "description": "IDs use separate namespaces", "enabled": true,
+      "hotkey": null, "hotkey_scope": {"type": "any_window"}, "folder_id": 7,
+      "playback": {"speed_percent": 100, "random_delay_ms": 0, "random_offset_px": 0},
+      "steps": [{"id": 7, "enabled": true, "repeat": 1, "delay_after_ms": 0, "on_error": "stop", "action": {"type": "text", "data": {"text": "Valid reference content", "mode": "paste"}}}],
+      "image_assets": []
+    },
+    {
+      "id": 3, "name": "Already unfiled", "description": "Keep unfiled membership", "enabled": true,
+      "hotkey": null, "hotkey_scope": {"type": "any_window"}, "folder_id": null,
+      "playback": {"speed_percent": 100, "random_delay_ms": 0, "random_offset_px": 0},
+      "steps": [{"id": 11, "enabled": true, "repeat": 1, "delay_after_ms": 0, "on_error": "stop", "action": {"type": "text", "data": {"text": "Unfiled content", "mode": "type"}}}],
+      "image_assets": []
+    }
+  ]
+}

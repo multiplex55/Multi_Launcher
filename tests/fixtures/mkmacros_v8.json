@@ -1,0 +1,31 @@
+{
+  "schema_version": 8,
+  "settings": {"record_toggle_hotkey": {"key": {"function": 7}, "modifiers": ["control"]}},
+  "macros": [
+    {
+      "id": 81,
+      "name": "Legacy delay and text",
+      "description": "Preserve playback and step options",
+      "enabled": true,
+      "hotkey": {"key": {"function": 6}, "modifiers": ["control", "shift"]},
+      "playback": {"speed_percent": 125, "random_delay_ms": 17, "random_offset_px": 3},
+      "steps": [
+        {"id": 902, "enabled": true, "repeat": 2, "delay_after_ms": 13, "on_error": "continue", "action": {"type": "delay", "data": {"milliseconds": 12345}}},
+        {"id": 204, "enabled": true, "repeat": 3, "delay_after_ms": 29, "on_error": "stop", "action": {"type": "text", "data": {"text": "  Keep this text\nexactly.  ", "mode": "paste"}}}
+      ],
+      "image_assets": []
+    },
+    {
+      "id": 12,
+      "name": "Legacy key sequence",
+      "description": "Keep macro order and disabled steps",
+      "enabled": false,
+      "hotkey": {"key": {"function": 8}, "modifiers": ["alt"]},
+      "playback": {"speed_percent": 75, "random_delay_ms": 0, "random_offset_px": 0},
+      "steps": [
+        {"id": 603, "enabled": false, "repeat": 4, "delay_after_ms": 31, "on_error": "stop", "action": {"type": "text", "data": {"text": "Second macro content", "mode": "type"}}}
+      ],
+      "image_assets": []
+    }
+  ]
+}
