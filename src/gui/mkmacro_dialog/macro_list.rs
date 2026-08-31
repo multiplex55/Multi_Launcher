@@ -6,6 +6,7 @@ struct MacroGroup<'a> {
     /// None identifies the synthetic Unfiled group, never a persisted folder.
     folder: Option<&'a MkMacroFolder>,
     macros: Vec<&'a MkMacro>,
+    expanded: bool,
 }
 
 /// Preserve document order, including empty folder headings. If malformed data
@@ -17,6 +18,7 @@ fn grouped_macros(document: &MkMacroDocument) -> Vec<MacroGroup<'_>> {
     for folder in &document.folders {
         groups.push(MacroGroup {
             folder: Some(folder),
+            expanded: true,
             macros: document
                 .macros
                 .iter()
@@ -26,6 +28,7 @@ fn grouped_macros(document: &MkMacroDocument) -> Vec<MacroGroup<'_>> {
     }
     groups.push(MacroGroup {
         folder: None,
+        expanded: true,
         macros: document
             .macros
             .iter()
@@ -36,6 +39,44 @@ fn grouped_macros(document: &MkMacroDocument) -> Vec<MacroGroup<'_>> {
     });
     groups
 }
+/// Search only macro names and descriptions, using case-insensitive substrings.
+/// Whitespace around the query is ignored; an empty query matches every macro.
+fn macro_matches_search(macro_: &MkMacro, search: &str) -> bool {
+    let search = search.trim().to_lowercase();
+    search.is_empty()
+        || macro_.name.to_lowercase().contains(&search)
+        || macro_.description.to_lowercase().contains(&search)
+}
+
+/// Compute visible rows without changing saved collapse state or document order.
+/// Search temporarily expands matching groups and omits all other groups.
+fn visible_macro_groups<'a>(
+    document: &'a MkMacroDocument,
+    search: &str,
+    collapsed_folders: &HashSet<u64>,
+) -> Vec<MacroGroup<'a>> {
+    let searching = !search.trim().is_empty();
+    grouped_macros(document)
+        .into_iter()
+        .filter_map(|mut group| {
+            if searching {
+                group.macros.retain(|m| macro_matches_search(m, search));
+                if group.macros.is_empty() {
+                    return None;
+                }
+            } else {
+                group.expanded = !group
+                    .folder
+                    .is_some_and(|folder| collapsed_folders.contains(&folder.id));
+                if !group.expanded {
+                    group.macros.clear();
+                }
+            }
+            Some(group)
+        })
+        .collect()
+}
+
 pub const SIDEBAR_WIDTH: f32 = 220.0;
 pub(super) fn show_empty(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let size = ui.available_size();
@@ -182,24 +223,29 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             command = selected.map(Command::DeleteMacro);
         }
     });
-    ui.add(eframe::egui::TextEdit::singleline(&mut d.search).hint_text("Search"));
+    ui.add(
+        eframe::egui::TextEdit::singleline(&mut d.search)
+            .hint_text("Search names and descriptions"),
+    );
     let mut rename_text = d.folder_rename_text.clone();
     let rename_needs_focus = std::mem::take(&mut d.folder_rename_needs_focus);
-    let groups = grouped_macros(&d.draft);
-    let search = d.search.to_lowercase();
+    let searching = !d.search.trim().is_empty();
+    let groups = visible_macro_groups(&d.draft, &d.search, &d.collapsed_folders);
     let mut clicked = None;
     let mut toggled_folders = Vec::new();
     eframe::egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            if searching && groups.is_empty() {
+                ui.label("No macros match this search.");
+            }
             for (index, group) in groups.iter().enumerate() {
                 let identity = match group.folder {
                     Some(folder) => eframe::egui::Id::new(("mkmacro_folder", folder.id, index)),
                     None => eframe::egui::Id::new("mkmacro_unfiled"),
                 };
                 ui.push_id(identity, |ui| {
-                    let expanded = if let Some(folder) = group.folder {
-                        let collapsed = d.is_folder_collapsed(folder.id);
+                    if let Some(folder) = group.folder {
                         if d.pending_folder_rename == Some(folder.id) {
                             if let Some(action) = show_folder_rename(
                                 ui,
@@ -211,12 +257,12 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 command = Some(action);
                             }
                         } else {
-                            let arrow = if collapsed { "▶" } else { "▼" };
+                            let arrow = if group.expanded { "▼" } else { "▶" };
                             let response = ui.add(
                                 eframe::egui::Button::new(format!("{arrow} {}", folder.name))
                                     .frame(false),
                             );
-                            if response.clicked() {
+                            if response.clicked() && !searching {
                                 toggled_folders.push(folder.id);
                             }
                             response.context_menu(|ui| {
@@ -232,17 +278,12 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 }
                             });
                         }
-                        !collapsed
                     } else {
                         ui.strong("Unfiled");
-                        true
-                    };
-                    if expanded {
+                    }
+                    if group.expanded {
                         ui.indent("members", |ui| {
                             for m in &group.macros {
-                                if !search.is_empty() && !m.name.to_lowercase().contains(&search) {
-                                    continue;
-                                }
                                 ui.push_id(m.id, |ui| {
                                     let response = ui.selectable_label(
                                         d.selected_macro_id == Some(m.id),
@@ -312,6 +353,132 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_matches_names_case_insensitively_and_trims_query() {
+        let m = macro_entry(1, "Open Browser", None);
+        for query in ["open", "BROWSER", "oPeN bRoWsEr", "  browser \t"] {
+            assert!(macro_matches_search(&m, query), "{query:?}");
+        }
+        assert!(!macro_matches_search(&m, "terminal"));
+        assert!(macro_matches_search(&m, " \t\n"));
+    }
+
+    #[test]
+    fn search_matches_descriptions_case_insensitively() {
+        let mut m = macro_entry(1, "Daily workflow", None);
+        m.description = "Launch the Browser and open mail".into();
+        assert!(macro_matches_search(&m, "BROWSER"));
+        assert!(macro_matches_search(&m, "  Open Mail  "));
+        assert!(!macro_matches_search(&m, "terminal"));
+    }
+
+    #[test]
+    fn search_expands_collapsed_folder_without_changing_collapsed_bytes() {
+        let draft = document();
+        let collapsed = HashSet::from([20, 30, 99]);
+        let before = serde_json::to_vec(&collapsed).unwrap();
+        let capacity = collapsed.capacity();
+
+        let groups = visible_macro_groups(&draft, "  zULu  ", &collapsed);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].folder.unwrap().id, 20);
+        assert!(groups[0].expanded);
+        assert_eq!(ids(&groups[0]), vec![7]);
+        // Compare the same set's serialized bytes, including iteration order.
+        assert_eq!(serde_json::to_vec(&collapsed).unwrap(), before);
+        assert_eq!(collapsed.capacity(), capacity);
+    }
+
+    #[test]
+    fn clearing_search_restores_collapsed_rendering_including_whitespace_query() {
+        let draft = document();
+        let collapsed = HashSet::from([20, 30]);
+        let before = serde_json::to_vec(&collapsed).unwrap();
+        let matches = visible_macro_groups(&draft, "Zulu", &collapsed);
+        assert!(matches[0].expanded);
+        assert_eq!(ids(&matches[0]), vec![7]);
+
+        for query in ["", " \t\n"] {
+            let groups = visible_macro_groups(&draft, query, &collapsed);
+            assert_eq!(groups.len(), 4);
+            assert_eq!(groups[0].folder.unwrap().id, 20);
+            assert!(!groups[0].expanded);
+            assert!(groups[0].macros.is_empty());
+            assert!(groups[1].expanded);
+            assert_eq!(ids(&groups[1]), vec![6]);
+            assert!(!groups[2].expanded);
+            assert_eq!(serde_json::to_vec(&collapsed).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn search_shows_matching_unfiled_and_dangling_macros() {
+        let draft = document();
+        for (query, expected) in [("unfiled", vec![8, 3]), ("dangling", vec![4])] {
+            let groups = visible_macro_groups(&draft, query, &HashSet::from([20, 10, 30]));
+            assert_eq!(groups.len(), 1);
+            assert!(groups[0].folder.is_none());
+            assert!(groups[0].expanded);
+            assert_eq!(ids(&groups[0]), expected);
+        }
+    }
+
+    #[test]
+    fn search_omits_unmatched_groups_and_does_not_match_folder_names() {
+        let mut draft = document();
+        draft.folders[1].name = "Zulu folder".into();
+        let groups = visible_macro_groups(&draft, "Zulu", &HashSet::new());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].folder.unwrap().id, 20);
+        assert_eq!(ids(&groups[0]), vec![7]);
+
+        assert!(visible_macro_groups(&draft, "Zulu folder", &HashSet::new()).is_empty());
+        assert!(visible_macro_groups(&draft, "no match", &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn search_preserves_group_and_member_order() {
+        let mut draft = document();
+        for m in &mut draft.macros {
+            if m.id != 4 {
+                m.description = "Match this description".into();
+            }
+        }
+        let groups = visible_macro_groups(&draft, "MATCH", &HashSet::from([20, 10]));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| g.folder.map(|f| f.id))
+                .collect::<Vec<_>>(),
+            vec![Some(20), Some(10), None]
+        );
+        assert_eq!(
+            groups.iter().flat_map(ids).collect::<Vec<_>>(),
+            vec![7, 5, 6, 8, 3]
+        );
+        assert!(groups.iter().all(|g| g.expanded));
+    }
+
+    #[test]
+    fn rendering_search_preserves_filtered_selection_and_collapsed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(dir.path()).unwrap();
+        let mut d = MkMacroDialog::new(std::sync::Arc::new(store));
+        d.draft = document();
+        d.selected_macro_id = Some(6);
+        d.collapsed_folders = HashSet::from([20, 30]);
+        let before = serde_json::to_vec(&d.collapsed_folders).unwrap();
+        let ctx = eframe::egui::Context::default();
+
+        for query in ["Zulu", "no match", "", "  "] {
+            d.search = query.into();
+            rename_frame(&ctx, &mut d, None);
+            assert_eq!(d.selected_macro_id, Some(6));
+            assert_eq!(serde_json::to_vec(&d.collapsed_folders).unwrap(), before);
+        }
+    }
 
     fn rename_frame(
         ctx: &eframe::egui::Context,
