@@ -1081,6 +1081,10 @@ impl ActionEditorState {
         if self.image_authoring.is_importing() {
             return None;
         }
+        // Keep invalid drafts open for correction without changing the step.
+        if !virtual_desktop_number_valid(&self.draft.as_ref()?.action) {
+            return None;
+        }
         self.image_authoring = Default::default();
         self.pending_visual_region = None;
         if let Some(workflow) = &mut self.visual_capture {
@@ -2130,6 +2134,13 @@ const VIRTUAL_DESKTOP_EXISTENCE_HELP: &str =
 
 fn clamp_virtual_desktop_number(desktop: &mut u32) {
     *desktop = (*desktop).max(1);
+}
+
+fn virtual_desktop_number_valid(action: &MkAction) -> bool {
+    !matches!(
+        action,
+        MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 0 })
+    )
 }
 
 fn action_ui(
@@ -3591,6 +3602,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             ui.separator();
             ui.horizontal(|ui| {
                 let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
+                    && virtual_desktop_number_valid(&step.action)
                     && !matches!(&step.action, MkAction::Notify(p) if p.title.trim().is_empty())
                     && !matches!(&step.action, MkAction::PlaySound(p) if !play_sound_is_supported(&p.sound))
                     && image_output_names_valid(&step.action)

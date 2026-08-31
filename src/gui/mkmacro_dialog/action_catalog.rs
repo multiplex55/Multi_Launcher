@@ -988,8 +988,8 @@ pub fn descriptor_name_matches_action(descriptor: &ActionDescriptor, action: &Mk
         )
 }
 
-/// Structural markers are complete actions at insertion time and intentionally
-/// have no configurable fields. All other actions must pass through an editor.
+/// Structural markers and unit virtual desktop operations have no configurable
+/// fields. Go To requires a desktop number and must pass through its editor.
 pub fn requires_no_configuration(action: &MkAction) -> bool {
     matches!(
         action,

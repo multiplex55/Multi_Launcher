@@ -1960,7 +1960,12 @@ mod tests {
                     | MkAction::WhileEnd
                     | MkAction::Break
                     | MkAction::Continue
-                    | MkAction::VirtualDesktop(_)
+                    | MkAction::VirtualDesktop(
+                        MkVirtualDesktopAction::Create
+                            | MkVirtualDesktopAction::SwitchLeft
+                            | MkVirtualDesktopAction::SwitchRight
+                            | MkVirtualDesktopAction::CloseCurrent
+                    )
             ));
         }
     }
@@ -2738,6 +2743,9 @@ mod tests {
         assert!(direct_rows.iter().all(|descriptor| {
             descriptor.category == action_catalog::ActionCategory::Windows
                 && descriptor.editor == action_catalog::EditorKind::DirectInsert
+                && action_catalog::requires_no_configuration(&(descriptor.make_default)())
+                && action_catalog::editor_for_action(&(descriptor.make_default)())
+                    == action_catalog::EditorKind::DirectInsert
         }));
         assert_eq!(
             direct_rows
@@ -2758,9 +2766,117 @@ mod tests {
         assert_eq!(go_to.category, action_catalog::ActionCategory::Windows);
         assert_eq!(go_to.editor, action_catalog::EditorKind::VirtualDesktop);
         assert!(matches!(
+            go_to.editor.contract(),
+            Some(action_catalog::EditorContract::Configurable { field_count: 1.. })
+        ));
+        for desktop in [0, 1, 3, u32::MAX] {
+            let action = MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop });
+            assert_eq!(
+                action_catalog::editor_for_action(&action),
+                action_catalog::EditorKind::VirtualDesktop
+            );
+            assert!(!action_catalog::requires_no_configuration(&action));
+        }
+        assert!(matches!(
             (go_to.make_default)(),
             MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 1 })
         ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn virtual_desktop_catalog_selection_uses_the_intended_transactions() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        for name in [
+            "Create Virtual Desktop",
+            "Switch Virtual Desktop Left",
+            "Switch Virtual Desktop Right",
+            "Close Current Virtual Desktop",
+        ] {
+            let descriptor = catalog_descriptor(name);
+            let count = d.selected_macro().unwrap().steps.len();
+            assert!(action_catalog::select_descriptor(&mut d, &descriptor));
+            assert!(d.action_editor.draft.is_none());
+            let steps = &d.selected_macro().unwrap().steps;
+            assert_eq!(steps.len(), count + 1);
+            assert_eq!(steps.last().unwrap().action, (descriptor.make_default)());
+        }
+
+        let before = d.draft.clone();
+        assert!(action_catalog::select_descriptor(
+            &mut d,
+            &catalog_descriptor("Go To Virtual Desktop")
+        ));
+        assert_eq!(d.draft, before);
+        assert_eq!(
+            d.action_editor.editor,
+            Some(action_catalog::EditorKind::VirtualDesktop)
+        );
+        assert_eq!(
+            d.action_editor.draft.as_ref().unwrap().action,
+            MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop: 1 })
+        );
+        d.action_editor.cancel();
+        assert_eq!(d.draft, before);
+    }
+
+    #[test]
+    fn virtual_desktop_editor_defaults_edits_cancels_and_rejects_zero() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        let descriptor = action_catalog::descriptors()
+            .into_iter()
+            .find(|row| row.name == "Go To Virtual Desktop")
+            .unwrap();
+        let go_to = |desktop| MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop });
+        let mut editor = d.take_action_editor();
+        editor.begin_new((descriptor.make_default)());
+        assert_eq!(editor.draft.as_ref().unwrap().action, go_to(1));
+
+        // Invalid new actions must not insert a step or consume the draft.
+        editor.draft.as_mut().unwrap().action = go_to(0);
+        let before = d.draft.clone();
+        assert!(editor.apply(&mut d).is_none());
+        assert_eq!(d.draft, before);
+        assert_eq!(editor.draft.as_ref().unwrap().action, go_to(0));
+        editor.draft.as_mut().unwrap().action = go_to(1);
+        let id = editor.apply(&mut d).unwrap();
+        let original = d.selected_macro().unwrap().steps[0].clone();
+        assert_eq!(original.action, go_to(1));
+
+        editor.begin_edit(&original);
+        editor.draft.as_mut().unwrap().action = go_to(3);
+        assert_eq!(d.selected_macro().unwrap().steps[0], original);
+        assert_eq!(editor.apply(&mut d), Some(id));
+        assert_eq!(d.selected_macro().unwrap().steps.len(), 1);
+        let committed = d.selected_macro().unwrap().steps[0].clone();
+        assert_eq!(committed.action, go_to(3));
+        assert_eq!(
+            action_catalog::action_details(&committed.action),
+            "Desktop 3"
+        );
+
+        editor.begin_edit(&committed);
+        assert_eq!(editor.draft.as_ref().unwrap(), &committed);
+        editor.draft.as_mut().unwrap().action = go_to(8);
+        editor.cancel();
+        assert_eq!(d.selected_macro().unwrap().steps[0], committed);
+
+        editor.begin_edit(&committed);
+        editor.draft.as_mut().unwrap().action = go_to(0);
+        let before = d.draft.clone();
+        assert!(editor.apply(&mut d).is_none());
+        assert_eq!(d.draft, before);
+        assert_eq!(editor.editing_id, Some(id));
+        assert_eq!(
+            editor.editor,
+            Some(action_catalog::EditorKind::VirtualDesktop)
+        );
+        assert_eq!(editor.draft.as_ref().unwrap().action, go_to(0));
+        editor.draft.as_mut().unwrap().action = go_to(3);
+        assert_eq!(editor.apply(&mut d), Some(id));
+        assert_eq!(d.selected_macro().unwrap().steps[0], committed);
     }
 
     #[test]
