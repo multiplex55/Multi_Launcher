@@ -443,8 +443,7 @@ fn validate_hotkey_scope(scope: &MkHotkeyScope) -> Result<(), MatcherValidationE
 ///
 /// Contextual candidates and unrestricted fallback candidates are compiled
 /// into separate tiers. Multiple unrestricted candidates remain attached to
-/// the group for diagnostics, but they do not form a fallback tier and are
-/// never dispatched.
+/// the group for ambiguity diagnostics and are never dispatched.
 /// Statically invalid contextual matchers are unarmed individually. They cannot
 /// match or block valid contextual peers or the single unrestricted fallback.
 fn compile_hotkey_groups_with_reserved(
@@ -563,7 +562,8 @@ fn resolve_hotkey_group(
 
     match group.unrestricted_candidates.as_slice() {
         [candidate] => HotkeyResolution::Run(candidate.macro_id),
-        _ => HotkeyResolution::NoMatch,
+        [] => HotkeyResolution::NoMatch,
+        candidates => HotkeyResolution::Ambiguous(candidate_summaries(candidates)),
     }
 }
 
@@ -1742,6 +1742,101 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Use the production compiler, matcher/resolver, and worker dispatch for every
+    // row. Only OS input and the runtime admission callback are replaced.
+    fn assert_dispatch_table(
+        document: &MkMacroDocument,
+        cases: &[(&str, WindowCandidate, HotkeyResolution)],
+    ) {
+        for (name, foreground, expected) in cases {
+            let h = TickHarness::with_reserved(document.clone(), Some(foreground.clone()), vec![]);
+            let groups = h.groups();
+            // A repeated chord is registered once, not rejected by frequency == 1.
+            assert_eq!(groups.len(), 1, "{name}: physical chord registration");
+            let group = &groups[0];
+            assert_eq!(group.canonical_chord, "CONTROL+K", "{name}");
+            assert_eq!(
+                resolve_hotkey_group(group, Some(foreground)),
+                *expected,
+                "{name}: resolver"
+            );
+
+            let log = CapturedLog::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                h.press();
+                h.tick(); // Holding the chord must not dispatch or log twice.
+            });
+            let output = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            let expected_ids = match expected {
+                HotkeyResolution::Run(id) => vec![*id],
+                _ => vec![],
+            };
+            assert_eq!(h.fired.ids(), expected_ids, "{name}: dispatch");
+            assert_eq!(
+                h.foreground.queries(),
+                usize::from(!group.contextual_candidates.is_empty()),
+                "{name}: one foreground snapshot per chord, not per candidate"
+            );
+            if let HotkeyResolution::Ambiguous(candidates) = expected {
+                assert_eq!(
+                    output.matches("Ambiguous mkmacro hotkey CONTROL+K").count(),
+                    1,
+                    "{name}: missing or repeated ambiguity: {output}"
+                );
+                let identities = output
+                    .lines()
+                    .filter(|line| line.contains("macro_id="))
+                    .collect::<Vec<_>>();
+                assert_eq!(identities.len(), candidates.len(), "{name}: {output}");
+                for candidate in candidates {
+                    assert!(
+                        identities
+                            .iter()
+                            .any(|line| line.contains("chord=CONTROL+K")
+                                && line.contains(&format!("macro_id={}", candidate.macro_id))
+                                && line
+                                    .contains(&format!("macro_name={}", candidate.display_name))),
+                        "{name}: missing {candidate:?}: {output}"
+                    );
+                }
+            } else {
+                assert!(output.is_empty(), "{name}: unexpected diagnostic: {output}");
+            }
+        }
+    }
+
+    fn shared_chord_cases() -> Vec<(&'static str, WindowCandidate, HotkeyResolution)> {
+        vec![
+            ("Firefox", firefox(), HotkeyResolution::Run(91)),
+            ("Visual Studio", visual_studio(), HotkeyResolution::Run(23)),
+            (
+                "Notepad global fallback",
+                notepad(),
+                HotkeyResolution::Run(47),
+            ),
+        ]
+    }
     fn firefox() -> WindowCandidate {
         WindowCandidate {
             handle: 1,
@@ -1922,7 +2017,16 @@ mod tests {
         let groups = compile_hotkey_groups(&d);
         assert_eq!(
             resolve_hotkey_group(&groups[0], Some(&window("Terminal"))),
-            HotkeyResolution::NoMatch
+            HotkeyResolution::Ambiguous(vec![
+                CandidateSummary {
+                    macro_id: 2,
+                    display_name: "2".into()
+                },
+                CandidateSummary {
+                    macro_id: 9,
+                    display_name: "9".into()
+                },
+            ])
         );
         assert_eq!(
             validate_hotkeys(&d, &[]),
@@ -2149,72 +2253,146 @@ mod tests {
     }
 
     #[test]
-    fn firefox_active_dispatches_only_firefox_from_a_shared_chord() {
-        let h = TickHarness::new(
-            vec![
-                process_mac(91, "firefox.exe"),
-                process_mac(23, "devenv.exe"),
-            ],
-            Some(firefox()),
-        );
-        assert_eq!(h.groups().len(), 1);
-        assert_eq!(h.groups()[0].contextual_candidates.len(), 2);
-        h.press();
-        assert_eq!(h.fired.ids(), vec![91]);
-        assert_eq!(h.foreground.queries(), 1);
-    }
-
-    #[test]
-    fn notepad_active_dispatches_only_global_fallback() {
-        let h = TickHarness::new(
-            vec![
-                process_mac(91, "firefox.exe"),
-                process_mac(23, "devenv.exe"),
+    fn shared_chord_dispatch_table_covers_process_title_regex_and_class() {
+        for (firefox_matcher, vs_matcher) in [
+            (
+                process_matcher("firefox.exe"),
+                process_matcher("devenv.exe"),
+            ),
+            (
+                title_matcher("Mozilla Firefox"),
+                title_matcher("Visual Studio"),
+            ),
+            (regex_matcher("Firefox$"), regex_matcher("Visual Studio$")),
+            (
+                class_matcher("MozillaWindowClass"),
+                class_matcher("HwndWrapper"),
+            ),
+        ] {
+            let mut document = validation_document(vec![
                 mac(47, true),
-            ],
-            Some(notepad()),
-        );
-        h.press();
-        assert_eq!(h.fired.ids(), vec![47]);
+                contextual_mac(91, firefox_matcher),
+                contextual_mac(23, vs_matcher),
+            ]);
+            for reverse in [false, true] {
+                if reverse {
+                    document.macros.reverse();
+                }
+                let groups = compile_hotkey_groups(&document);
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].contextual_candidates.len(), 2);
+                assert_eq!(groups[0].unrestricted_candidates.len(), 1);
+                assert_dispatch_table(&document, &shared_chord_cases());
+            }
+        }
     }
 
     #[test]
-    fn firefox_context_takes_precedence_over_global_fallback_on_tick() {
-        let h = TickHarness::new(
-            vec![mac(47, true), process_mac(91, "firefox.exe")],
-            Some(firefox()),
-        );
-        h.press();
-        assert_eq!(h.fired.ids(), vec![91]);
+    fn overlapping_scopes_report_chord_and_competing_identities_without_fallback() {
+        for matcher in [
+            title_matcher("YouTube"),
+            regex_matcher("^YouTube.*Firefox$"),
+            class_matcher("MozillaWindowClass"),
+        ] {
+            let mut browser = process_mac(91, "firefox.exe");
+            browser.name = "Firefox controls".into();
+            let mut video = contextual_mac(23, matcher);
+            video.name = "YouTube controls".into();
+            let mut document = validation_document(vec![browser, mac(47, true), video]);
+            let cases = [
+                (
+                    "overlap suppresses global fallback",
+                    firefox(),
+                    HotkeyResolution::Ambiguous(vec![
+                        CandidateSummary {
+                            macro_id: 23,
+                            display_name: "YouTube controls".into(),
+                        },
+                        CandidateSummary {
+                            macro_id: 91,
+                            display_name: "Firefox controls".into(),
+                        },
+                    ]),
+                ),
+                (
+                    "fallback remains eligible outside overlap",
+                    notepad(),
+                    HotkeyResolution::Run(47),
+                ),
+            ];
+            assert_dispatch_table(&document, &cases);
+            document.macros.reverse();
+            assert_dispatch_table(&document, &cases);
+        }
     }
 
     #[test]
-    fn overlapping_process_and_title_are_ambiguous_with_both_identities() {
-        let mut browser = process_mac(91, "firefox.exe");
-        browser.name = "Firefox controls".into();
-        let mut video = scoped_mac(23, "YouTube");
-        video.name = "YouTube controls".into();
-        let h = TickHarness::new(vec![browser, mac(47, true), video], Some(firefox()));
-        let expected = HotkeyResolution::Ambiguous(vec![
-            CandidateSummary {
-                macro_id: 23,
-                display_name: "YouTube controls".into(),
-            },
-            CandidateSummary {
-                macro_id: 91,
-                display_name: "Firefox controls".into(),
-            },
+    fn multiple_any_window_candidates_are_ambiguous_on_dispatch() {
+        for include_context in [false, true] {
+            let mut first = mac(23, true);
+            first.name = "Global first".into();
+            let mut second = mac(47, true);
+            second.name = "Global second".into();
+            let mut document = validation_document(vec![second, first]);
+            let mut cases = vec![(
+                "multiple global matches",
+                notepad(),
+                HotkeyResolution::Ambiguous(vec![
+                    CandidateSummary {
+                        macro_id: 23,
+                        display_name: "Global first".into(),
+                    },
+                    CandidateSummary {
+                        macro_id: 47,
+                        display_name: "Global second".into(),
+                    },
+                ]),
+            )];
+            if include_context {
+                document.macros.push(process_mac(91, "firefox.exe"));
+                cases.push((
+                    "scoped match still takes precedence",
+                    firefox(),
+                    HotkeyResolution::Run(91),
+                ));
+            }
+            assert_dispatch_table(&document, &cases);
+            document.macros.reverse();
+            assert_dispatch_table(&document, &cases);
+        }
+    }
+
+    #[test]
+    fn folder_assignment_does_not_change_shared_chord_grouping_or_precedence() {
+        let mut document = validation_document(vec![
+            mac(47, true),
+            process_mac(91, "firefox.exe"),
+            process_mac(23, "devenv.exe"),
         ]);
-        let mut group = h.groups().remove(0);
-        assert_eq!(resolve_hotkey_group(&group, Some(&firefox())), expected);
-        group.contextual_candidates.reverse();
-        assert_eq!(resolve_hotkey_group(&group, Some(&firefox())), expected);
-        h.press();
-        h.tick();
-        assert!(h.fired.ids().is_empty());
-        assert_eq!(h.foreground.queries(), 1);
+        document.folders = vec![
+            crate::mkmacro::MkMacroFolder {
+                id: 42,
+                name: "Browser".into(),
+            },
+            crate::mkmacro::MkMacroFolder {
+                id: 43,
+                name: "Work".into(),
+            },
+        ];
+        let expected = compile_hotkey_groups(&document);
+        for assignments in [
+            [None, None, None],
+            [Some(42), Some(42), Some(42)],
+            [None, Some(42), Some(43)],
+            [Some(43), Some(42), None],
+        ] {
+            for (macro_, folder_id) in document.macros.iter_mut().zip(assignments) {
+                macro_.folder_id = folder_id;
+            }
+            assert_eq!(compile_hotkey_groups(&document), expected);
+            assert_dispatch_table(&document, &shared_chord_cases());
+        }
     }
-
     #[test]
     fn unmatched_context_without_fallback_never_fires() {
         let h = TickHarness::new(
