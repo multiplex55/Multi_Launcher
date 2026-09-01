@@ -868,10 +868,19 @@ fn report_resolution_failure(chord: &str, error: &ExecutionDiagnostic) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{DiagnosticKind, MkMacro, MkPlayback};
+    use crate::mkmacro::{
+        DiagnosticKind, MkAction, MkMacro, MkMacroDocument, MkPlayback, MkStep, MkTextMode,
+        MkTextPayload, RuntimeRunMode, RuntimeState, SCHEMA_VERSION, StepState,
+        executor::fake::FakeBackend, runtime,
+    };
+    use serial_test::serial;
     use std::sync::{
         Arc, RwLock,
         atomic::{AtomicUsize, Ordering},
+    };
+    use std::{
+        thread,
+        time::{Duration, Instant},
     };
     fn mac(id: u64, on: bool) -> MkMacro {
         MkMacro {
@@ -2731,5 +2740,117 @@ mod tests {
         h.tick();
         assert_eq!(h.fired.ids(), vec![47]);
         assert_eq!(h.foreground.queries(), 0);
+    }
+
+    fn breakpoint_macro(id: u64) -> MkMacro {
+        let mut macro_ = mac(id, true);
+        macro_.steps = vec![MkStep {
+            id: 1,
+            enabled: true,
+            breakpoint: true,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::Text(MkTextPayload {
+                text: "hotkey breakpoint effect".into(),
+                mode: MkTextMode::Type,
+            }),
+        }];
+        macro_
+    }
+
+    fn wait_for_global_state(wanted: RuntimeState) -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = runtime::snapshot().expect("shared macro runtime is installed");
+            if snapshot.state == wanted {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not reach {wanted:?}: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_hotkey_completion() -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = runtime::snapshot().expect("shared macro runtime is installed");
+            assert_ne!(
+                snapshot.state,
+                RuntimeState::Paused,
+                "hotkey dispatch unexpectedly entered Debug mode"
+            );
+            if snapshot.state == RuntimeState::Completed {
+                return snapshot;
+            }
+            assert!(
+                !matches!(snapshot.state, RuntimeState::Failed | RuntimeState::Stopped),
+                "hotkey dispatch failed: {snapshot:?}"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "hotkey dispatch did not complete"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn hotkey_dispatch_runs_breakpoint_step_in_normal_mode_exactly_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                schema_version: SCHEMA_VERSION,
+                macros: vec![breakpoint_macro(7401)],
+                ..Default::default()
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let effects = Arc::new(FakeBackend::default());
+        runtime::set_shared_store_with_backends(store.clone(), effects.clone().backends());
+
+        let keys = Arc::new(FakeKeyStateBackend::default());
+        let service = MkMacroHotkeyService::with_backend(store, keys.clone());
+        keys.press_ctrl_k();
+        let snapshot = wait_for_hotkey_completion();
+        keys.release_primary();
+        service.shutdown();
+
+        assert_eq!(snapshot.macro_id, Some(7401));
+        assert_eq!(snapshot.run_mode, RuntimeRunMode::Normal);
+        assert_eq!(snapshot.steps[&1], StepState::Success);
+        assert_eq!(effects.events(), vec!["text:hotkey breakpoint effect"]);
+    }
+
+    #[test]
+    #[serial]
+    fn direct_debug_dispatch_pauses_before_the_same_breakpoint_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                schema_version: SCHEMA_VERSION,
+                macros: vec![breakpoint_macro(7402)],
+                ..Default::default()
+            })
+            .unwrap();
+        let effects = Arc::new(FakeBackend::default());
+        runtime::set_shared_store_with_backends(Arc::new(store), effects.clone().backends());
+
+        runtime::debug_run(7402).unwrap();
+        let paused = wait_for_global_state(RuntimeState::Paused);
+        assert_eq!(paused.macro_id, Some(7402));
+        assert_eq!(paused.run_mode, RuntimeRunMode::Debug);
+        assert!(effects.events().is_empty());
+
+        runtime::resume().unwrap();
+        let completed = wait_for_global_state(RuntimeState::Completed);
+        assert_eq!(completed.run_mode, RuntimeRunMode::Debug);
+        assert_eq!(effects.events(), vec!["text:hotkey breakpoint effect"]);
     }
 }

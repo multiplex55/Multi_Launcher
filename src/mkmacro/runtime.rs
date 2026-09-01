@@ -148,6 +148,8 @@ pub struct MacroRuntime {
     tx: mpsc::Sender<RuntimeCommand>,
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(test)]
+    test_commands: Mutex<Vec<RuntimeCommand>>,
 }
 impl MacroRuntime {
     pub fn new(store: Arc<MkMacroStore>, backends: Backends) -> Self {
@@ -175,9 +177,13 @@ impl MacroRuntime {
             tx,
             shared,
             worker: Mutex::new(Some(worker)),
+            #[cfg(test)]
+            test_commands: Mutex::new(Vec::new()),
         }
     }
     pub fn command(&self, c: RuntimeCommand) -> CommandResult {
+        #[cfg(test)]
+        self.test_commands.lock().unwrap().push(c.clone());
         let request = run_request(&c);
         if request.is_some_and(|request| request.selection.is_some_and(<[u64]>::is_empty)) {
             return CommandResult::Rejected(ExecutionDiagnostic::new(
@@ -251,6 +257,10 @@ impl MacroRuntime {
     }
     pub fn snapshot(&self) -> Arc<RuntimeSnapshot> {
         self.shared.snapshot.read().unwrap().clone()
+    }
+    #[cfg(test)]
+    fn take_test_commands(&self) -> Vec<RuntimeCommand> {
+        std::mem::take(&mut *self.test_commands.lock().unwrap())
     }
     pub fn shutdown(&self) {
         self.shared.control.stop();
@@ -463,7 +473,11 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 ExecutionEvent::Resumed => s.state = RuntimeState::Running,
             })
         };
-        Executor::new(backends.clone(), shared.control.clone()).execute(&plan, &observer)
+        let executor = Executor::new(backends.clone(), shared.control.clone());
+        match mode {
+            RuntimeRunMode::Normal => executor.execute(&plan, &observer),
+            RuntimeRunMode::Debug => executor.execute_debug(&plan, &observer),
+        }
     })();
     match result {
         Ok(()) => publish(shared, |s| {
@@ -581,6 +595,15 @@ pub fn run_from(macro_id: u64, step_id: u64) -> Result<()> {
 }
 pub fn run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
     accepted(global()?.command(RuntimeCommand::RunSelection(macro_id, ids)))
+}
+pub fn debug_run(macro_id: u64) -> Result<()> {
+    accepted(global()?.command(RuntimeCommand::DebugRun(macro_id)))
+}
+pub fn debug_run_from(macro_id: u64, step_id: u64) -> Result<()> {
+    accepted(global()?.command(RuntimeCommand::DebugRunFrom(macro_id, step_id)))
+}
+pub fn debug_run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
+    accepted(global()?.command(RuntimeCommand::DebugRunSelection(macro_id, ids)))
 }
 pub fn pause() -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Pause))
@@ -1149,6 +1172,117 @@ mod run_mode_tests {
 }
 
 #[cfg(test)]
+mod facade_tests {
+    use super::*;
+    use crate::mkmacro::{
+        MkAction, MkMacro, MkMacroDocument, MkStep, MkTextMode, MkTextPayload, SCHEMA_VERSION,
+        executor::fake::FakeBackend,
+    };
+    use serial_test::serial;
+    use std::time::{Duration, Instant};
+
+    fn step(id: u64, text: &str) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::Text(MkTextPayload {
+                text: text.into(),
+                mode: MkTextMode::Type,
+            }),
+        }
+    }
+
+    fn wait_for_terminal(runtime: &MacroRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.state == RuntimeState::Completed {
+                return;
+            }
+            assert!(
+                !matches!(snapshot.state, RuntimeState::Failed | RuntimeState::Stopped),
+                "debug facade run failed: {snapshot:?}"
+            );
+            assert!(Instant::now() < deadline, "debug facade run did not finish");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_admission_release(runtime: &MacroRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.shared.admission.lock().unwrap().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "runtime admission was not released"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn debug_facades_submit_the_matching_commands_without_rewriting_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                schema_version: SCHEMA_VERSION,
+                macros: vec![MkMacro {
+                    id: 7301,
+                    name: "debug facade target".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
+                    playback: Default::default(),
+                    steps: vec![step(10, "first"), step(20, "second"), step(30, "third")],
+                    image_assets: vec![],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        set_shared_store_with_backends(Arc::new(store), fake.backends());
+        let runtime = RUNTIME.read().unwrap().as_ref().unwrap().clone();
+
+        debug_run(7301).unwrap();
+        assert_eq!(
+            runtime.take_test_commands(),
+            vec![RuntimeCommand::DebugRun(7301)]
+        );
+        wait_for_terminal(&runtime);
+        assert_eq!(runtime.snapshot().macro_id, Some(7301));
+        assert_eq!(runtime.snapshot().run_mode, RuntimeRunMode::Debug);
+        wait_for_admission_release(&runtime);
+
+        debug_run_from(7301, 20).unwrap();
+        assert_eq!(
+            runtime.take_test_commands(),
+            vec![RuntimeCommand::DebugRunFrom(7301, 20)]
+        );
+        wait_for_terminal(&runtime);
+        assert_eq!(runtime.snapshot().macro_id, Some(7301));
+        assert_eq!(runtime.snapshot().run_mode, RuntimeRunMode::Debug);
+        wait_for_admission_release(&runtime);
+
+        let selection = vec![30, 10, 20];
+        debug_run_selection(7301, selection.clone()).unwrap();
+        assert_eq!(
+            runtime.take_test_commands(),
+            vec![RuntimeCommand::DebugRunSelection(7301, selection)]
+        );
+        wait_for_terminal(&runtime);
+        assert_eq!(runtime.snapshot().macro_id, Some(7301));
+        assert_eq!(runtime.snapshot().run_mode, RuntimeRunMode::Debug);
+    }
+}
+
+#[cfg(test)]
 mod recording_controller_tests {
     use super::*;
     use crate::mkmacro::{
@@ -1156,6 +1290,7 @@ mod recording_controller_tests {
     };
 
     #[test]
+    #[serial_test::serial]
     fn toggle_requires_a_target_and_assigns_the_stopped_session_only_to_it() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();

@@ -2755,6 +2755,21 @@ impl Executor {
         }
     }
     pub fn execute(&self, plan: &MkExecutionPlan, observe: &dyn Fn(ExecutionEvent)) -> ExecResult {
+        self.execute_inner(plan, observe, false)
+    }
+    pub(crate) fn execute_debug(
+        &self,
+        plan: &MkExecutionPlan,
+        observe: &dyn Fn(ExecutionEvent),
+    ) -> ExecResult {
+        self.execute_inner(plan, observe, true)
+    }
+    fn execute_inner(
+        &self,
+        plan: &MkExecutionPlan,
+        observe: &dyn Fn(ExecutionEvent),
+        debug: bool,
+    ) -> ExecResult {
         let _activity = RunActivityGuard(&self.control);
         let mut guard = InputCleanupGuard::new(self.backends.input.clone());
         let mut vars = RuntimeVariables::new();
@@ -2784,6 +2799,11 @@ impl Executor {
                 continue;
             }
             observe(ExecutionEvent::StepStarted(step.id));
+            if debug && step.breakpoint {
+                self.control.pause();
+                observe(ExecutionEvent::Paused);
+                self.control.checkpoint()?;
+            }
             vars.insert("step.id".into(), MkValue::Number(step.id as f64));
             let mut final_error = None;
             for repetition in 0..step.repeat {
