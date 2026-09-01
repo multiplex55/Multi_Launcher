@@ -887,6 +887,11 @@ impl Drop for RunActivityGuard<'_> {
 }
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {
+    /// A debugger breakpoint has paused execution before the step starts.
+    BreakpointHit {
+        step_id: u64,
+        variables: RuntimeVariables,
+    },
     StepStarted(u64),
     /// Kept as a single-field event for observers that only track lifecycle.
     StepFinished(u64),
@@ -1537,9 +1542,12 @@ mod tests {
                     ExecutionEvent::StepFinished(1) => {
                         worker_lifecycle.lock().unwrap().push("finished:1")
                     }
-                    ExecutionEvent::Paused => {
-                        worker_lifecycle.lock().unwrap().push("paused");
-                        paused_tx.send(()).unwrap();
+                    ExecutionEvent::BreakpointHit {
+                        step_id: 2,
+                        variables,
+                    } => {
+                        worker_lifecycle.lock().unwrap().push("breakpoint:2");
+                        paused_tx.send(variables).unwrap();
                     }
                     ExecutionEvent::StepStarted(2) => {
                         worker_lifecycle.lock().unwrap().push("started:2")
@@ -1552,10 +1560,26 @@ mod tests {
             )
         });
 
-        paused_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let breakpoint_variables = paused_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(
             *lifecycle.lock().unwrap(),
-            ["started:1", "finished:1", "paused"]
+            ["started:1", "finished:1", "breakpoint:2"]
+        );
+        assert_eq!(
+            breakpoint_variables.get("macro.id"),
+            Some(&MkValue::Number(7.0))
+        );
+        assert_eq!(
+            breakpoint_variables.get("last_action_success"),
+            Some(&MkValue::Boolean(true))
+        );
+        assert_eq!(
+            breakpoint_variables.get("point"),
+            Some(&MkValue::Point(prior_point))
+        );
+        assert_eq!(
+            breakpoint_variables.get("step.id"),
+            Some(&MkValue::Number(2.0))
         );
         assert!(
             fake.events().is_empty(),
@@ -1571,7 +1595,7 @@ mod tests {
             [
                 "started:1",
                 "finished:1",
-                "paused",
+                "breakpoint:2",
                 "started:2",
                 "finished:2"
             ]
@@ -1585,6 +1609,118 @@ mod tests {
         );
         assert_eq!(resolved[0].get("point"), Some(&MkValue::Point(prior_point)));
         assert_eq!(resolved[0].get("step.id"), Some(&MkValue::Number(2.0)));
+    }
+
+    #[test]
+    fn breakpoint_event_contains_prior_outputs_but_not_pending_action_outputs() {
+        let producer = step(
+            1,
+            MkAction::SetVariable {
+                name: "prior_output".into(),
+                value: MkValue::String("ready".into()),
+            },
+        );
+        let mut breakpoint_step = step(
+            2,
+            MkAction::SetVariable {
+                name: "pending_output".into(),
+                value: MkValue::String("not yet".into()),
+            },
+        );
+        breakpoint_step.breakpoint = true;
+        let plan = plan(vec![producer, breakpoint_step]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Mutex::new(Vec::new());
+
+        Executor::new(fake.backends(), control.clone())
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::BreakpointHit { step_id, variables } => {
+                    assert_eq!(step_id, 2);
+                    assert_eq!(variables.get("macro.id"), Some(&MkValue::Number(7.0)));
+                    assert_eq!(
+                        variables.get("last_action_success"),
+                        Some(&MkValue::Boolean(true))
+                    );
+                    assert_eq!(
+                        variables.get("prior_output"),
+                        Some(&MkValue::String("ready".into()))
+                    );
+                    assert_eq!(variables.get("step.id"), Some(&MkValue::Number(2.0)));
+                    assert!(!variables.contains_key("pending_output"));
+                    events.lock().unwrap().push("breakpoint");
+                    control.resume();
+                }
+                ExecutionEvent::StepStarted(2) => events.lock().unwrap().push("started"),
+                ExecutionEvent::StepOutcome(2, _) => events.lock().unwrap().push("outcome"),
+                ExecutionEvent::StepFinished(2) => events.lock().unwrap().push("finished"),
+                _ => {}
+            })
+            .unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["breakpoint", "started", "finished"]
+        );
+    }
+
+    #[test]
+    fn breakpoint_event_precedes_step_outcome_and_finish_after_resume() {
+        let mut breakpoint_step = step(
+            1,
+            MkAction::ImageFind(MkImagePayload {
+                asset_id: 10,
+                wait: MkWaitOptions {
+                    timeout_ms: 0,
+                    poll_interval_ms: 1,
+                },
+                region: Default::default(),
+                tolerance: 0,
+                alpha: Default::default(),
+                return_point: Default::default(),
+                not_found_policy: MkImageNotFoundPolicy::Continue,
+                outputs: MkImageOutputs::default(),
+            }),
+        );
+        breakpoint_step.breakpoint = true;
+        let plan = MkExecutionPlan {
+            macro_id: 7,
+            playback: MkPlayback::default(),
+            instructions: vec![super::super::MkInstruction {
+                step: Arc::new(breakpoint_step),
+                depth: 0,
+                jump: Jump::Next,
+            }]
+            .into(),
+            step_to_instruction: [(1, 0)].into_iter().collect(),
+        };
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_image(10, Ok(Some(MkPoint { x: 4, y: 8 })));
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Mutex::new(Vec::new());
+
+        Executor::new(fake.backends(), control.clone())
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::BreakpointHit { step_id: 1, .. } => {
+                    events.lock().unwrap().push("breakpoint");
+                    control.resume();
+                }
+                ExecutionEvent::StepStarted(1) => events.lock().unwrap().push("started"),
+                ExecutionEvent::StepOutcome(1, outcome) => {
+                    assert_eq!(outcome.last_image_found, Some(true));
+                    events.lock().unwrap().push("outcome");
+                }
+                ExecutionEvent::StepFinished(1) => events.lock().unwrap().push("finished"),
+                _ => {}
+            })
+            .unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["breakpoint", "started", "outcome", "finished"]
+        );
     }
 
     #[test]
@@ -1610,8 +1746,8 @@ mod tests {
                 &plan,
                 ExecutionOptions::debug(),
                 &|event| match event {
-                    ExecutionEvent::Paused => {
-                        worker_lifecycle.lock().unwrap().push("paused");
+                    ExecutionEvent::BreakpointHit { step_id: 1, .. } => {
+                        worker_lifecycle.lock().unwrap().push("breakpoint");
                         paused_tx.send(()).unwrap();
                     }
                     ExecutionEvent::StepStarted(1) => {
@@ -1623,13 +1759,13 @@ mod tests {
         });
 
         paused_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(*lifecycle.lock().unwrap(), ["paused"]);
+        assert_eq!(*lifecycle.lock().unwrap(), ["breakpoint"]);
         assert!(fake.window_calls.lock().unwrap().is_empty());
         control.stop();
 
         let error = worker.join().unwrap().unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::Cancelled);
-        assert_eq!(*lifecycle.lock().unwrap(), ["paused"]);
+        assert_eq!(*lifecycle.lock().unwrap(), ["breakpoint"]);
         assert!(fake.window_calls.lock().unwrap().is_empty());
         assert!(fake.events().is_empty());
     }
@@ -1652,8 +1788,8 @@ mod tests {
 
         Executor::new(fake.clone().backends(), control.clone())
             .execute(&plan, ExecutionOptions::debug(), &|event| match event {
-                ExecutionEvent::Paused => {
-                    events.lock().unwrap().push("paused");
+                ExecutionEvent::BreakpointHit { step_id: 1, .. } => {
+                    events.lock().unwrap().push("breakpoint");
                     // The observer runs before Executor calls checkpoint. This
                     // deterministically exercises Resume-before-wait.
                     control.resume();
@@ -1664,7 +1800,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(*events.lock().unwrap(), ["paused", "started", "finished"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["breakpoint", "started", "finished"]
+        );
         assert_eq!(fake.events(), ["text:resumed"]);
         assert!(
             !control.is_active(),
@@ -1690,8 +1829,8 @@ mod tests {
 
         let error = Executor::new(fake.clone().backends(), control.clone())
             .execute(&plan, ExecutionOptions::debug(), &|event| match event {
-                ExecutionEvent::Paused => {
-                    events.lock().unwrap().push("paused");
+                ExecutionEvent::BreakpointHit { step_id: 1, .. } => {
+                    events.lock().unwrap().push("breakpoint");
                     // As above, Stop is recorded before checkpoint starts.
                     control.stop();
                 }
@@ -1701,7 +1840,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind, DiagnosticKind::Cancelled);
-        assert_eq!(*events.lock().unwrap(), ["paused"]);
+        assert_eq!(*events.lock().unwrap(), ["breakpoint"]);
         assert!(fake.events().is_empty());
         assert!(
             !control.is_active(),
@@ -1731,6 +1870,9 @@ mod tests {
                 ExecutionEvent::StepSkipped(1) => lifecycle.lock().unwrap().push("skipped"),
                 ExecutionEvent::StepStarted(1) => lifecycle.lock().unwrap().push("started"),
                 ExecutionEvent::Paused => lifecycle.lock().unwrap().push("paused"),
+                ExecutionEvent::BreakpointHit { .. } => {
+                    lifecycle.lock().unwrap().push("breakpoint")
+                }
                 _ => {}
             })
             .unwrap();
@@ -1762,6 +1904,9 @@ mod tests {
                     normal_lifecycle.lock().unwrap().push("finished")
                 }
                 ExecutionEvent::Paused => normal_lifecycle.lock().unwrap().push("paused"),
+                ExecutionEvent::BreakpointHit { .. } => {
+                    normal_lifecycle.lock().unwrap().push("breakpoint")
+                }
                 _ => {}
             })
             .unwrap();
@@ -3098,7 +3243,10 @@ impl Executor {
             vars.insert("step.id".into(), MkValue::Number(step.id as f64));
             if options.mode == ExecutionMode::Debug && step.breakpoint {
                 self.control.pause();
-                observe(ExecutionEvent::Paused);
+                observe(ExecutionEvent::BreakpointHit {
+                    step_id: step.id,
+                    variables: vars.clone(),
+                });
                 self.control.checkpoint()?;
             }
             observe(ExecutionEvent::StepStarted(step.id));

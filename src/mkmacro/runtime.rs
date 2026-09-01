@@ -3,7 +3,7 @@
 use super::{MkMacroStore, compile, executor::*};
 use super::{
     NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
-    SharedOperationGuard, SystemRecorderClock, production_hook_service,
+    RuntimeVariables, SharedOperationGuard, SystemRecorderClock, production_hook_service,
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
@@ -80,6 +80,21 @@ pub enum RuntimeState {
     Failed,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimePauseReason {
+    Manual,
+    Breakpoint,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugSnapshotReason {
+    Breakpoint,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugSnapshot {
+    pub step_id: u64,
+    pub variables: Arc<RuntimeVariables>,
+    pub reason: DebugSnapshotReason,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepState {
     Pending,
     Running,
@@ -99,6 +114,8 @@ pub struct RuntimeSnapshot {
     pub run_id: u64,
     pub macro_id: Option<u64>,
     pub step_id: Option<u64>,
+    pub pause_reason: Option<RuntimePauseReason>,
+    pub debug_snapshot: Option<Arc<DebugSnapshot>>,
     pub completed_steps: usize,
     pub total_steps: usize,
     pub started_at: Option<SystemTime>,
@@ -118,6 +135,8 @@ impl Default for RuntimeSnapshot {
             run_id: 0,
             macro_id: None,
             step_id: None,
+            pause_reason: None,
+            debug_snapshot: None,
             completed_steps: 0,
             total_steps: 0,
             started_at: None,
@@ -223,7 +242,8 @@ impl MacroRuntime {
                 self.shared.control.pause();
                 if self.shared.admission.lock().unwrap().is_some() {
                     publish(&self.shared, |snapshot| {
-                        snapshot.state = RuntimeState::Paused
+                        snapshot.state = RuntimeState::Paused;
+                        snapshot.pause_reason = Some(RuntimePauseReason::Manual);
                     });
                 }
             }
@@ -231,7 +251,8 @@ impl MacroRuntime {
                 self.shared.control.resume();
                 if self.shared.admission.lock().unwrap().is_some() {
                     publish(&self.shared, |snapshot| {
-                        snapshot.state = RuntimeState::Running
+                        snapshot.state = RuntimeState::Running;
+                        snapshot.pause_reason = None;
                     });
                 }
             }
@@ -239,7 +260,8 @@ impl MacroRuntime {
                 self.shared.control.stop();
                 if self.shared.admission.lock().unwrap().is_some() {
                     publish(&self.shared, |snapshot| {
-                        snapshot.state = RuntimeState::Stopping
+                        snapshot.state = RuntimeState::Stopping;
+                        snapshot.pause_reason = None;
                     });
                 }
             }
@@ -294,12 +316,18 @@ fn worker_loop(
             RuntimeCommand::Shutdown => break,
             RuntimeCommand::Pause => {
                 if shared.control.is_active() {
-                    publish(&shared, |s| s.state = RuntimeState::Paused)
+                    publish(&shared, |s| {
+                        s.state = RuntimeState::Paused;
+                        s.pause_reason = Some(RuntimePauseReason::Manual);
+                    })
                 }
             }
             RuntimeCommand::Resume => {
                 if shared.control.is_active() {
-                    publish(&shared, |s| s.state = RuntimeState::Running)
+                    publish(&shared, |s| {
+                        s.state = RuntimeState::Running;
+                        s.pause_reason = None;
+                    })
                 }
             }
             RuntimeCommand::Stop => {}
@@ -433,6 +461,8 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
             s.run_id = run_id;
             s.macro_id = Some(mid);
             s.step_id = None;
+            s.pause_reason = None;
+            s.debug_snapshot = None;
             s.completed_steps = 0;
             s.total_steps = plan.instructions.iter().filter(|x| x.step.enabled).count();
             s.started_at = Some(SystemTime::now());
@@ -444,6 +474,16 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
         });
         let observer = |ev: ExecutionEvent| {
             publish(shared, |s| match ev {
+                ExecutionEvent::BreakpointHit { step_id, variables } => {
+                    s.state = RuntimeState::Paused;
+                    s.step_id = Some(step_id);
+                    s.pause_reason = Some(RuntimePauseReason::Breakpoint);
+                    s.debug_snapshot = Some(Arc::new(DebugSnapshot {
+                        step_id,
+                        variables: Arc::new(variables),
+                        reason: DebugSnapshotReason::Breakpoint,
+                    }));
+                }
                 ExecutionEvent::StepStarted(id) => {
                     s.step_id = Some(id);
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
@@ -469,8 +509,14 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                     );
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
                 }
-                ExecutionEvent::Paused => s.state = RuntimeState::Paused,
-                ExecutionEvent::Resumed => s.state = RuntimeState::Running,
+                ExecutionEvent::Paused => {
+                    s.state = RuntimeState::Paused;
+                    s.pause_reason = Some(RuntimePauseReason::Manual);
+                }
+                ExecutionEvent::Resumed => {
+                    s.state = RuntimeState::Running;
+                    s.pause_reason = None;
+                }
             })
         };
         let executor = Executor::new(backends.clone(), shared.control.clone());
@@ -484,6 +530,7 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
         Ok(()) => publish(shared, |s| {
             s.state = RuntimeState::Completed;
             s.step_id = None;
+            s.pause_reason = None;
             s.finished_at = Some(SystemTime::now())
         }),
         Err(d) => {
@@ -494,6 +541,7 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 } else {
                     RuntimeState::Failed
                 };
+                s.pause_reason = None;
                 s.latest_failure = if stopped {
                     s.latest_failure.clone()
                 } else {
@@ -860,7 +908,7 @@ mod run_mode_tests {
     use super::*;
     use crate::mkmacro::{
         MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, MkTextMode, MkTextPayload,
-        executor::fake::FakeBackend,
+        MkValue, executor::fake::FakeBackend,
     };
     use std::time::{Duration, Instant};
 
@@ -1192,7 +1240,21 @@ mod run_mode_tests {
             CommandResult::Accepted
         );
         let paused = wait_for_state(&runtime, RuntimeState::Paused);
-        assert_eq!(paused.step_id, None);
+        assert_eq!(
+            paused.revision, 2,
+            "run initialization and BreakpointHit must each publish one revision"
+        );
+        assert_eq!(paused.step_id, Some(1));
+        assert_eq!(paused.pause_reason, Some(RuntimePauseReason::Breakpoint));
+        let debug = paused.debug_snapshot.as_ref().unwrap();
+        assert_eq!(debug.step_id, 1);
+        assert_eq!(debug.reason, DebugSnapshotReason::Breakpoint);
+        assert_eq!(debug.variables.get("macro.id"), Some(&MkValue::Number(1.0)));
+        assert_eq!(
+            debug.variables.get("last_action_success"),
+            Some(&MkValue::Boolean(true))
+        );
+        assert_eq!(debug.variables.get("step.id"), Some(&MkValue::Number(1.0)));
         assert!(fake.events().is_empty());
         assert_eq!(
             runtime.command(RuntimeCommand::Pause),
