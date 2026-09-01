@@ -81,8 +81,8 @@ pub enum RuntimeState {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimePauseReason {
-    Manual,
-    Breakpoint,
+    User,
+    Breakpoint { step_id: u64 },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugSnapshotReason {
@@ -241,10 +241,7 @@ impl MacroRuntime {
             RuntimeCommand::Pause => {
                 self.shared.control.pause();
                 if self.shared.admission.lock().unwrap().is_some() {
-                    publish(&self.shared, |snapshot| {
-                        snapshot.state = RuntimeState::Paused;
-                        snapshot.pause_reason = Some(RuntimePauseReason::Manual);
-                    });
+                    publish_manual_pause(&self.shared);
                 }
             }
             RuntimeCommand::Resume => {
@@ -305,6 +302,34 @@ fn publish(shared: &Shared, f: impl FnOnce(&mut RuntimeSnapshot)) {
     n.revision += 1;
     *shared.snapshot.write().unwrap() = Arc::new(n)
 }
+
+fn publish_manual_pause(shared: &Shared) {
+    publish(shared, set_manual_pause);
+}
+
+fn set_manual_pause(snapshot: &mut RuntimeSnapshot) {
+    snapshot.state = RuntimeState::Paused;
+    // BreakpointHit is the authoritative pause event. A Pause command can
+    // already be queued when that event arrives, so manual pause updates
+    // must not downgrade the reason while still stopped at that breakpoint.
+    let stopped_at_breakpoint = matches!(
+        (snapshot.pause_reason, snapshot.step_id),
+        (
+            Some(RuntimePauseReason::Breakpoint { step_id }),
+            Some(current_step_id)
+        ) if step_id == current_step_id
+    );
+    if !stopped_at_breakpoint {
+        snapshot.pause_reason = Some(RuntimePauseReason::User);
+    }
+}
+
+fn clear_pause_reason(shared: &Shared) {
+    if shared.snapshot.read().unwrap().pause_reason.is_some() {
+        publish(shared, |snapshot| snapshot.pause_reason = None);
+    }
+}
+
 fn worker_loop(
     store: Arc<MkMacroStore>,
     backends: Backends,
@@ -313,13 +338,13 @@ fn worker_loop(
 ) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            RuntimeCommand::Shutdown => break,
+            RuntimeCommand::Shutdown => {
+                clear_pause_reason(&shared);
+                break;
+            }
             RuntimeCommand::Pause => {
                 if shared.control.is_active() {
-                    publish(&shared, |s| {
-                        s.state = RuntimeState::Paused;
-                        s.pause_reason = Some(RuntimePauseReason::Manual);
-                    })
+                    publish_manual_pause(&shared)
                 }
             }
             RuntimeCommand::Resume => {
@@ -477,7 +502,7 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 ExecutionEvent::BreakpointHit { step_id, variables } => {
                     s.state = RuntimeState::Paused;
                     s.step_id = Some(step_id);
-                    s.pause_reason = Some(RuntimePauseReason::Breakpoint);
+                    s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
                     s.debug_snapshot = Some(Arc::new(DebugSnapshot {
                         step_id,
                         variables: Arc::new(variables),
@@ -510,8 +535,7 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
                 }
                 ExecutionEvent::Paused => {
-                    s.state = RuntimeState::Paused;
-                    s.pause_reason = Some(RuntimePauseReason::Manual);
+                    set_manual_pause(s);
                 }
                 ExecutionEvent::Resumed => {
                     s.state = RuntimeState::Running;
@@ -1223,6 +1247,87 @@ mod run_mode_tests {
     }
 
     #[test]
+    fn manual_pause_and_resume_publish_reason_in_the_state_transition() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        wait_for_state(&runtime, RuntimeState::Running);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Accepted
+        );
+        let paused = runtime.snapshot();
+        assert_eq!(paused.state, RuntimeState::Paused);
+        assert_eq!(paused.pause_reason, Some(RuntimePauseReason::User));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let resumed = runtime.snapshot();
+        assert_eq!(resumed.state, RuntimeState::Running);
+        assert_eq!(resumed.pause_reason, None);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
+    }
+
+    #[test]
+    fn breakpoint_resume_clears_reason_in_the_running_transition() {
+        let mut breakpoint = step(
+            7,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 60_000,
+                ..Default::default()
+            }),
+        );
+        breakpoint.breakpoint = true;
+        let target = test_macro(1, true, vec![breakpoint]);
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 7 })
+        );
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let resumed = runtime.snapshot();
+        assert_eq!(resumed.state, RuntimeState::Running);
+        assert_eq!(resumed.pause_reason, None);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
+    }
+
+    #[test]
     fn breakpoint_snapshot_resume_executes_once_and_worker_accepts_next_run() {
         let mut breakpoint = step(
             1,
@@ -1245,7 +1350,10 @@ mod run_mode_tests {
             "run initialization and BreakpointHit must each publish one revision"
         );
         assert_eq!(paused.step_id, Some(1));
-        assert_eq!(paused.pause_reason, Some(RuntimePauseReason::Breakpoint));
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 1 })
+        );
         let debug = paused.debug_snapshot.as_ref().unwrap();
         assert_eq!(debug.step_id, 1);
         assert_eq!(debug.reason, DebugSnapshotReason::Breakpoint);
@@ -1276,6 +1384,7 @@ mod run_mode_tests {
         );
         let completed = wait_for_terminal(&runtime);
         assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(completed.pause_reason, None);
         assert_eq!(fake.events(), ["text:breakpoint action"]);
 
         wait_for_admission_release(&runtime);
@@ -1311,14 +1420,25 @@ mod run_mode_tests {
             runtime.command(RuntimeCommand::DebugRun(1)),
             CommandResult::Accepted
         );
-        wait_for_state(&runtime, RuntimeState::Paused);
+        let paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 1 })
+        );
         assert!(fake.events().is_empty());
         assert_eq!(
             runtime.command(RuntimeCommand::Stop),
             CommandResult::Accepted
         );
+        let stopping = runtime.snapshot();
+        assert!(matches!(
+            stopping.state,
+            RuntimeState::Stopping | RuntimeState::Stopped
+        ));
+        assert_eq!(stopping.pause_reason, None);
         let stopped = wait_for_terminal(&runtime);
         assert_eq!(stopped.state, RuntimeState::Stopped);
+        assert_eq!(stopped.pause_reason, None);
         assert!(fake.events().is_empty());
 
         wait_for_admission_release(&runtime);
@@ -1331,6 +1451,129 @@ mod run_mode_tests {
             RuntimeState::Completed
         );
         assert_eq!(fake.events(), ["text:breakpoint action"]);
+    }
+
+    #[test]
+    fn queued_manual_pause_cannot_replace_a_breakpoint_reason() {
+        let mut breakpoint = step(
+            19,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 60_000,
+                ..Default::default()
+            }),
+        );
+        breakpoint.breakpoint = true;
+        let target = test_macro(1, true, vec![breakpoint]);
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        wait_for_state(&runtime, RuntimeState::Paused);
+
+        // Models a manual Paused event that was queued before BreakpointHit but
+        // delivered afterward by either the command or executor event path.
+        publish_manual_pause(&runtime.shared);
+        let paused = runtime.snapshot();
+        assert_eq!(paused.state, RuntimeState::Paused);
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 19 })
+        );
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
+    }
+
+    #[test]
+    fn breakpoint_terminal_failure_and_completion_clear_reason() {
+        for fail in [false, true] {
+            let mut breakpoint = step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "terminal transition".into(),
+                    mode: MkTextMode::Type,
+                }),
+            );
+            breakpoint.breakpoint = true;
+            let target = test_macro(1, true, vec![breakpoint]);
+            let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+            if fail {
+                fake.fail(
+                    "text:terminal transition",
+                    ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected failure"),
+                );
+            }
+
+            assert_eq!(
+                runtime.command(RuntimeCommand::DebugRun(1)),
+                CommandResult::Accepted
+            );
+            let paused = wait_for_state(&runtime, RuntimeState::Paused);
+            assert_eq!(
+                paused.pause_reason,
+                Some(RuntimePauseReason::Breakpoint { step_id: 1 })
+            );
+            assert_eq!(
+                runtime.command(RuntimeCommand::Resume),
+                CommandResult::Accepted
+            );
+            let terminal = wait_for_terminal(&runtime);
+            assert_eq!(
+                terminal.state,
+                if fail {
+                    RuntimeState::Failed
+                } else {
+                    RuntimeState::Completed
+                }
+            );
+            assert_eq!(terminal.pause_reason, None);
+        }
+    }
+
+    #[test]
+    fn run_after_breakpoint_starts_without_a_stale_reason() {
+        let mut breakpoint = step(
+            23,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 60_000,
+                ..Default::default()
+            }),
+        );
+        breakpoint.breakpoint = true;
+        let target = test_macro(1, true, vec![breakpoint]);
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        let stopped = wait_for_terminal(&runtime);
+        assert_eq!(stopped.pause_reason, None);
+        wait_for_admission_release(&runtime);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let running = wait_for_state(&runtime, RuntimeState::Running);
+        assert!(running.run_id > stopped.run_id);
+        assert_eq!(running.pause_reason, None);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
     }
 
     #[test]
