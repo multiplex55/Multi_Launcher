@@ -43,8 +43,8 @@ pub use recorder_hooks::*;
 pub use recorder_runtime::*;
 pub use recorder_windows::*;
 pub use runtime::{
-    CommandResult, DiagnosticKey, MacroRuntime, RuntimeCommand, RuntimeSnapshot, RuntimeState,
-    StepState,
+    CommandResult, DiagnosticKey, MacroRuntime, RuntimeCommand, RuntimeRunMode, RuntimeSnapshot,
+    RuntimeState, StepState,
 };
 pub use screen::*;
 pub use store::*;

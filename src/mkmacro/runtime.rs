@@ -23,10 +23,51 @@ pub enum RuntimeCommand {
     Run(u64),
     RunFrom(u64, u64),
     RunSelection(u64, Vec<u64>),
+    DebugRun(u64),
+    DebugRunFrom(u64, u64),
+    DebugRunSelection(u64, Vec<u64>),
     Pause,
     Resume,
     Stop,
     Shutdown,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRunMode {
+    Normal,
+    Debug,
+}
+#[derive(Debug, Clone, Copy)]
+struct RunRequest<'a> {
+    macro_id: u64,
+    starting_step: Option<u64>,
+    selection: Option<&'a [u64]>,
+    mode: RuntimeRunMode,
+}
+fn run_request(command: &RuntimeCommand) -> Option<RunRequest<'_>> {
+    let (macro_id, starting_step, selection, mode) = match command {
+        RuntimeCommand::Run(id) => (*id, None, None, RuntimeRunMode::Normal),
+        RuntimeCommand::RunFrom(id, step_id) => (*id, Some(*step_id), None, RuntimeRunMode::Normal),
+        RuntimeCommand::RunSelection(id, selection) => (
+            *id,
+            None,
+            Some(selection.as_slice()),
+            RuntimeRunMode::Normal,
+        ),
+        RuntimeCommand::DebugRun(id) => (*id, None, None, RuntimeRunMode::Debug),
+        RuntimeCommand::DebugRunFrom(id, step_id) => {
+            (*id, Some(*step_id), None, RuntimeRunMode::Debug)
+        }
+        RuntimeCommand::DebugRunSelection(id, selection) => {
+            (*id, None, Some(selection.as_slice()), RuntimeRunMode::Debug)
+        }
+        _ => return None,
+    };
+    Some(RunRequest {
+        macro_id,
+        starting_step,
+        selection,
+        mode,
+    })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeState {
@@ -54,6 +95,7 @@ pub struct DiagnosticKey {
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
     pub state: RuntimeState,
+    pub run_mode: RuntimeRunMode,
     pub run_id: u64,
     pub macro_id: Option<u64>,
     pub step_id: Option<u64>,
@@ -72,6 +114,7 @@ impl Default for RuntimeSnapshot {
     fn default() -> Self {
         Self {
             state: RuntimeState::Idle,
+            run_mode: RuntimeRunMode::Normal,
             run_id: 0,
             macro_id: None,
             step_id: None,
@@ -135,7 +178,8 @@ impl MacroRuntime {
         }
     }
     pub fn command(&self, c: RuntimeCommand) -> CommandResult {
-        if matches!(&c, RuntimeCommand::RunSelection(_, ids) if ids.is_empty()) {
+        let request = run_request(&c);
+        if request.is_some_and(|request| request.selection.is_some_and(<[u64]>::is_empty)) {
             return CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidSelection,
                 "selection is empty",
@@ -155,10 +199,7 @@ impl MacroRuntime {
                 format!("command {c:?} is not valid while runtime is {state:?}"),
             ));
         }
-        if let RuntimeCommand::Run(id)
-        | RuntimeCommand::RunFrom(id, _)
-        | RuntimeCommand::RunSelection(id, _) = &c
-        {
+        if let Some(request) = request {
             let mut active = self.shared.admission.lock().unwrap();
             if let Some(a) = *active {
                 return CommandResult::AlreadyRunning { active_macro_id: a };
@@ -169,7 +210,7 @@ impl MacroRuntime {
                     "recording is active",
                 ));
             }
-            *active = Some(*id);
+            *active = Some(request.macro_id);
         }
         match c {
             RuntimeCommand::Pause => {
@@ -252,12 +293,9 @@ fn worker_loop(
                 }
             }
             RuntimeCommand::Stop => {}
-            RuntimeCommand::Run(mid) => run_one(&store, &backends, &shared, mid, None, None),
-            RuntimeCommand::RunFrom(mid, sid) => {
-                run_one(&store, &backends, &shared, mid, Some(sid), None)
-            }
-            RuntimeCommand::RunSelection(mid, ids) => {
-                run_one(&store, &backends, &shared, mid, None, Some(ids))
+            command => {
+                let request = run_request(&command).expect("run commands are classified");
+                run_one(&store, &backends, &shared, request)
             }
         }
     }
@@ -265,14 +303,13 @@ fn worker_loop(
     *shared.admission.lock().unwrap() = None;
     shared.operations.release(Operation::Playback);
 }
-fn run_one(
-    store: &MkMacroStore,
-    backends: &Backends,
-    shared: &Shared,
-    mid: u64,
-    from: Option<u64>,
-    selection: Option<Vec<u64>>,
-) {
+fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: RunRequest<'_>) {
+    let RunRequest {
+        macro_id: mid,
+        starting_step: from,
+        selection,
+        mode,
+    } = request;
     shared.control.reset();
     let run_id = shared.next_run_id.fetch_add(1, Ordering::Relaxed);
     let result = (|| {
@@ -326,7 +363,7 @@ fn run_one(
                 .collect();
         }
         if let Some(ids) = selection {
-            let wanted: HashSet<_> = ids.into_iter().collect();
+            let wanted: HashSet<_> = ids.iter().copied().collect();
             if wanted
                 .iter()
                 .any(|id| !plan.step_to_instruction.contains_key(id))
@@ -382,6 +419,7 @@ fn run_one(
             .collect();
         publish(shared, |s| {
             s.state = RuntimeState::Running;
+            s.run_mode = mode;
             s.run_id = run_id;
             s.macro_id = Some(mid);
             s.step_id = None;
@@ -789,6 +827,323 @@ mod folder_tests {
                 assert_eq!(actual.failures, expected.failures);
                 assert_eq!(events, expected_events);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod run_mode_tests {
+    use super::*;
+    use crate::mkmacro::{
+        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, executor::fake::FakeBackend,
+    };
+    use std::time::{Duration, Instant};
+
+    fn step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        }
+    }
+
+    fn test_macro(id: u64, enabled: bool, steps: Vec<MkStep>) -> MkMacro {
+        MkMacro {
+            id,
+            name: format!("macro {id}"),
+            description: String::new(),
+            enabled,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps,
+            image_assets: vec![],
+        }
+    }
+
+    fn runtime_with(
+        macros: Vec<MkMacro>,
+    ) -> (tempfile::TempDir, MacroRuntime, Arc<SharedOperationGuard>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros,
+                ..Default::default()
+            })
+            .unwrap();
+        let guard = Arc::new(SharedOperationGuard::default());
+        let fake = Arc::new(FakeBackend::default());
+        let runtime = MacroRuntime::with_guard(Arc::new(store), fake.backends(), guard.clone());
+        (dir, runtime, guard)
+    }
+
+    fn wait_for_terminal(runtime: &MacroRuntime) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if matches!(
+                snapshot.state,
+                RuntimeState::Completed | RuntimeState::Failed | RuntimeState::Stopped
+            ) {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not finish: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_state(runtime: &MacroRuntime, wanted: RuntimeState) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.state == wanted {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not reach {wanted:?}: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn failure_for(command: RuntimeCommand, macros: Vec<MkMacro>) -> ExecutionDiagnostic {
+        let (_dir, runtime, _guard) = runtime_with(macros);
+        assert_eq!(runtime.command(command), CommandResult::Accepted);
+        wait_for_terminal(&runtime)
+            .latest_failure
+            .clone()
+            .expect("failed run publishes a diagnostic")
+    }
+
+    fn wait_for_admission_release(runtime: &MacroRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while runtime.shared.admission.lock().unwrap().is_some() {
+            assert!(Instant::now() < deadline, "admission lock was not released");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn command_pairs(macro_id: u64) -> Vec<(RuntimeCommand, RuntimeCommand)> {
+        vec![
+            (
+                RuntimeCommand::Run(macro_id),
+                RuntimeCommand::DebugRun(macro_id),
+            ),
+            (
+                RuntimeCommand::RunFrom(macro_id, 1),
+                RuntimeCommand::DebugRunFrom(macro_id, 1),
+            ),
+            (
+                RuntimeCommand::RunSelection(macro_id, vec![1]),
+                RuntimeCommand::DebugRunSelection(macro_id, vec![1]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn normal_and_debug_runs_have_equal_target_and_enabled_validation() {
+        let normal_missing = failure_for(RuntimeCommand::Run(404), vec![]);
+        let debug_missing = failure_for(RuntimeCommand::DebugRun(404), vec![]);
+        assert_eq!(normal_missing, debug_missing);
+        assert_eq!(normal_missing.kind, DiagnosticKind::TargetNotFound);
+
+        let disabled = test_macro(1, false, vec![]);
+        let normal_disabled = failure_for(RuntimeCommand::Run(1), vec![disabled.clone()]);
+        let debug_disabled = failure_for(RuntimeCommand::DebugRun(1), vec![disabled]);
+        assert_eq!(normal_disabled, debug_disabled);
+        assert_eq!(normal_disabled.kind, DiagnosticKind::InvalidTarget);
+    }
+
+    #[test]
+    fn normal_and_debug_selections_have_equal_empty_and_invalid_validation() {
+        let (_dir, runtime, _guard) = runtime_with(vec![]);
+        let normal_empty = runtime.command(RuntimeCommand::RunSelection(1, vec![]));
+        let debug_empty = runtime.command(RuntimeCommand::DebugRunSelection(1, vec![]));
+        assert_eq!(normal_empty, debug_empty);
+        assert!(matches!(
+            normal_empty,
+            CommandResult::Rejected(ExecutionDiagnostic {
+                kind: DiagnosticKind::InvalidSelection,
+                ..
+            })
+        ));
+
+        let target = test_macro(1, true, vec![step(1, MkAction::Delay(Default::default()))]);
+        let normal_invalid = failure_for(
+            RuntimeCommand::RunSelection(1, vec![999]),
+            vec![target.clone()],
+        );
+        let debug_invalid = failure_for(
+            RuntimeCommand::DebugRunSelection(1, vec![999]),
+            vec![target],
+        );
+        assert_eq!(normal_invalid, debug_invalid);
+        assert_eq!(normal_invalid.kind, DiagnosticKind::TargetNotFound);
+    }
+
+    #[test]
+    fn normal_and_debug_run_from_reject_structured_plans_equally() {
+        let structured = test_macro(
+            1,
+            true,
+            vec![
+                step(1, MkAction::RepeatStart { count: 1 }),
+                step(2, MkAction::Delay(Default::default())),
+                step(3, MkAction::RepeatEnd),
+            ],
+        );
+        let normal = failure_for(RuntimeCommand::RunFrom(1, 2), vec![structured.clone()]);
+        let debug = failure_for(RuntimeCommand::DebugRunFrom(1, 2), vec![structured]);
+        assert_eq!(normal, debug);
+        assert_eq!(normal.kind, DiagnosticKind::InvalidSelection);
+    }
+
+    #[test]
+    fn all_normal_and_debug_pairs_share_recording_and_playback_admission() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                }),
+            )],
+        );
+
+        for (normal, debug) in command_pairs(1) {
+            let (_dir, runtime, guard) = runtime_with(vec![target.clone()]);
+            assert!(guard.claim(Operation::Recording));
+            let normal_result = runtime.command(normal);
+            let debug_result = runtime.command(debug);
+            assert_eq!(normal_result, debug_result);
+            assert!(matches!(
+                normal_result,
+                CommandResult::Rejected(ExecutionDiagnostic {
+                    kind: DiagnosticKind::InvalidTarget,
+                    ..
+                })
+            ));
+            guard.release(Operation::Recording);
+        }
+
+        for (normal, debug) in command_pairs(1) {
+            let (_dir, normal_runtime, _guard) = runtime_with(vec![target.clone()]);
+            assert_eq!(
+                normal_runtime.command(RuntimeCommand::Run(1)),
+                CommandResult::Accepted
+            );
+            wait_for_state(&normal_runtime, RuntimeState::Running);
+            let normal_result = normal_runtime.command(normal);
+
+            let (_dir, debug_runtime, _guard) = runtime_with(vec![target.clone()]);
+            assert_eq!(
+                debug_runtime.command(RuntimeCommand::Run(1)),
+                CommandResult::Accepted
+            );
+            wait_for_state(&debug_runtime, RuntimeState::Running);
+            let debug_result = debug_runtime.command(debug);
+
+            assert_eq!(normal_result, debug_result);
+            assert_eq!(
+                normal_result,
+                CommandResult::AlreadyRunning { active_macro_id: 1 }
+            );
+            assert_eq!(
+                normal_runtime.command(RuntimeCommand::Stop),
+                CommandResult::Accepted
+            );
+            assert_eq!(
+                debug_runtime.command(RuntimeCommand::Stop),
+                CommandResult::Accepted
+            );
+            assert_eq!(
+                wait_for_terminal(&normal_runtime).state,
+                RuntimeState::Stopped
+            );
+            assert_eq!(
+                wait_for_terminal(&debug_runtime).state,
+                RuntimeState::Stopped
+            );
+        }
+    }
+
+    #[test]
+    fn debug_controls_match_normal_playback_controls() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        wait_for_state(&runtime, RuntimeState::Running);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Accepted
+        );
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Stopped);
+    }
+
+    #[test]
+    fn snapshots_publish_each_mode_without_leaking_between_runs() {
+        assert_eq!(RuntimeSnapshot::default().run_mode, RuntimeRunMode::Normal);
+        let target = test_macro(1, true, vec![step(1, MkAction::Delay(Default::default()))]);
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let debug_snapshot = wait_for_terminal(&runtime);
+        assert_eq!(debug_snapshot.run_mode, RuntimeRunMode::Debug);
+        wait_for_admission_release(&runtime);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_id > debug_snapshot.run_id && snapshot.state == RuntimeState::Completed
+            {
+                assert_eq!(snapshot.run_mode, RuntimeRunMode::Normal);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "normal run did not replace debug snapshot: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
         }
     }
 }
