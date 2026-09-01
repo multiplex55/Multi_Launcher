@@ -1635,6 +1635,81 @@ mod tests {
     }
 
     #[test]
+    fn resume_emitted_from_breakpoint_observer_is_not_lost_before_checkpoint() {
+        let mut breakpoint_step = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "resumed".into(),
+                mode: crate::mkmacro::MkTextMode::Type,
+            }),
+        );
+        breakpoint_step.breakpoint = true;
+        let plan = plan(vec![breakpoint_step]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Mutex::new(Vec::new());
+
+        Executor::new(fake.clone().backends(), control.clone())
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::Paused => {
+                    events.lock().unwrap().push("paused");
+                    // The observer runs before Executor calls checkpoint. This
+                    // deterministically exercises Resume-before-wait.
+                    control.resume();
+                }
+                ExecutionEvent::StepStarted(1) => events.lock().unwrap().push("started"),
+                ExecutionEvent::StepFinished(1) => events.lock().unwrap().push("finished"),
+                _ => {}
+            })
+            .unwrap();
+
+        assert_eq!(*events.lock().unwrap(), ["paused", "started", "finished"]);
+        assert_eq!(fake.events(), ["text:resumed"]);
+        assert!(
+            !control.is_active(),
+            "executor worker activity was not cleared"
+        );
+    }
+
+    #[test]
+    fn stop_emitted_from_breakpoint_observer_is_seen_before_action_dispatch() {
+        let mut breakpoint_step = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "must not run".into(),
+                mode: crate::mkmacro::MkTextMode::Type,
+            }),
+        );
+        breakpoint_step.breakpoint = true;
+        let plan = plan(vec![breakpoint_step]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Mutex::new(Vec::new());
+
+        let error = Executor::new(fake.clone().backends(), control.clone())
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::Paused => {
+                    events.lock().unwrap().push("paused");
+                    // As above, Stop is recorded before checkpoint starts.
+                    control.stop();
+                }
+                ExecutionEvent::StepStarted(1) => events.lock().unwrap().push("started"),
+                _ => {}
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(*events.lock().unwrap(), ["paused"]);
+        assert!(fake.events().is_empty());
+        assert!(
+            !control.is_active(),
+            "executor worker activity was not cleared"
+        );
+    }
+
+    #[test]
     fn disabled_breakpoint_is_skipped_without_pausing_or_dispatching() {
         let mut disabled = step(
             1,

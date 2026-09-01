@@ -859,7 +859,8 @@ mod folder_tests {
 mod run_mode_tests {
     use super::*;
     use crate::mkmacro::{
-        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, executor::fake::FakeBackend,
+        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, MkTextMode, MkTextPayload,
+        executor::fake::FakeBackend,
     };
     use std::time::{Duration, Instant};
 
@@ -893,6 +894,18 @@ mod run_mode_tests {
     fn runtime_with(
         macros: Vec<MkMacro>,
     ) -> (tempfile::TempDir, MacroRuntime, Arc<SharedOperationGuard>) {
+        let (dir, runtime, guard, _fake) = runtime_with_effects(macros);
+        (dir, runtime, guard)
+    }
+
+    fn runtime_with_effects(
+        macros: Vec<MkMacro>,
+    ) -> (
+        tempfile::TempDir,
+        MacroRuntime,
+        Arc<SharedOperationGuard>,
+        Arc<FakeBackend>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         store
@@ -903,8 +916,9 @@ mod run_mode_tests {
             .unwrap();
         let guard = Arc::new(SharedOperationGuard::default());
         let fake = Arc::new(FakeBackend::default());
-        let runtime = MacroRuntime::with_guard(Arc::new(store), fake.backends(), guard.clone());
-        (dir, runtime, guard)
+        let runtime =
+            MacroRuntime::with_guard(Arc::new(store), fake.clone().backends(), guard.clone());
+        (dir, runtime, guard, fake)
     }
 
     fn wait_for_terminal(runtime: &MacroRuntime) -> Arc<RuntimeSnapshot> {
@@ -915,6 +929,29 @@ mod run_mode_tests {
                 snapshot.state,
                 RuntimeState::Completed | RuntimeState::Failed | RuntimeState::Stopped
             ) {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not finish: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_terminal_after(
+        runtime: &MacroRuntime,
+        previous_run_id: u64,
+    ) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_id > previous_run_id
+                && matches!(
+                    snapshot.state,
+                    RuntimeState::Completed | RuntimeState::Failed | RuntimeState::Stopped
+                )
+            {
                 return snapshot;
             }
             assert!(
@@ -1135,6 +1172,103 @@ mod run_mode_tests {
             CommandResult::Accepted
         );
         assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Stopped);
+    }
+
+    #[test]
+    fn breakpoint_snapshot_resume_executes_once_and_worker_accepts_next_run() {
+        let mut breakpoint = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "breakpoint action".into(),
+                mode: MkTextMode::Type,
+            }),
+        );
+        breakpoint.breakpoint = true;
+        let target = test_macro(1, true, vec![breakpoint]);
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(paused.step_id, None);
+        assert!(fake.events().is_empty());
+        assert_eq!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Rejected(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "command Pause is not valid while runtime is Paused",
+            ))
+        );
+        assert_eq!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Rejected(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "command Pause is not valid while runtime is Paused",
+            ))
+        );
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(fake.events(), ["text:breakpoint action"]);
+
+        wait_for_admission_release(&runtime);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        assert_eq!(
+            wait_for_terminal_after(&runtime, completed.run_id).state,
+            RuntimeState::Completed
+        );
+        assert_eq!(
+            fake.events(),
+            ["text:breakpoint action", "text:breakpoint action"],
+            "the same runtime worker must remain usable without a debugger worker"
+        );
+    }
+
+    #[test]
+    fn breakpoint_snapshot_stop_cancels_before_dispatch_and_worker_is_reusable() {
+        let mut breakpoint = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "breakpoint action".into(),
+                mode: MkTextMode::Type,
+            }),
+        );
+        breakpoint.breakpoint = true;
+        let target = test_macro(1, true, vec![breakpoint]);
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        wait_for_state(&runtime, RuntimeState::Paused);
+        assert!(fake.events().is_empty());
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        let stopped = wait_for_terminal(&runtime);
+        assert_eq!(stopped.state, RuntimeState::Stopped);
+        assert!(fake.events().is_empty());
+
+        wait_for_admission_release(&runtime);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        assert_eq!(
+            wait_for_terminal_after(&runtime, stopped.run_id).state,
+            RuntimeState::Completed
+        );
+        assert_eq!(fake.events(), ["text:breakpoint action"]);
     }
 
     #[test]
