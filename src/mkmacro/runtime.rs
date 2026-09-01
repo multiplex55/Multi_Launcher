@@ -474,10 +474,11 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
             })
         };
         let executor = Executor::new(backends.clone(), shared.control.clone());
-        match mode {
-            RuntimeRunMode::Normal => executor.execute(&plan, &observer),
-            RuntimeRunMode::Debug => executor.execute_debug(&plan, &observer),
-        }
+        let options = match mode {
+            RuntimeRunMode::Normal => ExecutionOptions::normal(),
+            RuntimeRunMode::Debug => ExecutionOptions::debug(),
+        };
+        executor.execute(&plan, options, &observer)
     })();
     match result {
         Ok(()) => publish(shared, |s| {

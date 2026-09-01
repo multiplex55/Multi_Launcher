@@ -104,6 +104,7 @@ fn image_wait_cancels_promptly_without_real_screen_access() {
                     not_found_policy: MkImageNotFoundPolicy::Fail,
                     outputs: MkImageOutputs::default(),
                 })),
+                ExecutionOptions::normal(),
                 &|_| {},
             )
         })
@@ -138,7 +139,13 @@ fn pixel_wait_cancels_promptly_without_real_screen_access() {
     };
     let worker = {
         let c = c.clone();
-        thread::spawn(move || Executor::new(f.backends(), c).execute(&plan(action), &|_| {}))
+        thread::spawn(move || {
+            Executor::new(f.backends(), c).execute(
+                &plan(action),
+                ExecutionOptions::normal(),
+                &|_| {},
+            )
+        })
     };
     thread::sleep(Duration::from_millis(10));
     c.stop();

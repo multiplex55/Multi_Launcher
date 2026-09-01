@@ -109,10 +109,10 @@ mod tests {
     use super::*;
     use crate::mkmacro::MkVirtualDesktopAction;
     use crate::mkmacro::{
-        AlphaPolicy, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition, MkCoordinateTarget,
-        MkHotkey, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey, MkMouseButton,
-        MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint,
-        SCHEMA_VERSION, SearchRegion,
+        AlphaPolicy, ExecutionOptions, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition,
+        MkCoordinateTarget, MkHotkey, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey,
+        MkMouseButton, MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep,
+        MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
     };
     use std::{
         fs, thread,
@@ -1859,7 +1859,7 @@ mod tests {
             // Exercise unsupported backends even on Windows, without sending
             // input or changing the user's desktop.
             let error = Executor::new(Backends::unsupported(), Arc::new(RunControl::default()))
-                .execute(&plan, &|_| {})
+                .execute(&plan, ExecutionOptions::normal(), &|_| {})
                 .unwrap_err();
             assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
             assert!(!error.message.trim().is_empty());

@@ -67,6 +67,31 @@ impl fmt::Display for ExecutionDiagnostic {
 impl std::error::Error for ExecutionDiagnostic {}
 pub type ExecResult<T = ()> = Result<T, ExecutionDiagnostic>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Normal,
+    Debug,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionOptions {
+    pub mode: ExecutionMode,
+}
+
+impl ExecutionOptions {
+    pub const fn normal() -> Self {
+        Self {
+            mode: ExecutionMode::Normal,
+        }
+    }
+
+    pub const fn debug() -> Self {
+        Self {
+            mode: ExecutionMode::Debug,
+        }
+    }
+}
+
 /// A notification after all runtime-variable interpolation has completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNotification {
@@ -1470,6 +1495,59 @@ mod tests {
         })
         .unwrap()
     }
+
+    #[test]
+    fn breakpoint_plan_only_pauses_before_backend_dispatch_in_debug_mode() {
+        let mut breakpoint_step = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "breakpoint action".into(),
+                mode: crate::mkmacro::MkTextMode::Type,
+            }),
+        );
+        breakpoint_step.breakpoint = true;
+        let plan = plan(vec![breakpoint_step]);
+
+        let normal_fake = Arc::new(FakeBackend::default());
+        let normal_control = Arc::new(RunControl::default());
+        normal_control.reset();
+        let normal_lifecycle = Mutex::new(Vec::new());
+        Executor::new(normal_fake.clone().backends(), normal_control)
+            .execute(&plan, ExecutionOptions::normal(), &|event| match event {
+                ExecutionEvent::StepStarted(1) => normal_lifecycle.lock().unwrap().push("started"),
+                ExecutionEvent::StepFinished(1) => {
+                    normal_lifecycle.lock().unwrap().push("finished")
+                }
+                ExecutionEvent::Paused => normal_lifecycle.lock().unwrap().push("paused"),
+                _ => {}
+            })
+            .unwrap();
+        assert_eq!(*normal_lifecycle.lock().unwrap(), ["started", "finished"]);
+        assert_eq!(normal_fake.events(), ["text:breakpoint action"]);
+
+        let debug_fake = Arc::new(FakeBackend::default());
+        let debug_control = Arc::new(RunControl::default());
+        debug_control.reset();
+        let debug_lifecycle = Mutex::new(Vec::new());
+        Executor::new(debug_fake.clone().backends(), debug_control.clone())
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::StepStarted(1) => debug_lifecycle.lock().unwrap().push("started"),
+                ExecutionEvent::Paused => {
+                    debug_lifecycle.lock().unwrap().push("paused");
+                    assert!(debug_fake.events().is_empty());
+                    debug_control.resume();
+                }
+                ExecutionEvent::StepFinished(1) => debug_lifecycle.lock().unwrap().push("finished"),
+                _ => {}
+            })
+            .unwrap();
+        assert_eq!(
+            *debug_lifecycle.lock().unwrap(),
+            ["started", "paused", "finished"]
+        );
+        assert_eq!(debug_fake.events(), ["text:breakpoint action"]);
+    }
+
     #[test]
     fn playback_duration_scaling_is_ceiling_and_saturating() {
         assert_eq!(scale_playback_duration(0, 50), 0);
@@ -1526,7 +1604,7 @@ mod tests {
     fn execute_delay(executor: &Executor, action: MkAction, speed_percent: u32) -> ExecResult {
         let mut plan = plan(vec![step(1, action)]);
         plan.playback.speed_percent = speed_percent;
-        executor.execute(&plan, &|_| {})
+        executor.execute(&plan, ExecutionOptions::normal(), &|_| {})
     }
 
     #[test]
@@ -1593,7 +1671,9 @@ mod tests {
         let mut plan = plan(vec![step(1, random_delay(500, 1500))]);
         Arc::make_mut(&mut Arc::make_mut(&mut plan.instructions)[0].step).action =
             random_delay(1500, 500);
-        let error = executor.execute(&plan, &|_| {}).unwrap_err();
+        let error = executor
+            .execute(&plan, ExecutionOptions::normal(), &|_| {})
+            .unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::InvalidPlan);
         assert_eq!(error.context["minimum_ms"], "1500");
         assert_eq!(error.context["maximum_ms"], "500");
@@ -1627,7 +1707,9 @@ mod tests {
             step(1, random_delay(500, 1500)),
             step(2, MkAction::Delay(Default::default())),
         ]);
-        let error = executor.execute(&plan, &|_| {}).unwrap_err();
+        let error = executor
+            .execute(&plan, ExecutionOptions::normal(), &|_| {})
+            .unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::Cancelled);
         assert_eq!(error.context["step_id"], "1");
         assert_eq!(waiter.sleeps(), [Duration::from_millis(900)]);
@@ -2005,7 +2087,7 @@ mod tests {
             ),
         ]);
         Executor::new(fake.clone().backends(), control)
-            .execute(&p, &|_| {})
+            .execute(&p, ExecutionOptions::normal(), &|_| {})
             .unwrap();
         assert_eq!(
             fake.events(),
@@ -2076,6 +2158,7 @@ mod tests {
                         index as u64 + 1,
                         MkAction::VirtualDesktop(action),
                     )]),
+                    ExecutionOptions::normal(),
                     &|_| {},
                 )
                 .unwrap();
@@ -2113,6 +2196,7 @@ mod tests {
                     9,
                     MkAction::VirtualDesktop(super::super::MkVirtualDesktopAction::Create),
                 )]),
+                ExecutionOptions::normal(),
                 &|_| {},
             )
             .unwrap_err();
@@ -2145,6 +2229,7 @@ mod tests {
                         desktop: 11,
                     }),
                 )]),
+                ExecutionOptions::normal(),
                 &|_| {},
             )
             .unwrap_err();
@@ -2188,7 +2273,7 @@ mod tests {
             ),
         ]);
         Executor::new(fake.clone().backends(), control)
-            .execute(&p, &|_| {})
+            .execute(&p, ExecutionOptions::normal(), &|_| {})
             .unwrap();
         let events = fake.events();
         assert_eq!(events.iter().filter(|e| *e == "cursor_position").count(), 1);
@@ -2311,6 +2396,7 @@ mod tests {
                         ..Default::default()
                     }),
                 )]),
+                ExecutionOptions::normal(),
                 &|_| {},
             )
         });
@@ -2754,21 +2840,11 @@ impl Executor {
             self.wait(sleep)?;
         }
     }
-    pub fn execute(&self, plan: &MkExecutionPlan, observe: &dyn Fn(ExecutionEvent)) -> ExecResult {
-        self.execute_inner(plan, observe, false)
-    }
-    pub(crate) fn execute_debug(
+    pub fn execute(
         &self,
         plan: &MkExecutionPlan,
+        options: ExecutionOptions,
         observe: &dyn Fn(ExecutionEvent),
-    ) -> ExecResult {
-        self.execute_inner(plan, observe, true)
-    }
-    fn execute_inner(
-        &self,
-        plan: &MkExecutionPlan,
-        observe: &dyn Fn(ExecutionEvent),
-        debug: bool,
     ) -> ExecResult {
         let _activity = RunActivityGuard(&self.control);
         let mut guard = InputCleanupGuard::new(self.backends.input.clone());
@@ -2799,7 +2875,7 @@ impl Executor {
                 continue;
             }
             observe(ExecutionEvent::StepStarted(step.id));
-            if debug && step.breakpoint {
+            if options.mode == ExecutionMode::Debug && step.breakpoint {
                 self.control.pause();
                 observe(ExecutionEvent::Paused);
                 self.control.checkpoint()?;
@@ -3731,7 +3807,7 @@ mod notification_sound_tests {
         .unwrap();
         let control = Arc::new(RunControl::default());
         control.reset();
-        Executor::new(fake.backends(), control).execute(&plan, &|_| {})
+        Executor::new(fake.backends(), control).execute(&plan, ExecutionOptions::normal(), &|_| {})
     }
 
     #[test]
@@ -3954,7 +4030,7 @@ mod notification_sound_tests {
         let control = Arc::new(RunControl::default());
         control.reset();
         Executor::new(backends, control)
-            .execute(&plan, &|_| {})
+            .execute(&plan, ExecutionOptions::normal(), &|_| {})
             .unwrap();
 
         // Receiving the scheduled work is independent from playback completion;
@@ -4802,7 +4878,7 @@ mod phase_d_tests {
     fn run(steps: Vec<MkStep>, fake: Arc<FakeBackend>) -> ExecResult {
         let c = Arc::new(RunControl::default());
         c.reset();
-        Executor::new(fake.backends(), c).execute(&plan(steps), &|_| {})
+        Executor::new(fake.backends(), c).execute(&plan(steps), ExecutionOptions::normal(), &|_| {})
     }
 
     fn run_recorded(
@@ -5367,6 +5443,7 @@ mod phase_d_tests {
                         }),
                     ),
                 ]),
+                ExecutionOptions::normal(),
                 &|_| {},
             )
             .unwrap();
@@ -5618,6 +5695,7 @@ mod phase_d_tests {
                         legacy_resolved_action: None,
                     }),
                 )]),
+                ExecutionOptions::normal(),
                 &|_| {},
             )
             .unwrap_err();

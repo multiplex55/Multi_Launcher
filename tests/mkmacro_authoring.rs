@@ -740,7 +740,7 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     rerun_control.reset();
     let rerun_states = std::sync::Mutex::new(Vec::new());
     Executor::new(fake.clone().backends(), rerun_control)
-        .execute(&rerun_plan, &|event| {
+        .execute(&rerun_plan, ExecutionOptions::normal(), &|event| {
             rerun_states.lock().unwrap().push(event)
         })
         .unwrap();
@@ -811,7 +811,7 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
     })
     .unwrap();
     let error = Executor::new(Backends::unsupported(), Arc::new(RunControl::default()))
-        .execute(&plan, &|_| {})
+        .execute(&plan, ExecutionOptions::normal(), &|_| {})
         .unwrap_err();
     assert_eq!(error.message, "UI Automation backend is not available yet");
 }
