@@ -1497,7 +1497,175 @@ mod tests {
     }
 
     #[test]
-    fn breakpoint_plan_only_pauses_before_backend_dispatch_in_debug_mode() {
+    fn debug_breakpoint_pauses_after_prior_outputs_and_resumes_current_step_once() {
+        let prior_point = MkPoint { x: 37, y: 91 };
+        let producer = step(
+            1,
+            MkAction::SetVariable {
+                name: "point".into(),
+                value: MkValue::Point(prior_point),
+            },
+        );
+        let mut breakpoint_step = step(
+            2,
+            MkAction::MouseMove(super::super::MkMouseMovePayload {
+                target: MkCoordinateTarget::Variable {
+                    name: "point".into(),
+                },
+                duration_ms: 0,
+            }),
+        );
+        breakpoint_step.breakpoint = true;
+        let plan = plan(vec![producer, breakpoint_step]);
+
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let lifecycle = Arc::new(Mutex::new(Vec::new()));
+        let worker_lifecycle = lifecycle.clone();
+        let worker_control = control.clone();
+        let worker_fake = fake.clone();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            Executor::new(worker_fake.backends(), worker_control).execute(
+                &plan,
+                ExecutionOptions::debug(),
+                &|event| match event {
+                    ExecutionEvent::StepStarted(1) => {
+                        worker_lifecycle.lock().unwrap().push("started:1")
+                    }
+                    ExecutionEvent::StepFinished(1) => {
+                        worker_lifecycle.lock().unwrap().push("finished:1")
+                    }
+                    ExecutionEvent::Paused => {
+                        worker_lifecycle.lock().unwrap().push("paused");
+                        paused_tx.send(()).unwrap();
+                    }
+                    ExecutionEvent::StepStarted(2) => {
+                        worker_lifecycle.lock().unwrap().push("started:2")
+                    }
+                    ExecutionEvent::StepFinished(2) => {
+                        worker_lifecycle.lock().unwrap().push("finished:2")
+                    }
+                    _ => {}
+                },
+            )
+        });
+
+        paused_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            *lifecycle.lock().unwrap(),
+            ["started:1", "finished:1", "paused"]
+        );
+        assert!(
+            fake.events().is_empty(),
+            "breakpoint action ran before Resume"
+        );
+        assert!(fake.resolved_variables.lock().unwrap().is_empty());
+
+        control.resume();
+        worker.join().unwrap().unwrap();
+
+        assert_eq!(
+            *lifecycle.lock().unwrap(),
+            [
+                "started:1",
+                "finished:1",
+                "paused",
+                "started:2",
+                "finished:2"
+            ]
+        );
+        assert_eq!(fake.events(), ["move:37,91"]);
+        let resolved = fake.resolved_variables.lock().unwrap();
+        assert_eq!(
+            resolved.len(),
+            1,
+            "Resume must execute the current step once"
+        );
+        assert_eq!(resolved[0].get("point"), Some(&MkValue::Point(prior_point)));
+        assert_eq!(resolved[0].get("step.id"), Some(&MkValue::Number(2.0)));
+    }
+
+    #[test]
+    fn stop_at_debug_breakpoint_cancels_before_start_or_condition_evaluation() {
+        let matcher = MkWindowMatcher {
+            title: Some("never queried".into()),
+            ..Default::default()
+        };
+        let mut breakpoint_step = step(1, MkAction::If(MkCondition::WindowExists { matcher }));
+        breakpoint_step.breakpoint = true;
+        let plan = plan(vec![breakpoint_step, step(2, MkAction::EndIf)]);
+
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let lifecycle = Arc::new(Mutex::new(Vec::new()));
+        let worker_lifecycle = lifecycle.clone();
+        let worker_control = control.clone();
+        let worker_fake = fake.clone();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            Executor::new(worker_fake.backends(), worker_control).execute(
+                &plan,
+                ExecutionOptions::debug(),
+                &|event| match event {
+                    ExecutionEvent::Paused => {
+                        worker_lifecycle.lock().unwrap().push("paused");
+                        paused_tx.send(()).unwrap();
+                    }
+                    ExecutionEvent::StepStarted(1) => {
+                        worker_lifecycle.lock().unwrap().push("started")
+                    }
+                    _ => {}
+                },
+            )
+        });
+
+        paused_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(*lifecycle.lock().unwrap(), ["paused"]);
+        assert!(fake.window_calls.lock().unwrap().is_empty());
+        control.stop();
+
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(*lifecycle.lock().unwrap(), ["paused"]);
+        assert!(fake.window_calls.lock().unwrap().is_empty());
+        assert!(fake.events().is_empty());
+    }
+
+    #[test]
+    fn disabled_breakpoint_is_skipped_without_pausing_or_dispatching() {
+        let mut disabled = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "disabled".into(),
+                mode: crate::mkmacro::MkTextMode::Type,
+            }),
+        );
+        disabled.enabled = false;
+        disabled.breakpoint = true;
+        let plan = plan(vec![disabled]);
+
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let lifecycle = Mutex::new(Vec::new());
+        Executor::new(fake.clone().backends(), control)
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::StepSkipped(1) => lifecycle.lock().unwrap().push("skipped"),
+                ExecutionEvent::StepStarted(1) => lifecycle.lock().unwrap().push("started"),
+                ExecutionEvent::Paused => lifecycle.lock().unwrap().push("paused"),
+                _ => {}
+            })
+            .unwrap();
+
+        assert_eq!(*lifecycle.lock().unwrap(), ["skipped"]);
+        assert!(fake.events().is_empty());
+    }
+
+    #[test]
+    fn normal_mode_ignores_enabled_breakpoints() {
         let mut breakpoint_step = step(
             1,
             MkAction::Text(MkTextPayload {
@@ -1524,28 +1692,6 @@ mod tests {
             .unwrap();
         assert_eq!(*normal_lifecycle.lock().unwrap(), ["started", "finished"]);
         assert_eq!(normal_fake.events(), ["text:breakpoint action"]);
-
-        let debug_fake = Arc::new(FakeBackend::default());
-        let debug_control = Arc::new(RunControl::default());
-        debug_control.reset();
-        let debug_lifecycle = Mutex::new(Vec::new());
-        Executor::new(debug_fake.clone().backends(), debug_control.clone())
-            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
-                ExecutionEvent::StepStarted(1) => debug_lifecycle.lock().unwrap().push("started"),
-                ExecutionEvent::Paused => {
-                    debug_lifecycle.lock().unwrap().push("paused");
-                    assert!(debug_fake.events().is_empty());
-                    debug_control.resume();
-                }
-                ExecutionEvent::StepFinished(1) => debug_lifecycle.lock().unwrap().push("finished"),
-                _ => {}
-            })
-            .unwrap();
-        assert_eq!(
-            *debug_lifecycle.lock().unwrap(),
-            ["started", "paused", "finished"]
-        );
-        assert_eq!(debug_fake.events(), ["text:breakpoint action"]);
     }
 
     #[test]
@@ -2874,13 +3020,13 @@ impl Executor {
                 pc += 1;
                 continue;
             }
-            observe(ExecutionEvent::StepStarted(step.id));
+            vars.insert("step.id".into(), MkValue::Number(step.id as f64));
             if options.mode == ExecutionMode::Debug && step.breakpoint {
                 self.control.pause();
                 observe(ExecutionEvent::Paused);
                 self.control.checkpoint()?;
             }
-            vars.insert("step.id".into(), MkValue::Number(step.id as f64));
+            observe(ExecutionEvent::StepStarted(step.id));
             let mut final_error = None;
             for repetition in 0..step.repeat {
                 vars.insert("iteration".into(), MkValue::Number(repetition as f64));
