@@ -1,5 +1,6 @@
 //! Worker-owned macro runtime.  The public methods only exchange messages and snapshots;
 //! action execution and all waits live on the worker.
+pub use super::executor::DebugSnapshotReason;
 use super::{MkMacroStore, compile, executor::*};
 use super::{
     NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
@@ -84,13 +85,9 @@ pub enum RuntimePauseReason {
     User,
     Breakpoint { step_id: u64 },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DebugSnapshotReason {
-    Breakpoint,
-}
 #[derive(Debug, Clone, PartialEq)]
 pub struct DebugSnapshot {
-    pub step_id: u64,
+    pub step_id: Option<u64>,
     pub variables: Arc<RuntimeVariables>,
     pub reason: DebugSnapshotReason,
 }
@@ -504,9 +501,27 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                     s.step_id = Some(step_id);
                     s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
                     s.debug_snapshot = Some(Arc::new(DebugSnapshot {
-                        step_id,
+                        step_id: Some(step_id),
                         variables: Arc::new(variables),
                         reason: DebugSnapshotReason::Breakpoint,
+                    }));
+                }
+                ExecutionEvent::DebugVariables {
+                    step_id,
+                    variables,
+                    reason,
+                } => {
+                    if reason == DebugSnapshotReason::Breakpoint
+                        && let Some(step_id) = step_id
+                    {
+                        s.state = RuntimeState::Paused;
+                        s.step_id = Some(step_id);
+                        s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
+                    }
+                    s.debug_snapshot = Some(Arc::new(DebugSnapshot {
+                        step_id,
+                        variables: Arc::new(variables),
+                        reason,
                     }));
                 }
                 ExecutionEvent::StepStarted(id) => {
@@ -1346,8 +1361,8 @@ mod run_mode_tests {
         );
         let paused = wait_for_state(&runtime, RuntimeState::Paused);
         assert_eq!(
-            paused.revision, 2,
-            "run initialization and BreakpointHit must each publish one revision"
+            paused.revision, 3,
+            "run initialization, RunStarted, and BreakpointHit must each publish one revision"
         );
         assert_eq!(paused.step_id, Some(1));
         assert_eq!(
@@ -1355,7 +1370,7 @@ mod run_mode_tests {
             Some(RuntimePauseReason::Breakpoint { step_id: 1 })
         );
         let debug = paused.debug_snapshot.as_ref().unwrap();
-        assert_eq!(debug.step_id, 1);
+        assert_eq!(debug.step_id, Some(1));
         assert_eq!(debug.reason, DebugSnapshotReason::Breakpoint);
         assert_eq!(debug.variables.get("macro.id"), Some(&MkValue::Number(1.0)));
         assert_eq!(

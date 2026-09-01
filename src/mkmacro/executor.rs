@@ -92,6 +92,14 @@ impl ExecutionOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugSnapshotReason {
+    RunStarted,
+    Breakpoint,
+    StepBoundary,
+    RunFinished,
+}
+
 /// A notification after all runtime-variable interpolation has completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNotification {
@@ -891,6 +899,13 @@ pub enum ExecutionEvent {
     BreakpointHit {
         step_id: u64,
         variables: RuntimeVariables,
+    },
+    /// An owned snapshot of the worker-local runtime variables at a debugger
+    /// boundary. The map is cloned before it crosses the executor boundary.
+    DebugVariables {
+        step_id: Option<u64>,
+        variables: RuntimeVariables,
+        reason: DebugSnapshotReason,
     },
     StepStarted(u64),
     /// Kept as a single-field event for observers that only track lifecycle.
@@ -1912,6 +1927,78 @@ mod tests {
             .unwrap();
         assert_eq!(*normal_lifecycle.lock().unwrap(), ["started", "finished"]);
         assert_eq!(normal_fake.events(), ["text:breakpoint action"]);
+    }
+
+    #[test]
+    fn debug_variable_snapshots_are_debug_only_boundary_events_and_are_owned() {
+        let first = step(
+            1,
+            MkAction::SetVariable {
+                name: "first_output".into(),
+                value: MkValue::String("first".into()),
+            },
+        );
+        let second = step(
+            2,
+            MkAction::SetVariable {
+                name: "second_output".into(),
+                value: MkValue::String("second".into()),
+            },
+        );
+        let plan = plan(vec![first, second]);
+
+        let normal_fake = Arc::new(FakeBackend::default());
+        let normal_events = Mutex::new(Vec::new());
+        Executor::new(normal_fake.backends(), Arc::new(RunControl::default()))
+            .execute(&plan, ExecutionOptions::normal(), &|event| {
+                if matches!(
+                    event,
+                    ExecutionEvent::DebugVariables { .. } | ExecutionEvent::BreakpointHit { .. }
+                ) {
+                    normal_events.lock().unwrap().push(event);
+                }
+            })
+            .unwrap();
+        assert_eq!(normal_events.lock().unwrap().len(), 0);
+
+        let debug_fake = Arc::new(FakeBackend::default());
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let captured = snapshots.clone();
+        Executor::new(debug_fake.backends(), Arc::new(RunControl::default()))
+            .execute(&plan, ExecutionOptions::debug(), &|event| {
+                if let ExecutionEvent::DebugVariables {
+                    step_id,
+                    variables,
+                    reason,
+                } = event
+                {
+                    captured.lock().unwrap().push((step_id, reason, variables));
+                }
+            })
+            .unwrap();
+
+        let snapshots = snapshots.lock().unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|(step_id, reason, _)| (*step_id, *reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, DebugSnapshotReason::RunStarted),
+                (Some(1), DebugSnapshotReason::StepBoundary),
+                (Some(2), DebugSnapshotReason::StepBoundary),
+                (None, DebugSnapshotReason::RunFinished),
+            ]
+        );
+        assert!(!snapshots[0].2.contains_key("first_output"));
+        assert_eq!(
+            snapshots[1].2.get("first_output"),
+            Some(&MkValue::String("first".into()))
+        );
+        assert_eq!(
+            snapshots[3].2.get("second_output"),
+            Some(&MkValue::String("second".into()))
+        );
     }
 
     #[test]
@@ -3220,142 +3307,168 @@ impl Executor {
         let mut transitions = 0u64;
         vars.insert("macro.id".into(), MkValue::Number(plan.macro_id as f64));
         vars.insert("last_action_success".into(), MkValue::Boolean(true));
-        while pc < plan.instructions.len() {
-            if self.backends.input.escape_pressed() {
-                self.control.stop();
-            }
-            self.control.checkpoint()?;
-            transitions += 1;
-            if transitions > Self::MAX_CONTROL_TRANSITIONS {
-                return Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::IterationLimit,
-                    "control-flow safety limit (100000 transitions) exceeded",
-                )
-                .context("limit", Self::MAX_CONTROL_TRANSITIONS.to_string()));
-            }
-            let ins = &plan.instructions[pc];
-            let step = &ins.step;
-            if !step.enabled {
-                observe(ExecutionEvent::StepSkipped(step.id));
-                pc += 1;
-                continue;
-            }
-            vars.insert("step.id".into(), MkValue::Number(step.id as f64));
-            if options.mode == ExecutionMode::Debug && step.breakpoint {
-                self.control.pause();
-                observe(ExecutionEvent::BreakpointHit {
-                    step_id: step.id,
-                    variables: vars.clone(),
+        let emit_debug_variables = |step_id, reason, variables: &RuntimeVariables| {
+            if options.mode == ExecutionMode::Debug {
+                observe(ExecutionEvent::DebugVariables {
+                    step_id,
+                    variables: variables.clone(),
+                    reason,
                 });
-                self.control.checkpoint()?;
             }
-            observe(ExecutionEvent::StepStarted(step.id));
-            let mut final_error = None;
-            for repetition in 0..step.repeat {
-                vars.insert("iteration".into(), MkValue::Number(repetition as f64));
-                let attempts = match (&step.action.is_structural(), &step.on_error) {
-                    (true, _) => 1,
-                    (_, super::MkErrorPolicy::Retry(r)) => r.attempts.max(1),
-                    _ => 1,
-                };
-                for attempt in 1..=attempts {
-                    tracing::debug!(
-                        macro_id = plan.macro_id,
-                        step_id = step.id,
-                        attempt,
-                        "executing macro step"
-                    );
-                    match self.action(
-                        plan.macro_id,
-                        &step.action,
-                        &plan.playback,
-                        &mut vars,
-                        &mut guard,
-                    ) {
-                        Ok(()) => {
-                            vars.insert("last_action_success".into(), MkValue::Boolean(true));
-                            final_error = None;
-                            break;
-                        }
-                        Err(e) => {
-                            let e = e
-                                .context("step", step.id.to_string())
-                                .context("step_id", step.id.to_string())
-                                .context("backend_operation", action_name(&step.action))
-                                .context("attempt", attempt.to_string())
-                                .context("attempts_exhausted", (attempt == attempts).to_string());
-                            vars.insert("last_action_success".into(), MkValue::Boolean(false));
-                            tracing::warn!(macro_id=plan.macro_id,step_id=step.id,attempt,error=%e,"macro step attempt failed");
-                            final_error = Some(e);
-                            if attempt < attempts
-                                && let super::MkErrorPolicy::Retry(r) = &step.on_error
-                            {
-                                self.wait(Duration::from_millis(r.delay_ms))?
+        };
+        emit_debug_variables(None, DebugSnapshotReason::RunStarted, &vars);
+        let result = (|| {
+            while pc < plan.instructions.len() {
+                if self.backends.input.escape_pressed() {
+                    self.control.stop();
+                }
+                self.control.checkpoint()?;
+                transitions += 1;
+                if transitions > Self::MAX_CONTROL_TRANSITIONS {
+                    return Err(ExecutionDiagnostic::new(
+                        DiagnosticKind::IterationLimit,
+                        "control-flow safety limit (100000 transitions) exceeded",
+                    )
+                    .context("limit", Self::MAX_CONTROL_TRANSITIONS.to_string()));
+                }
+                let ins = &plan.instructions[pc];
+                let step = &ins.step;
+                if !step.enabled {
+                    observe(ExecutionEvent::StepSkipped(step.id));
+                    pc += 1;
+                    continue;
+                }
+                vars.insert("step.id".into(), MkValue::Number(step.id as f64));
+                if options.mode == ExecutionMode::Debug && step.breakpoint {
+                    self.control.pause();
+                    observe(ExecutionEvent::BreakpointHit {
+                        step_id: step.id,
+                        variables: vars.clone(),
+                    });
+                    self.control.checkpoint()?;
+                }
+                observe(ExecutionEvent::StepStarted(step.id));
+                let mut final_error = None;
+                for repetition in 0..step.repeat {
+                    vars.insert("iteration".into(), MkValue::Number(repetition as f64));
+                    let attempts = match (&step.action.is_structural(), &step.on_error) {
+                        (true, _) => 1,
+                        (_, super::MkErrorPolicy::Retry(r)) => r.attempts.max(1),
+                        _ => 1,
+                    };
+                    for attempt in 1..=attempts {
+                        tracing::debug!(
+                            macro_id = plan.macro_id,
+                            step_id = step.id,
+                            attempt,
+                            "executing macro step"
+                        );
+                        match self.action(
+                            plan.macro_id,
+                            &step.action,
+                            &plan.playback,
+                            &mut vars,
+                            &mut guard,
+                        ) {
+                            Ok(()) => {
+                                vars.insert("last_action_success".into(), MkValue::Boolean(true));
+                                final_error = None;
+                                break;
+                            }
+                            Err(e) => {
+                                let e = e
+                                    .context("step", step.id.to_string())
+                                    .context("step_id", step.id.to_string())
+                                    .context("backend_operation", action_name(&step.action))
+                                    .context("attempt", attempt.to_string())
+                                    .context(
+                                        "attempts_exhausted",
+                                        (attempt == attempts).to_string(),
+                                    );
+                                vars.insert("last_action_success".into(), MkValue::Boolean(false));
+                                tracing::warn!(macro_id=plan.macro_id,step_id=step.id,attempt,error=%e,"macro step attempt failed");
+                                final_error = Some(e);
+                                if attempt < attempts
+                                    && let super::MkErrorPolicy::Retry(r) = &step.on_error
+                                {
+                                    self.wait(Duration::from_millis(r.delay_ms))?
+                                }
                             }
                         }
                     }
-                }
-                if final_error.is_some() {
-                    break;
-                }
-                // Retry delay is error-policy backoff, not playback pacing, and is intentionally unscaled.
-                let normal =
-                    scale_playback_duration(step.delay_after_ms, plan.playback.speed_percent);
-                let delay = if step.action.is_structural() {
-                    normal
-                } else {
-                    add_sampled_random_delay(normal, sample_delay(plan.playback.random_delay_ms))
-                };
-                if delay > 0 {
-                    self.wait(Duration::from_millis(delay))?
-                }
-            }
-            if let Some(e) = final_error {
-                observe(ExecutionEvent::StepFailed(step.id, e.clone()));
-                if e.kind == DiagnosticKind::Cancelled
-                    || !matches!(step.on_error, super::MkErrorPolicy::Continue)
-                {
-                    return Err(e);
-                }
-            } else {
-                let outcome = StepOutcome::for_action(&step.action, &vars);
-                if outcome.last_image_found.is_some() {
-                    observe(ExecutionEvent::StepOutcome(step.id, outcome));
-                }
-                observe(ExecutionEvent::StepFinished(step.id))
-            }
-            pc = match (&step.action, &ins.jump) {
-                (MkAction::If(c) | MkAction::WhileStart { condition: c }, Jump::IfFalse(to)) => {
-                    self.control.checkpoint()?;
-                    if self.condition(plan.macro_id, c, &mut vars)? {
-                        pc + 1
+                    if final_error.is_some() {
+                        break;
+                    }
+                    // Retry delay is error-policy backoff, not playback pacing, and is intentionally unscaled.
+                    let normal =
+                        scale_playback_duration(step.delay_after_ms, plan.playback.speed_percent);
+                    let delay = if step.action.is_structural() {
+                        normal
                     } else {
-                        *to
+                        add_sampled_random_delay(
+                            normal,
+                            sample_delay(plan.playback.random_delay_ms),
+                        )
+                    };
+                    if delay > 0 {
+                        self.wait(Duration::from_millis(delay))?
                     }
                 }
-                (_, Jump::To(to) | Jump::Break(to) | Jump::Continue(to)) => *to,
-                (MkAction::RepeatStart { count }, Jump::RepeatBegin { exit }) if *count == 0 => {
-                    *exit
+                if let Some(e) = final_error {
+                    observe(ExecutionEvent::StepFailed(step.id, e.clone()));
+                    if e.kind == DiagnosticKind::Cancelled
+                        || !matches!(step.on_error, super::MkErrorPolicy::Continue)
+                    {
+                        return Err(e);
+                    }
+                } else {
+                    let outcome = StepOutcome::for_action(&step.action, &vars);
+                    if outcome.last_image_found.is_some() {
+                        observe(ExecutionEvent::StepOutcome(step.id, outcome));
+                    }
+                    observe(ExecutionEvent::StepFinished(step.id))
                 }
-                (MkAction::RepeatStart { count }, _) => {
-                    loops.insert(pc, *count);
-                    pc + 1
-                }
-                (_, Jump::RepeatEnd { start, exit }) => {
-                    let entry = loops.entry(start.saturating_sub(1)).or_default();
-                    if *entry > 1 {
-                        *entry -= 1;
-                        *start
-                    } else {
-                        loops.remove(&start.saturating_sub(1));
+                pc = match (&step.action, &ins.jump) {
+                    (
+                        MkAction::If(c) | MkAction::WhileStart { condition: c },
+                        Jump::IfFalse(to),
+                    ) => {
+                        self.control.checkpoint()?;
+                        if self.condition(plan.macro_id, c, &mut vars)? {
+                            pc + 1
+                        } else {
+                            *to
+                        }
+                    }
+                    (_, Jump::To(to) | Jump::Break(to) | Jump::Continue(to)) => *to,
+                    (MkAction::RepeatStart { count }, Jump::RepeatBegin { exit })
+                        if *count == 0 =>
+                    {
                         *exit
                     }
-                }
-                (_, Jump::WhileEnd { condition }) => *condition,
-                _ => pc + 1,
-            };
-        }
-        Ok(())
+                    (MkAction::RepeatStart { count }, _) => {
+                        loops.insert(pc, *count);
+                        pc + 1
+                    }
+                    (_, Jump::RepeatEnd { start, exit }) => {
+                        let entry = loops.entry(start.saturating_sub(1)).or_default();
+                        if *entry > 1 {
+                            *entry -= 1;
+                            *start
+                        } else {
+                            loops.remove(&start.saturating_sub(1));
+                            *exit
+                        }
+                    }
+                    (_, Jump::WhileEnd { condition }) => *condition,
+                    _ => pc + 1,
+                };
+                emit_debug_variables(Some(step.id), DebugSnapshotReason::StepBoundary, &vars);
+            }
+            Ok(())
+        })();
+        emit_debug_variables(None, DebugSnapshotReason::RunFinished, &vars);
+        result
     }
     fn action(
         &self,
