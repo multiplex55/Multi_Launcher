@@ -441,6 +441,13 @@ fn schema_nine_load_adds_breakpoints_and_repairs_only_dangling_folder_membership
     assert_eq!(repaired.macros[2].folder_id, Some(7));
     assert_eq!(repaired.macros[3].folder_id, None);
     assert_eq!(repaired.folders, original.folders);
+    assert!(
+        repaired
+            .macros
+            .iter()
+            .flat_map(|mac| mac.steps.iter())
+            .all(|step| !step.breakpoint)
+    );
     assert_eq!(
         repaired.macros.iter().map(|mac| mac.id).collect::<Vec<_>>(),
         original.macros.iter().map(|mac| mac.id).collect::<Vec<_>>()
@@ -458,10 +465,166 @@ fn schema_nine_load_adds_breakpoints_and_repairs_only_dangling_folder_membership
     }
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted, expected_json);
+    let persisted_bytes = fs::read(&path).unwrap();
     drop(store);
     let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
     assert!(matches!(disposition, LoadDisposition::Loaded));
     assert_eq!(*reopened.snapshot(), expected);
+    assert_eq!(fs::read(&path).unwrap(), persisted_bytes);
+}
+
+#[test]
+fn schema_nine_normal_documents_load_through_public_store_without_manual_migration() {
+    let documents = [
+        serde_json::json!({
+            "schema_version": 9,
+            "macros": []
+        }),
+        serde_json::json!({
+            "schema_version": 9,
+            "folders": [],
+            "macros": [
+                {
+                    "id": 10,
+                    "name": "mixed actions",
+                    "description": "preserve all step data",
+                    "enabled": true,
+                    "hotkey": null,
+                    "hotkey_scope": {"type": "any_window"},
+                    "folder_id": null,
+                    "playback": {"speed_percent": 110, "random_delay_ms": 4, "random_offset_px": 2},
+                    "steps": [
+                        {
+                            "id": 4,
+                            "enabled": true,
+                            "repeat": 3,
+                            "delay_after_ms": 27,
+                            "on_error": "continue",
+                            "action": {"type": "image_find", "data": {
+                                "asset_id": 21,
+                                "wait": {"timeout_ms": 500, "poll_interval_ms": 25},
+                                "region": {"type": "desktop"},
+                                "tolerance": 8,
+                                "alpha": "ignore",
+                                "return_point": "top_left",
+                                "not_found_policy": "fail",
+                                "outputs": {"found": "found", "point": "point", "x": "x", "y": "y"}
+                            }}
+                        },
+                        {
+                            "id": 5,
+                            "enabled": false,
+                            "repeat": 2,
+                            "delay_after_ms": 11,
+                            "on_error": "stop",
+                            "action": {"type": "text", "data": {
+                                "text": "disabled but preserved",
+                                "mode": "paste"
+                            }}
+                        }
+                    ],
+                    "image_assets": []
+                },
+                {
+                    "id": 11,
+                    "name": "empty steps",
+                    "enabled": false,
+                    "steps": []
+                }
+            ]
+        }),
+    ];
+
+    for original in documents {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+
+        // The public store API performs the migration as part of opening the document.
+        let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        let loaded = store.snapshot();
+        assert_eq!(loaded.schema_version, 10);
+        assert_eq!(
+            loaded.macros.len(),
+            original["macros"].as_array().unwrap().len()
+        );
+
+        for (macro_index, original_macro) in
+            original["macros"].as_array().unwrap().iter().enumerate()
+        {
+            let loaded_macro = &loaded.macros[macro_index];
+            let original_steps = original_macro
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(loaded_macro.steps.len(), original_steps.len());
+            for (step_index, original_step) in original_steps.iter().enumerate() {
+                assert!(original_step.get("breakpoint").is_none());
+                let loaded_step = &loaded_macro.steps[step_index];
+                assert_eq!(loaded_step.id, original_step["id"]);
+                assert_eq!(loaded_step.enabled, original_step["enabled"]);
+                assert_eq!(loaded_step.repeat, original_step["repeat"]);
+                assert_eq!(loaded_step.delay_after_ms, original_step["delay_after_ms"]);
+                assert_eq!(
+                    serde_json::to_value(&loaded_step.on_error).unwrap(),
+                    original_step["on_error"]
+                );
+                assert_eq!(
+                    serde_json::to_value(&loaded_step.action).unwrap(),
+                    original_step["action"]
+                );
+                assert!(!loaded_step.breakpoint);
+            }
+        }
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schema_version"], 10);
+        for mac in persisted["macros"].as_array().unwrap() {
+            for step in mac["steps"].as_array().unwrap() {
+                assert_eq!(step["breakpoint"], serde_json::Value::Bool(false));
+            }
+        }
+
+        let persisted_bytes = fs::read(&path).unwrap();
+        drop(store);
+        let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        assert_eq!(reopened.snapshot().schema_version, 10);
+        assert_eq!(fs::read(&path).unwrap(), persisted_bytes);
+    }
+}
+
+#[test]
+fn breakpoint_values_round_trip_through_store_json() {
+    let dir = tempdir().unwrap();
+    let mut document = invalid_doc();
+    document.macros[0].steps[0].breakpoint = true;
+    document.macros[0].steps[0].action = MkAction::Text(MkTextPayload {
+        text: "persisted breakpoint".into(),
+        mode: MkTextMode::Paste,
+    });
+
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store.save(document).unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted["macros"][0]["steps"][0]["breakpoint"], true);
+    drop(store);
+
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert!(reopened.snapshot().macros[0].steps[0].breakpoint);
+    let reloaded_json = serde_json::to_value(reopened.snapshot().as_ref()).unwrap();
+    assert_eq!(reloaded_json["macros"][0]["steps"][0]["breakpoint"], true);
+    let persisted_after_reopen: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        persisted_after_reopen["macros"][0]["steps"][0]["breakpoint"],
+        true
+    );
 }
 
 #[test]
