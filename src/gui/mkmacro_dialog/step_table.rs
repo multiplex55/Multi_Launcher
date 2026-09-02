@@ -193,6 +193,8 @@ enum Command {
     InsertBelow(u64),
     RunOne,
     RunFrom,
+    DebugOne(u64),
+    DebugFrom(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +252,7 @@ fn menu_model(
             return vec![
                 MenuEntry::action(edit, Command::Edit(block.opener_id), true),
                 MenuEntry::action("Run From Here", Command::RunFrom, true),
+                MenuEntry::action("Debug From Here", Command::DebugFrom(id), true),
                 MenuEntry::separator(),
                 toggle_breakpoint_entry(id, breakpoint_locked),
                 MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
@@ -272,6 +275,7 @@ fn menu_model(
                     .is_some_and(|m| matches!(m, crate::mkmacro::MkBlockMarker::Open(_))),
             ),
             MenuEntry::action("Run From Here", Command::RunFrom, true),
+            MenuEntry::action("Debug From Here", Command::DebugFrom(id), true),
             MenuEntry::separator(),
             toggle_breakpoint_entry(id, breakpoint_locked),
             MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
@@ -295,7 +299,9 @@ fn menu_model(
     vec![
         MenuEntry::action("Edit", Command::Edit(id), true),
         MenuEntry::action("Run This Step", Command::RunOne, true),
+        MenuEntry::action("Debug This Step", Command::DebugOne(id), true),
         MenuEntry::action("Run From Here", Command::RunFrom, true),
+        MenuEntry::action("Debug From Here", Command::DebugFrom(id), true),
         MenuEntry::separator(),
         toggle_breakpoint_entry(id, breakpoint_locked),
         MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
@@ -577,6 +583,23 @@ fn render_context_menu(
         }
     }
 }
+fn report_command(d: &mut MkMacroDialog, result: anyhow::Result<()>) {
+    if let Err(e) = result {
+        d.command_error = Some(e.to_string());
+    }
+}
+
+fn debug_this_step(d: &mut MkMacroDialog, id: u64) -> anyhow::Result<()> {
+    let selection_before_debug = d.selection.clone();
+    d.selection = Selection {
+        ids: BTreeSet::from([id]),
+        anchor: None,
+    };
+    let result = d.debug_selected_steps();
+    d.selection = selection_before_debug;
+    result
+}
+
 fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     let selection_before_command = d.selection.clone();
     if let Command::ToggleBreakpoint(id) = c {
@@ -644,15 +667,18 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
         }
         return;
     }
-    if matches!(c, Command::RunOne | Command::RunFrom) {
+    if matches!(
+        c,
+        Command::RunOne | Command::RunFrom | Command::DebugOne(_) | Command::DebugFrom(_)
+    ) {
         let result = match (c, d.selection.ids.iter().next().copied()) {
             (Command::RunOne, _) => d.run_selected_steps(),
             (Command::RunFrom, Some(id)) => d.run_from_step(id),
+            (Command::DebugOne(id), _) => debug_this_step(d, id),
+            (Command::DebugFrom(id), _) => d.debug_from_step(id),
             _ => Err(anyhow::anyhow!("Select a step")),
         };
-        if let Err(e) = result {
-            d.command_error = Some(e.to_string());
-        }
+        report_command(d, result);
         return;
     }
     if let Command::UnwrapBlock(id) = c {
@@ -1001,7 +1027,9 @@ mod layout_tests {
             vec![
                 ("Edit", true),
                 ("Run This Step", true),
+                ("Debug This Step", true),
                 ("Run From Here", true),
+                ("Debug From Here", true),
                 ("", false),
                 ("Toggle Breakpoint", true),
                 ("Insert Above", true),
@@ -1028,6 +1056,7 @@ mod layout_tests {
         let if_expected = vec![
             ("Edit Condition", true),
             ("Run From Here", true),
+            ("Debug From Here", true),
             ("", false),
             ("Toggle Breakpoint", true),
             ("Insert Above", true),
@@ -1064,9 +1093,46 @@ mod layout_tests {
         let malformed_menu = labels(&malformed, 1);
         assert_eq!(malformed_menu[0], ("Edit", false));
         assert_eq!(
-            &malformed_menu[7..],
+            &malformed_menu[8..],
             &[("Delete Block", false), ("Unwrap Block", false)]
         );
+    }
+
+    #[test]
+    fn debug_commands_carry_the_context_row_id() {
+        let ordinary = vec![delay(1), delay(2), delay(3)];
+        let entries = menu_entries(&ordinary, 2, false);
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.command)
+                .collect::<Vec<_>>()[1..5],
+            [
+                Command::RunOne,
+                Command::DebugOne(2),
+                Command::RunFrom,
+                Command::DebugFrom(2),
+            ]
+        );
+
+        let structural = vec![
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            delay(2),
+            step(3, MkAction::EndIf),
+        ];
+        for id in [1, 3] {
+            let entries = menu_entries(&structural, id, false);
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.command == Some(Command::DebugFrom(id)))
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|entry| entry.command == Some(Command::DebugOne(id)))
+            );
+        }
     }
 
     #[test]

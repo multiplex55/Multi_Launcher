@@ -9,7 +9,12 @@ pub struct ToolbarState {
     pub stop: bool,
     pub run_from: bool,
     pub run_selected: bool,
+    pub debug_run: bool,
+    pub debug_from: bool,
+    pub debug_selected: bool,
     pub disabled_reason: Option<String>,
+    pub run_from_reason: Option<String>,
+    pub run_selected_reason: Option<String>,
 }
 pub fn decide(
     runtime: RuntimeState,
@@ -21,14 +26,35 @@ pub fn decide(
         RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping
     );
     let run = idle && disabled_reason.is_none();
+    let run_from_reason = if !run {
+        disabled_reason.clone()
+    } else if selected_rows != 1 {
+        Some("Select exactly one step".into())
+    } else {
+        None
+    };
+    let run_selected_reason = if !run {
+        disabled_reason.clone()
+    } else if selected_rows == 0 {
+        Some("Select one or more steps".into())
+    } else {
+        None
+    };
+    let run_from = run && selected_rows == 1;
+    let run_selected = run && selected_rows != 0;
     ToolbarState {
         run,
         pause: runtime == RuntimeState::Running,
         resume: runtime == RuntimeState::Paused,
         stop: matches!(runtime, RuntimeState::Running | RuntimeState::Paused),
-        run_from: run && selected_rows == 1,
-        run_selected: run && selected_rows != 0,
+        run_from,
+        run_selected,
+        debug_run: run,
+        debug_from: run_from,
+        debug_selected: run_selected,
         disabled_reason,
+        run_from_reason,
+        run_selected_reason,
     }
 }
 pub fn state(dialog: &MkMacroDialog) -> ToolbarState {
@@ -75,6 +101,53 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             let result = dialog.run_selected_macro();
             report(dialog, result);
         }
+        ui.menu_button("Debug", |ui| {
+            let response = ui.add_enabled(
+                state.debug_run,
+                eframe::egui::Button::new("Debug Run"),
+            );
+            let response = if let Some(reason) = state.disabled_reason.clone() {
+                response.on_disabled_hover_text(reason)
+            } else {
+                response
+            };
+            if response.clicked() {
+                let result = dialog.debug_selected_macro();
+                report(dialog, result);
+            }
+
+            ui.separator();
+
+            let response = ui.add_enabled(
+                state.debug_from,
+                eframe::egui::Button::new("Debug From Here"),
+            );
+            let response = if let Some(reason) = state.run_from_reason.clone() {
+                response.on_disabled_hover_text(reason)
+            } else {
+                response
+            };
+            if response.clicked() {
+                if let Some(id) = dialog.selection.ids.iter().next().copied() {
+                    let result = dialog.debug_from_step(id);
+                    report(dialog, result);
+                }
+            }
+
+            let response = ui.add_enabled(
+                state.debug_selected,
+                eframe::egui::Button::new("Debug Selected"),
+            );
+            let response = if let Some(reason) = state.run_selected_reason.clone() {
+                response.on_disabled_hover_text(reason)
+            } else {
+                response
+            };
+            if response.clicked() {
+                let result = dialog.debug_selected_steps();
+                report(dialog, result);
+            }
+        });
         if ui
             .add_enabled(state.pause, eframe::egui::Button::new("Pause"))
             .clicked()
@@ -93,22 +166,31 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         {
             report(dialog, crate::mkmacro::runtime::stop());
         }
-        if ui
-            .add_enabled(state.run_from, eframe::egui::Button::new("Run From Here"))
-            .clicked()
-        {
+        let response = ui.add_enabled(
+            state.run_from,
+            eframe::egui::Button::new("Run From Here"),
+        );
+        let response = if let Some(reason) = state.run_from_reason.clone() {
+            response.on_disabled_hover_text(reason)
+        } else {
+            response
+        };
+        if response.clicked() {
             if let Some(id) = dialog.selection.ids.iter().next().copied() {
                 let result = dialog.run_from_step(id);
                 report(dialog, result)
             }
         }
-        if ui
-            .add_enabled(
-                state.run_selected,
-                eframe::egui::Button::new("Run Selected"),
-            )
-            .clicked()
-        {
+        let response = ui.add_enabled(
+            state.run_selected,
+            eframe::egui::Button::new("Run Selected"),
+        );
+        let response = if let Some(reason) = state.run_selected_reason.clone() {
+            response.on_disabled_hover_text(reason)
+        } else {
+            response
+        };
+        if response.clicked() {
             let result = dialog.run_selected_steps();
             report(dialog, result);
         }
@@ -259,9 +341,15 @@ mod tests {
     fn idle_controls_follow_eligibility_and_selection() {
         let s = decide(RuntimeState::Idle, None, 1);
         assert!(s.run && s.run_from && s.run_selected);
+        assert_eq!(s.debug_run, s.run);
+        assert_eq!(s.debug_from, s.run_from);
+        assert_eq!(s.debug_selected, s.run_selected);
         assert!(!s.pause && !s.resume && !s.stop);
         let blocked = decide(RuntimeState::Idle, Some("macro is disabled".into()), 1);
         assert!(!blocked.run);
+        assert_eq!(blocked.debug_run, blocked.run);
+        assert_eq!(blocked.debug_from, blocked.run_from);
+        assert_eq!(blocked.debug_selected, blocked.run_selected);
         assert_eq!(
             blocked.disabled_reason.as_deref(),
             Some("macro is disabled")
@@ -272,8 +360,66 @@ mod tests {
         let running = decide(RuntimeState::Running, None, 1);
         assert!(running.pause && running.stop);
         assert!(!running.run && !running.resume);
+        assert_eq!(running.debug_run, running.run);
+        assert_eq!(running.debug_from, running.run_from);
+        assert_eq!(running.debug_selected, running.run_selected);
         let paused = decide(RuntimeState::Paused, None, 1);
         assert!(paused.resume && paused.stop);
         assert!(!paused.run && !paused.pause);
+        assert_eq!(paused.debug_run, paused.run);
+        assert_eq!(paused.debug_from, paused.run_from);
+        assert_eq!(paused.debug_selected, paused.run_selected);
+    }
+
+    #[test]
+    fn debug_availability_is_exactly_normal_availability_for_all_runtime_states() {
+        for runtime in [
+            RuntimeState::Idle,
+            RuntimeState::Running,
+            RuntimeState::Paused,
+            RuntimeState::Stopping,
+            RuntimeState::Completed,
+            RuntimeState::Stopped,
+            RuntimeState::Failed,
+        ] {
+            for reason in [
+                None,
+                Some("fatal validation".into()),
+                Some("disabled macro".into()),
+            ] {
+                for selected_rows in 0..=3 {
+                    let state = decide(runtime, reason.clone(), selected_rows);
+                    let idle = !matches!(
+                        runtime,
+                        RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping
+                    );
+                    let expected_run = idle && reason.is_none();
+                    assert_eq!(state.debug_run, state.run);
+                    assert_eq!(state.debug_from, state.run_from);
+                    assert_eq!(state.debug_selected, state.run_selected);
+                    assert_eq!(state.run, expected_run);
+                    assert_eq!(
+                        state.run_from_reason,
+                        if !expected_run {
+                            reason.clone()
+                        } else if selected_rows != 1 {
+                            Some("Select exactly one step".into())
+                        } else {
+                            None
+                        }
+                    );
+                    assert_eq!(
+                        state.run_selected_reason,
+                        if !expected_run {
+                            reason.clone()
+                        } else if selected_rows == 0 {
+                            Some("Select one or more steps".into())
+                        } else {
+                            None
+                        }
+                    );
+                }
+            }
+        }
     }
 }

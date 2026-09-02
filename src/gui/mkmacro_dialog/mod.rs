@@ -110,9 +110,9 @@ mod tests {
     use crate::mkmacro::MkVirtualDesktopAction;
     use crate::mkmacro::{
         AlphaPolicy, ExecutionOptions, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition,
-        MkCoordinateTarget, MkHotkey, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkKey,
-        MkMouseButton, MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkStep,
-        MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
+        MkCoordinateTarget, MkDelayPayload, MkHotkey, MkImageNotFoundPolicy, MkImageOutputs,
+        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
+        MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
     };
     use std::{
         fs, thread,
@@ -170,6 +170,115 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         (dir, MkMacroDialog::new(Arc::new(store)))
+    }
+
+    #[test]
+    fn debug_execution_methods_match_normal_admission_rejections() {
+        let (_dir, mut d) = dialog();
+        assert_eq!(
+            d.run_selected_macro().unwrap_err().to_string(),
+            d.debug_selected_macro().unwrap_err().to_string()
+        );
+
+        d.create_macro();
+        d.selected_macro_mut().unwrap().enabled = false;
+        assert_eq!(
+            d.run_selected_macro().unwrap_err().to_string(),
+            d.debug_selected_macro().unwrap_err().to_string()
+        );
+        assert_eq!(
+            d.run_from_step(1).unwrap_err().to_string(),
+            d.debug_from_step(1).unwrap_err().to_string()
+        );
+        assert_eq!(
+            d.run_selected_steps().unwrap_err().to_string(),
+            d.debug_selected_steps().unwrap_err().to_string()
+        );
+
+        d.selected_macro_mut().unwrap().enabled = true;
+        d.selected_macro_mut().unwrap().steps.push(MkStep {
+            id: 1,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::Delay(MkDelayPayload {
+                fixed_ms: u64::MAX,
+                ..Default::default()
+            }),
+        });
+        d.selection.ids = std::collections::BTreeSet::from([1]);
+        for (normal, debug) in [
+            (
+                d.run_selected_macro().unwrap_err().to_string(),
+                d.debug_selected_macro().unwrap_err().to_string(),
+            ),
+            (
+                d.run_from_step(1).unwrap_err().to_string(),
+                d.debug_from_step(1).unwrap_err().to_string(),
+            ),
+            (
+                d.run_selected_steps().unwrap_err().to_string(),
+                d.debug_selected_steps().unwrap_err().to_string(),
+            ),
+        ] {
+            assert_eq!(normal, debug);
+        }
+    }
+
+    #[test]
+    fn shared_execution_preparation_saves_and_remaps_targets_by_position() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        d.selected_macro_mut().unwrap().steps = vec![
+            MkStep {
+                id: 11,
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::Delay(MkDelayPayload::default()),
+            },
+            MkStep {
+                id: 22,
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::Delay(MkDelayPayload::default()),
+            },
+            MkStep {
+                id: 33,
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                action: MkAction::Delay(MkDelayPayload::default()),
+            },
+        ];
+        d.selection.ids = std::collections::BTreeSet::from([11, 33]);
+        let positions = d.selected_step_positions().unwrap();
+        assert_eq!(positions, vec![0, 2]);
+
+        let (macro_id, from_id) = d.prepare_from_step(22).unwrap();
+        assert_eq!((macro_id, from_id), (1, 22));
+        assert!(!d.dirty);
+
+        d.selected_macro_mut().unwrap().steps[0].id = 101;
+        d.selected_macro_mut().unwrap().steps[2].id = 303;
+        assert_eq!(d.step_ids_at_positions(&positions), vec![101, 303]);
+
+        d.selection.ids = std::collections::BTreeSet::from([101, 303]);
+        d.mark_dirty();
+        let (macro_id, selected_ids) = d.prepare_selected_steps().unwrap();
+        assert_eq!((macro_id, selected_ids), (1, vec![101, 303]));
+        assert!(!d.dirty);
+        assert_eq!(d.store.snapshot().macros[0].steps[0].id, 101);
+        assert_eq!(d.store.snapshot().macros[0].steps[2].id, 303);
     }
 
     fn folder_dialog() -> (tempfile::TempDir, MkMacroDialog) {
@@ -3546,56 +3655,98 @@ impl MkMacroDialog {
         self.selected_macro_id
             .ok_or_else(|| anyhow::anyhow!("Select a macro"))
     }
-    pub fn run_selected_macro(&mut self) -> anyhow::Result<()> {
+
+    fn prepare_execution_checked(&mut self) -> anyhow::Result<u64> {
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
-        let id = self.prepare_execution()?;
-        crate::mkmacro::runtime::run(id)
+        self.prepare_execution()
     }
-    pub fn run_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
-        if let Some(reason) = self.playback_block_reason() {
-            anyhow::bail!(reason);
-        }
-        let index = self
-            .selected_macro()
-            .and_then(|m| m.steps.iter().position(|s| s.id == original_step_id))
-            .ok_or_else(|| anyhow::anyhow!("Selected step no longer exists"))?;
-        let id = self.prepare_execution()?;
-        let step = self
-            .selected_macro()
-            .and_then(|m| m.steps.get(index))
-            .ok_or_else(|| anyhow::anyhow!("Selected step no longer exists after save"))?
-            .id;
-        crate::mkmacro::runtime::run_from(id, step)
+
+    fn step_position(&self, step_id: u64) -> anyhow::Result<usize> {
+        self.selected_macro()
+            .and_then(|m| m.steps.iter().position(|s| s.id == step_id))
+            .ok_or_else(|| anyhow::anyhow!("Selected step no longer exists"))
     }
-    pub fn run_selected_steps(&mut self) -> anyhow::Result<()> {
+
+    fn step_id_at_position(&self, position: usize) -> anyhow::Result<u64> {
+        self.selected_macro()
+            .and_then(|m| m.steps.get(position))
+            .map(|step| step.id)
+            .ok_or_else(|| anyhow::anyhow!("Selected step no longer exists after save"))
+    }
+
+    fn step_ids_at_positions(&self, positions: &[usize]) -> Vec<u64> {
+        positions
+            .iter()
+            .filter_map(|position| {
+                self.selected_macro()
+                    .and_then(|m| m.steps.get(*position))
+                    .map(|step| step.id)
+            })
+            .collect()
+    }
+
+    fn prepare_from_step(&mut self, original_step_id: u64) -> anyhow::Result<(u64, u64)> {
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
-        let positions: Vec<usize> = self
+        let position = self.step_position(original_step_id)?;
+        let macro_id = self.prepare_execution()?;
+        let step_id = self.step_id_at_position(position)?;
+        Ok((macro_id, step_id))
+    }
+
+    fn selected_step_positions(&self) -> anyhow::Result<Vec<usize>> {
+        let positions = self
             .selected_macro()
             .map(|m| {
                 m.steps
                     .iter()
                     .enumerate()
                     .filter_map(|(i, s)| self.selection.ids.contains(&s.id).then_some(i))
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         if positions.is_empty() {
             anyhow::bail!("Select one or more steps");
         }
-        let id = self.prepare_execution()?;
-        let ids = positions
-            .into_iter()
-            .filter_map(|i| {
-                self.selected_macro()
-                    .and_then(|m| m.steps.get(i))
-                    .map(|s| s.id)
-            })
-            .collect();
+        Ok(positions)
+    }
+
+    fn prepare_selected_steps(&mut self) -> anyhow::Result<(u64, Vec<u64>)> {
+        if let Some(reason) = self.playback_block_reason() {
+            anyhow::bail!(reason);
+        }
+        let positions = self.selected_step_positions()?;
+        let macro_id = self.prepare_execution()?;
+        let step_ids = self.step_ids_at_positions(&positions);
+        Ok((macro_id, step_ids))
+    }
+
+    pub fn run_selected_macro(&mut self) -> anyhow::Result<()> {
+        let id = self.prepare_execution_checked()?;
+        crate::mkmacro::runtime::run(id)
+    }
+    pub fn run_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
+        let (id, step) = self.prepare_from_step(original_step_id)?;
+        crate::mkmacro::runtime::run_from(id, step)
+    }
+    pub fn run_selected_steps(&mut self) -> anyhow::Result<()> {
+        let (id, ids) = self.prepare_selected_steps()?;
         crate::mkmacro::runtime::run_selection(id, ids)
+    }
+    pub fn debug_selected_macro(&mut self) -> anyhow::Result<()> {
+        let id = self.prepare_execution_checked()?;
+        crate::mkmacro::runtime::debug_run(id)
+    }
+    pub fn debug_from_step(&mut self, original_step_id: u64) -> anyhow::Result<()> {
+        let (id, step) = self.prepare_from_step(original_step_id)?;
+        crate::mkmacro::runtime::debug_run_from(id, step)
+    }
+    pub fn debug_selected_steps(&mut self) -> anyhow::Result<()> {
+        let (id, ids) = self.prepare_selected_steps()?;
+        crate::mkmacro::runtime::debug_run_selection(id, ids)
     }
     pub fn ui(&mut self, ctx: &eframe::egui::Context) {
         self.sync_external();
