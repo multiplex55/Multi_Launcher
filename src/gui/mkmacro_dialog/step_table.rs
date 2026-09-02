@@ -1,6 +1,7 @@
 use super::MkMacroDialog;
 use crate::mkmacro::{
-    MkDelayPayload, MkStep, MonitorValidation, ValidationContext, validate_document_with_context,
+    MkDelayPayload, MkStep, MonitorValidation, RuntimePauseReason, RuntimeSnapshot, RuntimeState,
+    StepState, ValidationContext, validate_document_with_context,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -94,9 +95,92 @@ pub fn move_steps(steps: &mut [MkStep], ids: &BTreeSet<u64>, down: bool) {
     }
 }
 
+const BREAKPOINT_COLUMN_WIDTH: f32 = 26.0;
+const BREAKPOINT_HOVER_TEXT: &str = "Breakpoint\nPauses before this step during Debug runs.\nNormal Run and macro hotkeys ignore breakpoints.";
+const BREAKPOINT_LOCKED_HOVER_TEXT: &str = "Stop the current playback before changing breakpoints.";
+const ACTIVE_BREAKPOINT_STATUS_TEXT: &str = "Paused at breakpoint\nThis step has not executed yet.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BreakpointVisual {
+    glyph: &'static str,
+    color: eframe::egui::Color32,
+}
+
+fn breakpoint_visual(breakpoint: bool) -> BreakpointVisual {
+    if breakpoint {
+        BreakpointVisual {
+            glyph: "●",
+            color: eframe::egui::Color32::from_rgb(239, 83, 80),
+        }
+    } else {
+        BreakpointVisual {
+            glyph: "○",
+            color: eframe::egui::Color32::GRAY,
+        }
+    }
+}
+
+fn breakpoint_edit_locked(state: Option<RuntimeState>) -> bool {
+    matches!(
+        state,
+        Some(RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping)
+    )
+}
+
+fn breakpoint_editable(runtime: Option<&RuntimeSnapshot>) -> bool {
+    !breakpoint_edit_locked(runtime.map(|snapshot| snapshot.state))
+}
+
+fn toggle_breakpoint_by_id(steps: &mut [MkStep], step_id: u64) -> bool {
+    let Some(step) = steps.iter_mut().find(|step| step.id == step_id) else {
+        return false;
+    };
+    step.breakpoint = !step.breakpoint;
+    true
+}
+
+fn active_breakpoint_status(
+    runtime: Option<&RuntimeSnapshot>,
+    displayed_macro_id: u64,
+    step_id: u64,
+    state: StepState,
+) -> bool {
+    state == StepState::Pending
+        && runtime.is_some_and(|snapshot| {
+            snapshot.macro_id == Some(displayed_macro_id)
+                && snapshot.state == RuntimeState::Paused
+                && matches!(
+                    snapshot.pause_reason,
+                    Some(RuntimePauseReason::Breakpoint { step_id: paused_step_id })
+                        if paused_step_id == step_id
+                )
+        })
+}
+
+fn status_visual(
+    state: StepState,
+    active_breakpoint: bool,
+) -> (&'static str, &'static str, eframe::egui::Color32) {
+    if active_breakpoint && state == StepState::Pending {
+        return (
+            "⏸",
+            ACTIVE_BREAKPOINT_STATUS_TEXT,
+            eframe::egui::Color32::from_rgb(255, 152, 0),
+        );
+    }
+    match state {
+        StepState::Pending => ("○", "Pending", eframe::egui::Color32::GRAY),
+        StepState::Running => ("▶", "Running", eframe::egui::Color32::YELLOW),
+        StepState::Success => ("✓", "Success", eframe::egui::Color32::GREEN),
+        StepState::Skipped => ("–", "Skipped", eframe::egui::Color32::GRAY),
+        StepState::Failed => ("✕", "Failed", eframe::egui::Color32::RED),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Edit(u64),
+    ToggleBreakpoint(u64),
     Duplicate,
     Toggle,
     Up,
@@ -138,6 +222,14 @@ impl MenuEntry {
     }
 }
 
+fn toggle_breakpoint_entry(id: u64, locked: bool) -> MenuEntry {
+    let mut entry = MenuEntry::action("Toggle Breakpoint", Command::ToggleBreakpoint(id), !locked);
+    if locked {
+        entry.disabled_reason = Some(BREAKPOINT_LOCKED_HOVER_TEXT);
+    }
+    entry
+}
+
 /// Pure description of a row menu. Structural markers are deliberately resolved
 /// through the analysis rather than inferred from their spelling or position.
 fn menu_model(
@@ -145,6 +237,7 @@ fn menu_model(
     selection: &BTreeSet<u64>,
     steps: &[MkStep],
     analysis: &crate::mkmacro::StructureAnalysis,
+    breakpoint_locked: bool,
 ) -> Vec<MenuEntry> {
     let id = step.id;
     if step.action.is_block_marker() {
@@ -157,6 +250,8 @@ fn menu_model(
             return vec![
                 MenuEntry::action(edit, Command::Edit(block.opener_id), true),
                 MenuEntry::action("Run From Here", Command::RunFrom, true),
+                MenuEntry::separator(),
+                toggle_breakpoint_entry(id, breakpoint_locked),
                 MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
                 MenuEntry::action("Insert Below", Command::InsertBelow(id), true),
                 MenuEntry::separator(),
@@ -177,6 +272,8 @@ fn menu_model(
                     .is_some_and(|m| matches!(m, crate::mkmacro::MkBlockMarker::Open(_))),
             ),
             MenuEntry::action("Run From Here", Command::RunFrom, true),
+            MenuEntry::separator(),
+            toggle_breakpoint_entry(id, breakpoint_locked),
             MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
             MenuEntry::action("Insert Below", Command::InsertBelow(id), true),
             MenuEntry::separator(),
@@ -199,6 +296,8 @@ fn menu_model(
         MenuEntry::action("Edit", Command::Edit(id), true),
         MenuEntry::action("Run This Step", Command::RunOne, true),
         MenuEntry::action("Run From Here", Command::RunFrom, true),
+        MenuEntry::separator(),
+        toggle_breakpoint_entry(id, breakpoint_locked),
         MenuEntry::action("Insert Above", Command::InsertAbove(id), true),
         MenuEntry::action("Insert Below", Command::InsertBelow(id), true),
         MenuEntry::action("Duplicate", Command::Duplicate, true),
@@ -256,6 +355,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             .on_hover_text(format!("{}\nCode: {}", diagnostic.message, diagnostic.code));
     }
     let runtime = crate::mkmacro::runtime::snapshot();
+    let breakpoint_locked = !breakpoint_editable(runtime.as_deref());
     let Some(m) = d.draft.macros.iter().find(|m| m.id == mid) else {
         return;
     };
@@ -265,6 +365,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let mut clicked = None;
     let mut changed = false;
     let mut updates = Vec::new();
+    let mut breakpoint_toggles = Vec::new();
     let mut command = None;
     let table_height = table_viewport_height(ui.available_height());
     ui.allocate_ui_with_layout(
@@ -276,6 +377,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         .striped(true)
         .auto_shrink([false, false])
         .max_scroll_height(max_scroll_height)
+        .column(egui_extras::Column::exact(BREAKPOINT_COLUMN_WIDTH))
         .column(egui_extras::Column::exact(28.0))
         .column(egui_extras::Column::exact(55.0))
         .column(egui_extras::Column::initial(100.0))
@@ -285,7 +387,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         .column(egui_extras::Column::initial(90.0))
         .header(20.0, |mut h| {
             for x in [
-                "#", "Enabled", "Action", "Details", "Repeat", "Delay", "Status",
+                "●", "#", "Enabled", "Action", "Details", "Repeat", "Delay", "Status",
             ] {
                 h.col(|ui| {
                     ui.label(x);
@@ -296,6 +398,24 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             for (i, source) in m.steps.iter().enumerate() {
                 let mut s = source.clone();
                 body.row(22.0, |mut r| {
+                    r.col(|ui| {
+                        let visual = breakpoint_visual(s.breakpoint);
+                        let response = ui.add_enabled(
+                            !breakpoint_locked,
+                            eframe::egui::Button::new(
+                                eframe::egui::RichText::new(visual.glyph).color(visual.color),
+                            )
+                            .frame(false),
+                        );
+                        let response = if breakpoint_locked {
+                            response.on_disabled_hover_text(BREAKPOINT_LOCKED_HOVER_TEXT)
+                        } else {
+                            response.on_hover_text(BREAKPOINT_HOVER_TEXT)
+                        };
+                        if response.clicked() {
+                            breakpoint_toggles.push(s.id);
+                        }
+                    });
                     r.col(|ui| {
                         if ui
                             .selectable_label(d.selection.ids.contains(&s.id), (i + 1).to_string())
@@ -317,7 +437,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         let response=if structural { ui.strong(label) } else { ui.label(label) };
                         if response.double_clicked(){command=Some(Command::Edit(s.id));}
                         if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }
-                        let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure);
+                        let menu = menu_model(
+                            &s,
+                            &d.selection.ids,
+                            &m.steps,
+                            &structure,
+                            breakpoint_locked,
+                        );
                         response.context_menu(|ui| render_context_menu(ui, &menu, &mut command));
                         if let Some(items) = row_diagnostics.get(&s.id) {
                             let first = items[0];
@@ -330,7 +456,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         }
                     });
                     r.col(|ui| {
-                        let full=super::action_catalog::action_details_with_assets(&s.action, &m.image_assets); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure);response.context_menu(|ui|render_context_menu(ui, &menu, &mut command));
+                        let full=super::action_catalog::action_details_with_assets(&s.action, &m.image_assets); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure, breakpoint_locked);response.context_menu(|ui|render_context_menu(ui, &menu, &mut command));
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
@@ -342,17 +468,22 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
                             (run.macro_id == Some(mid)).then(|| run.steps.get(&s.id)).flatten()
                         }) {
-                            let (label, full, color) = match state {
-                                crate::mkmacro::StepState::Pending => ("○", "Pending", eframe::egui::Color32::GRAY),
-                                crate::mkmacro::StepState::Running => ("▶", "Running", eframe::egui::Color32::YELLOW),
-                                crate::mkmacro::StepState::Success => ("✓", "Success", eframe::egui::Color32::GREEN),
-                                crate::mkmacro::StepState::Skipped => ("–", "Skipped", eframe::egui::Color32::GRAY),
-                                crate::mkmacro::StepState::Failed => ("✕", "Failed", eframe::egui::Color32::RED),
+                            let active_breakpoint = active_breakpoint_status(
+                                runtime.as_deref(),
+                                mid,
+                                s.id,
+                                *state,
+                            );
+                            let (label, full, color) = status_visual(*state, active_breakpoint);
+                            let detail = if active_breakpoint {
+                                full
+                            } else {
+                                runtime
+                                    .as_ref()
+                                    .and_then(|run| run.step_outcomes.get(&s.id))
+                                    .and_then(crate::mkmacro::StepOutcome::detail)
+                                    .unwrap_or(full)
                             };
-                            let detail = runtime.as_ref()
-                                .and_then(|run| run.step_outcomes.get(&s.id))
-                                .and_then(crate::mkmacro::StepOutcome::detail)
-                                .unwrap_or(full);
                             let response = ui.colored_label(color, label).on_hover_text(detail);
                             if let Some(run) = runtime.as_ref()
                                 && let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id })
@@ -373,8 +504,21 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         });
         },
     );
-    if let Some((i, ctrl, shift)) = clicked {
-        d.selection.click(&rows, i, ctrl, shift);
+    if !matches!(command, Some(Command::ToggleBreakpoint(_))) {
+        if let Some((i, ctrl, shift)) = clicked {
+            d.selection.click(&rows, i, ctrl, shift);
+        }
+    }
+    if !breakpoint_toggles.is_empty() {
+        let mut toggled = false;
+        if let Some(m) = d.selected_macro_mut() {
+            for id in breakpoint_toggles {
+                toggled |= toggle_breakpoint_by_id(&mut m.steps, id);
+            }
+        }
+        if toggled {
+            d.mark_dirty();
+        }
     }
     if changed {
         if let Some(m) = d.selected_macro_mut() {
@@ -407,7 +551,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         });
     }
     if let Some(c) = command {
-        apply_command(d, c);
+        apply_command(d, c, breakpoint_locked);
     }
 }
 
@@ -433,8 +577,20 @@ fn render_context_menu(
         }
     }
 }
-fn apply_command(d: &mut MkMacroDialog, c: Command) {
+fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     let selection_before_command = d.selection.clone();
+    if let Command::ToggleBreakpoint(id) = c {
+        if breakpoint_locked {
+            return;
+        }
+        let toggled = d
+            .selected_macro_mut()
+            .is_some_and(|m| toggle_breakpoint_by_id(&mut m.steps, id));
+        if toggled {
+            d.mark_dirty();
+        }
+        return;
+    }
     if let Command::DeleteBlock(id) | Command::DeleteRow(id) | Command::UnwrapBlock(id) = c {
         if !d.selection.ids.contains(&id) {
             d.selection.ids = BTreeSet::from([id]);
@@ -811,12 +967,30 @@ mod layout_tests {
     }
 
     fn labels(rows: &[MkStep], id: u64) -> Vec<(&'static str, bool)> {
-        let analysis = crate::mkmacro::analyze_structure(rows);
-        let row = rows.iter().find(|row| row.id == id).unwrap();
-        menu_model(row, &BTreeSet::from([id]), rows, &analysis)
+        labels_with_lock(rows, id, false)
+    }
+
+    fn labels_with_lock(
+        rows: &[MkStep],
+        id: u64,
+        breakpoint_locked: bool,
+    ) -> Vec<(&'static str, bool)> {
+        menu_entries(rows, id, breakpoint_locked)
             .into_iter()
             .map(|entry| (entry.label, entry.enabled))
             .collect()
+    }
+
+    fn menu_entries(rows: &[MkStep], id: u64, breakpoint_locked: bool) -> Vec<MenuEntry> {
+        let analysis = crate::mkmacro::analyze_structure(rows);
+        let row = rows.iter().find(|row| row.id == id).unwrap();
+        menu_model(
+            row,
+            &BTreeSet::from([id]),
+            rows,
+            &analysis,
+            breakpoint_locked,
+        )
     }
 
     #[test]
@@ -828,6 +1002,8 @@ mod layout_tests {
                 ("Edit", true),
                 ("Run This Step", true),
                 ("Run From Here", true),
+                ("", false),
+                ("Toggle Breakpoint", true),
                 ("Insert Above", true),
                 ("Insert Below", true),
                 ("Duplicate", true),
@@ -852,6 +1028,8 @@ mod layout_tests {
         let if_expected = vec![
             ("Edit Condition", true),
             ("Run From Here", true),
+            ("", false),
+            ("Toggle Breakpoint", true),
             ("Insert Above", true),
             ("Insert Below", true),
             ("", false),
@@ -886,8 +1064,136 @@ mod layout_tests {
         let malformed_menu = labels(&malformed, 1);
         assert_eq!(malformed_menu[0], ("Edit", false));
         assert_eq!(
-            &malformed_menu[5..],
+            &malformed_menu[7..],
             &[("Delete Block", false), ("Unwrap Block", false)]
         );
+    }
+
+    #[test]
+    fn breakpoint_visual_classifies_set_and_unset_symbols() {
+        let unset = breakpoint_visual(false);
+        assert_eq!(unset.glyph, "○");
+        assert_eq!(unset.color, eframe::egui::Color32::GRAY);
+
+        let set = breakpoint_visual(true);
+        assert_eq!(set.glyph, "●");
+        assert_eq!(set.color, eframe::egui::Color32::from_rgb(239, 83, 80));
+        assert_ne!(set.color, unset.color);
+    }
+
+    #[test]
+    fn breakpoint_editability_only_locks_active_playback() {
+        let cases = [
+            (RuntimeState::Idle, true),
+            (RuntimeState::Running, false),
+            (RuntimeState::Paused, false),
+            (RuntimeState::Stopping, false),
+            (RuntimeState::Completed, true),
+            (RuntimeState::Stopped, true),
+            (RuntimeState::Failed, true),
+        ];
+        for (state, editable) in cases {
+            let runtime = RuntimeSnapshot {
+                state,
+                ..RuntimeSnapshot::default()
+            };
+            assert_eq!(breakpoint_editable(Some(&runtime)), editable);
+            assert_eq!(breakpoint_edit_locked(Some(state)), !editable);
+        }
+        assert!(breakpoint_editable(None));
+    }
+
+    #[test]
+    fn breakpoint_mutation_uses_stable_id_without_touching_selection() {
+        let mut rows = vec![delay(11), delay(22), delay(33)];
+        rows[0].enabled = false;
+        rows[1].repeat = 7;
+        rows[2].delay_after_ms = 99;
+        let before = rows.clone();
+        let selection = Selection {
+            ids: BTreeSet::from([11, 33]),
+            anchor: Some(2),
+        };
+        let selection_before = selection.clone();
+
+        assert!(toggle_breakpoint_by_id(&mut rows, 22));
+        assert_eq!(rows[0], before[0]);
+        assert_eq!(rows[2], before[2]);
+        assert_eq!(rows[1].id, before[1].id);
+        assert_eq!(rows[1].repeat, before[1].repeat);
+        assert_eq!(rows[1].breakpoint, !before[1].breakpoint);
+        assert_eq!(selection.ids, selection_before.ids);
+        assert_eq!(selection.anchor, selection_before.anchor);
+
+        assert!(!toggle_breakpoint_by_id(&mut rows, 999));
+        assert_eq!(selection.ids, BTreeSet::from([11, 33]));
+    }
+
+    #[test]
+    fn breakpoint_menu_entry_is_disabled_during_active_playback() {
+        let rows = vec![delay(1)];
+        let entries = menu_entries(&rows, 1, true);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.label == "Toggle Breakpoint")
+            .unwrap();
+        assert_eq!(entry.command, Some(Command::ToggleBreakpoint(1)));
+        assert!(!entry.enabled);
+        assert_eq!(entry.disabled_reason, Some(BREAKPOINT_LOCKED_HOVER_TEXT));
+    }
+
+    #[test]
+    fn active_breakpoint_status_requires_matching_paused_runtime_boundary() {
+        let mut runtime = RuntimeSnapshot {
+            state: RuntimeState::Paused,
+            macro_id: Some(7),
+            pause_reason: Some(RuntimePauseReason::Breakpoint { step_id: 22 }),
+            ..RuntimeSnapshot::default()
+        };
+        assert!(active_breakpoint_status(
+            Some(&runtime),
+            7,
+            22,
+            StepState::Pending
+        ));
+        let (glyph, tooltip, _) = status_visual(StepState::Pending, true);
+        assert_eq!(glyph, "⏸");
+        assert_eq!(tooltip, ACTIVE_BREAKPOINT_STATUS_TEXT);
+
+        assert!(!active_breakpoint_status(
+            Some(&runtime),
+            8,
+            22,
+            StepState::Pending
+        ));
+        assert!(!active_breakpoint_status(
+            Some(&runtime),
+            7,
+            23,
+            StepState::Pending
+        ));
+        runtime.pause_reason = Some(RuntimePauseReason::User);
+        assert!(!active_breakpoint_status(
+            Some(&runtime),
+            7,
+            22,
+            StepState::Pending
+        ));
+        runtime.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id: 22 });
+        runtime.state = RuntimeState::Running;
+        assert!(!active_breakpoint_status(
+            Some(&runtime),
+            7,
+            22,
+            StepState::Pending
+        ));
+        runtime.state = RuntimeState::Paused;
+        assert!(!active_breakpoint_status(
+            Some(&runtime),
+            7,
+            22,
+            StepState::Success
+        ));
+        assert_eq!(status_visual(StepState::Pending, false).0, "○");
     }
 }
