@@ -87,6 +87,9 @@ pub enum RuntimePauseReason {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DebugSnapshot {
+    /// The last immutable variable map published by a Debug execution
+    /// boundary. This is always owned by the snapshot and never aliases the
+    /// executor's worker-local map.
     pub step_id: Option<u64>,
     pub variables: Arc<RuntimeVariables>,
     pub reason: DebugSnapshotReason,
@@ -112,6 +115,9 @@ pub struct RuntimeSnapshot {
     pub macro_id: Option<u64>,
     pub step_id: Option<u64>,
     pub pause_reason: Option<RuntimePauseReason>,
+    /// The most recently published Debug boundary for this run. `None` means
+    /// that this run has not published debug data, which is the defined state
+    /// for Normal playback, including a manually paused Normal run.
     pub debug_snapshot: Option<Arc<DebugSnapshot>>,
     pub completed_steps: usize,
     pub total_steps: usize,
@@ -945,10 +951,12 @@ mod folder_tests {
 #[cfg(test)]
 mod run_mode_tests {
     use super::*;
+    use crate::mkmacro::prompt::{PromptBackend, PromptRequest, PromptResponse};
     use crate::mkmacro::{
-        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, MkTextMode, MkTextPayload,
-        MkValue, executor::fake::FakeBackend,
+        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkPromptInputPayload, MkStep,
+        MkTextMode, MkTextPayload, MkValue, executor::fake::FakeBackend,
     };
+    use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     fn step(id: u64, action: MkAction) -> MkStep {
@@ -1008,6 +1016,23 @@ mod run_mode_tests {
         (dir, runtime, guard, fake)
     }
 
+    fn runtime_with_backends(
+        macros: Vec<MkMacro>,
+        backends: Backends,
+    ) -> (tempfile::TempDir, MacroRuntime, Arc<SharedOperationGuard>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros,
+                ..Default::default()
+            })
+            .unwrap();
+        let guard = Arc::new(SharedOperationGuard::default());
+        let runtime = MacroRuntime::with_guard(Arc::new(store), backends, guard.clone());
+        (dir, runtime, guard)
+    }
+
     fn wait_for_terminal(runtime: &MacroRuntime) -> Arc<RuntimeSnapshot> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1061,6 +1086,76 @@ mod run_mode_tests {
                 "runtime did not reach {wanted:?}: {snapshot:?}"
             );
             thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_debug_boundary(
+        runtime: &MacroRuntime,
+        step_id: Option<u64>,
+        reason: DebugSnapshotReason,
+    ) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot
+                .debug_snapshot
+                .as_ref()
+                .is_some_and(|debug| debug.step_id == step_id && debug.reason == reason)
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not publish debug boundary {step_id:?}/{reason:?}: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[derive(Default)]
+    struct PromptGateState {
+        entered: bool,
+        released: bool,
+    }
+
+    /// A worker-facing fake prompt that makes an action stay inside the
+    /// executor until the test explicitly releases it.
+    #[derive(Default)]
+    struct ControllablePromptBackend {
+        state: Mutex<PromptGateState>,
+        wake: Condvar,
+    }
+
+    impl ControllablePromptBackend {
+        fn wait_until_entered(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if self.state.lock().unwrap().entered {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "controllable prompt action was not entered"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn release(&self) {
+            self.state.lock().unwrap().released = true;
+            self.wake.notify_all();
+        }
+    }
+
+    impl PromptBackend for ControllablePromptBackend {
+        fn prompt(&self, _: PromptRequest, _: &RunControl) -> ExecResult<PromptResponse> {
+            let mut state = self.state.lock().unwrap();
+            state.entered = true;
+            self.wake.notify_all();
+            while !state.released {
+                state = self.wake.wait(state).unwrap();
+            }
+            Ok(PromptResponse::Submitted("during-action".into()))
         }
     }
 
@@ -1502,6 +1597,176 @@ mod run_mode_tests {
             CommandResult::Accepted
         );
         assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
+    }
+
+    #[test]
+    fn manual_pause_retains_last_safe_debug_snapshot_until_next_boundary() {
+        let target = test_macro(
+            1,
+            true,
+            vec![
+                step(
+                    1,
+                    MkAction::SetVariable {
+                        name: "safe".into(),
+                        value: MkValue::String("before action".into()),
+                    },
+                ),
+                step(
+                    2,
+                    MkAction::PromptInput(MkPromptInputPayload {
+                        title: "Controlled action".into(),
+                        prompt: "wait".into(),
+                        default_value: String::new(),
+                        variable: "partial".into(),
+                        copy_to_clipboard: false,
+                    }),
+                ),
+                step(
+                    3,
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 60_000,
+                        ..Default::default()
+                    }),
+                ),
+            ],
+        );
+        let fake = Arc::new(FakeBackend::default());
+        let prompt = Arc::new(ControllablePromptBackend::default());
+        let mut backends = fake.backends();
+        backends.prompt = prompt.clone();
+        let (_dir, runtime, _guard) = runtime_with_backends(vec![target], backends);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let safe_boundary =
+            wait_for_debug_boundary(&runtime, Some(1), DebugSnapshotReason::StepBoundary);
+        prompt.wait_until_entered();
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Accepted
+        );
+        let paused = runtime.snapshot();
+        assert_eq!(paused.state, RuntimeState::Paused);
+        assert_eq!(paused.pause_reason, Some(RuntimePauseReason::User));
+        assert_eq!(paused.step_id, Some(2));
+        let paused_debug = paused
+            .debug_snapshot
+            .as_ref()
+            .expect("Debug playback retains the last safe boundary while paused");
+        assert!(
+            Arc::ptr_eq(paused_debug, safe_boundary.debug_snapshot.as_ref().unwrap()),
+            "manual Pause must not replace the immutable debug snapshot"
+        );
+        assert_eq!(paused_debug.step_id, Some(1));
+        assert_eq!(paused_debug.reason, DebugSnapshotReason::StepBoundary);
+        assert_eq!(
+            paused_debug.variables.get("safe"),
+            Some(&MkValue::String("before action".into()))
+        );
+        assert!(
+            !paused_debug.variables.contains_key("partial"),
+            "variables written only after the action returns must not be exposed"
+        );
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        prompt.release();
+        let next_boundary =
+            wait_for_debug_boundary(&runtime, Some(2), DebugSnapshotReason::StepBoundary);
+        let next_debug = next_boundary.debug_snapshot.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(next_debug, paused_debug));
+        assert_eq!(
+            next_debug.variables.get("partial"),
+            Some(&MkValue::String("during-action".into()))
+        );
+        assert_eq!(next_debug.reason, DebugSnapshotReason::StepBoundary);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Stopped);
+    }
+
+    #[test]
+    fn normal_manual_pause_does_not_reuse_debug_data_from_an_earlier_run() {
+        let debug_target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::SetVariable {
+                    name: "debug_only".into(),
+                    value: MkValue::String("from Debug run".into()),
+                },
+            )],
+        );
+        let normal_target = test_macro(
+            2,
+            true,
+            vec![step(
+                1,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    title: "Controlled action".into(),
+                    prompt: "wait".into(),
+                    default_value: String::new(),
+                    variable: "normal_value".into(),
+                    copy_to_clipboard: false,
+                }),
+            )],
+        );
+        let fake = Arc::new(FakeBackend::default());
+        let prompt = Arc::new(ControllablePromptBackend::default());
+        let mut backends = fake.backends();
+        backends.prompt = prompt.clone();
+        let (_dir, runtime, _guard) =
+            runtime_with_backends(vec![debug_target, normal_target], backends);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let previous = wait_for_terminal(&runtime);
+        let previous_debug = previous
+            .debug_snapshot
+            .as_ref()
+            .expect("Debug run should publish a terminal snapshot");
+        assert_eq!(previous_debug.reason, DebugSnapshotReason::RunFinished);
+        assert_eq!(
+            previous_debug.variables.get("debug_only"),
+            Some(&MkValue::String("from Debug run".into()))
+        );
+        wait_for_admission_release(&runtime);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(2)),
+            CommandResult::Accepted
+        );
+        prompt.wait_until_entered();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Accepted
+        );
+        let paused = runtime.snapshot();
+        assert_eq!(paused.run_mode, RuntimeRunMode::Normal);
+        assert_eq!(paused.pause_reason, Some(RuntimePauseReason::User));
+        assert!(
+            paused.debug_snapshot.is_none(),
+            "Normal playback has no debug map or snapshot reason, even after a prior Debug run"
+        );
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        prompt.release();
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Completed);
     }
 
     #[test]
