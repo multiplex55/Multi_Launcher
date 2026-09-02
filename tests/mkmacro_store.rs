@@ -581,3 +581,25 @@ fn schema_newer_than_current_is_rejected() {
     );
     assert!(store.snapshot().macros.is_empty());
 }
+
+#[test]
+fn persisted_mkmacros_json_excludes_runtime_debug_state() {
+    let dir = tempdir().unwrap();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store.save(MkMacroDocument::default()).unwrap();
+
+    let persisted = fs::read_to_string(dir.path().join(MKMACROS_FILE)).unwrap();
+    for field in [
+        "run_mode",
+        "pause_reason",
+        "debug_variables",
+        "debug_variables_step_id",
+        "debug_snapshot_reason",
+        "last_completed_step_id",
+    ] {
+        assert!(
+            !persisted.contains(&format!("\"{field}\"")),
+            "runtime-only field {field} leaked into mkmacros.json: {persisted}"
+        );
+    }
+}

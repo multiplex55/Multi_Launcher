@@ -1,10 +1,14 @@
 //! Worker-owned macro runtime.  The public methods only exchange messages and snapshots;
 //! action execution and all waits live on the worker.
 pub use super::executor::DebugSnapshotReason;
-use super::{MkMacroStore, compile, executor::*};
+use super::executor::{
+    Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent, ExecutionOptions,
+    Executor, RunControl, StepOutcome, production_backends_with_store,
+};
 use super::{
-    NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
-    RuntimeVariables, SharedOperationGuard, SystemRecorderClock, production_hook_service,
+    MkMacroStore, MkValue, NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot,
+    RecordingResult, RuntimeVariables, SharedOperationGuard, SystemRecorderClock, compile,
+    production_hook_service,
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
@@ -119,6 +123,16 @@ pub struct RuntimeSnapshot {
     /// that this run has not published debug data, which is the defined state
     /// for Normal playback, including a manually paused Normal run.
     pub debug_snapshot: Option<Arc<DebugSnapshot>>,
+    /// The last immutable runtime-variable map published by a Debug event.
+    /// This remains empty for Normal playback and is runtime-only.
+    pub debug_variables: Arc<BTreeMap<String, MkValue>>,
+    /// Step associated with `debug_variables`, if the Debug event had one.
+    pub debug_variables_step_id: Option<u64>,
+    /// Reason associated with `debug_variables`, if a Debug event was seen.
+    pub debug_snapshot_reason: Option<DebugSnapshotReason>,
+    /// The last step that reached a terminal outcome. A skipped step is not
+    /// considered completed because it did not execute.
+    pub last_completed_step_id: Option<u64>,
     pub completed_steps: usize,
     pub total_steps: usize,
     pub started_at: Option<SystemTime>,
@@ -140,6 +154,10 @@ impl Default for RuntimeSnapshot {
             step_id: None,
             pause_reason: None,
             debug_snapshot: None,
+            debug_variables: Arc::new(BTreeMap::new()),
+            debug_variables_step_id: None,
+            debug_snapshot_reason: None,
+            last_completed_step_id: None,
             completed_steps: 0,
             total_steps: 0,
             started_at: None,
@@ -491,6 +509,10 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
             s.step_id = None;
             s.pause_reason = None;
             s.debug_snapshot = None;
+            s.debug_variables = Arc::new(BTreeMap::new());
+            s.debug_variables_step_id = None;
+            s.debug_snapshot_reason = None;
+            s.last_completed_step_id = None;
             s.completed_steps = 0;
             s.total_steps = plan.instructions.iter().filter(|x| x.step.enabled).count();
             s.started_at = Some(SystemTime::now());
@@ -503,12 +525,16 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
         let observer = |ev: ExecutionEvent| {
             publish(shared, |s| match ev {
                 ExecutionEvent::BreakpointHit { step_id, variables } => {
+                    let variables = Arc::new(variables);
                     s.state = RuntimeState::Paused;
                     s.step_id = Some(step_id);
                     s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
+                    s.debug_variables = variables.clone();
+                    s.debug_variables_step_id = Some(step_id);
+                    s.debug_snapshot_reason = Some(DebugSnapshotReason::Breakpoint);
                     s.debug_snapshot = Some(Arc::new(DebugSnapshot {
                         step_id: Some(step_id),
-                        variables: Arc::new(variables),
+                        variables,
                         reason: DebugSnapshotReason::Breakpoint,
                     }));
                 }
@@ -517,6 +543,7 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                     variables,
                     reason,
                 } => {
+                    let variables = Arc::new(variables);
                     if reason == DebugSnapshotReason::Breakpoint
                         && let Some(step_id) = step_id
                     {
@@ -524,9 +551,12 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                         s.step_id = Some(step_id);
                         s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
                     }
+                    s.debug_variables = variables.clone();
+                    s.debug_variables_step_id = step_id;
+                    s.debug_snapshot_reason = Some(reason);
                     s.debug_snapshot = Some(Arc::new(DebugSnapshot {
                         step_id,
-                        variables: Arc::new(variables),
+                        variables,
                         reason,
                     }));
                 }
@@ -536,15 +566,23 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 }
                 ExecutionEvent::StepFinished(id) => {
                     s.completed_steps += 1;
+                    s.last_completed_step_id = Some(id);
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
                 }
                 ExecutionEvent::StepOutcome(id, outcome) => {
                     Arc::make_mut(&mut s.step_outcomes).insert(id, outcome);
                 }
                 ExecutionEvent::StepSkipped(id) => {
+                    // Skipped steps are intentionally excluded from
+                    // last_completed_step_id: no terminal execution outcome
+                    // was produced for them.
                     Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
                 }
                 ExecutionEvent::StepFailed(id, d) => {
+                    // A failed attempt is terminal for the step, including
+                    // Continue policies, so it is the latest completed
+                    // outcome for correlation with failures.
+                    s.last_completed_step_id = Some(id);
                     s.latest_failure = Some(d.clone());
                     Arc::make_mut(&mut s.failures).insert(
                         DiagnosticKey {
@@ -2092,5 +2130,309 @@ mod step_outcome_tests {
         let unrelated = StepOutcome::default();
         assert_eq!(unrelated.last_image_found, None);
         assert_eq!(unrelated.detail(), None);
+    }
+}
+
+#[cfg(test)]
+mod runtime_snapshot_tests {
+    use super::*;
+    use crate::mkmacro::{
+        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, MkTextMode, MkTextPayload,
+        executor::fake::FakeBackend,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn step(id: u64, action: MkAction) -> MkStep {
+        MkStep {
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        }
+    }
+
+    fn test_macro(steps: Vec<MkStep>) -> MkMacro {
+        MkMacro {
+            id: 1,
+            name: "runtime snapshot test".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps,
+            image_assets: vec![],
+        }
+    }
+
+    fn runtime_with(target: MkMacro) -> (tempfile::TempDir, MacroRuntime, Arc<FakeBackend>) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros: vec![target],
+                ..Default::default()
+            })
+            .unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
+        (directory, runtime, fake)
+    }
+
+    fn wait_for_terminal(runtime: &MacroRuntime) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if matches!(
+                snapshot.state,
+                RuntimeState::Completed | RuntimeState::Failed | RuntimeState::Stopped
+            ) {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not finish: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_state(runtime: &MacroRuntime, state: RuntimeState) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.state == state {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not reach {state:?}: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn assert_debug_fields(
+        snapshot: &RuntimeSnapshot,
+        step_id: Option<u64>,
+        reason: DebugSnapshotReason,
+    ) {
+        assert_eq!(snapshot.debug_variables_step_id, step_id);
+        assert_eq!(snapshot.debug_snapshot_reason, Some(reason));
+        let debug = snapshot
+            .debug_snapshot
+            .as_ref()
+            .expect("debug event also publishes the compatibility snapshot");
+        assert_eq!(debug.step_id, step_id);
+        assert_eq!(debug.reason, reason);
+        assert_eq!(&*snapshot.debug_variables, &*debug.variables);
+    }
+
+    #[test]
+    fn default_snapshot_and_new_run_reset_all_debugger_fields() {
+        let default = RuntimeSnapshot::default();
+        assert_eq!(default.run_mode, RuntimeRunMode::Normal);
+        assert_eq!(default.pause_reason, None);
+        assert!(default.debug_variables.is_empty());
+        assert_eq!(default.debug_variables_step_id, None);
+        assert_eq!(default.debug_snapshot_reason, None);
+        assert_eq!(default.last_completed_step_id, None);
+
+        let mut breakpoint = step(
+            1,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 60_000,
+                ..Default::default()
+            }),
+        );
+        breakpoint.breakpoint = true;
+        let (_directory, runtime, _fake) = runtime_with(test_macro(vec![breakpoint]));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        wait_for_state(&runtime, RuntimeState::Paused);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        let stopped = wait_for_terminal(&runtime);
+        assert_eq!(
+            stopped.debug_snapshot_reason,
+            Some(DebugSnapshotReason::RunCancelled)
+        );
+        assert!(!stopped.debug_variables.is_empty());
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let running = wait_for_state(&runtime, RuntimeState::Running);
+        assert_eq!(running.run_mode, RuntimeRunMode::Normal);
+        assert_eq!(running.pause_reason, None);
+        assert!(running.debug_variables.is_empty());
+        assert_eq!(running.debug_variables_step_id, None);
+        assert_eq!(running.debug_snapshot_reason, None);
+        assert_eq!(running.last_completed_step_id, None);
+        assert!(running.debug_snapshot.is_none());
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
+    }
+
+    #[test]
+    fn debugger_fields_update_together_at_breakpoints_and_step_boundaries() {
+        let mut breakpoint = step(
+            2,
+            MkAction::SetVariable {
+                name: "after_breakpoint".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        breakpoint.breakpoint = true;
+        let mut hold = step(
+            3,
+            MkAction::Delay(MkDelayPayload {
+                fixed_ms: 60_000,
+                ..Default::default()
+            }),
+        );
+        hold.breakpoint = false;
+        let (_directory, runtime, _fake) = runtime_with(test_macro(vec![
+            step(
+                1,
+                MkAction::SetVariable {
+                    name: "before_breakpoint".into(),
+                    value: MkValue::String("ready".into()),
+                },
+            ),
+            breakpoint,
+            hold,
+        ]));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_state(&runtime, RuntimeState::Paused);
+        assert_debug_fields(&paused, Some(2), DebugSnapshotReason::Breakpoint);
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+        );
+        assert!(!paused.debug_variables.contains_key("after_breakpoint"));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let boundary_deadline = Instant::now() + Duration::from_secs(10);
+        let boundary = loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.debug_snapshot_reason == Some(DebugSnapshotReason::StepBoundary)
+                && snapshot.debug_variables_step_id == Some(2)
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < boundary_deadline,
+                "step boundary was not published: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_debug_fields(&boundary, Some(2), DebugSnapshotReason::StepBoundary);
+        assert_eq!(
+            boundary.debug_variables.get("after_breakpoint"),
+            Some(&MkValue::Boolean(true))
+        );
+        assert_eq!(boundary.last_completed_step_id, Some(2));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).pause_reason, None);
+    }
+    #[test]
+    fn completion_failure_and_skip_policy_preserve_runtime_correlation() {
+        let (_directory, success_runtime, _fake) = runtime_with(test_macro(vec![step(
+            10,
+            MkAction::SetVariable {
+                name: "completed".into(),
+                value: MkValue::Boolean(true),
+            },
+        )]));
+        assert_eq!(
+            success_runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let success = wait_for_terminal(&success_runtime);
+        assert_eq!(success.state, RuntimeState::Completed);
+        assert_eq!(success.pause_reason, None);
+        assert_eq!(success.last_completed_step_id, Some(10));
+        assert_eq!(success.steps[&10], StepState::Success);
+        assert_debug_fields(&success, Some(10), DebugSnapshotReason::RunFinished);
+
+        let (_directory, failure_runtime, fake) = runtime_with(test_macro(vec![
+            step(
+                20,
+                MkAction::SetVariable {
+                    name: "safe".into(),
+                    value: MkValue::String("before failure".into()),
+                },
+            ),
+            step(
+                21,
+                MkAction::Text(MkTextPayload {
+                    text: "failure".into(),
+                    mode: MkTextMode::Type,
+                }),
+            ),
+        ]));
+        fake.fail(
+            "text:failure",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected failure"),
+        );
+        assert_eq!(
+            failure_runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let failure = wait_for_terminal(&failure_runtime);
+        assert_eq!(failure.state, RuntimeState::Failed);
+        assert_eq!(failure.pause_reason, None);
+        assert_eq!(failure.last_completed_step_id, Some(21));
+        assert_eq!(failure.steps[&21], StepState::Failed);
+        assert!(failure.failures.contains_key(&DiagnosticKey {
+            run_id: failure.run_id,
+            step_id: 21,
+        }));
+        assert_debug_fields(&failure, Some(20), DebugSnapshotReason::RunFailed);
+        assert_eq!(
+            failure.debug_variables.get("safe"),
+            Some(&MkValue::String("before failure".into()))
+        );
+
+        let mut skipped = step(30, MkAction::Delay(Default::default()));
+        skipped.enabled = false;
+        let (_directory, skipped_runtime, _fake) = runtime_with(test_macro(vec![skipped]));
+        assert_eq!(
+            skipped_runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let skipped_snapshot = wait_for_terminal(&skipped_runtime);
+        assert_eq!(skipped_snapshot.state, RuntimeState::Completed);
+        assert_eq!(skipped_snapshot.steps[&30], StepState::Skipped);
+        assert_eq!(skipped_snapshot.completed_steps, 0);
+        // Skipped steps do not count as completed: they never produced an
+        // execution outcome and therefore leave this correlation unset.
+        assert_eq!(skipped_snapshot.last_completed_step_id, None);
     }
 }
