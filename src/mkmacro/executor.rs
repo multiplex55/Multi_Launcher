@@ -78,6 +78,10 @@ pub struct ExecutionOptions {
     pub mode: ExecutionMode,
 }
 
+/// In [`ExecutionMode::Debug`], an enabled breakpoint is checked once when its
+/// instruction is entered. The instruction's `repeat` body runs as one entry,
+/// so repetitions do not retrigger that breakpoint. Loop opcodes can naturally
+/// retrigger when the program counter revisits their instruction.
 impl ExecutionOptions {
     pub const fn normal() -> Self {
         Self {
@@ -1522,6 +1526,36 @@ mod tests {
         .unwrap()
     }
 
+    fn text_action(text: &str) -> MkAction {
+        MkAction::Text(MkTextPayload {
+            text: text.into(),
+            mode: MkTextMode::Type,
+        })
+    }
+
+    fn execute_mode(
+        plan: &MkExecutionPlan,
+        fake: Arc<FakeBackend>,
+        mode: ExecutionMode,
+    ) -> (ExecResult, Vec<ExecutionEvent>) {
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let observer_control = control.clone();
+        let result = Executor::new(fake.backends(), control).execute(
+            plan,
+            ExecutionOptions { mode },
+            &|event| {
+                if matches!(&event, ExecutionEvent::BreakpointHit { .. }) {
+                    observer_control.resume();
+                }
+                captured.lock().unwrap().push(event);
+            },
+        );
+        (result, events.lock().unwrap().clone())
+    }
+
     #[test]
     fn debug_breakpoint_pauses_after_prior_outputs_and_resumes_current_step_once() {
         let prior_point = MkPoint { x: 37, y: 91 };
@@ -1705,17 +1739,7 @@ mod tests {
             }),
         );
         breakpoint_step.breakpoint = true;
-        let plan = MkExecutionPlan {
-            macro_id: 7,
-            playback: MkPlayback::default(),
-            instructions: vec![super::super::MkInstruction {
-                step: Arc::new(breakpoint_step),
-                depth: 0,
-                jump: Jump::Next,
-            }]
-            .into(),
-            step_to_instruction: [(1, 0)].into_iter().collect(),
-        };
+        let plan = plan(vec![breakpoint_step]);
         let fake = Arc::new(FakeBackend::default());
         fake.script_image(10, Ok(Some(MkPoint { x: 4, y: 8 })));
         let control = Arc::new(RunControl::default());
@@ -1933,6 +1957,475 @@ mod tests {
             .unwrap();
         assert_eq!(*normal_lifecycle.lock().unwrap(), ["started", "finished"]);
         assert_eq!(normal_fake.events(), ["text:breakpoint action"]);
+    }
+
+    #[test]
+    fn debug_breakpoint_on_repeated_action_hits_once_and_runs_every_repetition() {
+        let mut repeated = step(1, text_action("repeated"));
+        repeated.repeat = 3;
+        repeated.breakpoint = true;
+        let plan = plan(vec![repeated]);
+
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let lifecycle = Arc::new(Mutex::new(Vec::new()));
+        let captured_hits = hits.clone();
+        let captured_lifecycle = lifecycle.clone();
+        let observer_control = control.clone();
+
+        Executor::new(fake.clone().backends(), control)
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::BreakpointHit { step_id, .. } => {
+                    captured_hits.lock().unwrap().push(step_id);
+                    observer_control.resume();
+                }
+                ExecutionEvent::StepStarted(step_id) => captured_lifecycle
+                    .lock()
+                    .unwrap()
+                    .push(("started", step_id)),
+                ExecutionEvent::StepFinished(step_id) => captured_lifecycle
+                    .lock()
+                    .unwrap()
+                    .push(("finished", step_id)),
+                _ => {}
+            })
+            .unwrap();
+
+        assert_eq!(*hits.lock().unwrap(), [1]);
+        assert_eq!(
+            *lifecycle.lock().unwrap(),
+            [("started", 1), ("finished", 1)]
+        );
+        assert_eq!(
+            fake.events(),
+            ["text:repeated", "text:repeated", "text:repeated"]
+        );
+    }
+
+    #[test]
+    fn debug_breakpoint_on_while_opener_observes_prior_safe_iteration_state() {
+        let mut opener = step(
+            1,
+            MkAction::WhileStart {
+                condition: MkCondition::WindowExists {
+                    matcher: MkWindowMatcher {
+                        title: Some("eventual".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+        opener.breakpoint = true;
+        let plan = plan(vec![
+            opener,
+            step(2, text_action("while-body")),
+            step(
+                3,
+                MkAction::SetVariable {
+                    name: "body_completed".into(),
+                    value: MkValue::Boolean(true),
+                },
+            ),
+            step(4, MkAction::WhileEnd),
+        ]);
+
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_condition("window_exists", [true, true]);
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let hit_variables = Arc::new(Mutex::new(Vec::new()));
+        let captured_variables = hit_variables.clone();
+        let observer_control = control.clone();
+        let observer_fake = fake.clone();
+        let hit_number = std::sync::atomic::AtomicUsize::new(0);
+
+        let error = Executor::new(fake.clone().backends(), control)
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::BreakpointHit { step_id, variables } => {
+                    assert_eq!(step_id, 1);
+                    let number = hit_number.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if number == 0 {
+                        assert!(!variables.contains_key("body_completed"));
+                        assert!(!variables.contains_key("last_window_result"));
+                    } else {
+                        assert_eq!(
+                            variables.get("body_completed"),
+                            Some(&MkValue::Boolean(true))
+                        );
+                        assert_eq!(
+                            variables.get("last_window_result"),
+                            Some(&MkValue::Boolean(true))
+                        );
+                    }
+                    captured_variables.lock().unwrap().push(variables);
+                    if number == 1 {
+                        assert_eq!(observer_fake.events(), ["text:while-body"]);
+                    }
+                    if number < 2 {
+                        observer_control.resume();
+                    } else {
+                        observer_control.stop();
+                    }
+                }
+                _ => {}
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(hit_variables.lock().unwrap().len(), 3);
+        assert_eq!(fake.events(), ["text:while-body", "text:while-body"]);
+        assert_eq!(fake.window_calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn debug_breakpoint_on_if_opener_precedes_condition_and_preserves_branching() {
+        for (condition_result, expected_branch) in [(true, "if-true"), (false, "if-false")] {
+            let mut if_step = step(
+                3,
+                MkAction::If(MkCondition::WindowExists {
+                    matcher: MkWindowMatcher {
+                        title: Some("condition".into()),
+                        ..Default::default()
+                    },
+                }),
+            );
+            if_step.breakpoint = true;
+            let plan = plan(vec![
+                step(
+                    1,
+                    MkAction::If(MkCondition::WindowExists {
+                        matcher: MkWindowMatcher {
+                            title: Some("prior condition".into()),
+                            ..Default::default()
+                        },
+                    }),
+                ),
+                step(2, MkAction::EndIf),
+                if_step,
+                step(4, text_action("if-true")),
+                step(5, MkAction::Else),
+                step(6, text_action("if-false")),
+                step(7, MkAction::EndIf),
+            ]);
+
+            let fake = Arc::new(FakeBackend::default());
+            fake.script_condition("window_exists", [!condition_result, condition_result]);
+            let control = Arc::new(RunControl::default());
+            control.reset();
+            let breakpoint_variables = Arc::new(Mutex::new(None));
+            let if_boundary_variables = Arc::new(Mutex::new(None));
+            let captured_breakpoint = breakpoint_variables.clone();
+            let captured_boundary = if_boundary_variables.clone();
+            let observer_control = control.clone();
+
+            Executor::new(fake.clone().backends(), control)
+                .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                    ExecutionEvent::BreakpointHit {
+                        step_id: 3,
+                        variables,
+                    } => {
+                        assert_eq!(
+                            variables.get("last_window_result"),
+                            Some(&MkValue::Boolean(!condition_result))
+                        );
+                        *captured_breakpoint.lock().unwrap() = Some(variables);
+                        observer_control.resume();
+                    }
+                    ExecutionEvent::DebugVariables {
+                        step_id: Some(3),
+                        reason: DebugSnapshotReason::StepBoundary,
+                        variables,
+                    } => {
+                        *captured_boundary.lock().unwrap() = Some(variables);
+                    }
+                    _ => {}
+                })
+                .unwrap();
+
+            assert!(breakpoint_variables.lock().unwrap().is_some());
+            assert_eq!(
+                if_boundary_variables
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|variables| variables.get("last_window_result")),
+                Some(&MkValue::Boolean(condition_result))
+            );
+            assert_eq!(fake.events(), [format!("text:{expected_branch}")]);
+            assert_eq!(fake.window_calls.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn compiled_structural_markers_can_break_and_resume_through_their_jumps() {
+        let mut else_step = step(3, MkAction::Else);
+        else_step.breakpoint = true;
+        let mut end_if_step = step(8, MkAction::EndIf);
+        end_if_step.breakpoint = true;
+        let mut repeat_start = step(9, MkAction::RepeatStart { count: 2 });
+        repeat_start.breakpoint = true;
+        let mut repeat_end = step(11, MkAction::RepeatEnd);
+        repeat_end.breakpoint = true;
+        let mut while_end = step(14, MkAction::WhileEnd);
+        while_end.breakpoint = true;
+        let plan = plan(vec![
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            step(2, text_action("if-true")),
+            else_step,
+            step(4, text_action("if-false")),
+            step(5, MkAction::EndIf),
+            step(6, MkAction::If(MkCondition::All { conditions: vec![] })),
+            step(7, text_action("if-without-else")),
+            end_if_step,
+            repeat_start,
+            step(10, text_action("repeat")),
+            repeat_end,
+            step(
+                12,
+                MkAction::WhileStart {
+                    condition: MkCondition::WindowExists {
+                        matcher: MkWindowMatcher {
+                            title: Some("loop".into()),
+                            ..Default::default()
+                        },
+                    },
+                },
+            ),
+            step(13, text_action("while")),
+            while_end,
+        ]);
+
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_condition("window_exists", [true, true, false]);
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let captured_hits = hits.clone();
+        let observer_control = control.clone();
+
+        Executor::new(fake.clone().backends(), control)
+            .execute(&plan, ExecutionOptions::debug(), &|event| {
+                if let ExecutionEvent::BreakpointHit { step_id, .. } = event {
+                    captured_hits.lock().unwrap().push(step_id);
+                    observer_control.resume();
+                }
+            })
+            .unwrap();
+
+        assert_eq!(*hits.lock().unwrap(), [3, 8, 9, 11, 11, 14, 14]);
+        assert_eq!(
+            fake.events(),
+            [
+                "text:if-true",
+                "text:if-without-else",
+                "text:repeat",
+                "text:repeat",
+                "text:while",
+                "text:while"
+            ]
+        );
+        assert_eq!(fake.window_calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn disabled_compiled_structural_openers_skip_without_breaking_or_evaluating() {
+        let mut disabled_if = step(
+            1,
+            MkAction::If(MkCondition::WindowExists {
+                matcher: MkWindowMatcher {
+                    title: Some("disabled if".into()),
+                    ..Default::default()
+                },
+            }),
+        );
+        disabled_if.enabled = false;
+        disabled_if.breakpoint = true;
+        let mut disabled_repeat = step(4, MkAction::RepeatStart { count: 3 });
+        disabled_repeat.enabled = false;
+        disabled_repeat.breakpoint = true;
+        let mut disabled_while = step(
+            7,
+            MkAction::WhileStart {
+                condition: MkCondition::WindowExists {
+                    matcher: MkWindowMatcher {
+                        title: Some("disabled while".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+        disabled_while.enabled = false;
+        disabled_while.breakpoint = true;
+        assert!(disabled_if.action.can_be_disabled());
+        assert!(disabled_repeat.action.can_be_disabled());
+        assert!(disabled_while.action.can_be_disabled());
+
+        let plan = plan(vec![
+            disabled_if,
+            step(2, text_action("if-body")),
+            step(3, MkAction::EndIf),
+            disabled_repeat,
+            step(5, text_action("repeat-body")),
+            step(6, MkAction::RepeatEnd),
+            disabled_while,
+            step(8, text_action("while-body")),
+            step(9, MkAction::Break),
+            step(10, MkAction::WhileEnd),
+        ]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let skipped = Arc::new(Mutex::new(Vec::new()));
+        let breakpoints = Arc::new(Mutex::new(Vec::new()));
+        let captured_skipped = skipped.clone();
+        let captured_breakpoints = breakpoints.clone();
+
+        Executor::new(fake.clone().backends(), control)
+            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
+                ExecutionEvent::StepSkipped(step_id) => {
+                    captured_skipped.lock().unwrap().push(step_id)
+                }
+                ExecutionEvent::BreakpointHit { step_id, .. } => {
+                    captured_breakpoints.lock().unwrap().push(step_id)
+                }
+                _ => {}
+            })
+            .unwrap();
+
+        assert_eq!(*skipped.lock().unwrap(), [1, 4, 7]);
+        assert!(breakpoints.lock().unwrap().is_empty());
+        assert_eq!(
+            fake.events(),
+            ["text:if-body", "text:repeat-body", "text:while-body"]
+        );
+        assert!(fake.window_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn normal_mode_ignores_breakpoints_without_changing_compiled_control_flow() {
+        let mut if_step = step(1, MkAction::If(MkCondition::All { conditions: vec![] }));
+        if_step.breakpoint = true;
+        let mut else_step = step(3, MkAction::Else);
+        else_step.breakpoint = true;
+        let mut repeat_start = step(6, MkAction::RepeatStart { count: 2 });
+        repeat_start.breakpoint = true;
+        let mut repeat_end = step(8, MkAction::RepeatEnd);
+        repeat_end.breakpoint = true;
+        let mut while_end = step(11, MkAction::WhileEnd);
+        while_end.breakpoint = true;
+        let steps = vec![
+            if_step,
+            step(2, text_action("if-true")),
+            else_step,
+            step(4, text_action("if-false")),
+            step(5, MkAction::EndIf),
+            repeat_start,
+            step(7, text_action("repeat")),
+            repeat_end,
+            step(
+                9,
+                MkAction::WhileStart {
+                    condition: MkCondition::WindowExists {
+                        matcher: MkWindowMatcher {
+                            title: Some("normal mode while".into()),
+                            ..Default::default()
+                        },
+                    },
+                },
+            ),
+            step(10, text_action("while")),
+            while_end,
+        ];
+        let plan = plan(steps);
+
+        let debug_fake = Arc::new(FakeBackend::default());
+        debug_fake.script_condition("window_exists", [true, true, false]);
+        let normal_fake = Arc::new(FakeBackend::default());
+        normal_fake.script_condition("window_exists", [true, true, false]);
+        let (debug_result, debug_events) =
+            execute_mode(&plan, debug_fake.clone(), ExecutionMode::Debug);
+        let (normal_result, normal_events) =
+            execute_mode(&plan, normal_fake.clone(), ExecutionMode::Normal);
+        debug_result.unwrap();
+        normal_result.unwrap();
+
+        let started = |events: &[ExecutionEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ExecutionEvent::StepStarted(step_id) => Some(*step_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(started(&debug_events), started(&normal_events));
+        assert_eq!(debug_fake.events(), normal_fake.events());
+        assert_eq!(
+            *debug_fake.window_calls.lock().unwrap(),
+            *normal_fake.window_calls.lock().unwrap()
+        );
+        assert!(
+            normal_events
+                .iter()
+                .all(|event| !matches!(event, ExecutionEvent::BreakpointHit { .. }))
+        );
+        assert!(
+            debug_events
+                .iter()
+                .filter(|event| matches!(event, ExecutionEvent::BreakpointHit { .. }))
+                .count()
+                > 1
+        );
+    }
+
+    #[test]
+    fn repeated_breakpoint_resume_cycles_still_hit_the_control_transition_limit() {
+        let mut opener = step(
+            1,
+            MkAction::WhileStart {
+                condition: MkCondition::All { conditions: vec![] },
+            },
+        );
+        opener.breakpoint = true;
+        let plan = plan(vec![
+            opener,
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "safe".into(),
+                    value: MkValue::Boolean(true),
+                },
+            ),
+            step(3, MkAction::WhileEnd),
+        ]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured_hits = hits.clone();
+        let observer_control = control.clone();
+
+        let error = Executor::new(fake.backends(), control)
+            .execute(&plan, ExecutionOptions::debug(), &|event| {
+                if let ExecutionEvent::BreakpointHit { .. } = event {
+                    let hit = captured_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if hit < 40_000 {
+                        observer_control.resume();
+                    } else {
+                        // Bound a faulty implementation which resets the
+                        // transition counter on every breakpoint resume.
+                        observer_control.stop();
+                    }
+                }
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind, DiagnosticKind::IterationLimit);
+        let hit_count = hits.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(hit_count > 30_000, "only {hit_count} breakpoint cycles ran");
+        assert!(hit_count < 40_001, "transition counter was bypassed");
     }
 
     #[test]
