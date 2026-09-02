@@ -98,6 +98,8 @@ pub enum DebugSnapshotReason {
     Breakpoint,
     StepBoundary,
     RunFinished,
+    RunFailed,
+    RunCancelled,
 }
 
 /// A notification after all runtime-variable interpolation has completed.
@@ -902,6 +904,9 @@ pub enum ExecutionEvent {
     },
     /// An owned snapshot of the worker-local runtime variables at a debugger
     /// boundary. The map is cloned before it crosses the executor boundary.
+    /// For terminal snapshots, `step_id` identifies the last safe instruction
+    /// boundary, i.e. the last completed step rather than a step that was only
+    /// entered and may still have partially executed.
     DebugVariables {
         step_id: Option<u64>,
         variables: RuntimeVariables,
@@ -1014,7 +1019,8 @@ mod tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
         AlphaPolicy, LauncherCommandBroker, LauncherCommandKind, LauncherCommandResponse,
-        MkErrorPolicy, MkMacro, MkPlayback, MkStep, ReturnPoint, SearchRegion, compile,
+        MkDelayPayload, MkErrorPolicy, MkMacro, MkPlayback, MkStep, MkTextMode, ReturnPoint,
+        SearchRegion, compile,
     };
 
     fn run_production_launcher_command(response: LauncherCommandResponse) -> (ExecResult, String) {
@@ -1987,8 +1993,13 @@ mod tests {
                 (None, DebugSnapshotReason::RunStarted),
                 (Some(1), DebugSnapshotReason::StepBoundary),
                 (Some(2), DebugSnapshotReason::StepBoundary),
-                (None, DebugSnapshotReason::RunFinished),
+                (Some(2), DebugSnapshotReason::RunFinished),
             ]
+        );
+        assert_eq!(snapshots[0].2.get("macro.id"), Some(&MkValue::Number(7.0)));
+        assert_eq!(
+            snapshots[0].2.get("last_action_success"),
+            Some(&MkValue::Boolean(true))
         );
         assert!(!snapshots[0].2.contains_key("first_output"));
         assert_eq!(
@@ -1998,6 +2009,256 @@ mod tests {
         assert_eq!(
             snapshots[3].2.get("second_output"),
             Some(&MkValue::String("second".into()))
+        );
+    }
+
+    fn debug_snapshots(
+        plan: &MkExecutionPlan,
+        fake: Arc<FakeBackend>,
+        control: Arc<RunControl>,
+    ) -> (
+        ExecResult,
+        Vec<(Option<u64>, DebugSnapshotReason, RuntimeVariables)>,
+    ) {
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let captured = snapshots.clone();
+        let result = Executor::new(fake.backends(), control).execute(
+            plan,
+            ExecutionOptions::debug(),
+            &|event| {
+                if let ExecutionEvent::DebugVariables {
+                    step_id,
+                    variables,
+                    reason,
+                } = event
+                {
+                    captured.lock().unwrap().push((step_id, reason, variables));
+                }
+            },
+        );
+        (result, snapshots.lock().unwrap().clone())
+    }
+
+    fn image_search_condition(found: bool) -> MkCondition {
+        MkCondition::ImageSearch {
+            search: crate::mkmacro::MkImageSearchCondition {
+                asset_id: 42,
+                region: SearchRegion::Desktop,
+                tolerance: 3,
+                alpha: AlphaPolicy::Ignore,
+                return_point: ReturnPoint::Center,
+            },
+            found,
+        }
+    }
+
+    #[test]
+    fn image_condition_results_are_snapshotted_after_if_and_while_evaluation() {
+        let if_fake = Arc::new(FakeBackend::default());
+        if_fake.script_image(42, Ok(Some(MkPoint { x: 4, y: 8 })));
+        let if_plan = plan(vec![
+            step(1, MkAction::If(image_search_condition(true))),
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "if_body".into(),
+                    value: MkValue::Boolean(true),
+                },
+            ),
+            step(3, MkAction::EndIf),
+        ]);
+        let (result, if_snapshots) =
+            debug_snapshots(&if_plan, if_fake, Arc::new(RunControl::default()));
+        result.unwrap();
+        assert!(!if_snapshots[0].2.contains_key("last_image_result"));
+        let if_boundary = if_snapshots
+            .iter()
+            .find(|(step_id, reason, _)| {
+                *step_id == Some(1) && *reason == DebugSnapshotReason::StepBoundary
+            })
+            .unwrap();
+        assert_eq!(
+            if_boundary.2.get("last_image_result"),
+            Some(&MkValue::Boolean(true))
+        );
+        assert_eq!(
+            if_boundary.2.get("last_image_found"),
+            Some(&MkValue::Boolean(true))
+        );
+
+        let while_fake = Arc::new(FakeBackend::default());
+        while_fake.script_image(42, Ok(Some(MkPoint { x: 9, y: 10 })));
+        while_fake.script_image(42, Ok(None));
+        let while_plan = plan(vec![
+            step(
+                1,
+                MkAction::WhileStart {
+                    condition: image_search_condition(true),
+                },
+            ),
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "while_body".into(),
+                    value: MkValue::Boolean(true),
+                },
+            ),
+            step(3, MkAction::WhileEnd),
+        ]);
+        let (result, while_snapshots) =
+            debug_snapshots(&while_plan, while_fake, Arc::new(RunControl::default()));
+        result.unwrap();
+        let while_boundaries = while_snapshots
+            .iter()
+            .filter(|(step_id, reason, _)| {
+                *step_id == Some(1) && *reason == DebugSnapshotReason::StepBoundary
+            })
+            .map(|(_, _, variables)| variables.get("last_image_result").cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            while_boundaries,
+            vec![Some(MkValue::Boolean(true)), Some(MkValue::Boolean(false))]
+        );
+    }
+
+    #[test]
+    fn continue_error_publishes_the_failed_step_final_state() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "text:failed",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected failure"),
+        );
+        let mut failed = step(
+            1,
+            MkAction::Text(MkTextPayload {
+                text: "failed".into(),
+                mode: MkTextMode::Type,
+            }),
+        );
+        failed.on_error = MkErrorPolicy::Continue;
+        let plan = plan(vec![
+            failed,
+            step(
+                2,
+                MkAction::SetVariable {
+                    name: "after_failure".into(),
+                    value: MkValue::Boolean(true),
+                },
+            ),
+        ]);
+        let (result, snapshots) = debug_snapshots(&plan, fake, Arc::new(RunControl::default()));
+        result.unwrap();
+        let failed_boundary = snapshots
+            .iter()
+            .find(|(step_id, reason, _)| {
+                *step_id == Some(1) && *reason == DebugSnapshotReason::StepBoundary
+            })
+            .unwrap();
+        assert_eq!(
+            failed_boundary.2.get("last_action_success"),
+            Some(&MkValue::Boolean(false))
+        );
+        assert_eq!(
+            snapshots.last().unwrap().2.get("after_failure"),
+            Some(&MkValue::Boolean(true))
+        );
+        assert_eq!(
+            snapshots.last().unwrap().2.get("last_action_success"),
+            Some(&MkValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn failed_run_publishes_only_the_last_safe_snapshot() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "text:failed",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected failure"),
+        );
+        let plan = plan(vec![
+            step(
+                1,
+                MkAction::SetVariable {
+                    name: "safe".into(),
+                    value: MkValue::String("complete".into()),
+                },
+            ),
+            step(
+                2,
+                MkAction::Text(MkTextPayload {
+                    text: "failed".into(),
+                    mode: MkTextMode::Type,
+                }),
+            ),
+        ]);
+        let (result, snapshots) = debug_snapshots(&plan, fake, Arc::new(RunControl::default()));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|(step_id, reason, _)| (*step_id, *reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, DebugSnapshotReason::RunStarted),
+                (Some(1), DebugSnapshotReason::StepBoundary),
+                (Some(1), DebugSnapshotReason::RunFailed),
+            ]
+        );
+        assert_eq!(snapshots[2].2, snapshots[1].2);
+        assert_eq!(
+            snapshots[2].2.get("safe"),
+            Some(&MkValue::String("complete".into()))
+        );
+        assert_eq!(snapshots[2].2.get("step.id"), Some(&MkValue::Number(1.0)));
+    }
+
+    #[test]
+    fn cancelled_run_retains_the_last_safe_snapshot() {
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        let plan = plan(vec![
+            step(
+                1,
+                MkAction::SetVariable {
+                    name: "safe".into(),
+                    value: MkValue::String("complete".into()),
+                },
+            ),
+            step(2, MkAction::Delay(MkDelayPayload::default())),
+        ]);
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let captured = snapshots.clone();
+        let worker_control = control.clone();
+        let result = Executor::new(fake.backends(), control).execute(
+            &plan,
+            ExecutionOptions::debug(),
+            &|event| {
+                if matches!(event, ExecutionEvent::StepStarted(2)) {
+                    worker_control.stop();
+                }
+                if let ExecutionEvent::DebugVariables {
+                    step_id,
+                    variables,
+                    reason,
+                } = event
+                {
+                    captured.lock().unwrap().push((step_id, reason, variables));
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err().kind, DiagnosticKind::Cancelled);
+        let snapshots = snapshots.lock().unwrap();
+        assert_eq!(
+            snapshots
+                .last()
+                .map(|(step_id, reason, _)| (*step_id, *reason)),
+            Some((Some(1), DebugSnapshotReason::RunCancelled))
+        );
+        assert_eq!(snapshots.last().unwrap().2, snapshots[1].2);
+        assert_eq!(
+            snapshots.last().unwrap().2.get("safe"),
+            Some(&MkValue::String("complete".into()))
         );
     }
 
@@ -3305,8 +3566,6 @@ impl Executor {
         let mut pc = 0;
         let mut loops: HashMap<usize, u32> = HashMap::new();
         let mut transitions = 0u64;
-        vars.insert("macro.id".into(), MkValue::Number(plan.macro_id as f64));
-        vars.insert("last_action_success".into(), MkValue::Boolean(true));
         let emit_debug_variables = |step_id, reason, variables: &RuntimeVariables| {
             if options.mode == ExecutionMode::Debug {
                 observe(ExecutionEvent::DebugVariables {
@@ -3316,7 +3575,15 @@ impl Executor {
                 });
             }
         };
+        vars.insert("macro.id".into(), MkValue::Number(plan.macro_id as f64));
+        vars.insert("last_action_success".into(), MkValue::Boolean(true));
         emit_debug_variables(None, DebugSnapshotReason::RunStarted, &vars);
+        // A snapshot is safe only after the complete instruction, including
+        // its error policy and control-flow decision, has settled. This also
+        // gives failure/cancellation paths a stable state to publish without
+        // exposing variables from a partially executed action.
+        let mut last_safe_variables = vars.clone();
+        let mut last_safe_step_id = None;
         let result = (|| {
             while pc < plan.instructions.len() {
                 if self.backends.input.escape_pressed() {
@@ -3428,7 +3695,7 @@ impl Executor {
                     }
                     observe(ExecutionEvent::StepFinished(step.id))
                 }
-                pc = match (&step.action, &ins.jump) {
+                let next_pc = match (&step.action, &ins.jump) {
                     (
                         MkAction::If(c) | MkAction::WhileStart { condition: c },
                         Jump::IfFalse(to),
@@ -3463,11 +3730,25 @@ impl Executor {
                     (_, Jump::WhileEnd { condition }) => *condition,
                     _ => pc + 1,
                 };
-                emit_debug_variables(Some(step.id), DebugSnapshotReason::StepBoundary, &vars);
+                last_safe_step_id = Some(step.id);
+                last_safe_variables = vars.clone();
+                emit_debug_variables(
+                    last_safe_step_id,
+                    DebugSnapshotReason::StepBoundary,
+                    &last_safe_variables,
+                );
+                pc = next_pc;
             }
             Ok(())
         })();
-        emit_debug_variables(None, DebugSnapshotReason::RunFinished, &vars);
+        let terminal_reason = match &result {
+            Ok(()) => DebugSnapshotReason::RunFinished,
+            Err(error) if error.kind == DiagnosticKind::Cancelled => {
+                DebugSnapshotReason::RunCancelled
+            }
+            Err(_) => DebugSnapshotReason::RunFailed,
+        };
+        emit_debug_variables(last_safe_step_id, terminal_reason, &last_safe_variables);
         result
     }
     fn action(
