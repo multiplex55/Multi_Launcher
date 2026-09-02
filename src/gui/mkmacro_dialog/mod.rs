@@ -12,6 +12,7 @@ pub mod launcher_action_picker;
 mod macro_list;
 mod macro_properties;
 pub mod recorder_controller;
+mod runtime_inspector;
 mod step_table;
 mod toolbar;
 pub mod uia_editor;
@@ -102,6 +103,15 @@ pub struct MkMacroDialog {
     pub recorder_options: NormalizationConfig,
     /// Kept when the target was deleted so the user can restore it without losing captured data.
     pub pending_recording: Option<(u64, Vec<RecordedStep>)>,
+    /// Process-local read-only runtime presentation state. None of these fields
+    /// participate in draft dirty tracking, persistence, or save conflicts.
+    pub runtime_inspector_open: bool,
+    pub runtime_inspector_show_internal: bool,
+    pub runtime_inspector_builtins_open: bool,
+    pub runtime_inspector_snapshot: Option<Arc<crate::mkmacro::RuntimeSnapshot>>,
+    pub runtime_inspector_is_current_debug_run: bool,
+    runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
+    runtime_inspector_last_breakpoint: Option<(u64, u64, u64)>,
 }
 
 #[cfg(test)]
@@ -3126,6 +3136,151 @@ mod tests {
             );
         }
     }
+
+    fn synthetic_debug_snapshot(
+        run_id: u64,
+        revision: u64,
+        state: crate::mkmacro::RuntimeState,
+        reason: crate::mkmacro::DebugSnapshotReason,
+        pause_reason: Option<crate::mkmacro::RuntimePauseReason>,
+    ) -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let variables = Arc::new(crate::mkmacro::RuntimeVariables::from([(
+            "answer".into(),
+            crate::mkmacro::MkValue::Number(42.0),
+        )]));
+        Arc::new(crate::mkmacro::RuntimeSnapshot {
+            state,
+            run_mode: crate::mkmacro::RuntimeRunMode::Debug,
+            run_id,
+            macro_id: Some(7),
+            pause_reason,
+            debug_snapshot: Some(Arc::new(crate::mkmacro::DebugSnapshot {
+                step_id: None,
+                variables: variables.clone(),
+                reason,
+            })),
+            debug_variables: variables,
+            debug_snapshot_reason: Some(reason),
+            revision,
+            ..crate::mkmacro::RuntimeSnapshot::default()
+        })
+    }
+
+    fn synthetic_normal_snapshot(
+        run_id: u64,
+        revision: u64,
+    ) -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let mut snapshot = (*synthetic_debug_snapshot(
+            run_id,
+            revision,
+            crate::mkmacro::RuntimeState::Running,
+            crate::mkmacro::DebugSnapshotReason::RunStarted,
+            None,
+        ))
+        .clone();
+        snapshot.run_mode = crate::mkmacro::RuntimeRunMode::Normal;
+        snapshot.debug_snapshot = None;
+        snapshot.debug_variables = Arc::new(Default::default());
+        snapshot.debug_snapshot_reason = None;
+        Arc::new(snapshot)
+    }
+
+    #[test]
+    fn runtime_inspector_lifecycle_replaces_debug_runs_and_clears_on_normal_run() {
+        let (_dir, mut dialog) = dialog();
+        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
+            1,
+            1,
+            crate::mkmacro::RuntimeState::Running,
+            crate::mkmacro::DebugSnapshotReason::RunStarted,
+            None,
+        )));
+        assert_eq!(
+            dialog
+                .runtime_inspector_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.run_id),
+            Some(1)
+        );
+        assert!(dialog.runtime_inspector_is_current_debug_run);
+
+        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
+            1,
+            2,
+            crate::mkmacro::RuntimeState::Completed,
+            crate::mkmacro::DebugSnapshotReason::RunFinished,
+            None,
+        )));
+        assert!(!dialog.runtime_inspector_is_current_debug_run);
+        assert_eq!(
+            runtime_inspector::RuntimeInspectorViewModel::from_snapshot(
+                dialog.runtime_inspector_snapshot.as_ref().unwrap(),
+                &dialog.draft,
+            )
+            .title,
+            "Runtime Inspector — Last Debug Run"
+        );
+
+        dialog.observe_runtime_snapshot(Some(synthetic_normal_snapshot(2, 3)));
+        assert!(dialog.runtime_inspector_snapshot.is_none());
+
+        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
+            3,
+            4,
+            crate::mkmacro::RuntimeState::Running,
+            crate::mkmacro::DebugSnapshotReason::RunStarted,
+            None,
+        )));
+        assert_eq!(
+            dialog
+                .runtime_inspector_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.run_id),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn runtime_inspector_opens_once_per_breakpoint_revision() {
+        let (_dir, mut dialog) = dialog();
+        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
+            11,
+            1,
+            crate::mkmacro::RuntimeState::Running,
+            crate::mkmacro::DebugSnapshotReason::RunStarted,
+            None,
+        )));
+        let breakpoint = synthetic_debug_snapshot(
+            11,
+            2,
+            crate::mkmacro::RuntimeState::Paused,
+            crate::mkmacro::DebugSnapshotReason::Breakpoint,
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99 }),
+        );
+        dialog.observe_runtime_snapshot(Some(breakpoint.clone()));
+        assert!(dialog.runtime_inspector_open);
+        dialog.runtime_inspector_open = false;
+        dialog.observe_runtime_snapshot(Some(breakpoint));
+        assert!(!dialog.runtime_inspector_open);
+
+        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
+            11,
+            3,
+            crate::mkmacro::RuntimeState::Paused,
+            crate::mkmacro::DebugSnapshotReason::Breakpoint,
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 100 }),
+        )));
+        assert!(dialog.runtime_inspector_open);
+        dialog.runtime_inspector_open = false;
+        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
+            11,
+            4,
+            crate::mkmacro::RuntimeState::Paused,
+            crate::mkmacro::DebugSnapshotReason::StepBoundary,
+            Some(crate::mkmacro::RuntimePauseReason::User),
+        )));
+        assert!(!dialog.runtime_inspector_open);
+    }
 }
 impl MkMacroDialog {
     /// Returns an operation client for constructing dialog-scoped visual tools.
@@ -3188,6 +3343,13 @@ impl MkMacroDialog {
             command_error: None,
             recorder_options: Default::default(),
             pending_recording: None,
+            runtime_inspector_open: false,
+            runtime_inspector_show_internal: false,
+            runtime_inspector_builtins_open: false,
+            runtime_inspector_snapshot: None,
+            runtime_inspector_is_current_debug_run: false,
+            runtime_inspector_observed_run: None,
+            runtime_inspector_last_breakpoint: None,
         }
     }
     pub fn open(&mut self) {
@@ -3748,6 +3910,54 @@ impl MkMacroDialog {
         let (id, ids) = self.prepare_selected_steps()?;
         crate::mkmacro::runtime::debug_run_selection(id, ids)
     }
+
+    fn observe_runtime_snapshot(&mut self, snapshot: Option<Arc<crate::mkmacro::RuntimeSnapshot>>) {
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        let run_identity = (snapshot.run_mode, snapshot.run_id);
+        let new_run = self.runtime_inspector_observed_run != Some(run_identity);
+        self.runtime_inspector_observed_run = Some(run_identity);
+        match snapshot.run_mode {
+            crate::mkmacro::RuntimeRunMode::Normal => {
+                if new_run && self.runtime_inspector_snapshot.is_some() {
+                    self.runtime_inspector_snapshot = None;
+                    self.runtime_inspector_is_current_debug_run = false;
+                    self.runtime_inspector_open = false;
+                    self.runtime_inspector_last_breakpoint = None;
+                }
+            }
+            crate::mkmacro::RuntimeRunMode::Debug => {
+                let same_debug_run = self.runtime_inspector_snapshot.as_ref().is_some_and(|old| {
+                    old.run_mode == crate::mkmacro::RuntimeRunMode::Debug
+                        && old.run_id == snapshot.run_id
+                });
+                if !same_debug_run {
+                    self.runtime_inspector_last_breakpoint = None;
+                }
+                // Retain the whole immutable runtime snapshot. In particular,
+                // this preserves terminal variables, outcomes, and diagnostics
+                // after the worker has moved on to unrelated UI repainting.
+                self.runtime_inspector_snapshot = Some(snapshot.clone());
+                self.runtime_inspector_is_current_debug_run = matches!(
+                    snapshot.state,
+                    crate::mkmacro::RuntimeState::Running
+                        | crate::mkmacro::RuntimeState::Paused
+                        | crate::mkmacro::RuntimeState::Stopping
+                );
+                if let Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id }) =
+                    snapshot.pause_reason
+                {
+                    let breakpoint = (snapshot.run_id, snapshot.revision, step_id);
+                    if self.runtime_inspector_last_breakpoint != Some(breakpoint) {
+                        self.runtime_inspector_open = true;
+                        self.runtime_inspector_last_breakpoint = Some(breakpoint);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn ui(&mut self, ctx: &eframe::egui::Context) {
         self.sync_external();
         if !self.open {
@@ -3783,6 +3993,7 @@ impl MkMacroDialog {
         self.launcher_action_picker.cancel();
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
+        self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         for result in crate::mkmacro::runtime::take_pending_recordings() {
             if self
                 .apply_recording(result.macro_id, &result.generated_steps)
@@ -3811,6 +4022,8 @@ impl MkMacroDialog {
                     strip.cell(|ui| macro_list::show(ui, self));
                     strip.cell(|ui| {
                         macro_properties::show(ui, self);
+                        ui.separator();
+                        runtime_inspector::show(ui, self);
                         ui.separator();
                         step_table::show(ui, self);
                     });
