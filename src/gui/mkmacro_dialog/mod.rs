@@ -119,10 +119,11 @@ mod tests {
     use super::*;
     use crate::mkmacro::MkVirtualDesktopAction;
     use crate::mkmacro::{
-        AlphaPolicy, ExecutionOptions, LoadDisposition, MKMACROS_FILE, MkAction, MkCondition,
-        MkCoordinateTarget, MkDelayPayload, MkHotkey, MkImageNotFoundPolicy, MkImageOutputs,
-        MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
-        MkMouseScrollAxis, MkStep, MkWaitOptions, ReturnPoint, SCHEMA_VERSION, SearchRegion,
+        AlphaPolicy, ExecutionOptions, LoadDisposition, MKMACROS_FILE, MacroRuntime, MkAction,
+        MkCondition, MkCoordinateTarget, MkDelayPayload, MkHotkey, MkImageNotFoundPolicy,
+        MkImageOutputs, MkImagePayload, MkKey, MkMouseButton, MkMouseMovePayload, MkMousePayload,
+        MkMouseScrollAxis, MkStep, MkValue, MkWaitOptions, ReturnPoint, RuntimeCommand,
+        RuntimeState, SCHEMA_VERSION, SearchRegion,
     };
     use std::{
         fs, thread,
@@ -3185,58 +3186,357 @@ mod tests {
         Arc::new(snapshot)
     }
 
+    fn wait_for_debug_boundary_after(
+        runtime: &MacroRuntime,
+        previous_run_id: u64,
+        reason: crate::mkmacro::DebugSnapshotReason,
+    ) -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_id > previous_run_id
+                && snapshot
+                    .debug_snapshot
+                    .as_ref()
+                    .is_some_and(|debug| debug.reason == reason)
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not publish {reason:?} for run after {previous_run_id}: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_terminal_after(
+        runtime: &MacroRuntime,
+        previous_run_id: u64,
+    ) -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_id > previous_run_id
+                && matches!(
+                    snapshot.state,
+                    RuntimeState::Completed | RuntimeState::Failed | RuntimeState::Stopped
+                )
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not finish run after {previous_run_id}: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn wait_for_mode_after(
+        runtime: &MacroRuntime,
+        previous_run_id: u64,
+        mode: crate::mkmacro::RuntimeRunMode,
+    ) -> Arc<crate::mkmacro::RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot.run_id > previous_run_id && snapshot.run_mode == mode {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not publish {mode:?} run after {previous_run_id}: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn submit_after_previous_run(runtime: &MacroRuntime, command: RuntimeCommand) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match runtime.command(command.clone()) {
+                crate::mkmacro::CommandResult::Accepted => return,
+                crate::mkmacro::CommandResult::AlreadyRunning { .. } => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "runtime admission was not released"
+                    );
+                    thread::sleep(Duration::from_millis(2));
+                }
+                crate::mkmacro::CommandResult::Rejected(diagnostic) => {
+                    panic!("runtime rejected {command:?}: {diagnostic:?}")
+                }
+            }
+        }
+    }
+
+    fn real_runtime_dialog() -> (
+        tempfile::TempDir,
+        MkMacroDialog,
+        MacroRuntime,
+        Arc<crate::mkmacro::executor::fake::FakeBackend>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let set_variable = |id: u64, name: &str, value: MkValue| MkStep {
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action: MkAction::SetVariable {
+                name: name.into(),
+                value,
+            },
+        };
+        store
+            .save(MkMacroDocument {
+                schema_version: SCHEMA_VERSION,
+                macros: vec![
+                    MkMacro {
+                        id: 1,
+                        name: "First debug run".into(),
+                        description: String::new(),
+                        enabled: true,
+                        hotkey: None,
+                        hotkey_scope: Default::default(),
+                        folder_id: None,
+                        playback: Default::default(),
+                        steps: vec![
+                            MkStep {
+                                delay_after_ms: 25,
+                                ..set_variable(11, "count", MkValue::Number(1.0))
+                            },
+                            set_variable(12, "result", MkValue::String("done".into())),
+                        ],
+                        image_assets: vec![],
+                    },
+                    MkMacro {
+                        id: 2,
+                        name: "Second debug run".into(),
+                        description: String::new(),
+                        enabled: true,
+                        hotkey: None,
+                        hotkey_scope: Default::default(),
+                        folder_id: None,
+                        playback: Default::default(),
+                        steps: vec![MkStep {
+                            delay_after_ms: 25,
+                            ..set_variable(21, "fresh", MkValue::String("new".into()))
+                        }],
+                        image_assets: vec![],
+                    },
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let dialog = MkMacroDialog::new(store.clone());
+        let fake = Arc::new(crate::mkmacro::executor::fake::FakeBackend::default());
+        let runtime = MacroRuntime::new(store, fake.clone().backends());
+        (directory, dialog, runtime, fake)
+    }
+
     #[test]
     fn runtime_inspector_lifecycle_replaces_debug_runs_and_clears_on_normal_run() {
-        let (_dir, mut dialog) = dialog();
-        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
-            1,
-            1,
-            crate::mkmacro::RuntimeState::Running,
+        let (_dir, mut dialog, runtime, _fake) = real_runtime_dialog();
+        let first_previous_run_id = runtime.snapshot().run_id;
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            crate::mkmacro::CommandResult::Accepted
+        );
+        let first_started = wait_for_debug_boundary_after(
+            &runtime,
+            first_previous_run_id,
             crate::mkmacro::DebugSnapshotReason::RunStarted,
-            None,
-        )));
+        );
+        dialog.observe_runtime_snapshot(Some(first_started.clone()));
         assert_eq!(
             dialog
                 .runtime_inspector_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.run_id),
-            Some(1)
+            Some(first_started.run_id)
         );
         assert!(dialog.runtime_inspector_is_current_debug_run);
 
-        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
-            1,
-            2,
-            crate::mkmacro::RuntimeState::Completed,
-            crate::mkmacro::DebugSnapshotReason::RunFinished,
-            None,
-        )));
+        let first = wait_for_terminal_after(&runtime, first_previous_run_id);
+        assert_eq!(first.state, RuntimeState::Completed);
+        assert_eq!(first.run_mode, crate::mkmacro::RuntimeRunMode::Debug);
+        assert_eq!(first.last_completed_step_id, Some(12));
+        assert_eq!(first.debug_variables_step_id, Some(12));
+        let first_debug = first
+            .debug_snapshot
+            .as_ref()
+            .expect("completed debug run retains its final snapshot");
+        assert_eq!(
+            first_debug.reason,
+            crate::mkmacro::DebugSnapshotReason::RunFinished
+        );
+        assert_eq!(first_debug.step_id, Some(12));
+        assert_eq!(
+            first_debug.variables.get("count"),
+            Some(&MkValue::Number(1.0))
+        );
+        assert_eq!(
+            first_debug.variables.get("result"),
+            Some(&MkValue::String("done".into()))
+        );
+        dialog.observe_runtime_snapshot(Some(first.clone()));
         assert!(!dialog.runtime_inspector_is_current_debug_run);
+        let retained_first = dialog
+            .runtime_inspector_snapshot
+            .as_ref()
+            .expect("completed debug snapshot is retained by the dialog");
+        assert_eq!(retained_first.state, RuntimeState::Completed);
+        assert_eq!(retained_first.run_id, first.run_id);
+        assert_eq!(
+            retained_first.debug_snapshot.as_ref().unwrap().reason,
+            crate::mkmacro::DebugSnapshotReason::RunFinished
+        );
+        assert_eq!(
+            retained_first.debug_snapshot.as_ref().unwrap().step_id,
+            Some(12)
+        );
+        assert_eq!(
+            retained_first
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .get("count"),
+            Some(&MkValue::Number(1.0))
+        );
+        assert_eq!(
+            retained_first
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .get("result"),
+            Some(&MkValue::String("done".into()))
+        );
         assert_eq!(
             runtime_inspector::RuntimeInspectorViewModel::from_snapshot(
-                dialog.runtime_inspector_snapshot.as_ref().unwrap(),
+                retained_first,
+                &dialog.draft,
+            )
+            .variable_label,
+            "Variables at successful completion"
+        );
+        assert_eq!(
+            runtime_inspector::RuntimeInspectorViewModel::from_snapshot(
+                retained_first,
                 &dialog.draft,
             )
             .title,
             "Runtime Inspector — Last Debug Run"
         );
 
-        dialog.observe_runtime_snapshot(Some(synthetic_normal_snapshot(2, 3)));
-        assert!(dialog.runtime_inspector_snapshot.is_none());
-
-        dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
-            3,
-            4,
-            crate::mkmacro::RuntimeState::Running,
+        let second_previous_run_id = first.run_id;
+        submit_after_previous_run(&runtime, RuntimeCommand::DebugRun(2));
+        let second_started = wait_for_debug_boundary_after(
+            &runtime,
+            second_previous_run_id,
             crate::mkmacro::DebugSnapshotReason::RunStarted,
-            None,
-        )));
-        assert_eq!(
-            dialog
-                .runtime_inspector_snapshot
+        );
+        assert!(second_started.run_id > first.run_id);
+        assert_eq!(second_started.state, RuntimeState::Running);
+        assert!(
+            !second_started
+                .debug_snapshot
                 .as_ref()
-                .map(|snapshot| snapshot.run_id),
-            Some(3)
+                .unwrap()
+                .variables
+                .contains_key("count")
+        );
+        assert!(
+            !second_started
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .contains_key("result")
+        );
+        assert_eq!(
+            second_started
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .get("macro.id"),
+            Some(&MkValue::Number(2.0))
+        );
+        dialog.observe_runtime_snapshot(Some(second_started.clone()));
+        assert_eq!(
+            dialog.runtime_inspector_snapshot.as_ref().unwrap().run_id,
+            second_started.run_id
+        );
+        assert!(dialog.runtime_inspector_is_current_debug_run);
+
+        let second = wait_for_terminal_after(&runtime, second_previous_run_id);
+        assert_eq!(second.state, RuntimeState::Completed);
+        assert_eq!(second.run_mode, crate::mkmacro::RuntimeRunMode::Debug);
+        assert_eq!(
+            second
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .get("fresh"),
+            Some(&MkValue::String("new".into()))
+        );
+        assert!(
+            !second
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .contains_key("count")
+        );
+        assert!(
+            !second
+                .debug_snapshot
+                .as_ref()
+                .unwrap()
+                .variables
+                .contains_key("result")
+        );
+        dialog.observe_runtime_snapshot(Some(second.clone()));
+        let retained_second = dialog
+            .runtime_inspector_snapshot
+            .as_ref()
+            .expect("second completed debug snapshot replaces the first");
+        assert_eq!(retained_second.run_id, second.run_id);
+        let retained_second_variables = &retained_second.debug_snapshot.as_ref().unwrap().variables;
+        assert_eq!(
+            retained_second_variables.get("fresh"),
+            Some(&MkValue::String("new".into()))
+        );
+        assert!(!retained_second_variables.contains_key("count"));
+        assert!(!retained_second_variables.contains_key("result"));
+
+        submit_after_previous_run(&runtime, RuntimeCommand::Run(2));
+        let normal_started = wait_for_mode_after(
+            &runtime,
+            second.run_id,
+            crate::mkmacro::RuntimeRunMode::Normal,
+        );
+        assert!(normal_started.debug_snapshot.is_none());
+        dialog.observe_runtime_snapshot(Some(normal_started));
+        assert!(dialog.runtime_inspector_snapshot.is_none());
+        assert!(!dialog.runtime_inspector_is_current_debug_run);
+
+        let normal = wait_for_terminal_after(&runtime, second.run_id);
+        assert_eq!(normal.run_mode, crate::mkmacro::RuntimeRunMode::Normal);
+        assert!(normal.debug_snapshot.is_none());
+        assert!(normal.debug_variables.is_empty());
+        assert_eq!(
+            runtime_inspector::RuntimeInspectorViewModel::from_snapshot(&normal, &dialog.draft)
+                .title,
+            "Runtime Inspector — Normal Run"
         );
     }
 

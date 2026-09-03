@@ -257,10 +257,10 @@ impl RuntimeInspectorViewModel {
             .map(|step_id| resolve_step(document, snapshot.macro_id, step_id));
         let outcome = last_outcome(snapshot);
         Self {
-            title: if current_debug_run {
-                "Runtime Inspector — Current Debug Run".into()
-            } else {
-                "Runtime Inspector — Last Debug Run".into()
+            title: match (snapshot.run_mode, current_debug_run) {
+                (RuntimeRunMode::Debug, true) => "Runtime Inspector — Current Debug Run".into(),
+                (RuntimeRunMode::Debug, false) => "Runtime Inspector — Last Debug Run".into(),
+                (RuntimeRunMode::Normal, _) => "Runtime Inspector — Normal Run".into(),
             },
             macro_name: resolve_macro_name(document, snapshot.macro_id),
             status: status_text(snapshot),
@@ -654,37 +654,111 @@ mod tests {
 
     #[test]
     fn formats_all_value_variants_and_number_policies() {
-        let string = format_value(&MkValue::String("hello".into()));
-        assert_eq!(string.table_text, "\"hello\"");
-        assert_eq!(string.hover_text, "\"hello\"");
-        assert_eq!(string.type_name, "String");
-        assert_eq!(format_value(&MkValue::Boolean(false)).table_text, "false");
-        assert_eq!(
-            format_value(&MkValue::Point(MkPoint { x: -2, y: 4 })).table_text,
-            "(-2, 4)"
-        );
-        let null = format_value(&MkValue::Null);
-        assert_eq!(null.table_text, "null");
-        assert_eq!(null.type_name, "Null");
-        assert_eq!(null.style, ValueDisplayStyle::NullMutedWarning);
-        for (number, expected) in [
-            (12.0, "12"),
-            (-12.0, "-12"),
-            (12.5, "12.5"),
-            (-12.5, "-12.5"),
-            (1_000_000_000_000.0, "1000000000000"),
-        ] {
-            assert_eq!(format_value(&MkValue::Number(number)).table_text, expected);
+        let cases = [
+            (
+                MkValue::String("hello".into()),
+                "\"hello\"",
+                "String",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::String("quote\" slash\\ newline\n".into()),
+                "\"quote\\\" slash\\\\ newline\\n\"",
+                "String",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(12.0),
+                "12",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(-12.0),
+                "-12",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(12.5),
+                "12.5",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(-12.5),
+                "-12.5",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(1_000_000_000_000.0),
+                "1000000000000",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(-0.0),
+                "-0",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(f64::NAN),
+                "NaN",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(f64::INFINITY),
+                "∞",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Number(f64::NEG_INFINITY),
+                "-∞",
+                "Number",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Boolean(true),
+                "true",
+                "Boolean",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Boolean(false),
+                "false",
+                "Boolean",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Point(MkPoint { x: 2, y: 4 }),
+                "(2, 4)",
+                "Point",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Point(MkPoint { x: -2, y: -4 }),
+                "(-2, -4)",
+                "Point",
+                ValueDisplayStyle::Normal,
+            ),
+            (
+                MkValue::Null,
+                "null",
+                "Null",
+                ValueDisplayStyle::NullMutedWarning,
+            ),
+        ];
+        for (value, expected_text, expected_type, expected_style) in cases {
+            let formatted = format_value(&value);
+            assert_eq!(formatted.table_text, expected_text, "value={value:?}");
+            assert_eq!(formatted.hover_text, expected_text, "value={value:?}");
+            assert_eq!(formatted.type_name, expected_type, "value={value:?}");
+            assert_eq!(formatted.style, expected_style, "value={value:?}");
         }
-        assert_eq!(format_value(&MkValue::Number(f64::NAN)).table_text, "NaN");
-        assert_eq!(
-            format_value(&MkValue::Number(f64::INFINITY)).table_text,
-            "∞"
-        );
-        assert_eq!(
-            format_value(&MkValue::Number(f64::NEG_INFINITY)).table_text,
-            "-∞"
-        );
     }
 
     #[test]
@@ -717,9 +791,12 @@ mod tests {
             ("a_user".into(), MkValue::Null),
             ("mouse.y".into(), MkValue::Null),
             ("mouse.x".into(), MkValue::Null),
+            ("macro.id".into(), MkValue::Number(7.0)),
+            ("step.id".into(), MkValue::Number(101.0)),
             ("__image.foo".into(), MkValue::Null),
             ("__image_found.foo".into(), MkValue::Null),
             ("__mouse.x".into(), MkValue::Null),
+            ("__secret".into(), MkValue::String("internal".into())),
         ]);
         let groups = VariableGroups::from_variables(&variables);
         assert_eq!(
@@ -736,7 +813,7 @@ mod tests {
                 .iter()
                 .map(|x| x.name.as_str())
                 .collect::<Vec<_>>(),
-            ["mouse.x", "mouse.y"]
+            ["macro.id", "mouse.x", "mouse.y", "step.id"]
         );
         assert_eq!(
             groups
@@ -744,11 +821,42 @@ mod tests {
                 .iter()
                 .map(|x| x.name.as_str())
                 .collect::<Vec<_>>(),
-            ["__image.foo", "__image_found.foo", "__mouse.x"]
+            ["__image.foo", "__image_found.foo", "__mouse.x", "__secret"]
+        );
+        for name in [
+            "a_user",
+            "z_user",
+            "macro.id",
+            "mouse.x",
+            "mouse.y",
+            "step.id",
+            "__image.foo",
+            "__image_found.foo",
+            "__mouse.x",
+            "__secret",
+        ] {
+            let occurrences = [&groups.user, &groups.built_ins, &groups.internal]
+                .into_iter()
+                .flat_map(|group| group.iter())
+                .filter(|entry| entry.name == name)
+                .count();
+            assert_eq!(occurrences, 1, "classification for {name}");
+        }
+        assert!(
+            groups
+                .user
+                .iter()
+                .all(|entry| !entry.name.starts_with("__"))
+        );
+        assert!(
+            groups
+                .internal
+                .iter()
+                .all(|entry| entry.name.starts_with("__"))
         );
         assert_eq!(groups.group(VariableGroupKind::User), &groups.user);
         assert!(groups.visible_internal(false).is_empty());
-        assert_eq!(groups.visible_internal(true).len(), 3);
+        assert_eq!(groups.visible_internal(true).len(), 4);
     }
 
     #[test]
@@ -759,6 +867,11 @@ mod tests {
         let running_view = RuntimeInspectorViewModel::from_snapshot(&running, &document());
         assert_eq!(running_view.status, "Running — debug run started");
         assert_eq!(running_view.title, "Runtime Inspector — Current Debug Run");
+
+        let mut normal = snapshot();
+        normal.run_mode = RuntimeRunMode::Normal;
+        let normal_view = RuntimeInspectorViewModel::from_snapshot(&normal, &document());
+        assert_eq!(normal_view.title, "Runtime Inspector — Normal Run");
 
         let mut breakpoint = running.clone();
         breakpoint.state = RuntimeState::Paused;

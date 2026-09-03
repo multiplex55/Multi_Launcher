@@ -16,6 +16,44 @@ pub struct ToolbarState {
     pub run_from_reason: Option<String>,
     pub run_selected_reason: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarCommand {
+    Run,
+    Pause,
+    Resume,
+    Stop,
+    RunFrom,
+    RunSelected,
+    DebugRun,
+    DebugFrom,
+    DebugSelected,
+}
+
+impl ToolbarState {
+    /// Return the enablement computed by [`decide`] for one execution command.
+    /// Keeping this lookup pure gives the renderer and tests one source of truth.
+    pub fn command_enabled(&self, command: ToolbarCommand) -> bool {
+        match command {
+            ToolbarCommand::Run => self.run,
+            ToolbarCommand::Pause => self.pause,
+            ToolbarCommand::Resume => self.resume,
+            ToolbarCommand::Stop => self.stop,
+            ToolbarCommand::RunFrom => self.run_from,
+            ToolbarCommand::RunSelected => self.run_selected,
+            ToolbarCommand::DebugRun => self.debug_run,
+            ToolbarCommand::DebugFrom => self.debug_from,
+            ToolbarCommand::DebugSelected => self.debug_selected,
+        }
+    }
+}
+
+pub const DEBUG_COMMANDS: [ToolbarCommand; 3] = [
+    ToolbarCommand::DebugRun,
+    ToolbarCommand::DebugFrom,
+    ToolbarCommand::DebugSelected,
+];
+
 pub fn decide(
     runtime: RuntimeState,
     disabled_reason: Option<String>,
@@ -89,7 +127,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         {
             dialog.action_catalog_visible = true;
         }
-        if !state.run {
+        if !state.command_enabled(ToolbarCommand::Run) {
             ui.add_enabled(false, eframe::egui::Button::new("Run"))
                 .on_disabled_hover_text(
                     state
@@ -102,8 +140,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             report(dialog, result);
         }
         ui.menu_button("Debug", |ui| {
+            let [debug_run_command, debug_from_command, debug_selected_command] = DEBUG_COMMANDS;
             let response = ui.add_enabled(
-                state.debug_run,
+                state.command_enabled(debug_run_command),
                 eframe::egui::Button::new("Debug Run"),
             );
             let response = if let Some(reason) = state.disabled_reason.clone() {
@@ -119,7 +158,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             ui.separator();
 
             let response = ui.add_enabled(
-                state.debug_from,
+                state.command_enabled(debug_from_command),
                 eframe::egui::Button::new("Debug From Here"),
             );
             let response = if let Some(reason) = state.run_from_reason.clone() {
@@ -135,7 +174,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             }
 
             let response = ui.add_enabled(
-                state.debug_selected,
+                state.command_enabled(debug_selected_command),
                 eframe::egui::Button::new("Debug Selected"),
             );
             let response = if let Some(reason) = state.run_selected_reason.clone() {
@@ -149,25 +188,34 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             }
         });
         if ui
-            .add_enabled(state.pause, eframe::egui::Button::new("Pause"))
+            .add_enabled(
+                state.command_enabled(ToolbarCommand::Pause),
+                eframe::egui::Button::new("Pause"),
+            )
             .clicked()
         {
             report(dialog, crate::mkmacro::runtime::pause());
         }
         if ui
-            .add_enabled(state.resume, eframe::egui::Button::new("Resume"))
+            .add_enabled(
+                state.command_enabled(ToolbarCommand::Resume),
+                eframe::egui::Button::new("Resume"),
+            )
             .clicked()
         {
             report(dialog, crate::mkmacro::runtime::resume());
         }
         if ui
-            .add_enabled(state.stop, eframe::egui::Button::new("Stop"))
+            .add_enabled(
+                state.command_enabled(ToolbarCommand::Stop),
+                eframe::egui::Button::new("Stop"),
+            )
             .clicked()
         {
             report(dialog, crate::mkmacro::runtime::stop());
         }
         let response = ui.add_enabled(
-            state.run_from,
+            state.command_enabled(ToolbarCommand::RunFrom),
             eframe::egui::Button::new("Run From Here"),
         );
         let response = if let Some(reason) = state.run_from_reason.clone() {
@@ -182,7 +230,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             }
         }
         let response = ui.add_enabled(
-            state.run_selected,
+            state.command_enabled(ToolbarCommand::RunSelected),
             eframe::egui::Button::new("Run Selected"),
         );
         let response = if let Some(reason) = state.run_selected_reason.clone() {
@@ -355,6 +403,57 @@ mod tests {
             Some("macro is disabled")
         );
     }
+
+    #[test]
+    fn debug_command_availability_and_identity_are_pure() {
+        assert_eq!(
+            DEBUG_COMMANDS,
+            [
+                ToolbarCommand::DebugRun,
+                ToolbarCommand::DebugFrom,
+                ToolbarCommand::DebugSelected,
+            ]
+        );
+
+        for runtime in [
+            RuntimeState::Running,
+            RuntimeState::Paused,
+            RuntimeState::Stopping,
+        ] {
+            let state = decide(runtime, None, 1);
+            assert!(
+                DEBUG_COMMANDS
+                    .into_iter()
+                    .all(|command| !state.command_enabled(command))
+            );
+        }
+
+        let idle_with_one_row = decide(RuntimeState::Idle, None, 1);
+        assert!(idle_with_one_row.command_enabled(ToolbarCommand::DebugRun));
+        assert!(idle_with_one_row.command_enabled(ToolbarCommand::DebugFrom));
+        assert!(idle_with_one_row.command_enabled(ToolbarCommand::DebugSelected));
+
+        let idle_with_no_rows = decide(RuntimeState::Idle, None, 0);
+        assert!(idle_with_no_rows.command_enabled(ToolbarCommand::DebugRun));
+        assert!(!idle_with_no_rows.command_enabled(ToolbarCommand::DebugFrom));
+        assert!(!idle_with_no_rows.command_enabled(ToolbarCommand::DebugSelected));
+    }
+
+    #[test]
+    fn selection_enablement_cannot_override_a_non_idle_runtime() {
+        for runtime in [
+            RuntimeState::Running,
+            RuntimeState::Paused,
+            RuntimeState::Stopping,
+        ] {
+            for selected_rows in [0, 1, 2] {
+                let state = decide(runtime, None, selected_rows);
+                assert!(!state.command_enabled(ToolbarCommand::DebugFrom));
+                assert!(!state.command_enabled(ToolbarCommand::DebugSelected));
+            }
+        }
+    }
+
     #[test]
     fn running_and_paused_controls_are_deterministic() {
         let running = decide(RuntimeState::Running, None, 1);
