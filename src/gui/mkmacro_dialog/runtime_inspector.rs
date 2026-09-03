@@ -450,6 +450,12 @@ fn render_variable_table(ui: &mut egui::Ui, id: &'static str, entries: &[Variabl
         });
 }
 
+fn apply_header_intent(open: &mut bool, activated: bool) {
+    if activated {
+        *open = !*open;
+    }
+}
+
 fn render_variables(
     ui: &mut egui::Ui,
     groups: &VariableGroups,
@@ -477,7 +483,10 @@ fn render_variables(
                                 &groups.built_ins,
                             );
                         });
-                *builtins_open = response.openness > 0.5;
+                // `openness` is only the animation progress. The header response is
+                // limited to the Built-ins header, so controls in its body cannot
+                // change the persisted expansion intent.
+                apply_header_intent(builtins_open, response.header_response.clicked());
             }
             if show_internal && !groups.internal.is_empty() {
                 has_visible = true;
@@ -566,7 +575,10 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
                     |ui| ui.label("Run Debug to capture read-only runtime variables."),
                 );
             });
-        dialog.runtime_inspector_open = response.openness > 0.5;
+        apply_header_intent(
+            &mut dialog.runtime_inspector_open,
+            response.header_response.clicked(),
+        );
         return;
     };
     let view = RuntimeInspectorViewModel::from_snapshot_with_retention(
@@ -590,7 +602,10 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
                 },
             );
         });
-    dialog.runtime_inspector_open = response.openness > 0.5;
+    apply_header_intent(
+        &mut dialog.runtime_inspector_open,
+        response.header_response.clicked(),
+    );
 }
 
 #[cfg(test)]
@@ -1008,5 +1023,48 @@ mod tests {
     #[test]
     fn inspector_body_height_stays_within_requested_cap() {
         assert!((150.0..=220.0).contains(&inspector_body_height()));
+    }
+
+    #[test]
+    fn controlled_header_state_ignores_animation_progress() {
+        let mut open = false;
+
+        for _ in 0..3 {
+            apply_header_intent(&mut open, false);
+        }
+        assert!(!open);
+
+        apply_header_intent(&mut open, true);
+        assert!(open);
+        for _ in 0..3 {
+            apply_header_intent(&mut open, false);
+        }
+        assert!(open);
+
+        apply_header_intent(&mut open, true);
+        assert!(!open);
+    }
+
+    #[test]
+    fn controlled_header_intents_are_independent_from_each_other_and_visibility() {
+        let mut outer_open = false;
+        let mut builtins_open = false;
+        let mut show_internal = false;
+        assert!(!show_internal);
+
+        apply_header_intent(&mut builtins_open, true);
+        apply_header_intent(&mut outer_open, false);
+        assert!(!outer_open);
+        assert!(builtins_open);
+
+        // An outer-header activation (including breakpoint auto-opening) does
+        // not alter the Built-ins expansion or internal-variable preference.
+        apply_header_intent(&mut outer_open, true);
+        show_internal = true;
+        apply_header_intent(&mut outer_open, false);
+        apply_header_intent(&mut builtins_open, false);
+        assert!(outer_open);
+        assert!(builtins_open);
+        assert!(show_internal);
     }
 }
