@@ -183,6 +183,8 @@ struct Shared {
     admission: Mutex<Option<u64>>,
     next_run_id: AtomicU64,
     operations: Arc<SharedOperationGuard>,
+    #[cfg(test)]
+    test_events: Mutex<Vec<ExecutionEvent>>,
 }
 pub struct MacroRuntime {
     tx: mpsc::Sender<RuntimeCommand>,
@@ -207,6 +209,8 @@ impl MacroRuntime {
             admission: Mutex::new(None),
             next_run_id: AtomicU64::new(1),
             operations,
+            #[cfg(test)]
+            test_events: Mutex::new(Vec::new()),
         });
         let s = shared.clone();
         let worker = thread::Builder::new()
@@ -302,6 +306,10 @@ impl MacroRuntime {
     fn take_test_commands(&self) -> Vec<RuntimeCommand> {
         std::mem::take(&mut *self.test_commands.lock().unwrap())
     }
+    #[cfg(test)]
+    fn take_test_events(&self) -> Vec<ExecutionEvent> {
+        std::mem::take(&mut *self.shared.test_events.lock().unwrap())
+    }
     pub fn shutdown(&self) {
         self.shared.control.stop();
         let _ = self.tx.send(RuntimeCommand::Shutdown);
@@ -395,6 +403,8 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
         mode,
     } = request;
     shared.control.reset();
+    #[cfg(test)]
+    shared.test_events.lock().unwrap().clear();
     let run_id = shared.next_run_id.fetch_add(1, Ordering::Relaxed);
     let result = (|| {
         let doc = store.snapshot();
@@ -523,6 +533,8 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
             s.step_outcomes = Arc::new(BTreeMap::new())
         });
         let observer = |ev: ExecutionEvent| {
+            #[cfg(test)]
+            shared.test_events.lock().unwrap().push(ev.clone());
             publish(shared, |s| match ev {
                 ExecutionEvent::BreakpointHit { step_id, variables } => {
                     let variables = Arc::new(variables);
@@ -991,8 +1003,9 @@ mod run_mode_tests {
     use super::*;
     use crate::mkmacro::prompt::{PromptBackend, PromptRequest, PromptResponse};
     use crate::mkmacro::{
-        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkPromptInputPayload, MkStep,
-        MkTextMode, MkTextPayload, MkValue, executor::fake::FakeBackend,
+        MkAction, MkCoordinateTarget, MkDelayPayload, MkMacro, MkMacroDocument, MkMouseButton,
+        MkMouseMovePayload, MkMousePayload, MkPoint, MkPromptInputPayload, MkStep, MkTextMode,
+        MkTextPayload, MkValue, executor::fake::FakeBackend,
     };
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
@@ -1476,12 +1489,70 @@ mod run_mode_tests {
     }
 
     #[test]
+    fn normal_execution_completely_ignores_persisted_breakpoint_metadata() {
+        let mut set_variable = step(
+            1,
+            MkAction::SetVariable {
+                name: "ready".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        set_variable.breakpoint = true;
+        let mut mouse_move = step(
+            2,
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Screen {
+                    point: MkPoint { x: 37, y: 91 },
+                },
+                duration_ms: 0,
+            }),
+        );
+        mouse_move.breakpoint = true;
+        let (_dir, runtime, _guard, fake) =
+            runtime_with_effects(vec![test_macro(1, true, vec![set_variable, mouse_move])]);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        let events = runtime.take_test_events();
+
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_ne!(completed.state, RuntimeState::Paused);
+        assert_eq!(completed.pause_reason, None);
+        assert_eq!(completed.steps[&1], StepState::Success);
+        assert_eq!(completed.steps[&2], StepState::Success);
+        assert_eq!(completed.completed_steps, 2);
+        assert_eq!(completed.total_steps, 2);
+        assert_eq!(fake.events(), ["move:37,91"]);
+        assert!(events.iter().all(|event| {
+            !matches!(
+                event,
+                ExecutionEvent::BreakpointHit { .. } | ExecutionEvent::Paused
+            )
+        }));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ExecutionEvent::StepStarted(1),
+                ExecutionEvent::StepFinished(1),
+                ExecutionEvent::StepStarted(2),
+                ExecutionEvent::StepFinished(2),
+            ]
+        ));
+    }
+
+    #[test]
     fn breakpoint_snapshot_resume_executes_once_and_worker_accepts_next_run() {
         let mut breakpoint = step(
             1,
-            MkAction::Text(MkTextPayload {
-                text: "breakpoint action".into(),
-                mode: MkTextMode::Type,
+            MkAction::MouseClick(MkMousePayload {
+                target: MkCoordinateTarget::Screen {
+                    point: MkPoint { x: 10, y: 20 },
+                },
+                button: MkMouseButton::Left,
+                clicks: 1,
             }),
         );
         breakpoint.breakpoint = true;
@@ -1498,6 +1569,7 @@ mod run_mode_tests {
             "run initialization, RunStarted, and BreakpointHit must each publish one revision"
         );
         assert_eq!(paused.step_id, Some(1));
+        assert_eq!(paused.steps[&1], StepState::Pending);
         assert_eq!(
             paused.pause_reason,
             Some(RuntimePauseReason::Breakpoint { step_id: 1 })
@@ -1531,9 +1603,31 @@ mod run_mode_tests {
             CommandResult::Accepted
         );
         let completed = wait_for_terminal(&runtime);
+        let first_run_events = runtime.take_test_events();
         assert_eq!(completed.state, RuntimeState::Completed);
         assert_eq!(completed.pause_reason, None);
-        assert_eq!(fake.events(), ["text:breakpoint action"]);
+        assert_eq!(completed.steps[&1], StepState::Success);
+        assert_eq!(
+            first_run_events
+                .iter()
+                .filter(|event| matches!(event, ExecutionEvent::BreakpointHit { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| *event == "button_down:Left")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| *event == "button_up:Left")
+                .count(),
+            1
+        );
 
         wait_for_admission_release(&runtime);
         assert_eq!(
@@ -1545,24 +1639,56 @@ mod run_mode_tests {
             RuntimeState::Completed
         );
         assert_eq!(
-            fake.events(),
-            ["text:breakpoint action", "text:breakpoint action"],
+            fake.events()
+                .iter()
+                .filter(|event| *event == "button_down:Left")
+                .count(),
+            2,
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| *event == "button_up:Left")
+                .count(),
+            2,
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| *event == "move:10,20")
+                .count(),
+            2,
             "the same runtime worker must remain usable without a debugger worker"
         );
     }
 
     #[test]
     fn breakpoint_snapshot_stop_cancels_before_dispatch_and_worker_is_reusable() {
+        let held_button = step(1, MkAction::MouseDown(MkMouseButton::Left));
         let mut breakpoint = step(
-            1,
-            MkAction::Text(MkTextPayload {
-                text: "breakpoint action".into(),
-                mode: MkTextMode::Type,
+            2,
+            MkAction::MouseClick(MkMousePayload {
+                target: MkCoordinateTarget::Screen {
+                    point: MkPoint { x: 10, y: 20 },
+                },
+                button: MkMouseButton::Left,
+                clicks: 1,
             }),
         );
         breakpoint.breakpoint = true;
-        let target = test_macro(1, true, vec![breakpoint]);
-        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+        let target = test_macro(1, true, vec![held_button, breakpoint]);
+        let harmless = test_macro(
+            2,
+            true,
+            vec![step(
+                1,
+                MkAction::SetVariable {
+                    name: "harmless".into(),
+                    value: MkValue::Boolean(true),
+                },
+            )],
+        );
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target, harmless]);
 
         assert_eq!(
             runtime.command(RuntimeCommand::DebugRun(1)),
@@ -1571,9 +1697,12 @@ mod run_mode_tests {
         let paused = wait_for_state(&runtime, RuntimeState::Paused);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 1 })
+            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
         );
-        assert!(fake.events().is_empty());
+        assert_eq!(paused.step_id, Some(2));
+        assert_eq!(paused.steps[&1], StepState::Success);
+        assert_eq!(paused.steps[&2], StepState::Pending);
+        assert_eq!(fake.events(), ["button_down:Left"]);
         assert_eq!(
             runtime.command(RuntimeCommand::Stop),
             CommandResult::Accepted
@@ -1587,18 +1716,54 @@ mod run_mode_tests {
         let stopped = wait_for_terminal(&runtime);
         assert_eq!(stopped.state, RuntimeState::Stopped);
         assert_eq!(stopped.pause_reason, None);
-        assert!(fake.events().is_empty());
+        assert_eq!(stopped.latest_failure, None);
+        assert_eq!(stopped.steps[&2], StepState::Pending);
+        assert_eq!(
+            fake.events(),
+            ["button_down:Left", "button_up:Left"],
+            "stopping at the breakpoint must clean up input owned by an earlier step"
+        );
+        assert!(!fake.events().iter().any(|event| event.starts_with("move:")));
+        let stopped_events = runtime.take_test_events();
+        assert!(
+            stopped_events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::BreakpointHit { step_id: 2, .. }))
+        );
+        assert!(
+            !stopped_events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::StepFinished(2)))
+        );
+        assert!(
+            !stopped_events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::StepFailed(2, _)))
+        );
+        assert!(stopped_events.iter().any(|event| {
+            matches!(
+                event,
+                ExecutionEvent::DebugVariables {
+                    reason: DebugSnapshotReason::RunCancelled,
+                    ..
+                }
+            )
+        }));
 
         wait_for_admission_release(&runtime);
         assert_eq!(
-            runtime.command(RuntimeCommand::Run(1)),
+            runtime.command(RuntimeCommand::Run(2)),
             CommandResult::Accepted
         );
         assert_eq!(
             wait_for_terminal_after(&runtime, stopped.run_id).state,
             RuntimeState::Completed
         );
-        assert_eq!(fake.events(), ["text:breakpoint action"]);
+        assert_eq!(
+            fake.events(),
+            ["button_down:Left", "button_up:Left"],
+            "a harmless follow-up run proves the stopped worker released the breakpoint wait"
+        );
     }
 
     #[test]
