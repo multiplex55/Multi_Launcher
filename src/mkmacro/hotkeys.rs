@@ -869,9 +869,9 @@ fn report_resolution_failure(chord: &str, error: &ExecutionDiagnostic) {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        DiagnosticKind, MkAction, MkMacro, MkMacroDocument, MkPlayback, MkStep, MkTextMode,
-        MkTextPayload, RuntimeRunMode, RuntimeState, SCHEMA_VERSION, StepState,
-        executor::fake::FakeBackend, runtime,
+        DiagnosticKind, ExecutionEvent, MkAction, MkMacro, MkMacroDocument, MkPlayback, MkStep,
+        MkTextMode, MkTextPayload, RuntimeCommand, RuntimeRunMode, RuntimeState, SCHEMA_VERSION,
+        StepState, executor::fake::FakeBackend, runtime,
     };
     use serial_test::serial;
     use std::sync::{
@@ -2813,6 +2813,8 @@ mod tests {
         let store = Arc::new(store);
         let effects = Arc::new(FakeBackend::default());
         runtime::set_shared_store_with_backends(store.clone(), effects.clone().backends());
+        let shared_runtime = runtime::test_runtime().expect("shared macro runtime is installed");
+        assert!(shared_runtime.take_test_commands().is_empty());
 
         let keys = Arc::new(FakeKeyStateBackend::default());
         let service = MkMacroHotkeyService::with_backend(store, keys.clone());
@@ -2825,6 +2827,27 @@ mod tests {
         assert_eq!(snapshot.run_mode, RuntimeRunMode::Normal);
         assert_eq!(snapshot.steps[&1], StepState::Success);
         assert_eq!(effects.events(), vec!["text:hotkey breakpoint effect"]);
+        assert_eq!(
+            shared_runtime.take_test_commands(),
+            vec![RuntimeCommand::Run(7401)]
+        );
+        let events = shared_runtime.take_test_events();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                ExecutionEvent::BreakpointHit { .. } | ExecutionEvent::Paused
+            )
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::StepStarted(1)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ExecutionEvent::StepFinished(1)))
+        );
     }
 
     #[test]
@@ -2841,12 +2864,24 @@ mod tests {
             .unwrap();
         let effects = Arc::new(FakeBackend::default());
         runtime::set_shared_store_with_backends(Arc::new(store), effects.clone().backends());
+        let shared_runtime = runtime::test_runtime().expect("shared macro runtime is installed");
 
         runtime::debug_run(7402).unwrap();
         let paused = wait_for_global_state(RuntimeState::Paused);
         assert_eq!(paused.macro_id, Some(7402));
         assert_eq!(paused.run_mode, RuntimeRunMode::Debug);
         assert!(effects.events().is_empty());
+        let paused_events = shared_runtime.take_test_events();
+        assert_eq!(
+            paused_events
+                .iter()
+                .filter_map(|event| match event {
+                    ExecutionEvent::BreakpointHit { step_id, .. } => Some(*step_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [1]
+        );
 
         runtime::resume().unwrap();
         let completed = wait_for_global_state(RuntimeState::Completed);

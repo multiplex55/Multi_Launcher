@@ -106,6 +106,8 @@ fn patch_loop(v: &mut [MkInstruction], start: usize, end: usize, cont: usize, ex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::MkValue;
+
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
             id,
@@ -251,6 +253,53 @@ mod tests {
         };
         assert_eq!(compile(&m).unwrap().playback, m.playback);
     }
+
+    #[test]
+    fn breakpoint_metadata_is_preserved_on_the_shared_compiled_plan() {
+        let mut breakpoint = step(
+            2,
+            MkAction::SetVariable {
+                name: "selected".into(),
+                value: MkValue::Boolean(true),
+            },
+        );
+        breakpoint.breakpoint = true;
+        let plan = compile(&mac(vec![
+            step(
+                1,
+                MkAction::SetVariable {
+                    name: "before".into(),
+                    value: MkValue::Boolean(true),
+                },
+            ),
+            breakpoint,
+            step(
+                3,
+                MkAction::Text(MkTextPayload {
+                    text: "after".into(),
+                    mode: MkTextMode::Type,
+                }),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            plan.instructions
+                .iter()
+                .map(|instruction| instruction.step.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            plan.instructions
+                .iter()
+                .map(|instruction| instruction.step.breakpoint)
+                .collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        assert_eq!(plan.step_to_instruction.get(&2), Some(&1));
+    }
+
     #[test]
     fn compiler_marker_variants_match_editor_classification() {
         let condition = MkCondition::All { conditions: vec![] };

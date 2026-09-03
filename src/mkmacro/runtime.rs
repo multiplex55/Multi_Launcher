@@ -303,11 +303,11 @@ impl MacroRuntime {
         self.shared.snapshot.read().unwrap().clone()
     }
     #[cfg(test)]
-    fn take_test_commands(&self) -> Vec<RuntimeCommand> {
+    pub(crate) fn take_test_commands(&self) -> Vec<RuntimeCommand> {
         std::mem::take(&mut *self.test_commands.lock().unwrap())
     }
     #[cfg(test)]
-    fn take_test_events(&self) -> Vec<ExecutionEvent> {
+    pub(crate) fn take_test_events(&self) -> Vec<ExecutionEvent> {
         std::mem::take(&mut *self.shared.test_events.lock().unwrap())
     }
     pub fn shutdown(&self) {
@@ -762,6 +762,10 @@ pub fn stop() -> Result<()> {
 pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
 }
+#[cfg(test)]
+pub(crate) fn test_runtime() -> Option<Arc<MacroRuntime>> {
+    RUNTIME.read().unwrap().clone()
+}
 pub fn record(macro_id: u64, mut config: NormalizationConfig) -> Result<()> {
     if let Some(doc) = RECORDER
         .read()
@@ -1003,9 +1007,9 @@ mod run_mode_tests {
     use super::*;
     use crate::mkmacro::prompt::{PromptBackend, PromptRequest, PromptResponse};
     use crate::mkmacro::{
-        MkAction, MkCoordinateTarget, MkDelayPayload, MkMacro, MkMacroDocument, MkMouseButton,
-        MkMouseMovePayload, MkMousePayload, MkPoint, MkPromptInputPayload, MkStep, MkTextMode,
-        MkTextPayload, MkValue, executor::fake::FakeBackend,
+        MkAction, MkCondition, MkCoordinateTarget, MkDelayPayload, MkMacro, MkMacroDocument,
+        MkMouseButton, MkMouseMovePayload, MkMousePayload, MkPoint, MkPromptInputPayload, MkStep,
+        MkTextMode, MkTextPayload, MkValue, executor::fake::FakeBackend,
     };
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
@@ -1287,19 +1291,218 @@ mod run_mode_tests {
 
     #[test]
     fn normal_and_debug_run_from_reject_structured_plans_equally() {
-        let structured = test_macro(
-            1,
-            true,
+        let structured_plans = vec![
+            vec![
+                step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+                step(2, MkAction::Delay(Default::default())),
+                step(3, MkAction::EndIf),
+            ],
+            vec![
+                step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+                step(2, MkAction::Delay(Default::default())),
+                step(3, MkAction::Else),
+                step(4, MkAction::Delay(Default::default())),
+                step(5, MkAction::EndIf),
+            ],
             vec![
                 step(1, MkAction::RepeatStart { count: 1 }),
                 step(2, MkAction::Delay(Default::default())),
                 step(3, MkAction::RepeatEnd),
             ],
+            vec![
+                step(
+                    1,
+                    MkAction::WhileStart {
+                        condition: MkCondition::All { conditions: vec![] },
+                    },
+                ),
+                step(2, MkAction::Delay(Default::default())),
+                step(3, MkAction::WhileEnd),
+            ],
+            vec![
+                step(1, MkAction::RepeatStart { count: 1 }),
+                step(2, MkAction::Break),
+                step(3, MkAction::RepeatEnd),
+            ],
+            vec![
+                step(1, MkAction::RepeatStart { count: 1 }),
+                step(2, MkAction::Continue),
+                step(3, MkAction::RepeatEnd),
+            ],
+        ];
+
+        for steps in structured_plans {
+            let structured = test_macro(1, true, steps);
+            assert!(compile(&structured).is_ok());
+            let normal = failure_for(RuntimeCommand::RunFrom(1, 2), vec![structured.clone()]);
+            let debug = failure_for(RuntimeCommand::DebugRunFrom(1, 2), vec![structured]);
+            assert_eq!(normal, debug);
+            assert_eq!(normal.kind, DiagnosticKind::InvalidSelection);
+            assert_eq!(
+                normal.message,
+                "run-from cannot enter a structured control-flow plan"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_selected_uses_the_normal_filtered_plan_and_only_selected_breakpoints() {
+        let mut selected_two = step(
+            2,
+            MkAction::Text(MkTextPayload {
+                text: "selected two".into(),
+                mode: MkTextMode::Type,
+            }),
         );
-        let normal = failure_for(RuntimeCommand::RunFrom(1, 2), vec![structured.clone()]);
-        let debug = failure_for(RuntimeCommand::DebugRunFrom(1, 2), vec![structured]);
-        assert_eq!(normal, debug);
-        assert_eq!(normal.kind, DiagnosticKind::InvalidSelection);
+        selected_two.breakpoint = true;
+        let mut excluded_three = step(
+            3,
+            MkAction::Text(MkTextPayload {
+                text: "excluded three".into(),
+                mode: MkTextMode::Type,
+            }),
+        );
+        excluded_three.breakpoint = true;
+        let mut selected_four = step(
+            4,
+            MkAction::Text(MkTextPayload {
+                text: "selected four".into(),
+                mode: MkTextMode::Type,
+            }),
+        );
+        selected_four.breakpoint = true;
+        let target = test_macro(
+            1,
+            true,
+            vec![
+                step(
+                    1,
+                    MkAction::Text(MkTextPayload {
+                        text: "excluded one".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+                selected_two,
+                excluded_three,
+                selected_four,
+            ],
+        );
+        let selected = vec![4, 2];
+        let lifecycle = |events: &[ExecutionEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ExecutionEvent::StepStarted(id) => Some(("started", *id)),
+                    ExecutionEvent::StepFinished(id) => Some(("finished", *id)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let (_normal_dir, normal, _normal_guard, normal_fake) =
+            runtime_with_effects(vec![target.clone()]);
+        assert_eq!(
+            normal.command(RuntimeCommand::RunSelection(1, selected.clone())),
+            CommandResult::Accepted
+        );
+        let normal_completed = wait_for_terminal(&normal);
+        let normal_events = normal.take_test_events();
+        assert_eq!(normal_completed.run_mode, RuntimeRunMode::Normal);
+        assert_eq!(
+            normal_completed.steps.keys().copied().collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert_eq!(normal_completed.total_steps, 2);
+        assert_eq!(normal_completed.completed_steps, 2);
+        assert_eq!(
+            normal_fake.events(),
+            ["text:selected two", "text:selected four"]
+        );
+        assert!(!normal_events.iter().any(|event| {
+            matches!(
+                event,
+                ExecutionEvent::BreakpointHit { .. } | ExecutionEvent::Paused
+            )
+        }));
+
+        let (_debug_dir, debug, _debug_guard, debug_fake) = runtime_with_effects(vec![target]);
+        assert_eq!(
+            debug.command(RuntimeCommand::DebugRunSelection(1, selected)),
+            CommandResult::Accepted
+        );
+        let first_pause = wait_for_state(&debug, RuntimeState::Paused);
+        assert_eq!(first_pause.run_mode, RuntimeRunMode::Debug);
+        assert_eq!(
+            first_pause.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+        );
+        assert_eq!(first_pause.step_id, Some(2));
+        assert_eq!(
+            first_pause.steps.keys().copied().collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert_eq!(first_pause.steps[&2], StepState::Pending);
+        assert_eq!(first_pause.steps[&4], StepState::Pending);
+        assert_eq!(first_pause.total_steps, 2);
+        assert_eq!(first_pause.completed_steps, 0);
+        assert!(debug_fake.events().is_empty());
+
+        assert_eq!(
+            debug.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let second_pause = wait_for_state(&debug, RuntimeState::Paused);
+        assert_eq!(
+            second_pause.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 4 })
+        );
+        assert_eq!(second_pause.step_id, Some(4));
+        assert_eq!(second_pause.steps[&2], StepState::Success);
+        assert_eq!(second_pause.steps[&4], StepState::Pending);
+        assert_eq!(debug_fake.events(), ["text:selected two"]);
+
+        assert_eq!(
+            debug.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let debug_completed = wait_for_terminal(&debug);
+        let debug_events = debug.take_test_events();
+        assert_eq!(debug_completed.state, RuntimeState::Completed);
+        assert_eq!(debug_completed.run_mode, RuntimeRunMode::Debug);
+        assert_eq!(debug_completed.steps, normal_completed.steps);
+        assert_eq!(debug_completed.total_steps, normal_completed.total_steps);
+        assert_eq!(
+            debug_completed.completed_steps,
+            normal_completed.completed_steps
+        );
+        assert_eq!(
+            debug_fake.events(),
+            ["text:selected two", "text:selected four"]
+        );
+        assert_eq!(lifecycle(&debug_events), lifecycle(&normal_events));
+        assert_eq!(
+            debug_events
+                .iter()
+                .filter_map(|event| match event {
+                    ExecutionEvent::BreakpointHit { step_id, .. } => Some(*step_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert!(
+            !debug_events
+                .iter()
+                .any(|event| { matches!(event, ExecutionEvent::BreakpointHit { step_id: 3, .. }) })
+        );
+        assert!(!debug_completed.steps.contains_key(&1));
+        assert!(!debug_completed.steps.contains_key(&3));
+        assert!(
+            !debug_fake
+                .events()
+                .iter()
+                .any(|event| { event == "text:excluded one" || event == "text:excluded three" })
+        );
     }
 
     #[test]
@@ -2455,6 +2658,88 @@ mod runtime_snapshot_tests {
         assert_eq!(debug.step_id, step_id);
         assert_eq!(debug.reason, reason);
         assert_eq!(&*snapshot.debug_variables, &*debug.variables);
+    }
+
+    #[test]
+    fn debug_run_from_starts_at_set_b_and_resumes_into_mouse_move() {
+        let target = test_macro(vec![
+            step(
+                1,
+                MkAction::SetVariable {
+                    name: "A".into(),
+                    value: MkValue::String("Set A".into()),
+                },
+            ),
+            {
+                let mut breakpoint = step(
+                    2,
+                    MkAction::SetVariable {
+                        name: "B".into(),
+                        value: MkValue::String("Set B".into()),
+                    },
+                );
+                breakpoint.breakpoint = true;
+                breakpoint
+            },
+            step(
+                3,
+                MkAction::MouseMove(MkMouseMovePayload {
+                    target: MkCoordinateTarget::Screen {
+                        point: MkPoint { x: 19, y: 27 },
+                    },
+                    duration_ms: 0,
+                }),
+            ),
+        ]);
+        let (_directory, runtime, fake) = runtime_with(target);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRunFrom(1, 2)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_debug_boundary(&runtime, Some(2), DebugSnapshotReason::Breakpoint);
+        assert_eq!(paused.state, RuntimeState::Paused);
+        assert_eq!(paused.step_id, Some(2));
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+        );
+        assert!(!paused.steps.contains_key(&1));
+        assert_eq!(paused.steps[&2], StepState::Pending);
+        assert_eq!(paused.steps[&3], StepState::Pending);
+        assert!(!paused.debug_variables.contains_key("A"));
+        assert!(!paused.debug_variables.contains_key("B"));
+        assert!(fake.events().is_empty());
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        let events = runtime.take_test_events();
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(completed.run_mode, RuntimeRunMode::Debug);
+        assert_eq!(completed.steps[&2], StepState::Success);
+        assert_eq!(completed.steps[&3], StepState::Success);
+        assert_eq!(completed.total_steps, 2);
+        assert_eq!(completed.completed_steps, 2);
+        assert_eq!(
+            completed.debug_variables.get("B"),
+            Some(&MkValue::String("Set B".into()))
+        );
+        assert_eq!(fake.events(), ["move:19,27"]);
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ExecutionEvent::StepStarted(id) | ExecutionEvent::StepFinished(id) => {
+                        Some(*id)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [2, 2, 3, 3]
+        );
     }
 
     #[test]
