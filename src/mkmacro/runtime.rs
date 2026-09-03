@@ -2302,8 +2302,9 @@ mod step_outcome_tests {
 mod runtime_snapshot_tests {
     use super::*;
     use crate::mkmacro::{
-        MkAction, MkDelayPayload, MkMacro, MkMacroDocument, MkStep, MkTextMode, MkTextPayload,
-        executor::fake::FakeBackend,
+        MkAction, MkCoordinateTarget, MkDelayPayload, MkImageNotFoundPolicy, MkImageOutputs,
+        MkImagePayload, MkMacro, MkMacroDocument, MkMouseMovePayload, MkPoint, MkStep, MkTextMode,
+        MkTextPayload, MkValue, MkWaitOptions, executor::fake::FakeBackend,
     };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -2332,6 +2333,41 @@ mod runtime_snapshot_tests {
             playback: Default::default(),
             steps,
             image_assets: vec![],
+        }
+    }
+
+    fn image_payload(policy: MkImageNotFoundPolicy) -> MkImagePayload {
+        MkImagePayload {
+            asset_id: 10,
+            wait: MkWaitOptions {
+                timeout_ms: 0,
+                poll_interval_ms: 1,
+            },
+            region: Default::default(),
+            tolerance: 0,
+            alpha: Default::default(),
+            return_point: Default::default(),
+            not_found_policy: policy,
+            outputs: MkImageOutputs {
+                point: Some("target_point".into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn variable_move() -> MkAction {
+        MkAction::MouseMove(MkMouseMovePayload {
+            target: MkCoordinateTarget::Variable {
+                name: "target_point".into(),
+            },
+            duration_ms: 0,
+        })
+    }
+
+    fn document_for(target: MkMacro) -> MkMacroDocument {
+        MkMacroDocument {
+            macros: vec![target],
+            ..Default::default()
         }
     }
 
@@ -2382,6 +2418,29 @@ mod runtime_snapshot_tests {
         }
     }
 
+    fn wait_for_debug_boundary(
+        runtime: &MacroRuntime,
+        step_id: Option<u64>,
+        reason: DebugSnapshotReason,
+    ) -> Arc<RuntimeSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if snapshot
+                .debug_snapshot
+                .as_ref()
+                .is_some_and(|debug| debug.step_id == step_id && debug.reason == reason)
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not publish debug boundary {step_id:?}/{reason:?}: {snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     fn assert_debug_fields(
         snapshot: &RuntimeSnapshot,
         step_id: Option<u64>,
@@ -2396,6 +2455,129 @@ mod runtime_snapshot_tests {
         assert_eq!(debug.step_id, step_id);
         assert_eq!(debug.reason, reason);
         assert_eq!(&*snapshot.debug_variables, &*debug.variables);
+    }
+
+    #[test]
+    fn debug_breakpoint_snapshot_exposes_image_point_before_mouse_move() {
+        let point = MkPoint { x: 823, y: 441 };
+        let mut mouse_move = step(2, variable_move());
+        mouse_move.breakpoint = true;
+        let target = test_macro(vec![
+            step(
+                1,
+                MkAction::ImageFind(image_payload(MkImageNotFoundPolicy::Fail)),
+            ),
+            mouse_move,
+        ]);
+        let (_directory, runtime, fake) = runtime_with(target);
+        fake.script_image(10, Ok(Some(point)));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_debug_boundary(&runtime, Some(2), DebugSnapshotReason::Breakpoint);
+        assert_eq!(paused.state, RuntimeState::Paused);
+        assert_eq!(
+            paused.pause_reason,
+            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+        );
+        assert_eq!(
+            paused.debug_variables.get("target_point"),
+            Some(&MkValue::Point(point))
+        );
+        assert_debug_fields(&paused, Some(2), DebugSnapshotReason::Breakpoint);
+        assert_eq!(paused.steps[&2], StepState::Pending);
+        assert!(
+            !fake.events().iter().any(|event| event.starts_with("move:")),
+            "Mouse Move must not execute before its breakpoint is resumed"
+        );
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let completed = wait_for_terminal(&runtime);
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(completed.steps[&2], StepState::Success);
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| event.as_str() == "move:823,441")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn debug_breakpoint_snapshot_preserves_image_miss_as_null_for_inspection() {
+        let mut mouse_move = step(2, variable_move());
+        mouse_move.breakpoint = true;
+        let target = test_macro(vec![
+            step(
+                1,
+                MkAction::ImageFind(image_payload(MkImageNotFoundPolicy::Continue)),
+            ),
+            mouse_move,
+        ]);
+        let document = document_for(target.clone());
+        let (_directory, runtime, fake) = runtime_with(target);
+        fake.script_image(10, Ok(None));
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRun(1)),
+            CommandResult::Accepted
+        );
+        let paused = wait_for_debug_boundary(&runtime, Some(2), DebugSnapshotReason::Breakpoint);
+        assert_eq!(
+            paused.debug_variables.get("target_point"),
+            Some(&MkValue::Null)
+        );
+        assert_debug_fields(&paused, Some(2), DebugSnapshotReason::Breakpoint);
+        assert_eq!(paused.steps[&2], StepState::Pending);
+        assert!(
+            !fake.events().iter().any(|event| event.starts_with("move:")),
+            "Mouse Move must not execute before its breakpoint is resumed"
+        );
+
+        let view =
+            crate::gui::mkmacro_dialog::runtime_inspector::RuntimeInspectorViewModel::from_snapshot(
+                &paused, &document,
+            );
+        let row = view
+            .variables
+            .user
+            .iter()
+            .find(|entry| entry.name == "target_point")
+            .expect("target_point is visible as a user variable");
+        assert_eq!(row.name, "target_point");
+        assert_eq!(row.value.type_name, "Null");
+        assert_eq!(row.value.table_text, "null");
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Accepted
+        );
+        let failed = wait_for_terminal(&runtime);
+        assert_eq!(failed.state, RuntimeState::Failed);
+        assert_eq!(failed.steps[&2], StepState::Failed);
+        let diagnostic = failed
+            .latest_failure
+            .as_ref()
+            .expect("Mouse Move publishes its type diagnostic");
+        assert_eq!(diagnostic.kind, DiagnosticKind::TypeMismatch);
+        assert_eq!(
+            diagnostic.message,
+            "Variable 'target_point' contains Null; coordinate target requires Point"
+        );
+        assert_eq!(
+            diagnostic.context.get("expected").map(String::as_str),
+            Some("Point")
+        );
+        assert!(
+            !fake.events().iter().any(|event| event.starts_with("move:")),
+            "a Null coordinate target must not move the pointer"
+        );
     }
 
     #[test]

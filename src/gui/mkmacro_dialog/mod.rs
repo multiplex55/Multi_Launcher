@@ -12,7 +12,7 @@ pub mod launcher_action_picker;
 mod macro_list;
 mod macro_properties;
 pub mod recorder_controller;
-mod runtime_inspector;
+pub(crate) mod runtime_inspector;
 mod step_table;
 mod toolbar;
 pub mod uia_editor;
