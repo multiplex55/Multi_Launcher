@@ -908,6 +908,7 @@ pub(crate) enum OverlayInputMode {
     PerMonitorShields,
 }
 
+pub(crate) fn overlay_input_mode(visual: &OverlayVisual) -> OverlayInputMode {
     if matches!(visual, OverlayVisual::RectanglePicker { .. }) {
         OverlayInputMode::PerMonitorShields
     } else {
