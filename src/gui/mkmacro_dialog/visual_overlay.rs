@@ -898,6 +898,46 @@ pub(crate) fn overlay_is_mouse_transparent(visual: &OverlayVisual) -> bool {
     visual.passive()
 }
 
+/// Describes the native input policy for an overlay visual. Rectangle picking
+/// is the only mode which must consume mouse messages before they reach the
+/// application underneath it; all other visuals continue to rely on polling
+/// (or have no input contract at all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverlayInputMode {
+    PollingOnly,
+    PerMonitorShields,
+}
+
+    if matches!(visual, OverlayVisual::RectanglePicker { .. }) {
+        OverlayInputMode::PerMonitorShields
+    } else {
+        OverlayInputMode::PollingOnly
+    }
+}
+
+pub(crate) fn overlay_requires_input_shields(visual: &OverlayVisual) -> bool {
+    matches!(
+        overlay_input_mode(visual),
+        OverlayInputMode::PerMonitorShields
+    )
+}
+
+/// Returns one physical-monitor shield specification for every display that
+/// intersects the rectangle picker's virtual desktop. Signed monitor bounds
+/// are returned unchanged, including negative origins and irregular layouts.
+pub(crate) fn input_shield_plan(
+    visual: &OverlayVisual,
+    displays: &[ScreenRect],
+) -> Vec<ScreenRect> {
+    let OverlayVisual::RectanglePicker {
+        virtual_desktop, ..
+    } = visual
+    else {
+        return vec![];
+    };
+    intersecting_monitor_bounds(displays, *virtual_desktop)
+}
+
 /// Isolates native windows, input, painting and resource ownership from the
 /// deterministic state machine.
 pub trait OverlayRenderer: Send {
@@ -1292,8 +1332,10 @@ impl VisualOverlayController {
         }
     }
     pub fn cancel(&mut self) {
+        // Keep cleanup unconditional: a native show can fail after allocating
+        // resources, and a disconnected/replaced owner must never strand one.
+        self.renderer.close();
         if let Some(id) = self.operation_id.take() {
-            self.renderer.close();
             self.events
                 .push_back(VisualOverlayEvent::Cancelled { operation_id: id });
         }
@@ -1322,8 +1364,8 @@ impl VisualOverlayController {
             }
         }
         if let Err(error) = input_result {
+            self.renderer.close();
             if let Some(id) = self.operation_id.take() {
-                self.renderer.close();
                 self.state = VisualOverlayState::Idle;
                 self.virtual_desktop = None;
                 self.events.push_back(VisualOverlayEvent::Error {
@@ -2067,6 +2109,72 @@ mod tests {
         assert_eq!(tiny[3].1, ScreenRect::new(-2, -3, 2, 1));
     }
 
+    fn rectangle_picker_visual(virtual_desktop: ScreenRect) -> OverlayVisual {
+        OverlayVisual::RectanglePicker {
+            virtual_desktop,
+            selection: None,
+            tooltip: RectangleTooltip {
+                text: rectangle_tooltip_text(None),
+                pointer: point(0, 0),
+            },
+        }
+    }
+
+    #[test]
+    fn only_rectangle_picker_uses_per_monitor_input_shields() {
+        let displays = vec![
+            ScreenRect::new(-1920, -200, 1920, 1080),
+            ScreenRect::new(0, 0, 2560, 1440),
+            ScreenRect::new(3000, -900, 1200, 800),
+        ];
+        let picker = rectangle_picker_visual(ScreenRect::new(-2000, -300, 6400, 2200));
+        assert_eq!(
+            overlay_input_mode(&picker),
+            OverlayInputMode::PerMonitorShields
+        );
+        assert!(overlay_requires_input_shields(&picker));
+        assert_eq!(input_shield_plan(&picker, &displays), displays);
+        assert_eq!(
+            input_shield_plan(&picker, &displays).len(),
+            3,
+            "one shield specification is produced per intersecting monitor"
+        );
+
+        let passive_visuals = vec![
+            OverlayVisual::RectanglePreview(ScreenRect::new(-10, -20, 30, 40)),
+            OverlayVisual::Monitor(monitor(1, displays[0])),
+            OverlayVisual::Monitors(vec![monitor(1, displays[0]), monitor(2, displays[2])]),
+            OverlayVisual::Desktop(vec![monitor(1, displays[0]), monitor(2, displays[2])]),
+            OverlayVisual::Window {
+                rect: ScreenRect::new(10, 20, 30, 40),
+                area_kind: WindowAreaKind::ClientArea,
+            },
+            OverlayVisual::PointPicker {
+                pointer: point(-20, -30),
+            },
+        ];
+        for visual in passive_visuals {
+            assert_eq!(overlay_input_mode(&visual), OverlayInputMode::PollingOnly);
+            assert!(!overlay_requires_input_shields(&visual));
+            assert!(input_shield_plan(&visual, &displays).is_empty());
+        }
+    }
+
+    #[test]
+    fn shield_plan_preserves_negative_origins_mixed_sizes_and_offsets() {
+        let displays = [
+            ScreenRect::new(-2560, -1440, 2560, 1440),
+            ScreenRect::new(0, -300, 1920, 1080),
+            ScreenRect::new(2100, 200, 1280, 720),
+            ScreenRect::new(4000, 3000, 800, 600),
+        ];
+        let picker = rectangle_picker_visual(ScreenRect::new(-2600, -400, 6200, 1600));
+        assert_eq!(
+            input_shield_plan(&picker, &displays),
+            displays[..3].to_vec(),
+            "shield bounds retain each physical monitor's signed ScreenRect"
+        );
+    }
     fn assert_four_bright_yellow_edges(
         visual: OverlayVisual,
         target: ScreenRect,
@@ -2632,12 +2740,13 @@ mod tests {
     }
 
     #[test]
-    fn startup_and_poll_failures_close_and_return_to_idle_once() {
+    fn partial_startup_and_poll_failures_close_and_return_to_idle_once() {
         let (mut c, fake, _) = controller();
         fake.lock().unwrap().show_error = Some(platform_error("partial startup"));
         let failed = c.preview_rectangle(ScreenRect::new(0, 0, 2, 2));
         assert_eq!(c.state(), &VisualOverlayState::Idle);
         assert_eq!(c.operation_id(), None);
+        assert_eq!(close_count(&fake), 1, "partial startup is cleaned up");
         assert!(
             matches!(advance_and_drain(&mut c).as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == failed)
         );
@@ -2647,6 +2756,7 @@ mod tests {
         assert!(
             matches!(advance_and_drain(&mut c).as_slice(), [VisualOverlayEvent::Error { operation_id, .. }] if *operation_id == active)
         );
+        assert_eq!(close_count(&fake), 2, "poll failure is cleaned up");
         assert!(advance_and_drain(&mut c).is_empty());
         assert_eq!(c.state(), &VisualOverlayState::Idle);
     }
@@ -2690,6 +2800,7 @@ mod tests {
     fn rectangle_picker_full_lifecycle_records_visuals_frames_tooltips_and_cleanup() {
         for purpose in [
             RectanglePurpose::SearchRegion,
+            RectanglePurpose::CropScreenshot,
             RectanglePurpose::ReferenceImageCapture,
         ] {
             let (mut controller, fake, _) = controller();
@@ -2717,6 +2828,10 @@ mod tests {
                     rect: ScreenRect::new(-40, -10, 60, 40),
                 }]
             );
+            assert!(matches!(
+                fake.lock().unwrap().calls.last(),
+                Some(RecordedCall::Close)
+            ));
             assert_eq!(controller.state(), &VisualOverlayState::Idle);
 
             let calls = fake.lock().unwrap().calls.clone();
@@ -2758,10 +2873,11 @@ mod tests {
     }
 
     #[test]
-    fn search_region_and_reference_capture_have_identical_picker_presentation() {
+    fn all_rectangle_purposes_have_identical_picker_presentation() {
         let mut presentations = Vec::new();
         for purpose in [
             RectanglePurpose::SearchRegion,
+            RectanglePurpose::CropScreenshot,
             RectanglePurpose::ReferenceImageCapture,
         ] {
             let (mut controller, fake, _) = controller();
@@ -2796,7 +2912,8 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
         }
-        assert_eq!(presentations[0], presentations[1]);
+        assert_eq!(presentations.len(), 3);
+        assert!(presentations.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]

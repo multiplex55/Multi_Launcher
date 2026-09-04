@@ -218,6 +218,14 @@ or open native windows.
 - whether any monitor has a negative virtual-desktop origin;
 - tester name and date.
 
+#### Rectangle-picker input-shield acceptance
+
+- [ ] Place disposable Notepad text and a File Explorer window beneath the picker, then start MkMacro **Pick Region** for reference capture and search-region selection. The picker must remain above both applications without activating them, and their text/navigation must not change.
+- [ ] Drag in all four directions, across a monitor boundary, and over a negative-origin secondary monitor when available. Confirm the live outline tracks the polling cursor and the accepted result is the exact half-open desktop rectangle `[x, x + width) × [y, y + height)` using the release coordinate.
+- [ ] Press **Esc** during an armed picker and during a drag. The picker, tooltip, visible picker windows, and monitor input shields must all disappear; normal Notepad and Explorer mouse input must immediately work again.
+- [ ] Run **crop screenshot** and repeat the same drag/release and Esc checks. It must use the same interactive picker behavior as MkMacro reference capture and search-region selection, and screen capture must begin only after the picker and shields are gone.
+- [ ] Trigger passive **Preview** and **Test** highlights over Notepad or Explorer. Their `WS_EX_TRANSPARENT` outlines and monitor labels must remain click-through; the underlying application must receive the click and no shield must appear.
+
 | Check | Setup | Action | Expected result | Cleanup |
 |---|---|---|---|---|
 | **Highlight Selected** | Open the monitor editor and select Monitor 0. | Click **Highlight Selected**. | A bright, clearly visible outline and the number `0` appear on the correct physical monitor for approximately 2.5 seconds. The overlay remains click-through and disappears without residue. | Wait for expiry and verify no overlay window or marking remains. |

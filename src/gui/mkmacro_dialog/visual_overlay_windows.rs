@@ -24,12 +24,13 @@ use windows::{
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
-                GetWindowRect, HWND_TOPMOST, IsWindow, IsWindowVisible, LWA_COLORKEY, MSG,
-                PM_REMOVE, PeekMessageW, RegisterClassW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-                SWP_NOSIZE, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-                SetWindowPos, ShowWindow, TranslateMessage, WM_ERASEBKGND, WM_NCCREATE, WM_PAINT,
-                WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-                WS_POPUP,
+                GetWindowRect, HTTRANSPARENT, HWND_TOPMOST, IsWindow, IsWindowVisible, LWA_ALPHA,
+                LWA_COLORKEY, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
+                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW,
+                SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+                WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -42,6 +43,14 @@ const OUTLINE_COLOR: COLORREF = COLORREF(0x0000ffff); // bright yellow
 const BADGE_COLOR: COLORREF = COLORREF(0x00400000); // dark blue
 const LABEL_COLOR: COLORREF = COLORREF(0x00ffffff);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowRole {
+    VisibleOverlay,
+    Passive,
+    Tooltip,
+    InputShield,
+}
+
 struct WindowPaintState {
     bounds: ScreenRect,
     frame: Vec<OverlayFramePrimitive>,
@@ -49,6 +58,7 @@ struct WindowPaintState {
     solid: Option<COLORREF>,
     operation_id: OperationId,
     description: &'static str,
+    role: WindowRole,
     paint_count: AtomicUsize,
 }
 struct OverlayWindow {
@@ -61,6 +71,8 @@ struct OverlayWindow {
 pub(super) struct NativeOverlayRenderer {
     // Full-monitor, layered picker surfaces only.
     windows: Vec<OverlayWindow>,
+    // Non-transparent, non-activating input consumers used only by rectangle picking.
+    input_shields: Vec<OverlayWindow>,
     // Small, opaque, non-activating passive resources.
     passive_edges: Vec<OverlayWindow>,
     passive_badges: Vec<OverlayWindow>,
@@ -75,6 +87,7 @@ impl Default for NativeOverlayRenderer {
     fn default() -> Self {
         Self {
             windows: vec![],
+            input_shields: vec![],
             passive_edges: vec![],
             passive_badges: vec![],
             tooltip: None,
@@ -93,6 +106,23 @@ fn platform(message: impl Into<String>) -> VisualOverlayError {
     }
 }
 
+fn win32_dimensions(
+    bounds: ScreenRect,
+    description: &str,
+) -> Result<(i32, i32), VisualOverlayError> {
+    let width = i32::try_from(bounds.width).map_err(|_| {
+        platform(format!(
+            "{description} rectangle {bounds:?} width exceeds Win32 range"
+        ))
+    })?;
+    let height = i32::try_from(bounds.height).map_err(|_| {
+        platform(format!(
+            "{description} rectangle {bounds:?} height exceeds Win32 range"
+        ))
+    })?;
+    Ok((width, height))
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
         let create = unsafe { &*(l.0 as *const CREATESTRUCTW) };
@@ -101,6 +131,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
     let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowPaintState };
     match msg {
         WM_ERASEBKGND => LRESULT(1), // WM_PAINT owns clearing the complete surface.
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_NCHITTEST
+            if !state.is_null()
+                && unsafe {
+                    matches!((*state).role, WindowRole::Passive | WindowRole::Tooltip)
+                } =>
+        {
+            LRESULT(HTTRANSPARENT as isize)
+        }
         WM_PAINT if !state.is_null() => {
             let mut ps = PAINTSTRUCT::default();
             let dc = unsafe { BeginPaint(hwnd, &mut ps) };
@@ -119,6 +158,57 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
     }
+}
+
+unsafe extern "system" fn input_shield_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    w: WPARAM,
+    l: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCCREATE {
+        let create = unsafe { &*(l.0 as *const CREATESTRUCTW) };
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize) };
+    }
+    match msg {
+        // These windows are intentionally hit-testable, but never activate and
+        // never forward mouse messages to the application below them.
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => LRESULT(0),
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let state =
+                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowPaintState };
+            if state.is_null() {
+                return unsafe { DefWindowProcW(hwnd, msg, w, l) };
+            }
+            let mut ps = PAINTSTRUCT::default();
+            let dc = unsafe { BeginPaint(hwnd, &mut ps) };
+            unsafe { paint_input_shield(dc, &*state) };
+            unsafe {
+                let _ = (&*state).paint_count.fetch_add(1, Ordering::Relaxed);
+                let _ = EndPaint(hwnd, &ps);
+            };
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
+    }
+}
+
+unsafe fn paint_input_shield(dc: HDC, state: &WindowPaintState) {
+    let client = RECT {
+        left: 0,
+        top: 0,
+        right: state.bounds.width as i32,
+        bottom: state.bounds.height as i32,
+    };
+    // The one-alpha layered surface is deliberately black and visually
+    // imperceptible. It is not color-keyed and never uses alpha zero.
+    let surface = unsafe { CreateSolidBrush(COLORREF(0)) };
+    unsafe { FillRect(dc, &client, surface) };
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(surface.0));
+    };
 }
 
 unsafe fn paint_frame(dc: HDC, state: &WindowPaintState) {
@@ -263,6 +353,91 @@ impl NativeOverlayRenderer {
         Err(error)
     }
 
+    fn show_input_shields(
+        &mut self,
+        module: windows::Win32::Foundation::HMODULE,
+        class: PCWSTR,
+        operation_id: OperationId,
+        bounds_list: &[ScreenRect],
+    ) -> Result<(), VisualOverlayError> {
+        for bounds in bounds_list.iter().copied() {
+            let (width, height) = win32_dimensions(bounds, "input shield")?;
+            let mut state = Box::new(WindowPaintState {
+                bounds,
+                frame: vec![],
+                hint: None,
+                solid: Some(COLORREF(0)),
+                operation_id,
+                description: "input shield",
+                role: WindowRole::InputShield,
+                paint_count: AtomicUsize::new(0),
+            });
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    class,
+                    PCWSTR::null(),
+                    WS_POPUP,
+                    bounds.x,
+                    bounds.y,
+                    width,
+                    height,
+                    None,
+                    None,
+                    module,
+                    Some(state.as_mut() as *mut _ as *const _),
+                )
+            }
+            .map_err(|e| {
+                platform(format!(
+                    "input shield window creation failed for {bounds:?}: {e}"
+                ))
+            })?;
+            // Store the state before any subsequent Win32 call can fail so
+            // fail()/close() can reclaim every partially-created shield.
+            self.input_shields.push(OverlayWindow {
+                hwnd,
+                state,
+                created_at: Instant::now(),
+            });
+            unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA) }.map_err(
+                |e| {
+                    platform(format!(
+                        "input shield layered configuration failed for {bounds:?}: {e}"
+                    ))
+                },
+            )?;
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    bounds.x,
+                    bounds.y,
+                    width,
+                    height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            }
+            .map_err(|e| {
+                platform(format!(
+                    "input shield positioning failed for {bounds:?}: {e}"
+                ))
+            })?;
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            if !unsafe { InvalidateRect(hwnd, None, false) }.as_bool()
+                || !unsafe { UpdateWindow(hwnd) }.as_bool()
+            {
+                return Err(platform(format!(
+                    "input shield initial paint failed for {bounds:?}: {}",
+                    unsafe { GetLastError().0 }
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn show_passive(
         &mut self,
         module: windows::Win32::Foundation::HMODULE,
@@ -316,13 +491,14 @@ impl NativeOverlayRenderer {
                 solid,
                 operation_id,
                 description,
+                role: WindowRole::Passive,
                 paint_count: AtomicUsize::new(0),
             });
             let width = match i32::try_from(bounds.width) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} width exceeds Win32 range")) };
             let height = match i32::try_from(bounds.height) { Ok(v) => v, Err(_) => return self.fail(format!("operation {operation_id} visual {visual:?} {description}: requested rectangle {bounds:?} height exceeds Win32 range")) };
             let hwnd = match unsafe {
                 CreateWindowExW(
-                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
                     class,
                     PCWSTR::null(),
                     WS_POPUP,
@@ -465,6 +641,13 @@ impl OverlayRenderer for NativeOverlayRenderer {
             self.show_passive(module, class, operation_id, visual)?;
             return Ok(());
         }
+        let physical = match visual {
+            OverlayVisual::PointPicker { .. } | OverlayVisual::Desktop(_) => vec![],
+            _ => match displays() {
+                Ok(displays) => displays,
+                Err(error) => return self.fail(error.message),
+            },
+        };
         let monitor_bounds = match visual {
             OverlayVisual::PointPicker { .. } => vec![],
             // Preserve the descriptor topology: never create a virtual-desktop union window
@@ -475,18 +658,43 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     return self
                         .fail("No physical display intersects the requested preview region");
                 };
-                let physical = match displays() {
-                    Ok(v) => v,
-                    Err(e) => return self.fail(e.message),
-                };
                 intersecting_monitor_bounds(&physical, target)
             }
         };
         if monitor_bounds.is_empty() && !matches!(visual, OverlayVisual::PointPicker { .. }) {
             return self.fail("No physical display intersects the requested preview region");
         }
+        let input_shield_bounds = input_shield_plan(visual, &physical);
+        if overlay_requires_input_shields(visual) {
+            let shield_class = windows::core::w!("MultiLauncherVisualOverlayInputShield");
+            let shield_wc = WNDCLASSW {
+                hInstance: module.into(),
+                lpszClassName: shield_class,
+                lpfnWndProc: Some(input_shield_wndproc),
+                style: CS_HREDRAW | CS_VREDRAW,
+                ..Default::default()
+            };
+            if unsafe { RegisterClassW(&shield_wc) } == 0
+                && unsafe { GetLastError() } != ERROR_CLASS_ALREADY_EXISTS
+            {
+                return self.fail(format!(
+                    "input shield class registration failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            if let Err(error) =
+                self.show_input_shields(module, shield_class, operation_id, &input_shield_bounds)
+            {
+                return self.fail(error.message);
+            }
+        }
+
         let frame = overlay_frame(visual);
         for bounds in monitor_bounds {
+            let (width, height) = match win32_dimensions(bounds, "interactive overlay") {
+                Ok(size) => size,
+                Err(error) => return self.fail(error.message),
+            };
             let mut state = Box::new(WindowPaintState {
                 bounds,
                 frame: frame.clone(),
@@ -494,6 +702,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 solid: None,
                 operation_id,
                 description: "interactive",
+                role: WindowRole::VisibleOverlay,
                 paint_count: AtomicUsize::new(0),
             });
             let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
@@ -508,8 +717,8 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     WS_POPUP,
                     bounds.x,
                     bounds.y,
-                    bounds.width as i32,
-                    bounds.height as i32,
+                    width,
+                    height,
                     None,
                     None,
                     module,
@@ -536,8 +745,8 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     HWND_TOPMOST,
                     bounds.x,
                     bounds.y,
-                    bounds.width as i32,
-                    bounds.height as i32,
+                    width,
+                    height,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
             } {
@@ -564,9 +773,14 @@ impl OverlayRenderer for NativeOverlayRenderer {
             _ => None,
         };
         if let Some((tooltip_pointer, tooltip_text, size)) = tooltip_spec {
-            let all = displays()?;
-            let monitor = monitor_nearest_pointer(&all, tooltip_pointer)
-                .ok_or_else(|| platform("No display is available for the selection tooltip"))?;
+            let all = match displays() {
+                Ok(displays) => displays,
+                Err(error) => return self.fail(error.message),
+            };
+            let monitor = match monitor_nearest_pointer(&all, tooltip_pointer) {
+                Some(monitor) => monitor,
+                None => return self.fail("No display is available for the selection tooltip"),
+            };
             let at =
                 place_rectangle_tooltip(tooltip_pointer, size, monitor, RECTANGLE_TOOLTIP_OFFSET);
             let bounds = ScreenRect::new(at.x, at.y, size.0, size.1);
@@ -577,6 +791,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 solid: None,
                 operation_id,
                 description: "tooltip",
+                role: WindowRole::Tooltip,
                 paint_count: AtomicUsize::new(0),
             });
             let hwnd = unsafe {
@@ -595,14 +810,22 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     Some(state.as_mut() as *mut _ as *const _),
                 )
             }
-            .map_err(|e| platform(format!("tooltip window creation failed: {e}")))?;
+            .map_err(|e| platform(format!("tooltip window creation failed: {e}")))
+            .map_err(|error| {
+                self.close();
+                error
+            })?;
             self.tooltip = Some(OverlayWindow {
                 hwnd,
                 state,
                 created_at: Instant::now(),
             });
             unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
-                .map_err(|e| platform(format!("tooltip layered configuration failed: {e}")))?;
+                .map_err(|e| platform(format!("tooltip layered configuration failed: {e}")))
+                .map_err(|error| {
+                    self.close();
+                    error
+                })?;
             unsafe {
                 SetWindowPos(
                     hwnd,
@@ -614,7 +837,11 @@ impl OverlayRenderer for NativeOverlayRenderer {
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
             }
-            .map_err(|e| platform(format!("tooltip positioning failed: {e}")))?;
+            .map_err(|e| platform(format!("tooltip positioning failed: {e}")))
+            .map_err(|error| {
+                self.close();
+                error
+            })?;
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let _ = InvalidateRect(hwnd, None, false);
@@ -738,22 +965,30 @@ impl OverlayRenderer for NativeOverlayRenderer {
     fn close(&mut self) {
         if self.operation_id.is_some()
             || !self.windows.is_empty()
+            || !self.input_shields.is_empty()
             || !self.passive_edges.is_empty()
             || !self.passive_badges.is_empty()
         {
             tracing::debug!(operation_id = ?self.operation_id, visual = ?self.visual, "closing native visual overlay");
         }
+        for window in self.input_shields.drain(..) {
+            let destroyed_at = Instant::now();
+            tracing::debug!(
+                operation_id=?self.operation_id,
+                hwnd=?window.hwnd,
+                created_at=?window.created_at,
+                destruction_time=?destroyed_at,
+                lifetime=?destroyed_at.duration_since(window.created_at),
+                paint_count=window.state.paint_count.load(Ordering::Relaxed),
+                "destroying input shield window"
+            );
+            destroy_overlay_window(window);
+        }
         if let Some(window) = self.tooltip.take() {
-            unsafe {
-                SetWindowLongPtrW(window.hwnd, GWLP_USERDATA, 0);
-                let _ = DestroyWindow(window.hwnd);
-            }
+            destroy_overlay_window(window);
         }
         for window in self.windows.drain(..) {
-            unsafe {
-                SetWindowLongPtrW(window.hwnd, GWLP_USERDATA, 0);
-                let _ = DestroyWindow(window.hwnd);
-            }
+            destroy_overlay_window(window);
         }
         for window in self
             .passive_edges
@@ -765,10 +1000,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 edge=window.state.description, created_at=?window.created_at,
                 destruction_time=?destroyed_at, lifetime=?destroyed_at.duration_since(window.created_at),
                 paint_count=window.state.paint_count.load(Ordering::Relaxed), "destroying passive overlay window");
-            unsafe {
-                SetWindowLongPtrW(window.hwnd, GWLP_USERDATA, 0);
-                let _ = DestroyWindow(window.hwnd);
-            }
+            destroy_overlay_window(window);
         }
         self.operation_id = None;
         self.visual = None;
@@ -776,6 +1008,18 @@ impl OverlayRenderer for NativeOverlayRenderer {
         self.escape_down = false;
     }
 }
+fn destroy_overlay_window(window: OverlayWindow) {
+    let hwnd = window.hwnd;
+    unsafe {
+        if IsWindow(hwnd).as_bool() {
+            // Clear the borrowed state pointer before DestroyWindow drops the
+            // native object; invalid/already-destroyed handles are ignored.
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}
+
 impl Drop for NativeOverlayRenderer {
     fn drop(&mut self) {
         self.close();
