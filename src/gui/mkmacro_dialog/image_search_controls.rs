@@ -211,6 +211,7 @@ pub fn show_search_region_fields(
 pub enum SharedImageOperation {
     ImportPng,
     CaptureRectangle,
+    CropImage,
     PickRectangle,
     PreviewRectangle,
     HighlightMonitor,
@@ -221,21 +222,35 @@ pub enum SharedImageOperation {
 /// Render the persisted fields that deliberately have identical semantics in actions and conditions.
 pub fn show_shared_fields(
     ui: &mut egui::Ui,
-    _image: &mut crate::mkmacro::MkImageRef,
+    image: &mut crate::mkmacro::MkImageRef,
     region: &mut SearchRegion,
     tolerance: &mut u8,
     alpha: &mut AlphaPolicy,
     return_point: &mut ReturnPoint,
-    _assets: &[crate::mkmacro::MkImageRef],
+    assets: &[crate::mkmacro::MkImageRef],
+    authoring_busy: bool,
 ) -> Option<SharedImageOperation> {
     let mut request = None;
+    let valid_asset = assets.iter().any(|asset| asset == image);
     ui.heading("Reference Image");
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Select PNG…").clicked() {
+        if ui
+            .add_enabled(!authoring_busy, egui::Button::new("Select PNG…"))
+            .clicked()
+        {
             request = Some(SharedImageOperation::ImportPng)
         }
-        if ui.button("Capture…").clicked() {
+        if ui
+            .add_enabled(!authoring_busy, egui::Button::new("Capture…"))
+            .clicked()
+        {
             request = Some(SharedImageOperation::CaptureRectangle)
+        }
+        if ui
+            .add_enabled(!authoring_busy && valid_asset, egui::Button::new("Crop…"))
+            .clicked()
+        {
+            request = Some(SharedImageOperation::CropImage)
         }
     });
     ui.add(egui::Slider::new(tolerance, 0..=255).text("Tolerance"));

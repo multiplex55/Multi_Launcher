@@ -4,6 +4,7 @@
 //! transform is presentation state and is deliberately kept separate from the
 //! crop value that is sent to the asset authoring service.
 
+pub use super::image_authoring_destination::ImageCropDestination;
 use super::{MkMacroDialog, image_authoring::normalize_image_filename};
 use crate::mkmacro::{
     ImageAssetAuthoringService, ImageCropRect, ImageImportChoice, ImageImportResult, MkImageRef,
@@ -186,10 +187,18 @@ pub fn display_to_source(point: CropPoint, transform: CropTransform) -> CropPoin
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageCropDestination {
-    pub macro_id: u64,
-    pub step_id: Option<u64>,
-    pub draft_generation: u64,
+pub enum ImageCropResult {
+    Cancelled,
+    Overwritten,
+    SavedAs(MkImageRef),
+    Collision(MkImageRef),
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageCropCompletion {
+    pub destination: ImageCropDestination,
+    pub result: ImageCropResult,
 }
 
 #[derive(Debug)]
@@ -217,7 +226,6 @@ enum CropUiAction {
 
 pub struct ImageCropEditorState {
     open: bool,
-    source: MkImageRef,
     destination: ImageCropDestination,
     loading: bool,
     worker: Option<mpsc::Receiver<Result<RgbaImage, String>>>,
@@ -233,17 +241,18 @@ pub struct ImageCropEditorState {
     collision_message: Option<String>,
     validation_message: Option<String>,
     persistence_message: Option<String>,
+    completion: Option<ImageCropCompletion>,
 }
 
 impl Default for ImageCropEditorState {
     fn default() -> Self {
         Self {
             open: false,
-            source: MkImageRef::default(),
-            destination: ImageCropDestination {
+            destination: ImageCropDestination::ImageActionReference {
                 macro_id: 0,
                 step_id: None,
                 draft_generation: 0,
+                source: MkImageRef::default(),
             },
             loading: false,
             worker: None,
@@ -259,6 +268,7 @@ impl Default for ImageCropEditorState {
             collision_message: None,
             validation_message: None,
             persistence_message: None,
+            completion: None,
         }
     }
 }
@@ -271,12 +281,14 @@ impl ImageCropEditorState {
     pub fn open(
         &mut self,
         store: Arc<MkMacroStore>,
-        source: MkImageRef,
         destination: ImageCropDestination,
-    ) {
+    ) -> Result<(), &'static str> {
+        if self.open {
+            return Err("An image crop is already in progress");
+        }
         self.cancel();
         self.open = true;
-        self.source = source.clone();
+        let source = destination.source().clone();
         self.destination = destination;
         self.loading = true;
         self.save_as_filename = suggested_crop_filename(&source);
@@ -297,6 +309,7 @@ impl ImageCropEditorState {
                 .map_err(|error| format!("{error:#}"));
             let _ = sender.send(result);
         });
+        Ok(())
     }
 
     pub fn cancel(&mut self) {
@@ -308,6 +321,28 @@ impl ImageCropEditorState {
         self.selection = None;
         self.interaction = None;
         self.overwrite_confirmation = false;
+        self.completion = None;
+    }
+
+    pub fn take_completion(&mut self) -> Option<ImageCropCompletion> {
+        self.completion.take()
+    }
+
+    fn complete(&mut self, result: ImageCropResult, close: bool) {
+        self.completion = Some(ImageCropCompletion {
+            destination: self.destination.clone(),
+            result,
+        });
+        if close {
+            self.open = false;
+            self.loading = false;
+            self.worker = None;
+            self.original = None;
+            self.texture = None;
+            self.selection = None;
+            self.interaction = None;
+            self.overwrite_confirmation = false;
+        }
     }
 
     fn poll_load(&mut self, ctx: &egui::Context) {
@@ -360,7 +395,10 @@ impl ImageCropEditorState {
             image.as_raw(),
         );
         self.texture = Some(ctx.load_texture(
-            format!("mkmacro-crop-source-{}", self.source.filename()),
+            format!(
+                "mkmacro-crop-source-{}",
+                self.destination.source().filename()
+            ),
             color_image,
             egui::TextureOptions::NEAREST,
         ));
@@ -578,7 +616,10 @@ impl ImageCropEditorState {
             .default_size([860.0, 680.0])
             .min_size([560.0, 480.0])
             .show(ctx, |ui| {
-                ui.label(format!("Source: mkmacro_assets/{}", self.source.filename()));
+                ui.label(format!(
+                    "Source: mkmacro_assets/{}",
+                    self.destination.source().filename()
+                ));
                 if self.loading {
                     ui.label("Loading reference image…");
                     return;
@@ -744,7 +785,7 @@ impl ImageCropEditorState {
                 .show(ctx, |ui| {
                     ui.label(format!(
                         "Overwrite {} with the selected crop?",
-                        self.source.filename()
+                        self.destination.source().filename()
                     ));
                     ui.colored_label(
                         egui::Color32::YELLOW,
@@ -784,7 +825,7 @@ impl ImageCropEditorState {
         let image = match normalize_image_filename(&self.save_as_filename) {
             Ok(image) => image,
             Err(error) => {
-                self.validation_message = Some(error);
+                self.complete(ImageCropResult::Error(error), false);
                 return;
             }
         };
@@ -792,7 +833,7 @@ impl ImageCropEditorState {
         let cropped = match self.cropped_image() {
             Ok(image) => image,
             Err(error) => {
-                self.validation_message = Some(error);
+                self.complete(ImageCropResult::Error(error), false);
                 return;
             }
         };
@@ -803,84 +844,50 @@ impl ImageCropEditorState {
         );
         match result {
             Ok(ImageImportResult::Imported(image)) => {
-                if !self.apply_destination(dialog, &image) {
-                    self.persistence_message = Some(
-                        "The asset was saved, but the original action editor target changed."
-                            .into(),
-                    );
-                }
-                self.open = false;
+                self.complete(ImageCropResult::SavedAs(image), true);
             }
             Ok(ImageImportResult::Collision { image }) => {
-                self.collision_message = Some(format!(
-                    "Reference image filename already exists: {}",
-                    image.filename()
-                ));
+                self.complete(ImageCropResult::Collision(image), false);
             }
             Ok(ImageImportResult::Cancelled) => {
-                self.persistence_message = Some("Image crop authoring cancelled".into());
+                self.complete(ImageCropResult::Cancelled, true);
             }
-            Err(error) => self.persistence_message = Some(format!("Reference image: {error:#}")),
+            Err(error) => self.complete(
+                ImageCropResult::Error(format!("Reference image: {error:#}")),
+                false,
+            ),
         }
     }
 
-    fn overwrite_current(&mut self, dialog: &mut MkMacroDialog, ctx: &egui::Context) {
+    fn overwrite_current(&mut self, dialog: &mut MkMacroDialog) {
         self.persistence_message = None;
         let cropped = match self.cropped_image() {
             Ok(image) => image,
             Err(error) => {
-                self.validation_message = Some(error);
+                self.complete(ImageCropResult::Error(error), false);
                 return;
             }
         };
         let result = ImageAssetAuthoringService::new(&dialog.store).stage_rgba(
             &cropped,
-            self.source.clone(),
+            self.destination.source().clone(),
             ImageImportChoice::ReplaceExisting,
         );
         match result {
             Ok(ImageImportResult::Imported(_)) => {
-                super::image_preview::invalidate(ctx, &dialog.store, &self.source);
-                ctx.request_repaint();
-                self.open = false;
+                self.complete(ImageCropResult::Overwritten, true);
             }
             Ok(ImageImportResult::Collision { image }) => {
-                self.collision_message = Some(format!(
-                    "Reference image filename already exists: {}",
-                    image.filename()
-                ));
+                self.complete(ImageCropResult::Collision(image), false);
             }
             Ok(ImageImportResult::Cancelled) => {
-                self.persistence_message = Some("Image crop authoring cancelled".into());
+                self.complete(ImageCropResult::Cancelled, true);
             }
-            Err(error) => self.persistence_message = Some(format!("Reference image: {error:#}")),
+            Err(error) => self.complete(
+                ImageCropResult::Error(format!("Reference image: {error:#}")),
+                false,
+            ),
         }
-    }
-
-    fn apply_destination(&self, dialog: &mut MkMacroDialog, image: &MkImageRef) -> bool {
-        let destination = &self.destination;
-        if dialog.selected_macro_id != Some(destination.macro_id)
-            || dialog.action_editor.draft_generation != destination.draft_generation
-            || dialog.action_editor.editing_id != destination.step_id
-        {
-            return false;
-        }
-        let Some(step) = dialog.action_editor.draft.as_mut() else {
-            return false;
-        };
-        let Some(payload) = (match &mut step.action {
-            crate::mkmacro::MkAction::ImageFind(payload)
-            | crate::mkmacro::MkAction::ImageClick(payload) => Some(payload),
-            _ => None,
-        }) else {
-            return false;
-        };
-        if payload.image != self.source {
-            return false;
-        }
-        payload.image = image.clone();
-        dialog.action_editor.draft_changed = true;
-        true
     }
 }
 
@@ -910,10 +917,43 @@ pub fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     let action = editor.render(ctx);
     match action {
         Some(CropUiAction::SaveAs) => editor.save_as(dialog),
-        Some(CropUiAction::ConfirmOverwrite) => editor.overwrite_current(dialog, ctx),
+        Some(CropUiAction::ConfirmOverwrite) => editor.overwrite_current(dialog),
         Some(CropUiAction::RequestOverwrite) => editor.overwrite_confirmation = true,
-        Some(CropUiAction::Cancel) => editor.cancel(),
+        Some(CropUiAction::Cancel) => editor.complete(ImageCropResult::Cancelled, true),
         None => {}
+    }
+    if let Some(completion) = editor.take_completion() {
+        match &completion.result {
+            ImageCropResult::Cancelled => {}
+            ImageCropResult::Overwritten => {
+                super::image_preview::invalidate(
+                    ctx,
+                    &dialog.store,
+                    completion.destination.source(),
+                );
+                ctx.request_repaint();
+            }
+            ImageCropResult::SavedAs(image) => {
+                if !dialog
+                    .action_editor
+                    .apply_crop_completion(&completion, dialog.selected_macro_id)
+                {
+                    dialog.action_editor.capture_message = Some(format!(
+                        "The asset was saved, but the original image editor target changed: {}",
+                        image.filename()
+                    ));
+                }
+            }
+            ImageCropResult::Collision(image) => {
+                editor.collision_message = Some(format!(
+                    "Reference image filename already exists: {}",
+                    image.filename()
+                ));
+            }
+            ImageCropResult::Error(error) => {
+                editor.persistence_message = Some(error.clone());
+            }
+        }
     }
     dialog.image_crop_editor = editor;
 }

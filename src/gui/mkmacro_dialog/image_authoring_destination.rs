@@ -51,11 +51,72 @@ impl ConditionPath {
 pub enum ConditionImageOperation {
     ImportPng,
     CaptureRectangle,
+    CropImage,
     PickRectangle,
     PreviewRectangle,
     HighlightMonitor,
     PickWindow,
     HighlightWindow,
+}
+
+/// Immutable identity of the image-search field that launched a crop.
+///
+/// The destination deliberately captures the source reference as well as the
+/// editor identity. A Save As completion may arrive after the draft has been
+/// edited, so the action editor must be able to prove that the field still
+/// refers to the image that was opened in the crop editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageCropDestination {
+    ImageActionReference {
+        macro_id: u64,
+        step_id: Option<u64>,
+        draft_generation: u64,
+        source: crate::mkmacro::MkImageRef,
+    },
+    ConditionImage {
+        macro_id: u64,
+        step_id: Option<u64>,
+        draft_generation: u64,
+        source: crate::mkmacro::MkImageRef,
+        path: ConditionPath,
+    },
+}
+
+impl ImageCropDestination {
+    pub fn macro_id(&self) -> u64 {
+        match self {
+            Self::ImageActionReference { macro_id, .. } | Self::ConditionImage { macro_id, .. } => {
+                *macro_id
+            }
+        }
+    }
+
+    pub fn step_id(&self) -> Option<u64> {
+        match self {
+            Self::ImageActionReference { step_id, .. } | Self::ConditionImage { step_id, .. } => {
+                *step_id
+            }
+        }
+    }
+
+    pub fn draft_generation(&self) -> u64 {
+        match self {
+            Self::ImageActionReference {
+                draft_generation, ..
+            }
+            | Self::ConditionImage {
+                draft_generation, ..
+            } => *draft_generation,
+        }
+    }
+
+    pub fn source(&self) -> &crate::mkmacro::MkImageRef {
+        match self {
+            Self::ImageActionReference { source, .. } | Self::ConditionImage { source, .. } => {
+                source
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

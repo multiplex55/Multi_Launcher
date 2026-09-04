@@ -3,7 +3,7 @@
 //! The editor owns a complete `MkStep` clone.  No document field is borrowed by
 //! the modal, which makes closing/cancelling it a genuinely lossless operation.
 use super::image_authoring::normalize_image_filename;
-pub use super::image_authoring_destination::ConditionOperationDestination;
+pub use super::image_authoring_destination::{ConditionOperationDestination, ImageCropDestination};
 use super::variable_catalog::{VariableCatalog, VariableDescriptor, VariableValueType};
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::{
@@ -447,6 +447,53 @@ impl ActionEditorState {
             operation: request.operation,
         }
     }
+
+    pub fn image_crop_destination(&self, macro_id: u64) -> anyhow::Result<ImageCropDestination> {
+        let source = self
+            .draft
+            .as_ref()
+            .and_then(image_payload)
+            .map(|payload| payload.image.clone())
+            .filter(|image| !image.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("no managed reference image is selected"))?;
+        Ok(ImageCropDestination::ImageActionReference {
+            macro_id,
+            step_id: self.editing_id,
+            draft_generation: self.draft_generation,
+            source,
+        })
+    }
+
+    pub fn condition_crop_destination(
+        &self,
+        macro_id: u64,
+        request: super::condition_editor::ConditionImageRequest,
+    ) -> anyhow::Result<ImageCropDestination> {
+        let source = self
+            .draft
+            .as_ref()
+            .and_then(|step| match &step.action {
+                MkAction::If(c)
+                | MkAction::WhileStart { condition: c }
+                | MkAction::WaitUntil { condition: c, .. } => {
+                    super::condition_editor::resolve_condition(c, &request.path)
+                }
+                _ => None,
+            })
+            .and_then(|condition| match condition {
+                MkCondition::ImageSearch { search, .. } => Some(search.image.clone()),
+                _ => None,
+            })
+            .filter(|image| !image.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("the selected image condition no longer exists"))?;
+        Ok(ImageCropDestination::ConditionImage {
+            macro_id,
+            step_id: self.editing_id,
+            draft_generation: self.draft_generation,
+            source,
+            path: request.path,
+        })
+    }
     /// Applies only to the exact still-live condition and compatible field selected when work began.
     pub fn apply_condition_result(
         &mut self,
@@ -507,6 +554,62 @@ impl ActionEditorState {
         }
         applied
     }
+
+    /// Applies a Save As crop only to the exact image-search field that
+    /// launched it. The asset has already been committed by the crop editor;
+    /// a failed validation here intentionally leaves that asset in the shared
+    /// library and only rejects the draft mutation.
+    pub fn apply_crop_completion(
+        &mut self,
+        completion: &super::image_crop_editor::ImageCropCompletion,
+        current_macro_id: Option<u64>,
+    ) -> bool {
+        let super::image_crop_editor::ImageCropResult::SavedAs(image) = &completion.result else {
+            return false;
+        };
+        let destination = &completion.destination;
+        if current_macro_id != Some(destination.macro_id())
+            || self.draft_generation != destination.draft_generation()
+            || self.editing_id != destination.step_id()
+        {
+            return false;
+        }
+        let source = destination.source().clone();
+        let applied = match destination {
+            ImageCropDestination::ImageActionReference { .. } => self
+                .draft
+                .as_mut()
+                .and_then(image_payload_mut)
+                .filter(|payload| payload.image == source)
+                .map(|payload| {
+                    payload.image = image.clone();
+                    true
+                })
+                .unwrap_or(false),
+            ImageCropDestination::ConditionImage { path, .. } => {
+                let Some(root) = self.draft.as_mut().and_then(|step| match &mut step.action {
+                    MkAction::If(condition)
+                    | MkAction::WhileStart { condition }
+                    | MkAction::WaitUntil { condition, .. } => Some(condition),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                match super::condition_editor::resolve_condition_mut(root, path) {
+                    Some(MkCondition::ImageSearch { search, .. }) if search.image == source => {
+                        search.image = image.clone();
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        if applied {
+            self.draft_changed = true;
+        }
+        applied
+    }
+
     fn start_import_from_selected_path(
         &mut self,
         store: std::sync::Arc<MkMacroStore>,
@@ -2281,6 +2384,7 @@ fn action_ui(
     draft_generation: u64,
     variable_catalog: &VariableCatalog,
     point_pick_active: bool,
+    authoring_busy: bool,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -2836,9 +2940,12 @@ fn action_ui(
             });
         }
         MkAction::If(condition) | MkAction::WhileStart { condition } => {
-            if let Some(request) =
-                super::condition_editor::condition_ui_with_context(ui, condition, image_context)
-            {
+            if let Some(request) = super::condition_editor::condition_ui_with_context(
+                ui,
+                condition,
+                image_context,
+                authoring_busy,
+            ) {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
                         window_pick =
@@ -2851,9 +2958,12 @@ fn action_ui(
             }
         }
         MkAction::WaitUntil { condition, wait } => {
-            if let Some(request) =
-                super::condition_editor::condition_ui_with_context(ui, condition, image_context)
-            {
+            if let Some(request) = super::condition_editor::condition_ui_with_context(
+                ui,
+                condition,
+                image_context,
+                authoring_busy,
+            ) {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
                         window_pick =
@@ -3258,7 +3368,7 @@ mod scroll_editor_tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageAuthoringRequest {
     Import,
-    Crop,
+    CropImage,
     CaptureRectangle,
     PickRectangle,
     PickClickWithinRegion,
@@ -3268,7 +3378,7 @@ impl ImageAuthoringRequest {
     fn rectangle_purpose(self) -> Option<super::visual_overlay::RectanglePurpose> {
         use super::visual_overlay::RectanglePurpose;
         match self {
-            Self::Import | Self::Crop => None,
+            Self::Import | Self::CropImage => None,
             Self::CaptureRectangle => Some(RectanglePurpose::ReferenceImageCapture),
             Self::PickRectangle | Self::PickClickWithinRegion => {
                 Some(RectanglePurpose::SearchRegion)
@@ -3724,6 +3834,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 draft_generation,
                 &state.variable_catalog,
                 point_pick_active,
+                workflow_active || importing || crop_open,
             );
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
@@ -3774,7 +3885,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
-                    Some(Crop) => image_request = Some(ImageAuthoringRequest::Crop),
+                    Some(CropImage) => image_request = Some(ImageAuthoringRequest::CropImage),
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
                     Some(SelectRegion) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::VisualRegion),
@@ -3932,30 +4043,18 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 })
                 .transpose()
                 .map(|_| ()),
-            ImageAuthoringRequest::Crop => {
-                let source = d
-                    .action_editor
-                    .draft
-                    .as_ref()
-                    .and_then(image_payload)
-                    .map(|payload| payload.image.clone());
-                match source {
-                    Some(source) if !source.is_empty() && image_refs.contains(&source) => {
-                        d.image_crop_editor.open(
-                            d.store.clone(),
-                            source,
-                            super::image_crop_editor::ImageCropDestination {
-                                macro_id,
-                                step_id: d.action_editor.editing_id,
-                                draft_generation: d.action_editor.draft_generation,
-                            },
-                        );
-                        Ok(())
+            ImageAuthoringRequest::CropImage => {
+                match d.action_editor.image_crop_destination(macro_id) {
+                    Ok(destination) if !image_refs.contains(destination.source()) => {
+                        Err(anyhow::anyhow!(
+                            "Select an existing managed reference image before cropping"
+                        ))
                     }
-                    Some(_) => Err(anyhow::anyhow!(
-                        "Select an existing managed reference image before cropping"
-                    )),
-                    None => Err(anyhow::anyhow!("No reference image is selected")),
+                    Ok(destination) => d
+                        .image_crop_editor
+                        .open(d.store.clone(), destination)
+                        .map_err(anyhow::Error::msg),
+                    Err(error) => Err(error),
                 }
             }
             request @ (ImageAuthoringRequest::CaptureRectangle
@@ -3991,7 +4090,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             super::condition_editor::ConditionImageOperation::ImportPng
         )
     {
-        if workflow_active || importing {
+        if workflow_active || importing || crop_open {
             d.action_editor.capture_message =
                 Some("Finish or cancel the active authoring operation first".into());
         } else {
@@ -4013,10 +4112,40 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         }
     }
     if let Some(ref request) = condition_image_request
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::CropImage
+        )
+    {
+        if workflow_active || importing || crop_open {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else {
+            let macro_id = d.selected_macro_id.unwrap_or(0);
+            let result = d
+                .action_editor
+                .condition_crop_destination(macro_id, request.clone())
+                .and_then(|destination| {
+                    if !image_refs.contains(destination.source()) {
+                        Err(anyhow::anyhow!(
+                            "Select an existing managed reference image before cropping"
+                        ))
+                    } else {
+                        d.image_crop_editor
+                            .open(d.store.clone(), destination)
+                            .map_err(anyhow::Error::msg)
+                    }
+                });
+            if let Err(error) = result {
+                d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
+            }
+        }
+    }
+    if let Some(ref request) = condition_image_request
         && let Some(purpose) = request.operation.rectangle_purpose()
     {
         let macro_id = d.selected_macro_id.unwrap_or(0);
-        if workflow_active || importing {
+        if workflow_active || importing || crop_open {
             d.action_editor.capture_message =
                 Some("Finish or cancel the active authoring operation first".into());
         } else {
@@ -5410,6 +5539,7 @@ mod tests {
             ConditionImageOperation::HighlightMonitor,
             ConditionImageOperation::PickWindow,
             ConditionImageOperation::HighlightWindow,
+            ConditionImageOperation::CropImage,
         ] {
             assert_eq!(operation.rectangle_purpose(), None);
         }
@@ -5453,6 +5583,334 @@ mod tests {
                 return_point: ReturnPoint::TopLeft,
             },
             found: false,
+        }
+    }
+
+    fn crop_completion(
+        destination: ImageCropDestination,
+        image: &str,
+    ) -> super::super::image_crop_editor::ImageCropCompletion {
+        super::super::image_crop_editor::ImageCropCompletion {
+            destination,
+            result: super::super::image_crop_editor::ImageCropResult::SavedAs(
+                MkImageRef::from_filename(image),
+            ),
+        }
+    }
+
+    fn crop_action_editor(action: MkAction) -> (ActionEditorState, ImageCropDestination) {
+        let mut editor = test_editor();
+        editor.begin_edit(&step(action));
+        draft_image_payload_mut(&mut editor).image = MkImageRef::from_filename("old.png");
+        let destination = editor.image_crop_destination(4).unwrap();
+        (editor, destination)
+    }
+
+    fn persist_test_asset(store: &MkMacroStore, image: &str) {
+        store
+            .write_captured_png(
+                &RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])),
+                MkImageRef::from_filename(image),
+                ImageImportChoice::ReplaceExisting,
+            )
+            .unwrap();
+    }
+
+    fn image_click_action() -> MkAction {
+        let MkAction::ImageFind(payload) = image_action() else {
+            unreachable!()
+        };
+        MkAction::ImageClick(payload)
+    }
+
+    #[test]
+    fn image_find_save_as_crop_updates_reference_and_marks_draft_changed() {
+        let (mut editor, destination) = crop_action_editor(image_action());
+        assert_eq!(destination.source(), &MkImageRef::from_filename("old.png"));
+        assert!(
+            editor
+                .apply_crop_completion(&crop_completion(destination, "old_cropped.png"), Some(4),)
+        );
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("old_cropped.png")
+        );
+        assert!(editor.draft_changed);
+    }
+
+    #[test]
+    fn image_click_save_as_crop_updates_reference_identically() {
+        let (mut editor, destination) = crop_action_editor(image_click_action());
+        assert!(
+            editor
+                .apply_crop_completion(&crop_completion(destination, "old_cropped.png"), Some(4),)
+        );
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("old_cropped.png")
+        );
+        assert!(editor.draft_changed);
+    }
+
+    #[test]
+    fn overwrite_crop_does_not_mutate_reference_or_mark_draft_changed() {
+        let (mut editor, destination) = crop_action_editor(image_action());
+        let completion = super::super::image_crop_editor::ImageCropCompletion {
+            destination,
+            result: super::super::image_crop_editor::ImageCropResult::Overwritten,
+        };
+        assert!(!editor.apply_crop_completion(&completion, Some(4)));
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("old.png")
+        );
+        assert!(!editor.draft_changed);
+    }
+
+    #[test]
+    fn stale_action_save_as_is_rejected_but_persisted_asset_is_retained() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        persist_test_asset(&store, "old_cropped.png");
+        let (mut editor, destination) = crop_action_editor(image_action());
+        draft_image_payload_mut(&mut editor).image = MkImageRef::from_filename("different.png");
+        let before = editor.draft.clone();
+        assert!(
+            !editor
+                .apply_crop_completion(&crop_completion(destination, "old_cropped.png"), Some(4),)
+        );
+        assert_eq!(editor.draft, before);
+        assert!(!editor.draft_changed);
+        assert!(
+            store
+                .image_refs()
+                .unwrap()
+                .contains(&MkImageRef::from_filename("old_cropped.png"))
+        );
+    }
+
+    #[test]
+    fn stale_action_save_as_identity_mismatches_are_rejected_independently() {
+        for mismatch in ["macro", "generation", "step"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+            persist_test_asset(&store, "old_cropped.png");
+            let (mut editor, destination) = crop_action_editor(image_action());
+            match mismatch {
+                "macro" => assert!(!editor.apply_crop_completion(
+                    &crop_completion(destination, "old_cropped.png"),
+                    Some(99),
+                )),
+                "generation" => {
+                    editor.draft_generation = editor.draft_generation.wrapping_add(1);
+                    assert!(!editor.apply_crop_completion(
+                        &crop_completion(destination, "old_cropped.png"),
+                        Some(4),
+                    ));
+                }
+                "step" => {
+                    editor.editing_id = Some(8);
+                    assert!(!editor.apply_crop_completion(
+                        &crop_completion(destination, "old_cropped.png"),
+                        Some(4),
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                draft_image_payload(&editor).image,
+                MkImageRef::from_filename("old.png")
+            );
+            assert!(!editor.draft_changed);
+            assert!(
+                store
+                    .image_refs()
+                    .unwrap()
+                    .contains(&MkImageRef::from_filename("old_cropped.png"))
+            );
+        }
+    }
+
+    fn draft_image_payload_mut(editor: &mut ActionEditorState) -> &mut MkImagePayload {
+        match &mut editor.draft.as_mut().unwrap().action {
+            MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => payload,
+            _ => panic!("expected image action"),
+        }
+    }
+
+    fn nested_condition() -> MkCondition {
+        MkCondition::All {
+            conditions: vec![
+                condition_search("sibling.png"),
+                MkCondition::Not {
+                    condition: Box::new(MkCondition::Any {
+                        conditions: vec![condition_search("old.png")],
+                    }),
+                },
+            ],
+        }
+    }
+
+    fn nested_condition_path() -> super::super::image_authoring_destination::ConditionPath {
+        let mut path = super::super::image_authoring_destination::ConditionPath::root();
+        path.push(super::super::image_authoring_destination::ConditionBranch::All(1));
+        path.push(super::super::image_authoring_destination::ConditionBranch::Not);
+        path.push(super::super::image_authoring_destination::ConditionBranch::Any(0));
+        path
+    }
+
+    fn nested_condition_editor() -> (
+        ActionEditorState,
+        ImageCropDestination,
+        super::super::image_authoring_destination::ConditionPath,
+    ) {
+        let path = nested_condition_path();
+        let mut editor = test_editor();
+        editor.begin_edit(&step(MkAction::If(nested_condition())));
+        let destination = editor
+            .condition_crop_destination(
+                4,
+                super::super::condition_editor::ConditionImageRequest {
+                    path: path.clone(),
+                    operation: super::super::condition_editor::ConditionImageOperation::CropImage,
+                },
+            )
+            .unwrap();
+        (editor, destination, path)
+    }
+
+    #[test]
+    fn condition_crop_destination_routes_all_image_condition_action_hosts() {
+        for action in [
+            MkAction::If(nested_condition()),
+            MkAction::WhileStart {
+                condition: nested_condition(),
+            },
+            MkAction::WaitUntil {
+                condition: nested_condition(),
+                wait: MkWaitOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 10,
+                },
+            },
+        ] {
+            let mut editor = test_editor();
+            editor.begin_edit(&step(action));
+            let path = nested_condition_path();
+            let destination = editor
+                .condition_crop_destination(
+                    4,
+                    super::super::condition_editor::ConditionImageRequest {
+                        path: path.clone(),
+                        operation:
+                            super::super::condition_editor::ConditionImageOperation::CropImage,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                destination,
+                ImageCropDestination::ConditionImage {
+                    macro_id: 4,
+                    step_id: Some(7),
+                    source,
+                    path: actual_path,
+                    ..
+                } if source == MkImageRef::from_filename("old.png") && actual_path == path
+            ));
+        }
+    }
+
+    #[test]
+    fn nested_condition_save_as_updates_only_the_exact_typed_path() {
+        let (mut editor, destination, path) = nested_condition_editor();
+        assert_eq!(destination.source(), &MkImageRef::from_filename("old.png"));
+        assert!(
+            editor
+                .apply_crop_completion(&crop_completion(destination, "old_cropped.png"), Some(4),)
+        );
+        let MkAction::If(condition) = &editor.draft.as_ref().unwrap().action else {
+            panic!("expected If action")
+        };
+        assert_eq!(
+            super::super::condition_editor::resolve_condition(condition, &path).and_then(
+                |condition| match condition {
+                    MkCondition::ImageSearch { search, .. } => Some(search.image.clone()),
+                    _ => None,
+                }
+            ),
+            Some(MkImageRef::from_filename("old_cropped.png"))
+        );
+        assert_eq!(
+            super::super::condition_editor::resolve_condition(
+                condition,
+                &super::super::image_authoring_destination::ConditionPath::from_indexes(vec![0]),
+            )
+            .and_then(|condition| match condition {
+                MkCondition::ImageSearch { search, .. } => Some(search.image.clone()),
+                _ => None,
+            }),
+            Some(MkImageRef::from_filename("sibling.png"))
+        );
+        assert!(editor.draft_changed);
+    }
+
+    #[test]
+    fn stale_nested_condition_save_as_leaves_tree_unchanged_and_asset_persisted() {
+        for stale in ["path", "kind", "source", "macro", "generation", "step"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+            persist_test_asset(&store, "old_cropped.png");
+            let (mut editor, destination, path) = nested_condition_editor();
+            match stale {
+                "path" => {
+                    let MkAction::If(MkCondition::All { conditions }) =
+                        &mut editor.draft.as_mut().unwrap().action
+                    else {
+                        panic!("expected nested If")
+                    };
+                    conditions.pop();
+                }
+                "kind" => {
+                    let root = match &mut editor.draft.as_mut().unwrap().action {
+                        MkAction::If(root) => root,
+                        _ => panic!("expected If"),
+                    };
+                    super::super::condition_editor::replace_condition(
+                        super::super::condition_editor::resolve_condition_mut(root, &path).unwrap(),
+                        super::super::condition_editor::ConditionKind::Variable,
+                    );
+                }
+                "source" => {
+                    let root = match &mut editor.draft.as_mut().unwrap().action {
+                        MkAction::If(root) => root,
+                        _ => panic!("expected If"),
+                    };
+                    let Some(MkCondition::ImageSearch { search, .. }) =
+                        super::super::condition_editor::resolve_condition_mut(root, &path)
+                    else {
+                        panic!("expected image search")
+                    };
+                    search.image = MkImageRef::from_filename("different.png");
+                }
+                "macro" => {}
+                "generation" => editor.draft_generation = editor.draft_generation.wrapping_add(1),
+                "step" => editor.editing_id = Some(8),
+                _ => unreachable!(),
+            }
+            let before = editor.draft.clone();
+            let current_macro_id = if stale == "macro" { Some(99) } else { Some(4) };
+            assert!(!editor.apply_crop_completion(
+                &crop_completion(destination, "old_cropped.png"),
+                current_macro_id,
+            ));
+            assert_eq!(editor.draft, before, "stale case: {stale}");
+            assert!(!editor.draft_changed, "stale case: {stale}");
+            assert!(
+                store
+                    .image_refs()
+                    .unwrap()
+                    .contains(&MkImageRef::from_filename("old_cropped.png"))
+            );
         }
     }
 

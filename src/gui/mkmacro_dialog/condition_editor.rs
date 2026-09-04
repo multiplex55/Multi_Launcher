@@ -209,6 +209,7 @@ pub(super) fn condition_ui_with_assets(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
     context: &TargetEditorContext<'_>,
+    authoring_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     let assets = context.store.image_refs().unwrap_or_default();
     let mut requested = None;
@@ -278,12 +279,14 @@ pub(super) fn condition_ui_with_assets(
                     &mut search.alpha,
                     &mut search.return_point,
                     &assets,
+                    authoring_busy,
                 ) {
                     use super::image_search_controls::SharedImageOperation as S;
                     use ConditionImageOperation as O;
                     let operation = match operation {
                         S::ImportPng => O::ImportPng,
                         S::CaptureRectangle => O::CaptureRectangle,
+                        S::CropImage => O::CropImage,
                         S::PickRectangle => O::PickRectangle,
                         S::PreviewRectangle => O::PreviewRectangle,
                         S::HighlightMonitor => O::HighlightMonitor,
@@ -348,11 +351,17 @@ pub(super) fn condition_ui_with_assets(
                     ui.add(egui::DragValue::new(tolerance));
                 });
             }
-            MkCondition::All { conditions } => requested = group_ui(ui, conditions, context, true),
-            MkCondition::Any { conditions } => requested = group_ui(ui, conditions, context, false),
+            MkCondition::All { conditions } => {
+                requested = group_ui(ui, conditions, context, true, authoring_busy)
+            }
+            MkCondition::Any { conditions } => {
+                requested = group_ui(ui, conditions, context, false, authoring_busy)
+            }
             MkCondition::Not { condition } => {
                 ui.indent("not-child", |ui| {
-                    if let Some(mut request) = condition_ui_with_assets(ui, condition, context) {
+                    if let Some(mut request) =
+                        condition_ui_with_assets(ui, condition, context, authoring_busy)
+                    {
                         prepend_request(&mut request, ConditionBranch::Not);
                         requested = Some(request)
                     }
@@ -369,6 +378,7 @@ pub fn condition_ui_with_context(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
     context: ImageAssetUiContext<'_>,
+    authoring_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     let target_context = TargetEditorContext {
         store: context.store,
@@ -379,6 +389,7 @@ pub fn condition_ui_with_context(
         context,
         &target_context,
         &ConditionPath::root(),
+        authoring_busy,
     )
 }
 
@@ -388,6 +399,7 @@ fn condition_ui_context_at(
     context: ImageAssetUiContext<'_>,
     target_context: &TargetEditorContext<'_>,
     path: &ConditionPath,
+    authoring_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     // The established editor handles all non-browser controls and request
     // routing. Temporarily rendering ImageSearch ourselves avoids maintaining
@@ -414,12 +426,14 @@ fn condition_ui_context_at(
                 &mut search.alpha,
                 &mut search.return_point,
                 &assets,
+                authoring_busy,
             ) {
                 use super::image_search_controls::SharedImageOperation as S;
                 use ConditionImageOperation as O;
                 let operation = match operation {
                     S::ImportPng => O::ImportPng,
                     S::CaptureRectangle => O::CaptureRectangle,
+                    S::CropImage => O::CropImage,
                     S::PickRectangle => O::PickRectangle,
                     S::PreviewRectangle => O::PreviewRectangle,
                     S::HighlightMonitor => O::HighlightMonitor,
@@ -450,9 +464,14 @@ fn condition_ui_context_at(
                 let mut child_path = path.clone();
                 child_path.push(branch);
                 ui.indent(index, |ui| {
-                    if let Some(r) =
-                        condition_ui_context_at(ui, child, context, target_context, &child_path)
-                    {
+                    if let Some(r) = condition_ui_context_at(
+                        ui,
+                        child,
+                        context,
+                        target_context,
+                        &child_path,
+                        authoring_busy,
+                    ) {
                         request = Some(r);
                     }
                 });
@@ -468,9 +487,14 @@ fn condition_ui_context_at(
                 let mut child_path = path.clone();
                 child_path.push(ConditionBranch::Any(index));
                 ui.indent(index, |ui| {
-                    if let Some(r) =
-                        condition_ui_context_at(ui, child, context, target_context, &child_path)
-                    {
+                    if let Some(r) = condition_ui_context_at(
+                        ui,
+                        child,
+                        context,
+                        target_context,
+                        &child_path,
+                        authoring_busy,
+                    ) {
                         request = Some(r);
                     }
                 });
@@ -484,19 +508,28 @@ fn condition_ui_context_at(
             let mut child_path = path.clone();
             child_path.push(ConditionBranch::Not);
             ui.indent("not-child", |ui| {
-                condition_ui_context_at(ui, condition, context, target_context, &child_path)
+                condition_ui_context_at(
+                    ui,
+                    condition,
+                    context,
+                    target_context,
+                    &child_path,
+                    authoring_busy,
+                )
             })
             .inner
         }
-        _ => condition_ui_with_assets(ui, condition, target_context).map(|mut request| {
-            match &mut request {
-                ConditionEditorRequest::WindowMatcher { path: p }
-                | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. }) => {
-                    *p = path.clone()
+        _ => condition_ui_with_assets(ui, condition, target_context, authoring_busy).map(
+            |mut request| {
+                match &mut request {
+                    ConditionEditorRequest::WindowMatcher { path: p }
+                    | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. }) => {
+                        *p = path.clone()
+                    }
                 }
-            }
-            request
-        }),
+                request
+            },
+        ),
     }
 }
 fn group_ui(
@@ -504,12 +537,14 @@ fn group_ui(
     conditions: &mut Vec<MkCondition>,
     context: &TargetEditorContext<'_>,
     is_all: bool,
+    authoring_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     let mut remove = None;
     let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
-            if let Some(mut request) = condition_ui_with_assets(ui, child, context) {
+            if let Some(mut request) = condition_ui_with_assets(ui, child, context, authoring_busy)
+            {
                 prepend_request(
                     &mut request,
                     if is_all {
@@ -670,6 +705,7 @@ mod tests {
         for operation in [
             ConditionImageOperation::ImportPng,
             ConditionImageOperation::CaptureRectangle,
+            ConditionImageOperation::CropImage,
             ConditionImageOperation::PickRectangle,
             ConditionImageOperation::PreviewRectangle,
             ConditionImageOperation::HighlightMonitor,
