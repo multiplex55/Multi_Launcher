@@ -397,6 +397,7 @@ fn show_sized(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::{ImageAssetAuthoringService, ImageImportChoice};
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
     use std::io::Cursor;
 
@@ -498,6 +499,54 @@ mod tests {
             decode_job(&Job { path, image, previous_key: Some(second.key), sender: tx }),
             DecodeResult::Failed(_, message) if message.contains("corrupt")
         ));
+    }
+
+    #[test]
+    fn explicit_invalidation_forces_fresh_decode_when_metadata_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let image = MkImageRef::from_filename("shared.png");
+        ImageAssetAuthoringService::new(&store)
+            .stage_rgba(
+                &RgbaImage::from_pixel(2, 2, Rgba([7, 8, 9, 10])),
+                image.clone(),
+                ImageImportChoice::SaveAs(image.clone()),
+            )
+            .unwrap();
+        let path = store.image_path(&image).unwrap();
+        let key = key_from_metadata(image.clone(), path.clone(), &fs::metadata(&path).unwrap());
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| {
+            let cache =
+                data.get_temp_mut_or_default::<PreviewCache>(egui::Id::new(PREVIEW_CACHE_ID));
+            cache.assets.insert(
+                (path.clone(), image.clone()),
+                AssetState {
+                    key: Some(key),
+                    outcome: Some(Outcome::Failed("stale cached decode".into())),
+                    pending: false,
+                    last_validation: Some(Instant::now()),
+                },
+            );
+        });
+
+        // The file identity is intentionally unchanged. Eviction must still
+        // discard the old result because the caller has explicitly committed
+        // replacement pixels.
+        invalidate(&ctx, &store, &image);
+        let inspection = ctx.data_mut(|data| {
+            inspect_cache(
+                data.get_temp_mut_or_default::<PreviewCache>(egui::Id::new(PREVIEW_CACHE_ID)),
+                path,
+                image,
+                Instant::now(),
+            )
+        });
+        let job = inspection
+            .job
+            .expect("invalidation should schedule a decode");
+        assert!(inspection.pending);
+        assert!(job.previous_key.is_none());
     }
 
     #[test]

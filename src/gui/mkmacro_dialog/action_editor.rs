@@ -3388,6 +3388,9 @@ impl ImageAuthoringRequest {
 }
 
 fn image_payload(step: &MkStep) -> Option<&MkImagePayload> {
+    if !super::image_search_editor::supports_reference_image_authoring(&step.action) {
+        return None;
+    }
     match &step.action {
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => Some(p),
         _ => None,
@@ -3486,6 +3489,9 @@ fn reduce_image_authoring_completion(dialog: &mut MkMacroDialog) {
 }
 
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
+    if !super::image_search_editor::supports_reference_image_authoring(&step.action) {
+        return None;
+    }
     match &mut step.action {
         MkAction::ImageFind(p) | MkAction::ImageClick(p) => Some(p),
         _ => None,
@@ -3881,7 +3887,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
             let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing || crop_open, find_action, image_refs.contains(&payload.image));
+                let valid_asset = super::image_search_controls::managed_image_is_available(
+                    &payload.image,
+                    &image_refs,
+                );
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing || crop_open, find_action, valid_asset);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),

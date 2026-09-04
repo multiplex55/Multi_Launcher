@@ -1,12 +1,18 @@
 //! Reusable image-search action editor and its UI-only authoring state.
 use crate::mkmacro::{
-    AlphaPolicy, MkImageNotFoundPolicy, MkImagePayload, MkWindowMatcher, MonitorDescriptor,
-    ReturnPoint, ScreenRect, SearchRegion,
+    AlphaPolicy, MkAction, MkImageNotFoundPolicy, MkImagePayload, MkWindowMatcher,
+    MonitorDescriptor, ReturnPoint, ScreenRect, SearchRegion,
 };
 use eframe::egui;
 
 pub use super::image_search_controls::SearchRegionKind;
 pub type ImageSearchEditorState = super::image_search_controls::SearchRegionEditorState;
+
+/// Only image-search actions own reference images. Result-consumer actions
+/// such as Mouse Move consume a prior result and must not expose Crop.
+pub(crate) fn supports_reference_image_authoring(action: &MkAction) -> bool {
+    matches!(action, MkAction::ImageFind(_) | MkAction::ImageClick(_))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageEditorRequest {
@@ -64,21 +70,21 @@ pub(super) fn show(
         disabled_request(
             ui,
             "Select PNG…",
-            !authoring_busy,
+            super::image_search_controls::reference_authoring_buttons_enabled(authoring_busy),
             ImageEditorRequest::ImportPng,
             &mut out,
         );
         disabled_request(
             ui,
             "Capture…",
-            !authoring_busy,
+            super::image_search_controls::reference_authoring_buttons_enabled(authoring_busy),
             ImageEditorRequest::CaptureRectangle,
             &mut out,
         );
         disabled_request(
             ui,
             "Crop…",
-            !authoring_busy && valid_asset,
+            super::image_search_controls::crop_button_enabled(valid_asset, authoring_busy),
             ImageEditorRequest::CropImage,
             &mut out,
         );
@@ -260,6 +266,26 @@ mod tests {
             not_found_policy: MkImageNotFoundPolicy::Fail,
             outputs: MkImageOutputs::default(),
         }
+    }
+
+    #[test]
+    fn result_consumers_do_not_support_reference_image_authoring() {
+        let image_payload = payload(SearchRegion::Desktop);
+        assert!(supports_reference_image_authoring(&MkAction::ImageFind(
+            image_payload.clone()
+        )));
+        assert!(supports_reference_image_authoring(&MkAction::ImageClick(
+            image_payload
+        )));
+        assert!(!supports_reference_image_authoring(&MkAction::MouseMove(
+            crate::mkmacro::MkMouseMovePayload {
+                target: crate::mkmacro::MkCoordinateTarget::Image {
+                    image: MkImageRef::from_filename("3.png"),
+                    offset: crate::mkmacro::MkPoint { x: 0, y: 0 },
+                },
+                duration_ms: 0,
+            }
+        )));
     }
     #[test]
     fn every_kind_converts() {

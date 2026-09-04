@@ -297,6 +297,126 @@ mod tests {
         })
     }
 
+    fn fixture_with_original() -> (tempfile::TempDir, MkMacroStore, MkImageRef, RgbaImage) {
+        let (dir, store) = fixture();
+        let original_ref = MkImageRef::from_filename("original.png");
+        let original = distinct_rgba_fixture();
+        let path = store.image_path(&original_ref).unwrap();
+        std::fs::create_dir_all(store.asset_root()).unwrap();
+        DynamicImage::ImageRgba8(original.clone())
+            .save_with_format(path, ImageFormat::Png)
+            .unwrap();
+        (dir, store, original_ref, original)
+    }
+
+    fn assert_pixels_equal(expected: &RgbaImage, actual: &RgbaImage) {
+        assert_eq!(actual.dimensions(), expected.dimensions());
+        for (x, y, pixel) in expected.enumerate_pixels() {
+            assert_eq!(
+                actual.get_pixel(x, y),
+                pixel,
+                "pixel mismatch at ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn save_as_crop_persists_exact_pixels_and_rejects_collision_without_mutation() {
+        let (_dir, store, original_ref, expected_original) = fixture_with_original();
+        let original = store.validate_image_ref(&original_ref).unwrap();
+        let cropped_ref = MkImageRef::from_filename("original_cropped.png");
+        let crop = crop_rgba(
+            &original,
+            ImageCropRect {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2,
+            },
+        )
+        .unwrap();
+        let service = ImageAssetAuthoringService::new(&store);
+
+        assert_eq!(
+            service
+                .stage_rgba(
+                    &crop,
+                    cropped_ref.clone(),
+                    ImageImportChoice::SaveAs(cropped_ref.clone()),
+                )
+                .unwrap(),
+            ImageImportResult::Imported(cropped_ref.clone())
+        );
+
+        let original_path = store.image_path(&original_ref).unwrap();
+        let cropped_path = store.image_path(&cropped_ref).unwrap();
+        assert!(original_path.is_file());
+        assert!(cropped_path.is_file());
+        assert_eq!(original_path.parent(), Some(store.asset_root().as_path()));
+        assert_eq!(cropped_path.parent(), Some(store.asset_root().as_path()));
+        assert_eq!(
+            store.image_refs().unwrap(),
+            vec![original_ref.clone(), cropped_ref.clone()]
+        );
+
+        let decoded_original = store.validate_image_ref(&original_ref).unwrap();
+        let decoded_crop = store.validate_image_ref(&cropped_ref).unwrap();
+        assert_pixels_equal(&expected_original, &decoded_original);
+        assert_pixels_equal(&crop, &decoded_crop);
+        assert_eq!(decoded_crop.dimensions(), (2, 2));
+        assert_eq!(decoded_crop.get_pixel(0, 0).0, [5, 18, 195, 36]);
+        assert_eq!(decoded_crop.get_pixel(1, 0).0, [6, 35, 191, 37]);
+        assert_eq!(decoded_crop.get_pixel(0, 1).0, [9, 19, 194, 40]);
+        assert_eq!(decoded_crop.get_pixel(1, 1).0, [10, 36, 190, 41]);
+
+        let different = RgbaImage::from_pixel(2, 2, Rgba([250, 1, 2, 3]));
+        assert_eq!(
+            service
+                .stage_rgba(
+                    &different,
+                    cropped_ref.clone(),
+                    ImageImportChoice::SaveAs(cropped_ref.clone()),
+                )
+                .unwrap(),
+            ImageImportResult::Collision {
+                image: cropped_ref.clone()
+            }
+        );
+        assert_pixels_equal(&crop, &store.validate_image_ref(&cropped_ref).unwrap());
+    }
+
+    #[test]
+    fn overwrite_crop_keeps_original_reference_and_replaces_valid_managed_png() {
+        let (_dir, store, original_ref, expected_original) = fixture_with_original();
+        let original = store.validate_image_ref(&original_ref).unwrap();
+        assert_pixels_equal(&expected_original, &original);
+        let crop = crop_rgba(
+            &original,
+            ImageCropRect {
+                x: 0,
+                y: 2,
+                width: 3,
+                height: 2,
+            },
+        )
+        .unwrap();
+
+        let result = ImageAssetAuthoringService::new(&store)
+            .stage_rgba(
+                &crop,
+                original_ref.clone(),
+                ImageImportChoice::ReplaceExisting,
+            )
+            .unwrap();
+        assert_eq!(result, ImageImportResult::Imported(original_ref.clone()));
+
+        let decoded = store.validate_image_ref(&original_ref).unwrap();
+        assert_pixels_equal(&crop, &decoded);
+        assert_eq!(decoded.dimensions(), (3, 2));
+        assert!(store.image_path(&original_ref).unwrap().is_file());
+        assert_eq!(store.image_refs().unwrap(), vec![original_ref]);
+    }
+
     #[test]
     fn crop_preserves_exact_pixels_dimensions_alpha_and_source() {
         let source = distinct_rgba_fixture();

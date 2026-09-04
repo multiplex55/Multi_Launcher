@@ -1,8 +1,8 @@
 //! Search fields shared by image actions and live image conditions.
 use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::{
-    AlphaPolicy, MkImagePayload, MkImageSearchCondition, MkWindowMatcher, MonitorDescriptor,
-    ReturnPoint, ScreenRect, SearchRegion,
+    AlphaPolicy, MkImagePayload, MkImageRef, MkImageSearchCondition, MkWindowMatcher,
+    MonitorDescriptor, ReturnPoint, ScreenRect, SearchRegion,
 };
 use eframe::egui;
 
@@ -219,6 +219,22 @@ pub enum SharedImageOperation {
     HighlightWindow,
 }
 
+/// Returns whether a filename is an enumerated, managed asset in the current
+/// store. Empty and stale references are deliberately not treated as usable.
+pub(crate) fn managed_image_is_available(image: &MkImageRef, assets: &[MkImageRef]) -> bool {
+    !image.is_empty() && assets.iter().any(|asset| asset == image)
+}
+
+/// All reference-authoring controls share this busy predicate, including the
+/// controls rendered by the action and condition editors.
+pub(crate) fn reference_authoring_buttons_enabled(authoring_busy: bool) -> bool {
+    !authoring_busy
+}
+
+pub(crate) fn crop_button_enabled(valid_asset: bool, authoring_busy: bool) -> bool {
+    reference_authoring_buttons_enabled(authoring_busy) && valid_asset
+}
+
 /// Render the persisted fields that deliberately have identical semantics in actions and conditions.
 pub fn show_shared_fields(
     ui: &mut egui::Ui,
@@ -231,23 +247,32 @@ pub fn show_shared_fields(
     authoring_busy: bool,
 ) -> Option<SharedImageOperation> {
     let mut request = None;
-    let valid_asset = assets.iter().any(|asset| asset == image);
+    let valid_asset = managed_image_is_available(image, assets);
     ui.heading("Reference Image");
     ui.horizontal_wrapped(|ui| {
         if ui
-            .add_enabled(!authoring_busy, egui::Button::new("Select PNG…"))
+            .add_enabled(
+                reference_authoring_buttons_enabled(authoring_busy),
+                egui::Button::new("Select PNG…"),
+            )
             .clicked()
         {
             request = Some(SharedImageOperation::ImportPng)
         }
         if ui
-            .add_enabled(!authoring_busy, egui::Button::new("Capture…"))
+            .add_enabled(
+                reference_authoring_buttons_enabled(authoring_busy),
+                egui::Button::new("Capture…"),
+            )
             .clicked()
         {
             request = Some(SharedImageOperation::CaptureRectangle)
         }
         if ui
-            .add_enabled(!authoring_busy && valid_asset, egui::Button::new("Crop…"))
+            .add_enabled(
+                crop_button_enabled(valid_asset, authoring_busy),
+                egui::Button::new("Crop…"),
+            )
             .clicked()
         {
             request = Some(SharedImageOperation::CropImage)
@@ -307,6 +332,28 @@ pub fn apply_condition_to_payload(c: &MkImageSearchCondition, p: &mut MkImagePay
 mod tests {
     use super::*;
     use crate::mkmacro::{MkImageNotFoundPolicy, MkImageOutputs, MkImageRef, MkWaitOptions};
+
+    #[test]
+    fn reference_authoring_availability_is_safe_for_actions_and_conditions() {
+        let available = MkImageRef::from_filename("managed.png");
+        let assets = vec![available.clone()];
+
+        assert!(managed_image_is_available(&available, &assets));
+        assert!(!managed_image_is_available(&MkImageRef::default(), &assets));
+        assert!(!managed_image_is_available(
+            &MkImageRef::from_filename("missing.png"),
+            &assets
+        ));
+
+        // Both the image action editor and condition editor use these shared
+        // predicates for their identical reference controls.
+        assert!(reference_authoring_buttons_enabled(false));
+        assert!(!reference_authoring_buttons_enabled(true));
+        assert!(crop_button_enabled(true, false));
+        assert!(!crop_button_enabled(false, false));
+        assert!(!crop_button_enabled(true, true));
+    }
+
     #[test]
     fn action_condition_shared_settings_have_parity_for_every_region() {
         for region in [

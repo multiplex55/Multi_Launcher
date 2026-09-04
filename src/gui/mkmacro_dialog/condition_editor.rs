@@ -35,6 +35,12 @@ pub enum ConditionEditorRequest {
     Image(ConditionImageRequest),
 }
 
+/// Previous-image-result and other condition result consumers do not own a
+/// reference image and therefore never expose reference authoring controls.
+pub(crate) fn supports_reference_image_authoring(condition: &MkCondition) -> bool {
+    matches!(condition, MkCondition::ImageSearch { .. })
+}
+
 pub fn resolve_condition_mut<'a>(
     mut condition: &'a mut MkCondition,
     path: &ConditionPath,
@@ -404,7 +410,10 @@ fn condition_ui_context_at(
     // The established editor handles all non-browser controls and request
     // routing. Temporarily rendering ImageSearch ourselves avoids maintaining
     // a second asset selector while leaving its capture controls untouched.
-    if let MkCondition::ImageSearch { search, found } = condition {
+    if supports_reference_image_authoring(condition) {
+        let MkCondition::ImageSearch { search, found } = condition else {
+            unreachable!("image authoring support must match ImageSearch")
+        };
         let mut requested = None;
         ui.group(|ui| {
             egui::ComboBox::from_label("Condition type")
@@ -605,6 +614,20 @@ fn op_label(op: &MkCompareOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_consumer_conditions_do_not_support_reference_image_authoring() {
+        assert!(supports_reference_image_authoring(&default_condition(
+            ConditionKind::ImageSearch
+        )));
+        assert!(!supports_reference_image_authoring(&default_condition(
+            ConditionKind::PreviousImageResult
+        )));
+        assert!(!supports_reference_image_authoring(&default_condition(
+            ConditionKind::PixelResult
+        )));
+    }
+
     #[test]
     fn mutations_are_recursive_and_groups_are_editable() {
         let mut c = default_condition(ConditionKind::All);
