@@ -390,6 +390,10 @@ impl SharedVisualOverlayController {
         self.receive_into_editor();
         self.0.editor_events.lock().unwrap().drain(..).collect()
     }
+    pub fn poll_rectangle_event(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
+        self.poll_rectangle(expected)
+    }
+
     fn poll_rectangle(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
         self.receive_into_editor();
         let mut queue = self.0.editor_events.lock().unwrap();
@@ -400,7 +404,14 @@ impl SharedVisualOverlayController {
             | VisualOverlayEvent::Expired { operation_id }
             | VisualOverlayEvent::Error { operation_id, .. } if *operation_id==expected)
         });
-        position.and_then(|index| queue.remove(index))
+        let event = position.and_then(|index| queue.remove(index));
+        if event.is_some() {
+            let _ =
+                self.0
+                    .active_id
+                    .compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire);
+        }
+        event
     }
 }
 
@@ -816,6 +827,40 @@ mod tests {
         assert_eq!(fixture.observer.joins.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn crop_screenshot_uses_shared_controller_and_preserves_signed_rectangles() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let signed = ScreenRect::new(-1_920, -240, 1_280, 1_024);
+        let operation_id = fixture
+            .controller
+            .begin_rectangle_pick(RectanglePurpose::CropScreenshot, signed);
+        fixture.observer.wait_for_commands(1);
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[0],
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::CropScreenshot,
+                virtual_desktop,
+            } if id == operation_id && virtual_desktop == signed
+        ));
+
+        fixture
+            .controller
+            .inject_editor_event_for_test(VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose: RectanglePurpose::CropScreenshot,
+                rect: signed,
+            });
+        assert_eq!(
+            fixture.controller.poll_rectangle_event(operation_id),
+            Some(VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose: RectanglePurpose::CropScreenshot,
+                rect: signed,
+            })
+        );
+        assert_eq!(fixture.controller.operation_id(), None);
+    }
     #[test]
     fn one_service_orders_every_operation_type_and_replaces_each_predecessor_once() {
         use super::super::visual_overlay::WindowAreaKind;

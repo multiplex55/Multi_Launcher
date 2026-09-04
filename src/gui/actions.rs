@@ -96,7 +96,6 @@ impl LauncherApp {
         }
         self.restore_for_new_launcher_interaction(&before);
     }
-
     fn maybe_confirm_destructive_action(
         &mut self,
         a: &Action,
@@ -446,6 +445,10 @@ impl LauncherApp {
             self.macro_dialog.open();
         } else if a.action == "mkmacro:dialog" {
             self.mkmacro_dialog.open();
+        } else if a.action == "crop:image" {
+            self.handle_crop_image_action();
+        } else if a.action == "crop:screenshot" {
+            self.begin_crop_screenshot();
         } else if a.action == "mg:dialog" {
             self.mouse_gestures_dialog.open();
         } else if a.action == "mg:dialog:add" {
@@ -1381,6 +1384,109 @@ impl LauncherApp {
             _ => false,
         }
     }
+
+    pub(crate) fn reduce_crop_image_picker_result(
+        result: Option<std::path::PathBuf>,
+    ) -> Option<std::path::PathBuf> {
+        result
+    }
+
+    fn handle_crop_image_action(&mut self) {
+        let path = rfd::FileDialog::new()
+            .add_filter("PNG, JPEG, or BMP image", &["png", "jpg", "jpeg", "bmp"])
+            .pick_file();
+        let Some(path) = Self::reduce_crop_image_picker_result(path) else {
+            return;
+        };
+        match crate::gui::crop_dialog::decode_rgba(&path) {
+            Ok(image) => {
+                if let Err(error) = self.crop_dialog.open(
+                    crate::gui::crop_dialog::CropSourceContext::ExistingFile { source_path: path },
+                    image,
+                ) {
+                    self.report_error_message("crop", error);
+                }
+            }
+            Err(error) => self.report_error_message("crop", error),
+        }
+    }
+
+    fn begin_crop_screenshot(&mut self) {
+        if self.crop_screenshot_operation.is_some() {
+            self.add_error_toast("A screenshot crop selection is already active");
+            return;
+        }
+        let backend: Arc<dyn crate::mkmacro::ScreenCaptureBackend> =
+            Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system());
+        let desktop = match backend.virtual_desktop() {
+            Ok(desktop) => desktop,
+            Err(error) => {
+                self.report_error_message("crop.screenshot", error.to_string());
+                return;
+            }
+        };
+        let operation = self
+            .mkmacro_dialog
+            .visual_overlay_controller()
+            .begin_rectangle_pick(
+                crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose::CropScreenshot,
+                desktop,
+            );
+        self.crop_screenshot_operation = Some(operation);
+        self.crop_screenshot_capture = Some(backend);
+    }
+
+    pub(crate) fn poll_crop_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(expected) = self.crop_screenshot_operation else {
+            return;
+        };
+        let controller = self.mkmacro_dialog.visual_overlay_controller();
+        let Some(event) = controller.poll_rectangle_event(expected) else {
+            ctx.request_repaint();
+            return;
+        };
+        self.crop_screenshot_operation = None;
+        let backend = self.crop_screenshot_capture.take();
+        match event {
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose:
+                    crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose::CropScreenshot,
+                rect,
+            } if operation_id == expected => {
+                // The confirmation event means the interactive overlay has ended;
+                // capture only after it is gone, using the exact signed desktop rect.
+                let Some(backend) = backend else {
+                    self.report_error_message("crop.screenshot", "capture backend unavailable");
+                    return;
+                };
+                match backend.capture_rect(rect, &|| false) {
+                    Ok(image) => {
+                        if let Err(error) = self.crop_dialog.open_screenshot(
+                            image,
+                            crate::plugins::screenshot::screenshot_dir(),
+                        ) {
+                            self.report_error_message("crop.screenshot", error.to_string());
+                        }
+                    }
+                    Err(error) => self.report_error_message("crop.screenshot", error.to_string()),
+                }
+            }
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::Cancelled {
+                operation_id,
+            }
+            | crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::Expired {
+                operation_id,
+            } if operation_id == expected => {}
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::Error {
+                operation_id,
+                error,
+            } if operation_id == expected => {
+                self.report_error_message("crop.screenshot", error.to_string());
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1417,6 +1523,16 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn cancelled_crop_picker_result_keeps_dialog_closed() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let app = new_app(&ctx);
+
+        assert_eq!(LauncherApp::reduce_crop_image_picker_result(None), None);
+        assert!(!app.crop_dialog.is_open());
     }
 
     fn note(title: &str, slug: &str, content: &str) -> Note {

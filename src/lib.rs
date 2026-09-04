@@ -27,6 +27,7 @@ pub mod file_search;
 pub mod help_window;
 pub mod history;
 pub mod hotkey;
+pub mod image_crop;
 pub mod indexer;
 pub mod launcher;
 pub mod linking;

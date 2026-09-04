@@ -5,6 +5,7 @@
 //! store-level operation outside action editing.
 
 use super::{ImageImportChoice, ImageImportResult, MkImageRef, MkMacroStore};
+pub use crate::image_crop::{ImageCropRect, crop_rgba, validate_crop_rect};
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage, codecs::png::PngDecoder};
 use std::{
@@ -15,48 +16,6 @@ use std::{
 /// Shared import/preview decode budget. It bounds allocations made from untrusted PNG headers.
 pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
 pub const MAX_DECODED_RGBA_BYTES: u64 = 64 * 1024 * 1024;
-
-/// A rectangle in the original source image's pixel coordinate system.
-///
-/// This is intentionally distinct from ScreenRect, whose coordinates describe
-/// the desktop rather than image pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ImageCropRect {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Returns an owned, exact-size RGBA crop without changing any source pixels.
-pub fn crop_rgba(source: &RgbaImage, rect: ImageCropRect) -> Result<RgbaImage> {
-    validate_image_dimensions(source.width(), source.height())?;
-    if rect.width == 0 || rect.height == 0 {
-        anyhow::bail!("image crop width and height must be positive")
-    }
-    if rect.x >= source.width() {
-        anyhow::bail!("image crop x coordinate is outside the source image")
-    }
-    if rect.y >= source.height() {
-        anyhow::bail!("image crop y coordinate is outside the source image")
-    }
-    let right = rect
-        .x
-        .checked_add(rect.width)
-        .ok_or_else(|| anyhow::anyhow!("image crop right edge overflows u32"))?;
-    let bottom = rect
-        .y
-        .checked_add(rect.height)
-        .ok_or_else(|| anyhow::anyhow!("image crop bottom edge overflows u32"))?;
-    if right > source.width() {
-        anyhow::bail!("image crop extends beyond the source image width")
-    }
-    if bottom > source.height() {
-        anyhow::bail!("image crop extends beyond the source image height")
-    }
-    validate_image_dimensions(rect.width, rect.height)?;
-    Ok(image::imageops::crop_imm(source, rect.x, rect.y, rect.width, rect.height).to_image())
-}
 
 pub fn validated_rgba_len(width: u32, height: u32) -> Result<usize> {
     if width == 0 || height == 0 {

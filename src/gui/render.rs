@@ -885,6 +885,7 @@ impl eframe::App for LauncherApp {
             ctx.request_repaint();
         }
 
+        self.poll_crop_screenshot(ctx);
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.poll_macro_prompt(ctx);
@@ -1495,6 +1496,7 @@ impl eframe::App for LauncherApp {
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
         self.mkmacro_dialog.ui(ctx);
+        self.crop_dialog.show(ctx);
         let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
         mg_dlg.ui(ctx, self);
         self.mouse_gestures_dialog = mg_dlg;

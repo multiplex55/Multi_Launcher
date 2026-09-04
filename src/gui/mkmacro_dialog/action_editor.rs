@@ -7328,6 +7328,9 @@ mod tests {
                     RectanglePurpose::SearchRegion => {
                         VisualRegionDestination::ImageActionSearchRegion
                     }
+                    RectanglePurpose::CropScreenshot => {
+                        panic!("CropScreenshot is owned by the standalone crop workflow")
+                    }
                     RectanglePurpose::ReferenceImageCapture => {
                         VisualRegionDestination::ImageActionReferenceAsset
                     }

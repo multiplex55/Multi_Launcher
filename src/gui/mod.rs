@@ -12,11 +12,13 @@ mod clipboard_modify_dialog;
 mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
+pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod diff_dialog;
 mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
+pub mod image_crop_editor;
 mod image_panel;
 mod macro_dialog;
 pub mod mkmacro_dialog;
@@ -328,6 +330,7 @@ pub enum Panel {
     NotePanel,
     ImagePanel,
     ScreenshotEditor,
+    CropDialog,
     TodoDialog,
     TodoViewDialog,
     ClipboardDialog,
@@ -373,6 +376,7 @@ struct PanelStates {
     note_panel: bool,
     image_panel: bool,
     screenshot_editor: bool,
+    crop_dialog: bool,
     todo_dialog: bool,
     todo_view_dialog: bool,
     clipboard_dialog: bool,
@@ -531,6 +535,9 @@ pub struct LauncherApp {
     pub(crate) note_mutation_search_count: usize,
     image_panels: Vec<ImagePanel>,
     screenshot_editors: Vec<ScreenshotEditor>,
+    pub(crate) crop_dialog: crop_dialog::CropDialogState,
+    crop_screenshot_operation: Option<mkmacro_dialog::visual_overlay::OperationId>,
+    crop_screenshot_capture: Option<Arc<dyn crate::mkmacro::ScreenCaptureBackend>>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
@@ -1506,6 +1513,9 @@ impl LauncherApp {
             note_mutation_search_count: 0,
             image_panels: Vec::new(),
             screenshot_editors: Vec::new(),
+            crop_dialog: crop_dialog::CropDialogState::default(),
+            crop_screenshot_operation: None,
+            crop_screenshot_capture: None,
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),
@@ -2061,7 +2071,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 41] = [
+    const TRACKED_PANELS: [Panel; 42] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2086,6 +2096,7 @@ impl LauncherApp {
         Panel::NotePanel,
         Panel::ImagePanel,
         Panel::ScreenshotEditor,
+        Panel::CropDialog,
         Panel::TodoDialog,
         Panel::TodoViewDialog,
         Panel::ClipboardDialog,
@@ -2131,6 +2142,7 @@ impl LauncherApp {
             Panel::NotePanel => !self.note_panels.is_empty(),
             Panel::ImagePanel => !self.image_panels.is_empty(),
             Panel::ScreenshotEditor => !self.screenshot_editors.is_empty(),
+            Panel::CropDialog => self.crop_dialog.is_open(),
             Panel::TodoDialog => self.todo_dialog.open,
             Panel::TodoViewDialog => self.todo_view_dialog.open,
             Panel::ClipboardDialog => self.clipboard_dialog.open,
@@ -2323,6 +2335,10 @@ impl LauncherApp {
                 let _ = self.screenshot_editors.pop();
                 self.panel_states.screenshot_editor = false;
             }
+            Panel::CropDialog => {
+                self.crop_dialog.cancel();
+                self.panel_states.crop_dialog = false;
+            }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
                 self.panel_states.todo_dialog = false;
@@ -2504,6 +2520,10 @@ impl LauncherApp {
                 let _ = self.screenshot_editors.pop();
                 self.panel_states.screenshot_editor = false;
             }
+            Panel::CropDialog => {
+                self.crop_dialog.cancel();
+                self.panel_states.crop_dialog = false;
+            }
             Panel::TodoDialog => {
                 self.todo_dialog.open = false;
                 self.panel_states.todo_dialog = false;
@@ -2603,6 +2623,7 @@ impl LauncherApp {
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
             Panel::ScreenshotEditor => {}
+            Panel::CropDialog => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
             Panel::ClipboardDialog => self.clipboard_dialog.open = true,
@@ -2703,6 +2724,7 @@ impl LauncherApp {
         check!(note_panel, Panel::NotePanel);
         check!(image_panel, Panel::ImagePanel);
         check!(screenshot_editor, Panel::ScreenshotEditor);
+        check!(crop_dialog, Panel::CropDialog);
         check!(todo_dialog, Panel::TodoDialog);
         check!(todo_view_dialog, Panel::TodoViewDialog);
         check!(clipboard_dialog, Panel::ClipboardDialog);
@@ -3216,7 +3238,7 @@ mod tests {
         let openable_panels = LauncherApp::TRACKED_PANELS.iter().copied().filter(|panel| {
             !matches!(
                 panel,
-                Panel::NotePanel | Panel::ImagePanel | Panel::ScreenshotEditor
+                Panel::NotePanel | Panel::ImagePanel | Panel::ScreenshotEditor | Panel::CropDialog
             )
         });
 

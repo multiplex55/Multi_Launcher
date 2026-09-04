@@ -26,6 +26,7 @@ pub mod validation;
 pub mod variables;
 pub mod virtual_desktops;
 pub mod windows;
+pub use crate::image_crop::{ImageCropRect, crop_rgba, validate_crop_rect};
 
 pub use asset_authoring::*;
 pub use compiler::*;
