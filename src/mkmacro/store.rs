@@ -4,30 +4,37 @@ use crate::common::{
     json_watch::{JsonWatcher, watch_json},
 };
 use anyhow::{Context, Result};
-use image::{DynamicImage, ImageFormat, RgbaImage};
+use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage, codecs::png::PngDecoder};
 use std::io::Cursor;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
 pub const MKMACROS_FILE: &str = "mkmacros.json";
 pub const ASSET_DIRECTORY: &str = "mkmacro_assets";
-pub(crate) fn managed_asset_path(
-    asset_root: &Path,
-    macro_id: u64,
-    asset_id: u64,
-) -> Result<PathBuf> {
-    if macro_id == 0
-        || asset_id == 0
-        || asset_root.file_name() != Some(std::ffi::OsStr::new(ASSET_DIRECTORY))
+pub(crate) fn managed_image_path(asset_root: &Path, image: &MkImageRef) -> Result<PathBuf> {
+    if asset_root.file_name() != Some(std::ffi::OsStr::new(ASSET_DIRECTORY))
+        || !image.is_valid_filename()
     {
-        anyhow::bail!("invalid managed asset root or identifier")
+        anyhow::bail!("invalid managed asset root or image reference")
     }
-    Ok(asset_root
-        .join(macro_id.to_string())
-        .join(format!("{asset_id}.png")))
+    Ok(asset_root.join(image.filename()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageImportChoice {
+    ReplaceExisting,
+    SaveAs(MkImageRef),
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageImportResult {
+    Imported(MkImageRef),
+    Collision { image: MkImageRef },
+    Cancelled,
 }
 #[derive(Debug)]
 pub enum LoadDisposition {
@@ -41,7 +48,7 @@ struct Inner {
     /// Orders the entire disk-read/write and publication transaction. In particular,
     /// a watcher may not publish bytes it read before a completed local save.
     transaction: Mutex<()>,
-    /// Serializes fresh asset allocation with publication of the corresponding PNG.
+    /// Serializes image writes with publication of the corresponding PNG.
     asset_authoring: Mutex<()>,
     snapshot: RwLock<Arc<MkMacroDocument>>,
     diagnostics: RwLock<Arc<[MkDiagnostic]>>,
@@ -59,97 +66,37 @@ impl MkMacroStore {
             .unwrap_or(Path::new("."))
             .join(ASSET_DIRECTORY)
     }
-    /// Enumerates the canonical PNG assets owned by one macro.
-    pub fn asset_ids(&self, macro_id: u64) -> Result<Vec<u64>> {
-        if macro_id == 0 {
-            anyhow::bail!("macro ID must be non-zero")
-        }
-        let directory = self
-            .inner
-            .path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(ASSET_DIRECTORY)
-            .join(macro_id.to_string());
-        let mut ids = Vec::new();
+    /// Enumerates direct regular PNG files in the shared canonical root in
+    /// deterministic filename order. Symlinks and nested files are ignored.
+    pub fn image_refs(&self) -> Result<Vec<MkImageRef>> {
+        let directory = self.asset_root();
+        let mut refs = Vec::new();
         match fs::read_dir(&directory) {
             Ok(entries) => {
                 for entry in entries {
                     let entry = entry?;
                     let path = entry.path();
-                    if entry.file_type()?.is_file()
-                        && path.extension().and_then(|x| x.to_str()) == Some("png")
-                    {
-                        if let Some(id) = path
-                            .file_stem()
+                    if !entry.file_type()?.is_file()
+                        || path
+                            .extension()
                             .and_then(|x| x.to_str())
-                            .and_then(|x| x.parse::<u64>().ok())
-                        {
-                            if id > 0
-                                && path.file_stem().and_then(|x| x.to_str())
-                                    == Some(&id.to_string())
-                            {
-                                ids.push(id);
-                            }
-                        }
+                            .is_none_or(|x| !x.eq_ignore_ascii_case("png"))
+                    {
+                        continue;
+                    }
+                    let Some(name) = path.file_name().and_then(|x| x.to_str()) else {
+                        continue;
+                    };
+                    if let Ok(image) = MkImageRef::new(name.to_owned()) {
+                        refs.push(image);
                     }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("inspect assets for macro {macro_id}"));
-            }
+            Err(e) => return Err(e).context("enumerate mkmacro_assets"),
         }
-        ids.sort_unstable();
-        Ok(ids)
-    }
-    /// Returns the lowest unused canonical positive numeric PNG stem.
-    pub fn next_asset_id(&self, macro_id: u64) -> Result<u64> {
-        if macro_id == 0 {
-            anyhow::bail!("macro ID must be non-zero")
-        }
-        let directory = self
-            .inner
-            .path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(ASSET_DIRECTORY)
-            .join(macro_id.to_string());
-        let mut occupied = HashSet::new();
-        match fs::read_dir(&directory) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry?;
-                    if !entry.file_type()?.is_file() {
-                        continue;
-                    }
-                    let path = entry.path();
-                    if path.extension().and_then(|x| x.to_str()) != Some("png") {
-                        continue;
-                    }
-                    let Some(stem) = path.file_stem().and_then(|x| x.to_str()) else {
-                        continue;
-                    };
-                    let Ok(id) = stem.parse::<u64>() else {
-                        continue;
-                    };
-                    if id > 0 && stem == id.to_string() {
-                        occupied.insert(id);
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("inspect assets for macro {macro_id}"));
-            }
-        }
-        let mut id = 1u64;
-        while occupied.contains(&id) {
-            id = id
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("asset ID space exhausted"))?;
-        }
-        Ok(id)
+        refs.sort_by(|a, b| a.filename().cmp(b.filename()));
+        Ok(refs)
     }
     pub fn open(directory: impl AsRef<Path>) -> Result<(Self, LoadDisposition)> {
         let path = directory.as_ref().join(MKMACROS_FILE);
@@ -232,126 +179,160 @@ impl MkMacroStore {
         );
         Ok(saved)
     }
-    pub fn asset_path(&self, macro_id: u64, asset_id: u64) -> Result<PathBuf> {
-        if macro_id == 0 || asset_id == 0 {
-            anyhow::bail!("macro and asset IDs must be non-zero")
-        };
-        Ok(self
-            .inner
-            .path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(ASSET_DIRECTORY)
-            .join(macro_id.to_string())
-            .join(format!("{asset_id}.png")))
-    }
-    /// Writes a validated PNG before the caller changes the document.  The returned
-    /// value is the stable, portable reference that should be persisted in JSON.
-    pub fn import_png_asset(&self, macro_id: u64, asset_id: u64, source: &Path) -> Result<PathBuf> {
-        let bytes = fs::read(source).with_context(|| format!("read image {}", source.display()))?;
-        let image = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
-            .with_context(|| format!("{} is not a valid PNG image", source.display()))?
-            .to_rgba8();
-        self.write_png_asset(macro_id, asset_id, &image)
-    }
-    /// Capture flow counterpart to [`Self::import_png_asset`].
-    pub fn write_png_asset(
-        &self,
-        macro_id: u64,
-        asset_id: u64,
-        image: &RgbaImage,
-    ) -> Result<PathBuf> {
-        if image.width() == 0 || image.height() == 0 {
-            anyhow::bail!("reference image is empty")
-        }
-        let destination = self.asset_path(macro_id, asset_id)?;
-        let mut encoded = Cursor::new(Vec::new());
-        DynamicImage::ImageRgba8(image.clone()).write_to(&mut encoded, ImageFormat::Png)?;
-        save_atomic(&destination, encoded.get_ref())
-            .with_context(|| format!("write asset {}", destination.display()))?;
-        Ok(PathBuf::from(ASSET_DIRECTORY)
-            .join(macro_id.to_string())
-            .join(format!("{asset_id}.png")))
+    pub fn image_path(&self, image: &MkImageRef) -> Result<PathBuf> {
+        let path = managed_image_path(&self.asset_root(), image)?;
+        ensure_safe_direct_child(&self.asset_root(), &path)?;
+        Ok(path)
     }
 
-    /// Allocates and completely stages a fresh asset as one concurrency-safe operation.
-    pub(crate) fn stage_new_png_asset(
-        &self,
-        macro_id: u64,
-        image: &RgbaImage,
-    ) -> Result<(u64, PathBuf)> {
-        let _authoring = self.inner.asset_authoring.lock().unwrap();
-        let asset_id = self.next_asset_id(macro_id)?;
-        let reference = self.write_png_asset(macro_id, asset_id, image)?;
-        Ok((asset_id, reference))
+    pub fn validate_image_ref(&self, image: &MkImageRef) -> Result<RgbaImage> {
+        let path = self.image_path(image)?;
+        let bytes = fs::read(&path).with_context(|| format!("read image {}", image.filename()))?;
+        decode_png(&bytes).with_context(|| format!("decode image {}", image.filename()))
     }
-    /// JSON is committed only after an asset was staged. The old path is merely
-    /// returned: deletion still requires a separate, explicit `cleanup_assets` call.
-    pub fn commit_asset_update(
-        &self,
-        doc: MkMacroDocument,
-        staged_reference: &Path,
-        previous_reference: Option<&Path>,
-    ) -> Result<(Arc<MkMacroDocument>, Option<PathBuf>)> {
-        let macro_id = staged_reference
-            .components()
-            .nth(1)
-            .and_then(|x| x.as_os_str().to_str())
-            .and_then(|x| x.parse().ok())
-            .ok_or_else(|| anyhow::anyhow!("invalid staged asset reference"))?;
-        let staged = self.resolve_asset_reference(macro_id, staged_reference)?;
-        if !staged.is_file() {
-            anyhow::bail!("staged asset does not exist: {}", staged.display())
+
+    pub fn import_png(&self, source: &Path) -> Result<ImageImportResult> {
+        let bytes = fs::read(source).with_context(|| format!("read image {}", source.display()))?;
+        let _ = decode_png(&bytes)
+            .with_context(|| format!("{} is not a valid PNG image", source.display()))?;
+        if let Some(image) = direct_root_reference(&self.asset_root(), source)? {
+            return Ok(ImageImportResult::Imported(image));
         }
-        let saved = self.save(doc)?;
-        let cleanup = previous_reference
-            .filter(|old| *old != staged_reference)
-            .map(|old| self.resolve_asset_reference(macro_id, old))
-            .transpose()?;
-        Ok((saved, cleanup))
+        let name = source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("source image has no usable filename"))?;
+        let image = MkImageRef::new(name.to_owned()).map_err(anyhow::Error::msg)?;
+        // A first import is create-only: using SaveAs here makes an existing
+        // destination report a collision without permitting an overwrite.
+        self.write_image_bytes(&bytes, image.clone(), ImageImportChoice::SaveAs(image))
     }
-    pub fn resolve_asset_reference(&self, macro_id: u64, reference: &Path) -> Result<PathBuf> {
-        if reference.is_absolute()
-            || reference.components().any(|c| {
-                matches!(
-                    c,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            anyhow::bail!("asset reference must be a contained relative path")
+
+    pub fn import_png_with_choice(
+        &self,
+        source: &Path,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult> {
+        let bytes = fs::read(source).with_context(|| format!("read image {}", source.display()))?;
+        let _ = decode_png(&bytes)
+            .with_context(|| format!("{} is not a valid PNG image", source.display()))?;
+        if let Some(image) = direct_root_reference(&self.asset_root(), source)? {
+            return Ok(ImageImportResult::Imported(image));
+        }
+        let default_name = source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("source image has no usable filename"))?;
+        let requested = match &choice {
+            ImageImportChoice::SaveAs(image) => image.clone(),
+            _ => MkImageRef::new(default_name.to_owned()).map_err(anyhow::Error::msg)?,
         };
-        let expected = PathBuf::from(ASSET_DIRECTORY).join(macro_id.to_string());
-        if !reference.starts_with(&expected) {
-            anyhow::bail!("asset reference crosses its macro directory")
-        };
-        Ok(self
-            .inner
-            .path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(reference))
+        self.write_image_bytes(&bytes, requested, choice)
     }
-    pub fn cleanup_assets(&self, confirmed: bool, paths: &[PathBuf]) -> Result<()> {
-        if !confirmed {
-            anyhow::bail!("asset deletion requires explicit confirmation after saving")
+
+    pub fn write_captured_png(
+        &self,
+        image: &RgbaImage,
+        requested: MkImageRef,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult> {
+        validate_capture(image)?;
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image.clone()).write_to(&mut encoded, ImageFormat::Png)?;
+        self.write_image_bytes(encoded.get_ref(), requested, choice)
+    }
+
+    fn write_image_bytes(
+        &self,
+        bytes: &[u8],
+        requested: MkImageRef,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult> {
+        let _authoring = self.inner.asset_authoring.lock().unwrap();
+        if matches!(choice, ImageImportChoice::Cancel) {
+            return Ok(ImageImportResult::Cancelled);
+        }
+        let requested = match &choice {
+            ImageImportChoice::SaveAs(image) => image.clone(),
+            _ => requested,
         };
-        let root = self
-            .inner
-            .path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(ASSET_DIRECTORY);
-        for p in paths {
-            if !p.starts_with(&root) {
-                anyhow::bail!("refusing to delete asset outside asset root")
-            };
-            if p.is_file() {
-                fs::remove_file(p)?
+        let destination = self.image_path(&requested)?;
+        if destination.exists() {
+            match choice {
+                ImageImportChoice::ReplaceExisting => {}
+                ImageImportChoice::SaveAs(_) | ImageImportChoice::Cancel => {
+                    return Ok(ImageImportResult::Collision { image: requested });
+                }
             }
         }
-        Ok(())
+        fs::create_dir_all(self.asset_root())?;
+        save_atomic(&destination, bytes)
+            .with_context(|| format!("write image {}", requested.filename()))?;
+        Ok(ImageImportResult::Imported(requested))
     }
+}
+
+fn validate_capture(image: &RgbaImage) -> Result<()> {
+    if image.width() == 0 || image.height() == 0 {
+        anyhow::bail!("reference image is empty")
+    }
+    Ok(())
+}
+
+fn decode_png(bytes: &[u8]) -> Result<RgbaImage> {
+    let decoder = PngDecoder::new(Cursor::new(bytes))?;
+    let (width, height) = decoder.dimensions();
+    super::asset_authoring::validate_image_dimensions(width, height)?;
+    Ok(DynamicImage::from_decoder(decoder)?.to_rgba8())
+}
+
+fn ensure_safe_direct_child(root: &Path, path: &Path) -> Result<()> {
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if path.parent() != Some(root) {
+        anyhow::bail!("image reference must be a direct child of mkmacro_assets")
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("image reference must not follow a symlink")
+        }
+        Ok(_) => {
+            let canonical = path.canonicalize()?;
+            if canonical.parent() != Some(root_canonical.as_path()) {
+                anyhow::bail!("image reference escapes mkmacro_assets")
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn direct_root_reference(root: &Path, source: &Path) -> Result<Option<MkImageRef>> {
+    let source_metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if source_metadata.file_type().is_symlink() {
+        anyhow::bail!("image source must not be a symlink")
+    }
+    if !source_metadata.file_type().is_file() {
+        return Ok(None);
+    }
+    let source_canonical = source.canonicalize()?;
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if source_canonical.parent() != Some(root_canonical.as_path()) {
+        return Ok(None);
+    }
+    let Some(name) = source_canonical.file_name().and_then(|n| n.to_str()) else {
+        return Ok(None);
+    };
+    let Ok(image) = MkImageRef::new(name.to_owned()) else {
+        return Ok(None);
+    };
+    let candidate = root.join(image.filename());
+    ensure_safe_direct_child(root, &candidate)?;
+    Ok(Some(image))
 }
 fn reload_from_disk(i: &Inner) {
     let _transaction = i.transaction.lock().unwrap();
@@ -427,12 +408,324 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(9) {
         migrate_v9_to_v10(&mut value)?;
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(10) {
+        migrate_v10_to_v11(&mut value, path)?;
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
     doc.schema_version = SCHEMA_VERSION;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
+}
+
+/// Filesystem-aware schema-10 migration. The JSON value is rewritten only after
+/// every required legacy source has been decoded and copied successfully. Flat
+/// files created by this pass are tracked so a failed transaction can remove
+/// only files this invocation created; nested legacy files are never touched.
+fn migrate_v10_to_v11(value: &mut serde_json::Value, document_path: &Path) -> Result<()> {
+    let root = document_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(ASSET_DIRECTORY);
+    let macros = value
+        .get_mut("macros")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("schema 10 macro document must contain a macros array"))?;
+
+    let mut planned: HashMap<String, Vec<u8>> = HashMap::new();
+    match fs::read_dir(&root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if name.to_ascii_lowercase().ends_with(".png") {
+                    planned.insert(name, fs::read(entry.path())?);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("enumerate legacy asset root {}", root.display()));
+        }
+    }
+    let mut created = Vec::<PathBuf>::new();
+    let mut source_destinations: HashMap<PathBuf, MkImageRef> = HashMap::new();
+    let result = (|| -> Result<()> {
+        for macro_value in macros.iter_mut() {
+            let (macro_id, metadata) = {
+                let macro_object = macro_value
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("schema 10 macro must be an object"))?;
+                let macro_id = macro_object.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut metadata = HashMap::<u64, (String, PathBuf)>::new();
+                if let Some(entries) = macro_object.get("image_assets").and_then(|v| v.as_array()) {
+                    for entry in entries {
+                        let Some(object) = entry.as_object() else {
+                            continue;
+                        };
+                        let Some(id) = object.get("id").and_then(|v| v.as_u64()) else {
+                            continue;
+                        };
+                        let name = object
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        metadata.insert(
+                            id,
+                            (
+                                name,
+                                root.join(macro_id.to_string()).join(format!("{id}.png")),
+                            ),
+                        );
+                    }
+                }
+                (macro_id, metadata)
+            };
+            let mut ids = Vec::new();
+            collect_legacy_asset_ids(macro_value, &mut ids);
+            ids.extend(metadata.keys().copied());
+            ids.sort_unstable();
+            ids.dedup();
+            let mut mapping = HashMap::<u64, MkImageRef>::new();
+            for id in ids {
+                let (friendly, source) = metadata.get(&id).cloned().unwrap_or_else(|| {
+                    (
+                        format!("image_{id}"),
+                        root.join(macro_id.to_string()).join(format!("{id}.png")),
+                    )
+                });
+                let source_exists = match fs::symlink_metadata(&source) {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() {
+                            anyhow::bail!(
+                                "legacy image source must not be a symlink: {}",
+                                source.display()
+                            );
+                        }
+                        if !metadata.is_file() {
+                            anyhow::bail!(
+                                "legacy image source is not a regular file: {}",
+                                source.display()
+                            );
+                        }
+                        true
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("inspect legacy image source {}", source.display())
+                        });
+                    }
+                };
+                if !source_exists {
+                    mapping.insert(id, missing_image_ref(macro_id, id, &mut planned)?);
+                    continue;
+                }
+                let bytes = fs::read(&source)
+                    .with_context(|| format!("read legacy image source {}", source.display()))?;
+                decode_png(&bytes)
+                    .with_context(|| format!("decode legacy image source {}", source.display()))?;
+                if let Some(existing) = source_destinations.get(&source) {
+                    mapping.insert(id, existing.clone());
+                    continue;
+                }
+                let candidate = sanitize_legacy_filename(&friendly, id);
+                let destination = choose_migration_destination(&candidate, &bytes, &planned)?;
+                let image = MkImageRef::new(destination.clone()).map_err(anyhow::Error::msg)?;
+                if !planned.contains_key(&destination) {
+                    fs::create_dir_all(&root)?;
+                    let path = root.join(&destination);
+                    save_atomic(&path, &bytes)
+                        .with_context(|| format!("copy legacy image {}", source.display()))?;
+                    created.push(path);
+                    planned.insert(destination, bytes);
+                }
+                source_destinations.insert(source, image.clone());
+                mapping.insert(id, image);
+            }
+            rewrite_legacy_asset_ids(macro_value, &mapping)?;
+            macro_value.as_object_mut().unwrap().remove("image_assets");
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for path in created {
+            let _ = fs::remove_file(path);
+        }
+        return Err(error);
+    }
+    value["schema_version"] = serde_json::json!(11);
+    Ok(())
+}
+
+fn collect_legacy_asset_ids(value: &serde_json::Value, ids: &mut Vec<u64>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(id) = object.get("asset_id").and_then(|v| v.as_u64()) {
+                ids.push(id);
+            }
+            for child in object.values() {
+                collect_legacy_asset_ids(child, ids);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_legacy_asset_ids(child, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_legacy_asset_ids(
+    value: &mut serde_json::Value,
+    mapping: &HashMap<u64, MkImageRef>,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(asset_id) = object.remove("asset_id") {
+                let image = match asset_id {
+                    serde_json::Value::Null => serde_json::Value::Null,
+                    serde_json::Value::Number(number) => {
+                        let id = number.as_u64().ok_or_else(|| {
+                            anyhow::anyhow!("legacy asset_id must be an unsigned integer or null")
+                        })?;
+                        serde_json::to_value(mapping.get(&id).ok_or_else(|| {
+                            anyhow::anyhow!("legacy asset ID {id} was not collected")
+                        })?)?
+                    }
+                    _ => anyhow::bail!("legacy asset_id must be an unsigned integer or null"),
+                };
+                object.insert("image".into(), image);
+            }
+            for child in object.values_mut() {
+                rewrite_legacy_asset_ids(child, mapping)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                rewrite_legacy_asset_ids(child, mapping)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn sanitize_legacy_filename(name: &str, id: u64) -> String {
+    let mut base = name.trim().to_owned();
+    if base.is_empty() {
+        base = format!("image_{id}");
+    }
+    base = base
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    base = base.trim_end_matches(['.', ' ']).to_owned();
+    if base.is_empty() {
+        base = format!("image_{id}");
+    }
+    let stem = if base.to_ascii_lowercase().ends_with(".png") {
+        &base[..base.len() - 4]
+    } else {
+        &base
+    };
+    let mut stem = stem.to_owned();
+    let reserved = stem.split('.').next().unwrap_or(&stem).to_ascii_uppercase();
+    if matches!(
+        reserved.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        stem.insert(0, '_');
+    }
+    format!("{stem}.png")
+}
+
+fn choose_migration_destination(
+    candidate: &str,
+    bytes: &[u8],
+    planned: &HashMap<String, Vec<u8>>,
+) -> Result<String> {
+    if let Some((existing_name, existing)) = planned
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(candidate))
+        .min_by(|(left, _), (right, _)| left.cmp(right))
+    {
+        if existing == bytes {
+            return Ok(existing_name.clone());
+        }
+    } else {
+        return Ok(candidate.to_owned());
+    }
+    let stem = candidate.strip_suffix(".png").unwrap_or(candidate);
+    for suffix in 2.. {
+        let candidate = format!("{stem}_{suffix}.png");
+        match planned
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(&candidate))
+            .min_by(|(left, _), (right, _)| left.cmp(right))
+        {
+            None => return Ok(candidate),
+            Some((existing_name, existing)) if existing == bytes => {
+                return Ok(existing_name.clone());
+            }
+            Some(_) => {}
+        }
+    }
+    unreachable!()
+}
+
+fn missing_image_ref(
+    macro_id: u64,
+    asset_id: u64,
+    planned: &mut HashMap<String, Vec<u8>>,
+) -> Result<MkImageRef> {
+    let base = format!("missing_image_{macro_id}_{asset_id}");
+    let mut candidate = format!("{base}.png");
+    let mut suffix = 2;
+    while planned
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(&candidate))
+    {
+        candidate = format!("{base}_{suffix}.png");
+        suffix += 1;
+    }
+    Ok(MkImageRef::new(candidate).map_err(anyhow::Error::msg)?)
 }
 /// Converts schema-7 resolved Launcher actions into the temporary compatibility
 /// state used by schema 8. No Serde aliases accept the old shape outside here.
@@ -928,6 +1221,14 @@ mod tests {
     use crate::mkmacro::{AlphaPolicy, MkPoint, ReturnPoint, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
 
+    fn png_bytes(color: [u8; 4]) -> Vec<u8> {
+        let mut output = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba(color)))
+            .write_to(&mut output, ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
+
     fn schema_v7_document(actions: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "schema_version": 7,
@@ -984,7 +1285,6 @@ mod tests {
                         ..Default::default()
                     }),
                 }],
-                image_assets: vec![],
             }],
         }
     }
@@ -1252,21 +1552,18 @@ mod tests {
         let mut migrated = legacy;
         migrate_v4_to_v5(&mut migrated).unwrap();
         assert_eq!(migrated["schema_version"], 5);
-        let doc: MkMacroDocument = serde_json::from_value(migrated).unwrap();
-        let MkAction::WaitUntil { condition, .. } = &doc.macros[0].steps[0].action else {
-            panic!()
-        };
-        let json = serde_json::to_value(condition).unwrap();
+        let json = &migrated["macros"][0]["steps"][0]["action"]["data"]["condition"];
         let first = &json["conditions"][0];
         assert_eq!(first["type"], "image_search");
         assert_eq!(first["found"], true);
+        assert_eq!(first["search"]["asset_id"], 7);
         assert_eq!(
-            first["search"],
-            serde_json::json!({
-                "asset_id":7,"region":{"type":"desktop"},"tolerance":0,
-                "alpha":"compare","return_point":"center"
-            })
+            first["search"]["region"],
+            serde_json::json!({"type":"desktop"})
         );
+        assert_eq!(first["search"]["tolerance"], 0);
+        assert_eq!(first["search"]["alpha"], "compare");
+        assert_eq!(first["search"]["return_point"], "center");
         let nested = &json["conditions"][1]["condition"]["conditions"][0];
         assert_eq!(nested["type"], "image_search");
         assert_eq!(nested["found"], false);
@@ -1385,7 +1682,7 @@ mod tests {
         let conditions = vec![
             MkCondition::ImageSearch {
                 search: MkImageSearchCondition {
-                    asset_id: 3,
+                    image: MkImageRef::from_filename("3.png"),
                     region: SearchRegion::Desktop,
                     tolerance: 4,
                     alpha: AlphaPolicy::Ignore,
@@ -1394,11 +1691,11 @@ mod tests {
                 found: false,
             },
             MkCondition::PreviousImageResult {
-                asset_id: None,
+                image: None,
                 found: true,
             },
             MkCondition::PreviousImageResult {
-                asset_id: Some(3),
+                image: Some(MkImageRef::from_filename("3.png")),
                 found: false,
             },
         ];
@@ -1497,10 +1794,10 @@ mod tests {
         .unwrap();
         let (_, disposition) = MkMacroStore::open(d.path()).unwrap();
         let LoadDisposition::NeedsUserRecovery { error } = disposition else {
-            panic!("schema 11 should require user recovery")
+            panic!("schema 12 should require user recovery")
         };
-        assert!(error.contains("schema version 11"), "{error}");
-        assert!(error.contains("supported version 10"), "{error}");
+        assert!(error.contains("schema version 12"), "{error}");
+        assert!(error.contains("supported version 11"), "{error}");
     }
     #[test]
     fn version_one_mouse_move_migrates_once_to_payload() {
@@ -1649,75 +1946,262 @@ mod tests {
         assert_eq!(d, repaired);
     }
     #[test]
-    fn assets_are_contained() {
+    fn image_references_are_direct_children_of_the_canonical_root() {
         let d = tempfile::tempdir().unwrap();
         let (s, _) = MkMacroStore::open(d.path()).unwrap();
-        assert!(s.resolve_asset_reference(4, Path::new("../x")).is_err());
+        for name in [
+            "",
+            ".",
+            "..",
+            "../x.png",
+            "nested/x.png",
+            "/tmp/x.png",
+            r"C:\x.png",
+            r"\\server\share\x.png",
+            "x.jpg",
+        ] {
+            assert!(
+                s.image_path(&MkImageRef::from_filename(name)).is_err(),
+                "accepted {name:?}"
+            );
+        }
         assert!(
-            s.resolve_asset_reference(4, Path::new("mkmacro_assets/5/1.png"))
-                .is_err()
+            s.image_path(&MkImageRef::from_filename("login.png"))
+                .is_ok()
+        );
+    }
+    #[test]
+    fn image_enumeration_is_flat_sorted_and_ignores_nested_or_non_png_files() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = MkMacroStore::open(d.path()).unwrap();
+        let dir = d.path().join(ASSET_DIRECTORY);
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["z.png", "a.PNG", "notes.txt", "nested.png"] {
+            if name == "nested.png" {
+                fs::create_dir_all(dir.join(name)).unwrap();
+            } else {
+                fs::write(dir.join(name), png_bytes([1, 2, 3, 255])).unwrap();
+            }
+        }
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(
+            dir.join("nested").join("inner.png"),
+            png_bytes([1, 2, 3, 255]),
+        )
+        .unwrap();
+        assert_eq!(
+            s.image_refs()
+                .unwrap()
+                .iter()
+                .map(|image| image.filename())
+                .collect::<Vec<_>>(),
+            vec!["a.PNG", "z.png"]
+        );
+    }
+
+    #[test]
+    fn replacing_a_reference_never_deletes_the_shared_library_file() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = MkMacroStore::open(d.path()).unwrap();
+        let old = MkImageRef::from_filename("old.png");
+        let new = MkImageRef::from_filename("new.png");
+        s.write_captured_png(
+            &RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+            old.clone(),
+            ImageImportChoice::SaveAs(old.clone()),
+        )
+        .unwrap();
+        s.write_captured_png(
+            &RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 255])),
+            new.clone(),
+            ImageImportChoice::SaveAs(new.clone()),
+        )
+        .unwrap();
+        assert!(s.image_path(&old).unwrap().is_file());
+        assert!(s.image_path(&new).unwrap().is_file());
+    }
+
+    #[test]
+    fn schema_ten_migration_flattens_all_reference_forms_and_keeps_legacy_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(ASSET_DIRECTORY);
+        let first_source = root.join("2").join("7.png");
+        let second_source = root.join("2").join("8.png");
+        let third_source = root.join("2").join("9.png");
+        fs::create_dir_all(first_source.parent().unwrap()).unwrap();
+        fs::write(&first_source, png_bytes([1, 2, 3, 255])).unwrap();
+        fs::write(&second_source, png_bytes([9, 8, 7, 255])).unwrap();
+        fs::write(&third_source, png_bytes([4, 5, 6, 255])).unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 10,
+            "macros": [{
+                "id": 2,
+                "name": "legacy",
+                "image_assets": [
+                    {"id": 7, "name": "Login Button", "relative_path": "old/7.png"},
+                    {"id": 8, "name": "Login Button", "relative_path": "old/8.png"},
+                    {"id": 9, "name": "Login Button", "relative_path": "old/9.png"}
+                ],
+                "steps": [
+                    {"id": 1, "action": {"type": "image_find", "data": {
+                        "asset_id": 7, "wait": {"timeout_ms": 1, "poll_interval_ms": 1}
+                    }}},
+                    {"id": 2, "action": {"type": "if", "data": {
+                        "type": "all", "conditions": [
+                            {"type": "image_search", "search": {
+                                "asset_id": 8, "region": {"type": "desktop"}
+                            }, "found": true},
+                            {"type": "not", "condition": {
+                                "type": "previous_image_result", "asset_id": null, "found": false
+                            }}
+                        ]
+                    }}},
+                    {"id": 3, "action": {"type": "mouse_move", "data": {
+                        "target": {"kind": "image", "asset_id": 7, "offset": {"x": 3, "y": -2}},
+                        "duration_ms": 0
+                    }}}
+                ]
+            }]
+        });
+        fs::write(
+            d.path().join(MKMACROS_FILE),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let (store, disposition) = MkMacroStore::open(d.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        assert_eq!(store.snapshot().schema_version, SCHEMA_VERSION);
+        let first = MkImageRef::from_filename("Login Button.png");
+        let second = MkImageRef::from_filename("Login Button_2.png");
+        let third = MkImageRef::from_filename("Login Button_3.png");
+        assert_eq!(
+            store.image_refs().unwrap(),
+            vec![first.clone(), second.clone(), third.clone()]
+        );
+        assert_eq!(fs::read(&first_source).unwrap(), png_bytes([1, 2, 3, 255]));
+        assert_eq!(fs::read(&second_source).unwrap(), png_bytes([9, 8, 7, 255]));
+        assert_eq!(fs::read(&third_source).unwrap(), png_bytes([4, 5, 6, 255]));
+        let json = serde_json::to_value(store.snapshot().as_ref()).unwrap();
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(!text.contains("asset_id"));
+        assert!(!text.contains("image_assets"));
+        assert_eq!(
+            json["macros"][0]["steps"][0]["action"]["data"]["image"],
+            first.filename()
+        );
+        assert_eq!(
+            json["macros"][0]["steps"][1]["action"]["data"]["conditions"][0]["search"]["image"],
+            second.filename()
         );
         assert!(
-            s.resolve_asset_reference(4, Path::new("mkmacro_assets/4/1.png"))
-                .is_ok()
+            json["macros"][0]["steps"][1]["action"]["data"]["conditions"][1]["condition"]["image"]
+                .is_null()
+        );
+        assert_eq!(
+            json["macros"][0]["steps"][2]["action"]["data"]["target"]["image"],
+            first.filename()
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(d.path().join(MKMACROS_FILE)).unwrap()).unwrap();
+        assert_eq!(persisted["schema_version"], 11);
+        assert_eq!(persisted, json);
+    }
+
+    #[test]
+    fn schema_ten_missing_reference_is_explicit_without_blocking_other_assets() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(ASSET_DIRECTORY).join("6");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("6.png"), png_bytes([4, 5, 6, 255])).unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 10,
+            "macros": [{"id": 5, "name": "missing", "image_assets": [], "steps": [
+                {"id": 1, "action": {"type": "image_find", "data": {
+                    "asset_id": 9, "wait": {"timeout_ms": 1, "poll_interval_ms": 1}
+                }}}
+            ]}, {
+                "id": 6, "name": "present", "image_assets": [
+                    {"id": 6, "name": "Present", "relative_path": "6.png"}
+                ], "steps": []
+            }]
+        });
+        fs::write(
+            d.path().join(MKMACROS_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
         )
-    }
-    #[test]
-    fn next_asset_id_uses_only_canonical_positive_png_files() {
-        let d = tempfile::tempdir().unwrap();
-        let (s, _) = MkMacroStore::open(d.path()).unwrap();
-        assert_eq!(s.next_asset_id(7).unwrap(), 1);
-        let dir = d.path().join(ASSET_DIRECTORY).join("7");
-        fs::create_dir_all(&dir).unwrap();
-        for name in [
-            "1.png",
-            "3.png",
-            "0.png",
-            "01.png",
-            "2.jpg",
-            "notes.txt",
-            "18446744073709551615.png",
-        ] {
-            fs::write(dir.join(name), b"x").unwrap();
-        }
-        assert_eq!(s.next_asset_id(7).unwrap(), 2);
-        assert_eq!(s.next_asset_id(8).unwrap(), 1);
-        assert!(s.next_asset_id(0).is_err());
+        .unwrap();
+        let (store, disposition) = MkMacroStore::open(d.path()).unwrap();
+        assert!(matches!(disposition, LoadDisposition::Loaded));
+        let json = serde_json::to_value(store.snapshot().as_ref()).unwrap();
+        assert_eq!(
+            json["macros"][0]["steps"][0]["action"]["data"]["image"],
+            "missing_image_5_9.png"
+        );
+        assert_eq!(json["macros"][1]["steps"], serde_json::json!([]));
+        assert!(
+            store
+                .image_path(&MkImageRef::from_filename("missing_image_5_9.png"))
+                .unwrap()
+                .exists()
+                == false
+        );
+        assert!(
+            store
+                .image_path(&MkImageRef::from_filename("Present.png"))
+                .unwrap()
+                .is_file()
+        );
     }
 
     #[test]
-    fn asset_replacement_requires_save_then_explicit_cleanup() {
+    fn schema_ten_copy_failure_leaves_json_and_flat_library_untouched() {
         let d = tempfile::tempdir().unwrap();
-        let (s, _) = MkMacroStore::open(d.path()).unwrap();
-        let old_ref = s
-            .write_png_asset(
-                7,
-                1,
-                &RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 4])),
-            )
-            .unwrap();
-        let new_ref = s
-            .write_png_asset(
-                7,
-                2,
-                &RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 8])),
-            )
-            .unwrap();
-        let old_path = s.resolve_asset_reference(7, &old_ref).unwrap();
-        let new_path = s.resolve_asset_reference(7, &new_ref).unwrap();
-        assert!(old_path.is_file() && new_path.is_file());
-
-        // Cancellation/failure is represented by not committing: staging alone is non-destructive.
-        assert!(s.cleanup_assets(false, &[old_path.clone()]).is_err());
-        assert!(old_path.is_file());
-        let (_saved, cleanup) = s
-            .commit_asset_update(document(), &new_ref, Some(&old_ref))
-            .unwrap();
-        assert!(old_path.is_file());
-        s.cleanup_assets(true, &[cleanup.unwrap()]).unwrap();
-        assert!(!old_path.exists());
-        assert!(new_path.is_file());
+        let source = d.path().join(ASSET_DIRECTORY).join("7").join("3.png");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"corrupt png").unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 10,
+            "macros": [{"id": 7, "name": "bad", "image_assets": [
+                {"id": 3, "name": "Bad", "relative_path": "3.png"}
+            ], "steps": []}]
+        });
+        let original = serde_json::to_vec(&legacy).unwrap();
+        let path = d.path().join(MKMACROS_FILE);
+        fs::write(&path, &original).unwrap();
+        let (_, disposition) = MkMacroStore::open(d.path()).unwrap();
+        assert!(matches!(
+            disposition,
+            LoadDisposition::NeedsUserRecovery { .. }
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!d.path().join(ASSET_DIRECTORY).join("Bad.png").exists());
     }
+
+    #[test]
+    fn schema_ten_retry_reuses_identical_flat_destination_without_suffix_drift() {
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join(ASSET_DIRECTORY).join("8").join("4.png");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let bytes = png_bytes([7, 7, 7, 255]);
+        fs::write(&source, &bytes).unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 10,
+            "macros": [{"id": 8, "name": "retry", "image_assets": [
+                {"id": 4, "name": "Retry", "relative_path": "4.png"}
+            ], "steps": [{"id": 1, "action": {"type": "image_find", "data": {
+                "asset_id": 4, "wait": {"timeout_ms": 1, "poll_interval_ms": 1}
+            }}}]}]
+        });
+        let mut first = legacy.clone();
+        migrate_v10_to_v11(&mut first, &d.path().join(MKMACROS_FILE)).unwrap();
+        let mut second = legacy;
+        migrate_v10_to_v11(&mut second, &d.path().join(MKMACROS_FILE)).unwrap();
+        assert_eq!(first, second);
+        assert!(d.path().join(ASSET_DIRECTORY).join("Retry.png").is_file());
+        assert!(!d.path().join(ASSET_DIRECTORY).join("Retry_2.png").exists());
+    }
+
     #[test]
     fn version_two_images_migrate_once_and_drop_confidence() {
         let d = tempfile::tempdir().unwrap();
@@ -1728,7 +2212,7 @@ mod tests {
         let MkAction::ImageFind(image) = &doc.macros[0].steps[0].action else {
             panic!()
         };
-        assert_eq!(image.asset_id, 9);
+        assert_eq!(image.image.filename(), "missing_image_1_9.png");
         assert_eq!(image.wait.timeout_ms, 20);
         assert_eq!(image.region, SearchRegion::Desktop);
         assert_eq!(image.tolerance, 0);
@@ -1895,18 +2379,25 @@ mod tests {
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let loaded = store.snapshot();
-        assert_eq!(loaded.schema_version, 10);
+        assert_eq!(loaded.schema_version, 11);
         assert!(loaded.macros[0].steps.iter().all(|step| !step.breakpoint));
 
         let rewritten: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(rewritten["schema_version"], 10);
+        assert_eq!(rewritten["schema_version"], 11);
         for (index, original_step) in original_steps.iter().enumerate() {
             let loaded_step = &loaded.macros[0].steps[index];
-            assert_eq!(
-                serde_json::to_value(&loaded_step.action).unwrap(),
-                original_step["action"]
-            );
+            if index == 2 {
+                let MkAction::ImageFind(image) = &loaded_step.action else {
+                    panic!()
+                };
+                assert_eq!(image.image.filename(), "missing_image_1_21.png");
+            } else {
+                assert_eq!(
+                    serde_json::to_value(&loaded_step.action).unwrap(),
+                    original_step["action"]
+                );
+            }
             let rewritten_step = &rewritten["macros"][0]["steps"][index];
             for property in [
                 "id",
@@ -1916,10 +2407,12 @@ mod tests {
                 "on_error",
                 "action",
             ] {
-                assert_eq!(
-                    rewritten_step[property], original_step[property],
-                    "step {index} property {property}"
-                );
+                if !(index == 2 && property == "action") {
+                    assert_eq!(
+                        rewritten_step[property], original_step[property],
+                        "step {index} property {property}"
+                    );
+                }
             }
             assert_eq!(rewritten_step["breakpoint"], serde_json::Value::Bool(false));
         }

@@ -52,7 +52,7 @@ pub(super) fn show(
     payload: &mut MkImagePayload,
     state: &mut ImageSearchEditorState,
     store: &crate::mkmacro::MkMacroStore,
-    macro_id: u64,
+    _macro_id: u64,
     authoring_busy: bool,
     find_action: bool,
     valid_asset: bool,
@@ -78,15 +78,12 @@ pub(super) fn show(
     if authoring_busy {
         ui.label("Importing reference image...");
     }
-    if payload.asset_id == 0 {
+    if payload.image.filename().is_empty() {
         ui.label("No reference image selected.");
     } else {
         ui.label("Saved reference image");
-        ui.small(format!(
-            "mkmacro_assets/{macro_id}/{}.png",
-            payload.asset_id
-        ));
-        super::image_preview::show(ui, store, macro_id, payload.asset_id);
+        ui.small(format!("mkmacro_assets/{}", payload.image.filename()));
+        super::image_preview::show(ui, store, &payload.image);
     }
 
     ui.separator();
@@ -240,10 +237,10 @@ pub(super) fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkImageOutputs, MkWaitOptions};
+    use crate::mkmacro::{MkImageOutputs, MkImageRef, MkWaitOptions};
     fn payload(region: SearchRegion) -> MkImagePayload {
         MkImagePayload {
-            asset_id: 3,
+            image: MkImageRef::from_filename("3.png"),
             wait: MkWaitOptions {
                 timeout_ms: 10,
                 poll_interval_ms: 1,

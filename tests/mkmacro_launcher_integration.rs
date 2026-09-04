@@ -352,7 +352,6 @@ fn legacy_parent_invokes_scoped_child_without_foreground_match() {
                         mode: MkTextMode::Type,
                     }),
                 }],
-                image_assets: vec![],
             }],
         })
         .unwrap();

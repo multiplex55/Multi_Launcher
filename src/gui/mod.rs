@@ -3077,8 +3077,8 @@ mod tests {
         dashboard::config::OverflowMode,
         dashboard::layout::NormalizedSlot,
         mkmacro::{
-            AlphaPolicy, MkAction, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
-            MkWaitOptions, ReturnPoint, SearchRegion,
+            AlphaPolicy, ImageImportChoice, ImageImportResult, MkAction, MkImageNotFoundPolicy,
+            MkImageOutputs, MkImagePayload, MkImageRef, MkWaitOptions, ReturnPoint, SearchRegion,
         },
         plugin::PluginManager,
         plugins::note::{NotePlugin, append_note, load_notes, save_notes},
@@ -3289,9 +3289,14 @@ mod tests {
     }
     struct HostAssets(Arc<Mutex<HostCaptureLog>>);
     impl mkmacro_dialog::visual_capture_workflow::AssetStoreAdapter for HostAssets {
-        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
+        fn write_captured_image(
+            &mut self,
+            _: &RgbaImage,
+            filename: MkImageRef,
+            _: ImageImportChoice,
+        ) -> Result<ImageImportResult, String> {
             self.0.lock().unwrap().writes += 1;
-            Ok(88)
+            Ok(ImageImportResult::Imported(filename))
         }
     }
     fn host_capture_dependencies(log: Arc<Mutex<HostCaptureLog>>) -> VisualCaptureDependencies {
@@ -3304,7 +3309,7 @@ mod tests {
 
     fn host_image_action() -> MkAction {
         MkAction::ImageClick(MkImagePayload {
-            asset_id: 7,
+            image: MkImageRef::from_filename("7.png"),
             region: SearchRegion::Desktop,
             wait: MkWaitOptions::default(),
             tolerance: 0,

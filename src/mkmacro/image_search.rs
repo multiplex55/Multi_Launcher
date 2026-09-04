@@ -11,72 +11,144 @@ use std::{
 };
 
 use super::{
-    MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkPoint, ScreenCaptureBackend,
-    SearchRegion, VisualSearch,
+    MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkImageRef, MkPoint,
+    ScreenCaptureBackend, SearchRegion, VisualSearch,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageFileIdentity {
+    pub path: PathBuf,
+    pub reference: MkImageRef,
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone)]
+struct DecodedImage {
+    image: Arc<RgbaImage>,
+    identity: ImageFileIdentity,
+}
 
 /// Run-scoped decode cache. Construct one for each playback; repeated visual waits
 /// and searches using the same stable reference share the decoded pixels.
 #[derive(Default)]
 pub struct ImageDecodeCache {
-    images: HashMap<String, Arc<RgbaImage>>,
+    images: HashMap<(PathBuf, MkImageRef), DecodedImage>,
 }
 impl ImageDecodeCache {
     pub fn get_or_decode(
         &mut self,
         store: &MkMacroStore,
-        macro_id: u64,
-        reference: &str,
+        reference: &MkImageRef,
     ) -> ExecResult<Arc<RgbaImage>> {
-        if let Some(image) = self.images.get(reference) {
-            return Ok(image.clone());
-        }
-        let path = store
-            .resolve_asset_reference(macro_id, Path::new(reference))
-            .map_err(|e| {
-                ExecutionDiagnostic::new(
-                    DiagnosticKind::InvalidTarget,
-                    "Reference image could not be resolved",
-                )
-                .context("reference", reference)
-                .context("macro_id", macro_id.to_string())
-                .context("detail", e.to_string())
-            })?;
-        let bytes = std::fs::read(&path).map_err(|e| {
-            let (kind, message) = if e.kind() == std::io::ErrorKind::NotFound {
-                (DiagnosticKind::TargetNotFound, "Reference image is missing")
-            } else {
-                (DiagnosticKind::Backend, "Reference image could not be read")
-            };
-            ExecutionDiagnostic::new(kind, message)
-                .context("asset_path", path.display().to_string())
-                .context("operation", "read reference image")
-                .context("detail", e.to_string())
+        let path = store.image_path(reference).map_err(|e| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Reference image could not be resolved",
+            )
+            .context("image", reference.filename())
+            .context("detail", e.to_string())
         })?;
-        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-            .map_err(|e| {
-                ExecutionDiagnostic::new(
+        let root_key = store
+            .asset_root()
+            .canonicalize()
+            .unwrap_or_else(|_| store.asset_root());
+        let cache_key = (root_key, reference.clone());
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => {
+                self.images.remove(&cache_key);
+                return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidTarget,
-                    "Reference image could not be decoded",
+                    "Reference image is not a regular file",
                 )
-                .context("asset_path", path.display().to_string())
-                .context("operation", "decode reference image")
-                .context("detail", e.to_string())
-            })?
-            .to_rgba8();
+                .context("image", reference.filename())
+                .context("path", path.display().to_string()));
+            }
+            Err(e) => {
+                self.images.remove(&cache_key);
+                let kind = if e.kind() == std::io::ErrorKind::NotFound {
+                    DiagnosticKind::TargetNotFound
+                } else {
+                    DiagnosticKind::Backend
+                };
+                let message = if kind == DiagnosticKind::TargetNotFound {
+                    format!("Reference image '{}' is missing", reference.filename())
+                } else {
+                    format!(
+                        "Reference image '{}' metadata could not be read",
+                        reference.filename()
+                    )
+                };
+                return Err(ExecutionDiagnostic::new(kind, message)
+                    .context("image", reference.filename())
+                    .context("path", path.display().to_string())
+                    .context("detail", e.to_string()));
+            }
+        };
+        let identity = ImageFileIdentity {
+            path: path.clone(),
+            reference: reference.clone(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        };
+        if let Some(entry) = self.images.get(&cache_key) {
+            if entry.identity == identity {
+                return Ok(entry.image.clone());
+            }
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.images.remove(&cache_key);
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::Backend,
+                    format!(
+                        "Reference image '{}' could not be read",
+                        reference.filename()
+                    ),
+                )
+                .context("image", reference.filename())
+                .context("path", path.display().to_string())
+                .context("detail", e.to_string()));
+            }
+        };
+        let image = match image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
+            Ok(image) => image.to_rgba8(),
+            Err(e) => {
+                self.images.remove(&cache_key);
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    format!(
+                        "Reference image '{}' could not be decoded",
+                        reference.filename()
+                    ),
+                )
+                .context("image", reference.filename())
+                .context("path", path.display().to_string())
+                .context("detail", e.to_string()));
+            }
+        };
         if image.width() == 0 || image.height() == 0 {
+            self.images.remove(&cache_key);
             return Err(ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidTarget,
                 "Reference image has invalid dimensions",
             )
-            .context("asset_path", path.display().to_string())
+            .context("image", reference.filename())
             .context(
                 "dimensions",
                 format!("{}x{}", image.width(), image.height()),
             ));
         }
         let image = Arc::new(image);
-        self.images.insert(reference.to_owned(), image.clone());
+        self.images.insert(
+            cache_key,
+            DecodedImage {
+                image: image.clone(),
+                identity,
+            },
+        );
         Ok(image)
     }
     pub fn len(&self) -> usize {
@@ -104,26 +176,18 @@ impl ProductionVisualSearch {
             cache: Mutex::new(ImageDecodeCache::default()),
         }
     }
-
-    fn asset_reference(macro_id: u64, asset_id: u64) -> String {
-        PathBuf::from(super::store::ASSET_DIRECTORY)
-            .join(macro_id.to_string())
-            .join(format!("{asset_id}.png"))
-            .to_string_lossy()
-            .into_owned()
-    }
 }
 
 impl VisualSearch for ProductionVisualSearch {
     fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
-        let reference = Self::asset_reference(macro_id, payload.asset_id);
+        let reference = &payload.image;
         let needle = self
             .cache
             .lock()
             .unwrap()
-            .get_or_decode(&self.store, macro_id, &reference)
+            .get_or_decode(&self.store, reference)
             .map_err(|e| {
-                e.context("asset_id", payload.asset_id.to_string())
+                e.context("image", reference.filename())
                     .context("macro_id", macro_id.to_string())
             })?;
         let frame = self.capture.capture(&payload.region, &|| false)?;
@@ -410,9 +474,9 @@ mod tests {
             Ok(self.frame.image.clone())
         }
     }
-    fn payload(asset_id: u64, tolerance: u8) -> MkImagePayload {
+    fn payload(image: &str, tolerance: u8) -> MkImagePayload {
         MkImagePayload {
-            asset_id,
+            image: MkImageRef::from_filename(image),
             wait: super::super::MkWaitOptions {
                 timeout_ms: 0,
                 poll_interval_ms: 0,
@@ -431,7 +495,13 @@ mod tests {
     ) -> (tempfile::TempDir, Arc<MkMacroStore>, ProductionVisualSearch) {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        store.write_png_asset(7, 3, needle).unwrap();
+        store
+            .write_captured_png(
+                needle,
+                MkImageRef::from_filename("needle.png"),
+                crate::mkmacro::ImageImportChoice::SaveAs(MkImageRef::from_filename("needle.png")),
+            )
+            .unwrap();
         let store = Arc::new(store);
         let capture = Arc::new(FakeCapture {
             frame,
@@ -453,9 +523,12 @@ mod tests {
             }
         }
         let (_dir, _store, adapter) = adapter_fixture(frame, &needle);
-        assert_eq!(adapter.find_image(7, &payload(3, 1)).unwrap(), None);
         assert_eq!(
-            adapter.find_image(7, &payload(3, 2)).unwrap(),
+            adapter.find_image(7, &payload("needle.png", 1)).unwrap(),
+            None
+        );
+        assert_eq!(
+            adapter.find_image(7, &payload("needle.png", 2)).unwrap(),
             Some(MkPoint { x: -117, y: 37 })
         );
     }
@@ -474,43 +547,82 @@ mod tests {
                 }),
             )
         };
-        let missing = make().find_image(7, &payload(3, 0)).unwrap_err();
-        let expected_path = store.asset_path(7, 3).unwrap().display().to_string();
+        let image = MkImageRef::from_filename("missing.png");
+        let missing = make()
+            .find_image(7, &payload("missing.png", 0))
+            .unwrap_err();
+        let expected_path = store.image_path(&image).unwrap().display().to_string();
         assert_eq!(missing.kind, DiagnosticKind::TargetNotFound);
-        assert_eq!(missing.message, "Reference image is missing");
+        assert_eq!(missing.message, "Reference image 'missing.png' is missing");
         assert_eq!(
-            missing.context.get("asset_id").map(String::as_str),
-            Some("3")
+            missing.context.get("image").map(String::as_str),
+            Some("missing.png")
         );
         assert_eq!(
             missing.context.get("macro_id").map(String::as_str),
             Some("7")
         );
         assert_eq!(
-            missing.context.get("asset_path").map(String::as_str),
+            missing.context.get("path").map(String::as_str),
             Some(expected_path.as_str())
         );
 
-        let path = store.asset_path(7, 3).unwrap();
+        let path = store.image_path(&image).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not a png").unwrap();
-        let undecodable = make().find_image(7, &payload(3, 0)).unwrap_err();
+        let undecodable = make()
+            .find_image(7, &payload("missing.png", 0))
+            .unwrap_err();
         assert_eq!(undecodable.kind, DiagnosticKind::InvalidTarget);
-        assert_eq!(undecodable.message, "Reference image could not be decoded");
         assert_eq!(
-            undecodable.context.get("asset_path").map(String::as_str),
+            undecodable.message,
+            "Reference image 'missing.png' could not be decoded"
+        );
+        assert_eq!(
+            undecodable.context.get("path").map(String::as_str),
             Some(expected_path.as_str())
         );
 
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        let unreadable = make().find_image(7, &payload(3, 0)).unwrap_err();
-        assert_eq!(unreadable.kind, DiagnosticKind::Backend);
-        assert_eq!(unreadable.message, "Reference image could not be read");
+        let unreadable = make()
+            .find_image(7, &payload("missing.png", 0))
+            .unwrap_err();
+        assert_eq!(unreadable.kind, DiagnosticKind::InvalidTarget);
+        assert_eq!(unreadable.message, "Reference image is not a regular file");
         assert_eq!(
-            unreadable.context.get("operation").map(String::as_str),
-            Some("read reference image")
+            unreadable.context.get("path").map(String::as_str),
+            Some(expected_path.as_str())
         );
+    }
+
+    #[test]
+    fn decode_cache_reloads_after_same_filename_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let image = MkImageRef::from_filename("shared.png");
+        let first = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+        store
+            .write_captured_png(
+                &first,
+                image.clone(),
+                crate::mkmacro::ImageImportChoice::SaveAs(image.clone()),
+            )
+            .unwrap();
+        let mut cache = ImageDecodeCache::default();
+        let decoded_first = cache.get_or_decode(&store, &image).unwrap();
+        let second = RgbaImage::from_pixel(2, 2, Rgba([230, 220, 210, 255]));
+        store
+            .write_captured_png(
+                &second,
+                image.clone(),
+                crate::mkmacro::ImageImportChoice::ReplaceExisting,
+            )
+            .unwrap();
+        let decoded_second = cache.get_or_decode(&store, &image).unwrap();
+        assert_ne!(decoded_first.as_raw(), decoded_second.as_raw());
+        assert_eq!(decoded_second.get_pixel(0, 0), &Rgba([230, 220, 210, 255]));
+        assert_eq!(cache.len(), 1);
     }
     #[test]
     fn too_large_and_deterministic() {

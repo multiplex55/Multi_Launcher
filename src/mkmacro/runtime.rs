@@ -934,7 +934,6 @@ mod folder_tests {
                     mode: MkTextMode::Type,
                 }),
             }],
-            image_assets: vec![],
         };
         let mut decoy = target.clone();
         decoy.id = 7;
@@ -1037,7 +1036,6 @@ mod run_mode_tests {
             folder_id: None,
             playback: Default::default(),
             steps,
-            image_assets: vec![],
         }
     }
 
@@ -2367,7 +2365,6 @@ mod facade_tests {
                     folder_id: None,
                     playback: Default::default(),
                     steps: vec![step(10, "first"), step(20, "second"), step(30, "third")],
-                    image_assets: vec![],
                 }],
                 ..Default::default()
             })
@@ -2437,7 +2434,6 @@ mod recording_controller_tests {
                         folder_id: None,
                         playback: MkPlayback::default(),
                         steps: vec![],
-                        image_assets: vec![],
                     })
                     .collect(),
             })
@@ -2506,8 +2502,8 @@ mod runtime_snapshot_tests {
     use super::*;
     use crate::mkmacro::{
         MkAction, MkCoordinateTarget, MkDelayPayload, MkImageNotFoundPolicy, MkImageOutputs,
-        MkImagePayload, MkMacro, MkMacroDocument, MkMouseMovePayload, MkPoint, MkStep, MkTextMode,
-        MkTextPayload, MkValue, MkWaitOptions, executor::fake::FakeBackend,
+        MkImagePayload, MkImageRef, MkMacro, MkMacroDocument, MkMouseMovePayload, MkPoint, MkStep,
+        MkTextMode, MkTextPayload, MkValue, MkWaitOptions, executor::fake::FakeBackend,
     };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -2535,13 +2531,12 @@ mod runtime_snapshot_tests {
             folder_id: None,
             playback: Default::default(),
             steps,
-            image_assets: vec![],
         }
     }
 
     fn image_payload(policy: MkImageNotFoundPolicy) -> MkImagePayload {
         MkImagePayload {
-            asset_id: 10,
+            image: MkImageRef::from_filename("10.png"),
             wait: MkWaitOptions {
                 timeout_ms: 0,
                 poll_interval_ms: 1,
@@ -2755,7 +2750,7 @@ mod runtime_snapshot_tests {
             mouse_move,
         ]);
         let (_directory, runtime, fake) = runtime_with(target);
-        fake.script_image(10, Ok(Some(point)));
+        fake.script_image(MkImageRef::from_filename("10.png"), Ok(Some(point)));
 
         assert_eq!(
             runtime.command(RuntimeCommand::DebugRun(1)),
@@ -2807,7 +2802,7 @@ mod runtime_snapshot_tests {
         ]);
         let document = document_for(target.clone());
         let (_directory, runtime, fake) = runtime_with(target);
-        fake.script_image(10, Ok(None));
+        fake.script_image(MkImageRef::from_filename("10.png"), Ok(None));
 
         assert_eq!(
             runtime.command(RuntimeCommand::DebugRun(1)),

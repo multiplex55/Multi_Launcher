@@ -2,7 +2,7 @@
 use super::{
     CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkDelayMode,
     MkExecutionPlan, MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
-    MkKey, MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration,
+    MkImageRef, MkKey, MkMacroStore, MkMouseButton, MkMouseScrollAxis, MkNotificationDuration,
     MkNotificationKind, MkNotifyPayload, MkPlaySoundPayload, MkPlayback, MkPoint, MkProcessPayload,
     MkPromptInputPayload, MkScreenshotFormat, MkTextPayload, MkUiPayload, MkValue, MkWaitOptions,
     MkWindowMatcher, MkWindowMoveResizePayload, MkWindowPayload, MkWindowState, PromptBackend,
@@ -1021,6 +1021,10 @@ impl InputCleanupGuard {
 #[cfg(test)]
 mod tests {
     use super::{fake::FakeBackend, *};
+    use crate::mkmacro::screen::{image_found_variable, image_result_variable};
+    fn image_ref(id: u64) -> MkImageRef {
+        MkImageRef::from_filename(format!("{id}.png"))
+    }
     use crate::mkmacro::{
         AlphaPolicy, LauncherCommandBroker, LauncherCommandKind, LauncherCommandResponse,
         MkDelayPayload, MkErrorPolicy, MkMacro, MkPlayback, MkStep, MkTextMode, ReturnPoint,
@@ -1521,7 +1525,6 @@ mod tests {
             folder_id: None,
             playback: MkPlayback::default(),
             steps,
-            image_assets: vec![],
         })
         .unwrap()
     }
@@ -1725,7 +1728,7 @@ mod tests {
         let mut breakpoint_step = step(
             1,
             MkAction::ImageFind(MkImagePayload {
-                asset_id: 10,
+                image: MkImageRef::from_filename("10.png"),
                 wait: MkWaitOptions {
                     timeout_ms: 0,
                     poll_interval_ms: 1,
@@ -1741,7 +1744,10 @@ mod tests {
         breakpoint_step.breakpoint = true;
         let plan = plan(vec![breakpoint_step]);
         let fake = Arc::new(FakeBackend::default());
-        fake.script_image(10, Ok(Some(MkPoint { x: 4, y: 8 })));
+        fake.script_image(
+            MkImageRef::from_filename("10.png"),
+            Ok(Some(MkPoint { x: 4, y: 8 })),
+        );
         let control = Arc::new(RunControl::default());
         control.reset();
         let events = Mutex::new(Vec::new());
@@ -2564,7 +2570,7 @@ mod tests {
     fn image_search_condition(found: bool) -> MkCondition {
         MkCondition::ImageSearch {
             search: crate::mkmacro::MkImageSearchCondition {
-                asset_id: 42,
+                image: MkImageRef::from_filename("42.png"),
                 region: SearchRegion::Desktop,
                 tolerance: 3,
                 alpha: AlphaPolicy::Ignore,
@@ -2577,7 +2583,10 @@ mod tests {
     #[test]
     fn image_condition_results_are_snapshotted_after_if_and_while_evaluation() {
         let if_fake = Arc::new(FakeBackend::default());
-        if_fake.script_image(42, Ok(Some(MkPoint { x: 4, y: 8 })));
+        if_fake.script_image(
+            MkImageRef::from_filename("42.png"),
+            Ok(Some(MkPoint { x: 4, y: 8 })),
+        );
         let if_plan = plan(vec![
             step(1, MkAction::If(image_search_condition(true))),
             step(
@@ -2609,8 +2618,11 @@ mod tests {
         );
 
         let while_fake = Arc::new(FakeBackend::default());
-        while_fake.script_image(42, Ok(Some(MkPoint { x: 9, y: 10 })));
-        while_fake.script_image(42, Ok(None));
+        while_fake.script_image(
+            MkImageRef::from_filename("42.png"),
+            Ok(Some(MkPoint { x: 9, y: 10 })),
+        );
+        while_fake.script_image(MkImageRef::from_filename("42.png"), Ok(None));
         let while_plan = plan(vec![
             step(
                 1,
@@ -3683,7 +3695,7 @@ mod tests {
         control.reset();
         let executor = Executor::new(fake.clone().backends(), control);
         let payload = |asset_id| MkImagePayload {
-            asset_id,
+            image: MkImageRef::from_filename(format!("{asset_id}.png")),
             wait: MkWaitOptions {
                 timeout_ms: 0,
                 poll_interval_ms: 1,
@@ -3704,14 +3716,16 @@ mod tests {
             executor.wait_image(1, &payload(8), &mut vars).unwrap(),
             Some(MkPoint { x: 1, y: 1 })
         );
+        let image_7_key = image_result_variable(&image_ref(7));
+        let image_8_key = image_result_variable(&image_ref(8));
         for key in [
             "last_image",
             "last_image_x",
             "last_image_y",
             "last_image_result",
             "last_image_found",
-            "__image.7",
-            "__image.8",
+            image_7_key.as_str(),
+            image_8_key.as_str(),
         ] {
             assert!(
                 vars.contains_key(key),
@@ -3731,8 +3745,8 @@ mod tests {
             executor.wait_image(1, &payload(7), &mut vars).unwrap(),
             None
         );
-        assert!(!vars.contains_key("__image.7"));
-        assert!(vars.contains_key("__image.8"));
+        assert!(!vars.contains_key(&image_result_variable(&image_ref(7))));
+        assert!(vars.contains_key(&image_result_variable(&image_ref(8))));
         assert_eq!(vars.get("last_image_found"), Some(&MkValue::Boolean(false)));
         assert!(!vars.contains_key("last_image_x"));
     }
@@ -4630,7 +4644,7 @@ impl Executor {
                         "Click Image requires a matching point",
                     )
                     .context("macro_id", macro_id.to_string())
-                    .context("asset_id", p.asset_id.to_string())
+                    .context("image", p.image.filename())
                 })?;
                 self.backends.input.move_mouse(pt)?;
                 set_point(v, "mouse", pt);
@@ -4889,7 +4903,7 @@ impl Executor {
             }
             Err(error) => Err(error
                 .context("macro_id", macro_id.to_string())
-                .context("asset_id", p.asset_id.to_string())
+                .context("image", p.image.filename())
                 .context("region", format!("{:?}", p.region))
                 .context("tolerance", p.tolerance.to_string())
                 .context("alpha", format!("{:?}", p.alpha))
@@ -4983,9 +4997,9 @@ impl Executor {
         let found = point.is_some();
         v.insert("last_image_result".into(), MkValue::Boolean(found));
         v.insert("last_image_found".into(), MkValue::Boolean(found));
-        let asset = super::screen::image_result_variable(p.asset_id);
+        let asset = super::screen::image_result_variable(&p.image);
         v.insert(
-            super::screen::image_found_variable(p.asset_id),
+            super::screen::image_found_variable(&p.image),
             MkValue::Boolean(found),
         );
         if let Some(point) = point {
@@ -5122,8 +5136,9 @@ impl Executor {
                 Self::write_image_result(v, &payload, point);
                 Ok(point.is_some() == *found)
             }
-            MkCondition::PreviousImageResult { asset_id, found } => {
-                let key = asset_id
+            MkCondition::PreviousImageResult { image, found } => {
+                let key = image
+                    .as_ref()
                     .map(super::screen::image_found_variable)
                     .unwrap_or_else(|| "last_image_found".into());
                 // No recorded result is explicitly treated as "not found".
@@ -5243,7 +5258,6 @@ mod notification_sound_tests {
             folder_id: None,
             playback: MkPlayback::default(),
             steps,
-            image_assets: vec![],
         })
         .unwrap();
         let control = Arc::new(RunControl::default());
@@ -5465,7 +5479,6 @@ mod notification_sound_tests {
                     }),
                 ),
             ],
-            image_assets: vec![],
         })
         .unwrap();
         let control = Arc::new(RunControl::default());
@@ -5680,7 +5693,7 @@ pub mod fake {
         pub prompts: Mutex<Vec<PromptRequest>>,
         pub window_calls: Mutex<Vec<WindowCall>>,
         pub virtual_desktop_calls: Mutex<Vec<super::super::MkVirtualDesktopAction>>,
-        pub image_results: Mutex<HashMap<u64, VecDeque<ExecResult<Option<MkPoint>>>>>,
+        pub image_results: Mutex<HashMap<MkImageRef, VecDeque<ExecResult<Option<MkPoint>>>>>,
         pub resolved_variables: Mutex<Vec<RuntimeVariables>>,
         pub finalized_points: Mutex<Vec<MkPoint>>,
     }
@@ -5753,11 +5766,11 @@ pub mod fake {
         }
         /// Queues a distinct match, clean miss, decode error, or capture error
         /// for an asset. `Ok(None)` is deliberately not conflated with `Err`.
-        pub fn script_image(&self, asset_id: u64, result: ExecResult<Option<MkPoint>>) {
+        pub fn script_image(&self, image: MkImageRef, result: ExecResult<Option<MkPoint>>) {
             self.image_results
                 .lock()
                 .unwrap()
-                .entry(asset_id)
+                .entry(image)
                 .or_default()
                 .push_back(result);
         }
@@ -5944,8 +5957,8 @@ pub mod fake {
                     .context("variable", name)
                     .context("expected", "Point")),
                 },
-                MkCoordinateTarget::Image { asset_id, offset } => {
-                    match v.get(&super::super::screen::image_result_variable(*asset_id)) {
+                MkCoordinateTarget::Image { image, offset } => {
+                    match v.get(&super::super::screen::image_result_variable(image)) {
                         Some(MkValue::Point(point)) => Ok(offset_point(
                             *point,
                             i64::from(offset.x),
@@ -5955,7 +5968,7 @@ pub mod fake {
                             DiagnosticKind::TargetNotFound,
                             "image target not found",
                         )
-                        .context("asset_id", asset_id.to_string())),
+                        .context("image", image.filename())),
                     }
                 }
                 _ => Err(ExecutionDiagnostic::new(
@@ -5973,7 +5986,7 @@ pub mod fake {
                 .image_results
                 .lock()
                 .unwrap()
-                .get_mut(&payload.asset_id)
+                .get_mut(&payload.image)
                 .and_then(VecDeque::pop_front)
             {
                 return result;
@@ -6082,6 +6095,7 @@ pub mod fake {
 #[cfg(test)]
 mod phase_d_tests {
     use super::{fake::FakeBackend, *};
+    use crate::mkmacro::screen::{image_found_variable, image_result_variable};
     use crate::mkmacro::{
         MkErrorPolicy, MkLauncherCommandPayload, MkMacro, MkPlayback, MkRetry, MkStep, MkTextMode,
         compile,
@@ -6097,6 +6111,10 @@ mod phase_d_tests {
             on_error: MkErrorPolicy::Stop,
             action,
         }
+    }
+
+    fn image_ref(id: u64) -> MkImageRef {
+        MkImageRef::from_filename(format!("{id}.png"))
     }
 
     fn paste(text: &str) -> MkAction {
@@ -6316,7 +6334,6 @@ mod phase_d_tests {
             folder_id: None,
             playback: MkPlayback::default(),
             steps,
-            image_assets: vec![],
         })
         .unwrap()
     }
@@ -6405,7 +6422,7 @@ mod phase_d_tests {
     fn image_condition(found: bool) -> MkCondition {
         MkCondition::ImageSearch {
             search: crate::mkmacro::MkImageSearchCondition {
-                asset_id: 42,
+                image: MkImageRef::from_filename("42.png"),
                 region: SearchRegion::Desktop,
                 tolerance: 3,
                 alpha: crate::mkmacro::AlphaPolicy::Ignore,
@@ -6430,7 +6447,7 @@ mod phase_d_tests {
         ] {
             let fake = Arc::new(FakeBackend::default());
             for result in results {
-                fake.script_image(42, Ok(result));
+                fake.script_image(MkImageRef::from_filename("42.png"), Ok(result));
             }
             let waiter = Arc::new(RecordingWaiter::default());
             run_recorded(
@@ -7181,7 +7198,7 @@ mod phase_d_tests {
 
     fn image_payload(asset_id: u64, policy: MkImageNotFoundPolicy) -> MkImagePayload {
         MkImagePayload {
-            asset_id,
+            image: image_ref(asset_id),
             wait: MkWaitOptions {
                 timeout_ms: 0,
                 poll_interval_ms: 1,
@@ -7231,9 +7248,15 @@ mod phase_d_tests {
                     vars.get("last_image_result"),
                     Some(&MkValue::Boolean(found))
                 );
-                assert_eq!(vars.get("__image_found.10"), Some(&MkValue::Boolean(found)));
+                assert_eq!(
+                    vars.get(&image_found_variable(&image_ref(10))),
+                    Some(&MkValue::Boolean(found))
+                );
                 let expected_point = point.map(MkValue::Point);
-                assert_eq!(vars.get("__image.10"), expected_point.as_ref());
+                assert_eq!(
+                    vars.get(&image_result_variable(&image_ref(10))),
+                    expected_point.as_ref()
+                );
                 if named {
                     assert_eq!(vars.get("found"), Some(&MkValue::Boolean(found)));
                     assert_eq!(
@@ -7269,16 +7292,19 @@ mod phase_d_tests {
         let executor = Executor::new(fake.clone().backends(), control);
         let payload = image_payload(10, MkImageNotFoundPolicy::Continue);
         let point = MkPoint { x: 40, y: 50 };
-        fake.script_image(10, Ok(Some(point)));
+        fake.script_image(image_ref(10), Ok(Some(point)));
         let mut vars = RuntimeVariables::new();
         image_action(&executor, &payload, &mut vars).unwrap();
         assert_eq!(vars.get("point"), Some(&MkValue::Point(point)));
         assert_eq!(vars.get("x"), Some(&MkValue::Number(40.0)));
 
-        fake.script_image(10, Ok(None));
+        fake.script_image(image_ref(10), Ok(None));
         image_action(&executor, &payload, &mut vars).unwrap();
-        for key in ["__image.10", "last_image"] {
-            assert!(!vars.contains_key(key));
+        for key in [
+            image_result_variable(&image_ref(10)),
+            "last_image".to_owned(),
+        ] {
+            assert!(!vars.contains_key(&key));
         }
         for key in ["point", "x", "y"] {
             assert_eq!(vars.get(key), Some(&MkValue::Null));
@@ -7291,18 +7317,18 @@ mod phase_d_tests {
         ] {
             Executor::write_image_result(&mut vars, &payload, Some(point));
             fake.script_image(
-                10,
+                image_ref(10),
                 Err(ExecutionDiagnostic::new(DiagnosticKind::Backend, message)
                     .context("source", path)),
             );
             let error = image_action(&executor, &payload, &mut vars).unwrap_err();
             assert_eq!(error.kind, DiagnosticKind::Backend);
             assert_eq!(
-                error.context.get("asset_id").map(String::as_str),
-                Some("10")
+                error.context.get("image").map(String::as_str),
+                Some("10.png")
             );
             assert!(error.context.contains_key("region"));
-            assert!(!vars.contains_key("__image.10"));
+            assert!(!vars.contains_key(&image_result_variable(&image_ref(10))));
             assert_eq!(vars.get("found"), Some(&MkValue::Boolean(false)));
         }
     }
@@ -7310,7 +7336,7 @@ mod phase_d_tests {
     #[test]
     fn failing_miss_clears_stale_outputs_before_returning_timeout() {
         let fake = Arc::new(FakeBackend::default());
-        fake.script_image(10, Ok(None));
+        fake.script_image(image_ref(10), Ok(None));
         let control = Arc::new(RunControl::default());
         control.reset();
         let executor = Executor::new(fake.backends(), control);
@@ -7319,7 +7345,7 @@ mod phase_d_tests {
         Executor::write_image_result(&mut vars, &payload, Some(MkPoint { x: 1, y: 2 }));
         let error = image_action(&executor, &payload, &mut vars).unwrap_err();
         assert_eq!(error.kind, DiagnosticKind::Timeout);
-        assert!(!vars.contains_key("__image.10"));
+        assert!(!vars.contains_key(&image_result_variable(&image_ref(10))));
         assert_eq!(vars.get("point"), Some(&MkValue::Null));
     }
 
@@ -7334,7 +7360,7 @@ mod phase_d_tests {
             (10, MkPoint { x: 10, y: 20 }),
             (11, MkPoint { x: 90, y: 80 }),
         ] {
-            fake.script_image(id, Ok(Some(point)));
+            fake.script_image(image_ref(id), Ok(Some(point)));
             image_action(
                 &executor,
                 &image_payload(id, MkImageNotFoundPolicy::Continue),
@@ -7343,12 +7369,12 @@ mod phase_d_tests {
             .unwrap();
         }
         assert_eq!(
-            vars.get("__image.10"),
+            vars.get(&image_result_variable(&image_ref(10))),
             Some(&MkValue::Point(MkPoint { x: 10, y: 20 }))
         );
         let mut guard = InputCleanupGuard::new(fake.clone());
         let target = MkCoordinateTarget::Image {
-            asset_id: 10,
+            image: image_ref(10),
             offset: MkPoint { x: 3, y: -2 },
         };
         for duration_ms in [125, 0] {
@@ -7368,16 +7394,19 @@ mod phase_d_tests {
         assert!(fake.events().contains(&"smooth_move:13,18:125".into()));
         assert!(fake.events().contains(&"move:13,18".into()));
 
-        fake.script_image(10, Ok(None));
+        fake.script_image(image_ref(10), Ok(None));
         image_action(
             &executor,
             &image_payload(10, MkImageNotFoundPolicy::Continue),
             &mut vars,
         )
         .unwrap();
-        assert_eq!(vars.get("__image_found.10"), Some(&MkValue::Boolean(false)));
         assert_eq!(
-            vars.get("__image.11"),
+            vars.get(&image_found_variable(&image_ref(10))),
+            Some(&MkValue::Boolean(false))
+        );
+        assert_eq!(
+            vars.get(&image_result_variable(&image_ref(11))),
             Some(&MkValue::Point(MkPoint { x: 90, y: 80 }))
         );
         assert_eq!(
@@ -7441,7 +7470,7 @@ mod phase_d_tests {
     fn find_image_point_output_mandatory_match_moves_mouse_in_one_compiled_playback() {
         let fake = Arc::new(FakeBackend::default());
         let point = MkPoint { x: 823, y: 441 };
-        fake.script_image(10, Ok(Some(point)));
+        fake.script_image(image_ref(10), Ok(Some(point)));
         let mut payload = image_payload(10, MkImageNotFoundPolicy::Fail);
         payload.outputs = MkImageOutputs {
             point: Some("point".into()),
@@ -7475,7 +7504,7 @@ mod phase_d_tests {
     #[test]
     fn find_image_point_output_continued_miss_writes_null_and_reports_variable_type() {
         let fake = Arc::new(FakeBackend::default());
-        fake.script_image(10, Ok(None));
+        fake.script_image(image_ref(10), Ok(None));
         let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
         payload.outputs = MkImageOutputs {
             point: Some("point".into()),
@@ -7522,8 +7551,8 @@ mod phase_d_tests {
     #[test]
     fn repeated_find_image_point_output_match_then_miss_overwrites_same_runtime_value() {
         let fake = Arc::new(FakeBackend::default());
-        fake.script_image(10, Ok(Some(MkPoint { x: 10, y: 20 })));
-        fake.script_image(10, Ok(None));
+        fake.script_image(image_ref(10), Ok(Some(MkPoint { x: 10, y: 20 })));
+        fake.script_image(image_ref(10), Ok(None));
         let mut payload = image_payload(10, MkImageNotFoundPolicy::Continue);
         payload.outputs = MkImageOutputs {
             point: Some("point".into()),
@@ -7574,9 +7603,9 @@ mod phase_d_tests {
             s(2, variable_move()),
         ];
 
-        fake.script_image(10, Ok(Some(MkPoint { x: 500, y: 300 })));
+        fake.script_image(image_ref(10), Ok(Some(MkPoint { x: 500, y: 300 })));
         run(configured.clone(), fake.clone()).unwrap();
-        fake.script_image(10, Ok(Some(MkPoint { x: 500, y: 300 })));
+        fake.script_image(image_ref(10), Ok(Some(MkPoint { x: 500, y: 300 })));
         run(vec![configured[0].clone()], fake.clone()).unwrap();
         let error = run(vec![configured[1].clone()], fake).unwrap_err();
 

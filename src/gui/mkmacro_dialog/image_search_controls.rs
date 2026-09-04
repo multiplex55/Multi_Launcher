@@ -221,12 +221,12 @@ pub enum SharedImageOperation {
 /// Render the persisted fields that deliberately have identical semantics in actions and conditions.
 pub fn show_shared_fields(
     ui: &mut egui::Ui,
-    _asset_id: &mut u64,
+    _image: &mut crate::mkmacro::MkImageRef,
     region: &mut SearchRegion,
     tolerance: &mut u8,
     alpha: &mut AlphaPolicy,
     return_point: &mut ReturnPoint,
-    _assets: &[crate::mkmacro::MkImageAsset],
+    _assets: &[crate::mkmacro::MkImageRef],
 ) -> Option<SharedImageOperation> {
     let mut request = None;
     ui.heading("Reference Image");
@@ -273,7 +273,7 @@ pub fn show_shared_fields(
 
 pub fn payload_to_condition(p: &MkImagePayload) -> MkImageSearchCondition {
     MkImageSearchCondition {
-        asset_id: p.asset_id,
+        image: p.image.clone(),
         region: p.region.clone(),
         tolerance: p.tolerance,
         alpha: p.alpha.clone(),
@@ -281,7 +281,7 @@ pub fn payload_to_condition(p: &MkImagePayload) -> MkImageSearchCondition {
     }
 }
 pub fn apply_condition_to_payload(c: &MkImageSearchCondition, p: &mut MkImagePayload) {
-    p.asset_id = c.asset_id;
+    p.image = c.image.clone();
     p.region = c.region.clone();
     p.tolerance = c.tolerance;
     p.alpha = c.alpha.clone();
@@ -291,7 +291,7 @@ pub fn apply_condition_to_payload(c: &MkImageSearchCondition, p: &mut MkImagePay
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkImageNotFoundPolicy, MkImageOutputs, MkWaitOptions};
+    use crate::mkmacro::{MkImageNotFoundPolicy, MkImageOutputs, MkImageRef, MkWaitOptions};
     #[test]
     fn action_condition_shared_settings_have_parity_for_every_region() {
         for region in [
@@ -308,7 +308,7 @@ mod tests {
             },
         ] {
             let p = MkImagePayload {
-                asset_id: 9,
+                image: MkImageRef::from_filename("9.png"),
                 region,
                 tolerance: 7,
                 alpha: AlphaPolicy::Ignore,
@@ -322,7 +322,7 @@ mod tests {
             };
             let c = payload_to_condition(&p);
             let mut q = p.clone();
-            q.asset_id = 0;
+            q.image = MkImageRef::default();
             apply_condition_to_payload(&c, &mut q);
             assert_eq!(payload_to_condition(&q), c);
         }

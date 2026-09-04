@@ -10,7 +10,10 @@ use super::visual_overlay::{
     VisualOverlayCommand, VisualOverlayController, VisualOverlayError, VisualOverlayEvent,
 };
 use crate::mkmacro::ScreenRect;
-use crate::mkmacro::{ImageAssetAuthoringService, MkMacroStore, ScreenCaptureBackend};
+use crate::mkmacro::{
+    ImageAssetAuthoringService, ImageImportChoice, ImageImportResult, MkImageRef, MkMacroStore,
+    ScreenCaptureBackend,
+};
 use image::RgbaImage;
 use std::collections::VecDeque;
 use std::sync::{
@@ -508,10 +511,16 @@ pub trait RectangleOverlay: Send {
 pub trait CaptureAdapter: Send {
     fn capture_rect(&mut self, rect: ScreenRect) -> Result<RgbaImage, String>;
 }
-/// Combines asset allocation and PNG persistence into a transactional boundary.
-/// It must return an id only after the PNG has been completely written.
+/// Combines filename validation/collision handling and PNG persistence into a
+/// transactional boundary. It returns a reference only after the PNG is fully
+/// written.
 pub trait AssetStoreAdapter: Send {
-    fn write_png_asset(&mut self, macro_id: u64, image: &RgbaImage) -> Result<u64, String>;
+    fn write_captured_image(
+        &mut self,
+        image: &RgbaImage,
+        filename: MkImageRef,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult, String>;
 }
 
 /// Production capture adapter; importantly this calls the backend's rectangle
@@ -526,10 +535,14 @@ impl CaptureAdapter for ScreenCaptureAdapter {
 }
 pub struct MkMacroAssetStoreAdapter(pub Arc<MkMacroStore>);
 impl AssetStoreAdapter for MkMacroAssetStoreAdapter {
-    fn write_png_asset(&mut self, macro_id: u64, image: &RgbaImage) -> Result<u64, String> {
+    fn write_captured_image(
+        &mut self,
+        image: &RgbaImage,
+        filename: MkImageRef,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult, String> {
         ImageAssetAuthoringService::new(&self.0)
-            .stage_rgba(macro_id, image)
-            .map(|staged| staged.asset_id)
+            .stage_rgba(image, filename, choice)
             .map_err(|e| e.to_string())
     }
 }
@@ -542,8 +555,14 @@ pub struct DraftToken {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowOutcome {
-    Region { token: DraftToken, rect: ScreenRect },
-    Asset { token: DraftToken, asset_id: u64 },
+    Region {
+        token: DraftToken,
+        rect: ScreenRect,
+    },
+    Asset {
+        token: DraftToken,
+        image: MkImageRef,
+    },
     Cancelled,
     Failed(String),
 }
@@ -557,6 +576,11 @@ pub enum WorkflowState {
     },
     Capturing {
         rect: ScreenRect,
+    },
+    Naming {
+        rect: ScreenRect,
+        image: RgbaImage,
+        suggested_filename: String,
     },
 }
 
@@ -646,17 +670,56 @@ impl VisualCaptureWorkflow {
                 }
                 _ => {}
             },
-            WorkflowState::Capturing { rect } => {
-                let token = self.token.unwrap();
-                let outcome = self
-                    .capture
-                    .capture_rect(rect)
-                    .and_then(|image| self.assets.write_png_asset(token.macro_id, &image))
-                    .map(|asset_id| WorkflowOutcome::Asset { token, asset_id })
-                    .unwrap_or_else(WorkflowOutcome::Failed);
-                self.complete(outcome);
-            }
+            WorkflowState::Capturing { rect } => match self.capture.capture_rect(rect) {
+                Ok(image) => {
+                    self.state = WorkflowState::Naming {
+                        rect,
+                        image,
+                        suggested_filename: "reference.png".into(),
+                    }
+                }
+                Err(error) => self.complete(WorkflowOutcome::Failed(error)),
+            },
+            WorkflowState::Naming { .. } => {}
         }
+    }
+
+    pub fn pending_image(&self) -> Option<&RgbaImage> {
+        match &self.state {
+            WorkflowState::Naming { image, .. } => Some(image),
+            _ => None,
+        }
+    }
+
+    pub fn suggested_filename(&self) -> Option<&str> {
+        match &self.state {
+            WorkflowState::Naming {
+                suggested_filename, ..
+            } => Some(suggested_filename),
+            _ => None,
+        }
+    }
+
+    pub fn confirm_filename(
+        &mut self,
+        filename: MkImageRef,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult, String> {
+        let WorkflowState::Naming { image, .. } = &self.state else {
+            return Err("no captured image is awaiting a filename".into());
+        };
+        let result = self.assets.write_captured_image(image, filename, choice)?;
+        match &result {
+            ImageImportResult::Imported(image) => {
+                self.complete(WorkflowOutcome::Asset {
+                    token: self.token.unwrap(),
+                    image: image.clone(),
+                });
+            }
+            ImageImportResult::Cancelled => self.complete(WorkflowOutcome::Cancelled),
+            ImageImportResult::Collision { .. } => {}
+        }
+        Ok(result)
     }
     fn complete_with_cleanup(&mut self, outcome: WorkflowOutcome) {
         if let WorkflowState::Selecting { operation_id, .. } = self.state {
@@ -834,7 +897,8 @@ mod tests {
         Cancel,
         Capture(ScreenRect),
         Write {
-            macro_id: u64,
+            filename: MkImageRef,
+            choice: ImageImportChoice,
             dimensions: (u32, u32),
         },
     }
@@ -884,13 +948,21 @@ mod tests {
     }
     struct Store(Arc<Mutex<FakeState>>);
     impl AssetStoreAdapter for Store {
-        fn write_png_asset(&mut self, macro_id: u64, image: &RgbaImage) -> Result<u64, String> {
+        fn write_captured_image(
+            &mut self,
+            image: &RgbaImage,
+            filename: MkImageRef,
+            choice: ImageImportChoice,
+        ) -> Result<ImageImportResult, String> {
             let mut fake = self.0.lock().unwrap();
             fake.calls.push(Call::Write {
-                macro_id,
+                filename: filename.clone(),
+                choice,
                 dimensions: image.dimensions(),
             });
-            fake.write_error.take().map_or(Ok(42), Err)
+            fake.write_error
+                .take()
+                .map_or(Ok(ImageImportResult::Imported(filename)), Err)
         }
     }
     fn fixture() -> (VisualCaptureWorkflow, Arc<Mutex<FakeState>>) {
@@ -995,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_capture_orders_confirmation_before_capture_and_write() {
+    fn reference_capture_keeps_pixels_pending_until_filename_confirmation() {
         let (mut workflow, fake) = fixture();
         let rect = ScreenRect::new(-13, 27, 6, 4);
         workflow
@@ -1017,11 +1089,19 @@ mod tests {
             [Call::Begin(RectanglePurpose::ReferenceImageCapture)]
         );
         workflow.tick();
+        assert!(matches!(workflow.state(), WorkflowState::Naming { .. }));
+        assert_eq!(workflow.take_completed(), None);
+        workflow
+            .confirm_filename(
+                MkImageRef::from_filename("captured.png"),
+                ImageImportChoice::SaveAs(MkImageRef::from_filename("captured.png")),
+            )
+            .unwrap();
         assert_eq!(
             workflow.take_completed(),
             Some(WorkflowOutcome::Asset {
                 token: token(),
-                asset_id: 42
+                image: MkImageRef::from_filename("captured.png")
             })
         );
         assert_eq!(
@@ -1030,7 +1110,8 @@ mod tests {
                 Call::Begin(RectanglePurpose::ReferenceImageCapture),
                 Call::Capture(rect),
                 Call::Write {
-                    macro_id: 3,
+                    filename: MkImageRef::from_filename("captured.png"),
+                    choice: ImageImportChoice::SaveAs(MkImageRef::from_filename("captured.png")),
                     dimensions: (6, 4)
                 }
             ]
@@ -1120,10 +1201,22 @@ mod tests {
             confirm(&fake, 7, rect);
             workflow.tick();
             workflow.tick();
-            assert!(matches!(
-                workflow.take_completed(),
-                Some(WorkflowOutcome::Failed(_))
-            ));
+            if store_failure {
+                assert!(matches!(workflow.state(), WorkflowState::Naming { .. }));
+                assert!(
+                    workflow
+                        .confirm_filename(
+                            MkImageRef::from_filename("capture.png"),
+                            ImageImportChoice::ReplaceExisting,
+                        )
+                        .is_err()
+                );
+            } else {
+                assert!(matches!(
+                    workflow.take_completed(),
+                    Some(WorkflowOutcome::Failed(_))
+                ));
+            }
             let calls = data_calls(&fake);
             assert_eq!(
                 calls

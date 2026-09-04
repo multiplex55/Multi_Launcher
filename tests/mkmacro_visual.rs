@@ -26,7 +26,6 @@ fn plan(action: MkAction) -> MkExecutionPlan {
         folder_id: None,
         playback: Default::default(),
         steps: vec![s(action)],
-        image_assets: vec![],
     })
     .unwrap()
 }
@@ -47,7 +46,7 @@ fn image_catalog_defaults_require_assets_and_configured_payload_round_trips() {
         assert_eq!(
             action_catalog::draft_validation_contract(&action),
             DraftValidationContract::AwaitingRequiredAsset,
-            "{} must not apply the asset_id == 0 draft sentinel",
+            "{} must not apply an empty filename draft sentinel",
             descriptor.name
         );
         assert!(multi_launcher::mkmacro::executor::has_runtime_support(
@@ -57,7 +56,7 @@ fn image_catalog_defaults_require_assets_and_configured_payload_round_trips() {
     }
 
     let payload = MkImagePayload {
-        asset_id: 42,
+        image: MkImageRef::from_filename("visual.png"),
         wait: MkWaitOptions {
             timeout_ms: 12_345,
             poll_interval_ms: 77,
@@ -92,7 +91,7 @@ fn image_wait_cancels_promptly_without_real_screen_access() {
         thread::spawn(move || {
             Executor::new(f.backends(), c).execute(
                 &plan(MkAction::ImageFind(MkImagePayload {
-                    asset_id: 2,
+                    image: MkImageRef::from_filename("visual.png"),
                     wait: MkWaitOptions {
                         timeout_ms: 60_000,
                         poll_interval_ms: 10_000,

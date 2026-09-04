@@ -1,69 +1,47 @@
-//! Shared, searchable browser for image assets owned by the active macro.
+//! Shared, searchable browser for references in the flat library.
 
-use crate::mkmacro::{MkImageAsset, MkMacroStore};
+use crate::mkmacro::{MkImageRef, MkMacroStore};
 use eframe::egui;
-use std::path::Path;
 
-/// Everything the picker may inspect. Callers must pass the complete asset
-/// collection of `macro_id`; the picker deliberately never queries other macros.
+/// Everything the picker may inspect. Entries always come from the store's
+/// direct flat-root enumeration, not from a macro-owned catalog.
 #[derive(Clone, Copy)]
 pub struct ImageAssetUiContext<'a> {
-    pub macro_id: u64,
-    pub assets: &'a [MkImageAsset],
     pub store: &'a MkMacroStore,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageAssetSelection {
-    pub asset_id: u64,
-}
-
-pub fn asset_filename(asset: &MkImageAsset) -> &str {
-    Path::new(&asset.relative_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&asset.relative_path)
+    pub image: MkImageRef,
 }
 
 /// Widget-independent description of one browser row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ImageAssetBrowserEntry<'a> {
-    pub asset_id: u64,
-    pub display_name: &'a str,
     pub filename: &'a str,
     pub selected: bool,
     pub preview_key: super::image_preview::PreviewLookupKey,
 }
 
-/// Builds rows solely from the active macro's assets. A selected row which does
+/// Builds rows solely from the shared library. A selected row which does
 /// not match the search is retained at the beginning, making its placement
 /// deterministic while leaving matching rows in document order.
 pub(crate) fn browser_entries<'a>(
-    macro_id: u64,
-    assets: &'a [MkImageAsset],
+    assets: &'a [MkImageRef],
     query: &str,
-    selected_asset_id: u64,
+    selected: &MkImageRef,
 ) -> Vec<ImageAssetBrowserEntry<'a>> {
     let query = query.trim().to_lowercase();
-    let matches = |asset: &MkImageAsset| {
-        query.is_empty()
-            || asset.name.to_lowercase().contains(&query)
-            || asset_filename(asset).to_lowercase().contains(&query)
-    };
-    let row = |asset: &'a MkImageAsset| ImageAssetBrowserEntry {
-        asset_id: asset.id,
-        display_name: if asset.name.is_empty() {
-            asset_filename(asset)
-        } else {
-            &asset.name
-        },
-        filename: asset_filename(asset),
-        selected: asset.id == selected_asset_id,
-        preview_key: super::image_preview::PreviewLookupKey::new(macro_id, asset.id),
+    let matches =
+        |asset: &MkImageRef| query.is_empty() || asset.filename().to_lowercase().contains(&query);
+    let row = |asset: &'a MkImageRef| ImageAssetBrowserEntry {
+        filename: asset.filename(),
+        selected: asset == selected,
+        preview_key: super::image_preview::PreviewLookupKey::new(asset.clone()),
     };
     let retained = assets
         .iter()
-        .find(|asset| asset.id == selected_asset_id && !matches(asset));
+        .find(|asset| **asset == *selected && !matches(asset));
     retained
         .into_iter()
         .chain(assets.iter().filter(|asset| matches(asset)))
@@ -72,21 +50,16 @@ pub(crate) fn browser_entries<'a>(
 }
 
 /// Filters without reordering: document/source order is the deterministic UI order.
-pub fn filtered_assets<'a>(assets: &'a [MkImageAsset], query: &str) -> Vec<&'a MkImageAsset> {
+pub fn filtered_assets<'a>(assets: &'a [MkImageRef], query: &str) -> Vec<&'a MkImageRef> {
     let query = query.trim().to_lowercase();
     assets
         .iter()
-        .filter(|asset| {
-            query.is_empty()
-                || asset.name.to_lowercase().contains(&query)
-                || asset_filename(asset).to_lowercase().contains(&query)
-                || asset.id.to_string().contains(&query)
-        })
+        .filter(|asset| query.is_empty() || asset.filename().to_lowercase().contains(&query))
         .collect()
 }
 
-pub fn selected_asset<'a>(assets: &'a [MkImageAsset], asset_id: u64) -> Option<&'a MkImageAsset> {
-    assets.iter().find(|asset| asset.id == asset_id)
+pub fn selected_asset<'a>(assets: &'a [MkImageRef], image: &MkImageRef) -> Option<&'a MkImageRef> {
+    assets.iter().find(|asset| *asset == image)
 }
 
 /// Render a picker whose persistent state is isolated by `editor_id`.
@@ -94,7 +67,7 @@ pub fn show(
     ui: &mut egui::Ui,
     editor_id: impl std::hash::Hash,
     context: ImageAssetUiContext<'_>,
-    asset_id: &mut u64,
+    image: &mut MkImageRef,
 ) -> Option<ImageAssetSelection> {
     let id = ui.make_persistent_id(("image-asset-picker", editor_id));
     ui.label("Reference Image");
@@ -110,23 +83,22 @@ pub fn show(
     ui.ctx()
         .data_mut(|data| data.insert_temp(id, query.clone()));
 
-    if *asset_id != 0 && selected_asset(context.assets, *asset_id).is_none() {
+    let assets = context.store.image_refs().unwrap_or_default();
+    if !image.filename().is_empty() && selected_asset(&assets, image).is_none() {
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            format!("Missing asset · ID {}", *asset_id),
+            format!("Missing reference image · {}", image.filename()),
         );
     }
-    let matches = browser_entries(context.macro_id, context.assets, &query, *asset_id);
+    let matches = browser_entries(&assets, &query, image);
     let mut selection = None;
     egui::ScrollArea::vertical()
         .id_source(id.with("scroll"))
         .max_height(230.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            if context.assets.is_empty() {
-                ui.weak(
-                    "No image assets belong to this macro. Select PNG… or Capture… to add one.",
-                );
+            if assets.is_empty() {
+                ui.weak("No PNG files are available in mkmacro_assets. Select PNG… or Capture… to add one.");
             } else if matches.is_empty() {
                 ui.weak("No image assets match this search.");
             }
@@ -145,20 +117,17 @@ pub fn show(
                             super::image_preview::show_thumbnail(
                                 ui,
                                 context.store,
-                                context.macro_id,
-                                asset.asset_id,
+                                &crate::mkmacro::MkImageRef::from_filename(asset.filename),
                                 56.0,
                             );
                             ui.vertical(|ui| {
-                                ui.strong(asset.display_name);
                                 ui.small(asset.filename);
-                                ui.small(format!("ID {}", asset.asset_id));
                             });
                         });
                     });
                 let response = ui.interact(
                     row.response.rect,
-                    id.with(("row", asset.asset_id)),
+                    id.with(("row", asset.filename)),
                     egui::Sense::click(),
                 );
                 response.widget_info(|| {
@@ -166,15 +135,15 @@ pub fn show(
                         egui::WidgetType::SelectableLabel,
                         selected,
                         format!(
-                            "{}; {}; ID {}",
-                            asset.display_name, asset.filename, asset.asset_id
+                            "{}; {}",
+                            asset.filename, asset.filename
                         ),
                     )
                 });
                 if response.clicked() {
-                    *asset_id = asset.asset_id;
+                    *image = MkImageRef::from_filename(asset.filename);
                     selection = Some(ImageAssetSelection {
-                        asset_id: asset.asset_id,
+                        image: MkImageRef::from_filename(asset.filename),
                     });
                 }
             }
@@ -185,118 +154,108 @@ pub fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn asset(id: u64, name: &str, file: &str) -> MkImageAsset {
-        MkImageAsset {
-            id,
-            name: name.into(),
-            relative_path: file.into(),
-        }
+    fn image(name: &str) -> MkImageRef {
+        MkImageRef::from_filename(name)
     }
 
     #[test]
-    fn filtering_covers_names_files_ids_case_whitespace_and_empty() {
-        let assets = vec![
-            asset(42, "Login Button", "m/LOGIN.png"),
-            asset(7, "Other", "m/cat.png"),
-        ];
-        assert_eq!(filtered_assets(&assets, " login ")[0].id, 42);
-        assert_eq!(filtered_assets(&assets, "CAT")[0].id, 7);
-        assert_eq!(filtered_assets(&assets, " 42 ")[0].id, 42);
+    fn filtering_matches_filenames_case_insensitively() {
+        let assets = vec![image("LOGIN.png"), image("cat.png")];
+        assert_eq!(
+            filtered_assets(&assets, " login ")[0].filename(),
+            "LOGIN.png"
+        );
+        assert_eq!(filtered_assets(&assets, "CAT")[0].filename(), "cat.png");
+        assert!(filtered_assets(&assets, "LOGIN").len() == 1);
         assert!(filtered_assets(&assets, "missing").is_empty());
         assert_eq!(
             filtered_assets(&assets, "")
                 .iter()
-                .map(|a| a.id)
+                .map(|a| a.filename())
                 .collect::<Vec<_>>(),
-            vec![42, 7]
+            vec!["LOGIN.png", "cat.png"]
         );
         assert_eq!(filtered_assets(&assets, "   ").len(), 2);
     }
 
     #[test]
     fn source_list_is_complete_and_deterministically_ordered() {
-        let assets = vec![asset(9, "Unused", "9.png"), asset(2, "Used", "2.png")];
+        let assets = vec![image("b.png"), image("a.png")];
         assert_eq!(
             filtered_assets(&assets, "")
                 .iter()
-                .map(|a| a.id)
+                .map(|a| a.filename())
                 .collect::<Vec<_>>(),
-            vec![9, 2]
+            vec!["b.png", "a.png"]
         );
     }
 
     #[test]
     fn selected_and_missing_lookup_are_explicit() {
-        let assets = vec![asset(3, "Three", "3.png")];
-        assert_eq!(selected_asset(&assets, 3).unwrap().id, 3);
-        assert!(selected_asset(&assets, 99).is_none());
+        let assets = vec![image("three.png")];
+        assert_eq!(
+            selected_asset(&assets, &image("three.png"))
+                .unwrap()
+                .filename(),
+            "three.png"
+        );
+        assert!(selected_asset(&assets, &image("missing.png")).is_none());
     }
 
     #[test]
     fn selection_event_updates_only_the_passed_value() {
-        let mut selected = 4;
-        assert_eq!(selected, 4);
-        let event = ImageAssetSelection { asset_id: 8 };
-        selected = event.asset_id;
-        assert_eq!(selected, 8);
+        let event = ImageAssetSelection {
+            image: image("new.png"),
+        };
+        let selected = event.image;
+        assert_eq!(selected.filename(), "new.png");
     }
 
     #[test]
-    fn browser_model_is_macro_scoped_complete_and_has_preview_identity() {
-        let current = vec![
-            asset(1, "Shared", "current/same.png"),
-            asset(2, "", "current/two.png"),
-        ];
-        let other_macro = vec![
-            asset(1, "Shared", "other/same.png"),
-            asset(3, "Two", "other/two.png"),
-        ];
-        let rows = browser_entries(10, &current, "", 2);
+    fn browser_model_uses_filename_rows_and_shared_preview_identity() {
+        let current = vec![image("same.png"), image("two.png")];
+        let rows = browser_entries(&current, "", &image("two.png"));
         assert_eq!(
-            rows.iter().map(|row| row.asset_id).collect::<Vec<_>>(),
-            vec![1, 2]
+            rows.iter().map(|row| row.filename).collect::<Vec<_>>(),
+            vec!["same.png", "two.png"]
         );
-        assert_eq!(rows[1].display_name, "two.png");
         assert!(rows[1].selected);
         assert_eq!(
             rows[0].preview_key,
-            super::super::image_preview::PreviewLookupKey::new(10, 1)
+            super::super::image_preview::PreviewLookupKey::new(image("same.png"))
         );
-        assert!(rows.iter().all(|row| {
-            !other_macro
-                .iter()
-                .any(|other| other.id == row.asset_id && other.relative_path == row.filename)
-        }));
-        assert!(browser_entries(10, &[], "same", 1).is_empty());
+        assert!(browser_entries(&[], "", &image("same.png")).is_empty());
     }
 
     #[test]
     fn browser_searches_names_and_filenames_case_insensitively() {
         let assets = vec![
-            asset(1, "Login Button", "shots/unrelated.png"),
-            asset(2, "Animal", "shots/Siamese-Cat.PNG"),
-            asset(3, "Settings", "shots/gear.png"),
+            image("login_button.png"),
+            image("Siamese-Cat.PNG"),
+            image("gear.png"),
         ];
-        assert_eq!(browser_entries(1, &assets, "  bUtTo  ", 0)[0].asset_id, 1);
-        assert_eq!(browser_entries(1, &assets, "cat.p", 0)[0].asset_id, 2);
-        assert!(browser_entries(1, &assets, "absent", 0).is_empty());
+        assert_eq!(
+            browser_entries(&assets, "  bUtTo  ", &MkImageRef::default())[0].filename,
+            "login_button.png"
+        );
+        assert_eq!(
+            browser_entries(&assets, "cat.p", &MkImageRef::default())[0].filename,
+            "Siamese-Cat.PNG"
+        );
+        assert!(browser_entries(&assets, "absent", &MkImageRef::default()).is_empty());
     }
 
     #[test]
     fn selected_non_match_is_retained_first_without_duplicates() {
-        let assets = vec![
-            asset(1, "Alpha", "a.png"),
-            asset(2, "Beta", "b.png"),
-            asset(3, "Alphabet", "c.png"),
-        ];
-        let retained = browser_entries(7, &assets, "alpha", 2);
+        let assets = vec![image("a.png"), image("b.png"), image("alphabet.png")];
+        let retained = browser_entries(&assets, "alpha", &image("b.png"));
         assert_eq!(
-            retained.iter().map(|row| row.asset_id).collect::<Vec<_>>(),
-            vec![2, 1, 3]
+            retained.iter().map(|row| row.filename).collect::<Vec<_>>(),
+            vec!["b.png", "alphabet.png"]
         );
         assert!(retained[0].selected);
-        let matching = browser_entries(7, &assets, "beta", 2);
+        let matching = browser_entries(&assets, "b.png", &image("b.png"));
         assert_eq!(matching.len(), 1);
-        assert_eq!(matching[0].asset_id, 2);
+        assert_eq!(matching[0].filename, "b.png");
     }
 }

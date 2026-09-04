@@ -1,6 +1,6 @@
 //! Background reference-image authoring jobs.
 use super::image_authoring_destination::ConditionOperationDestination;
-use crate::mkmacro::{MkMacroStore, StagedImageAsset};
+use crate::mkmacro::{ImageImportChoice, ImageImportResult, MkImageRef, MkMacroStore};
 use std::{
     path::PathBuf,
     sync::{
@@ -49,7 +49,7 @@ mod tests {
             Arc::new(store),
             token,
             destination.clone(),
-            44,
+            MkImageRef::from_filename("old.png"),
             "secret/example.png".into(),
             &DropExecutor,
         )
@@ -59,7 +59,7 @@ mod tests {
                 Arc::new(MkMacroStore::open(dir.path()).unwrap().0),
                 token,
                 ImageAuthoringDestination::ImageActionReference,
-                0,
+                MkImageRef::default(),
                 "other.png".into(),
                 &DropExecutor
             )
@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(actual_token, token);
         assert_eq!(actual_destination, destination);
         assert_eq!(completion.destination, destination);
-        assert_eq!(previous, 44);
+        assert_eq!(previous, MkImageRef::from_filename("old.png"));
         assert_eq!(source.file_name().unwrap(), "example.png");
         assert!(
             completion
@@ -106,7 +106,7 @@ pub enum ImageAuthoringDestination {
 pub struct ImageAuthoringCompletion {
     pub token: DraftToken,
     pub destination: ImageAuthoringDestination,
-    pub result: Result<StagedImageAsset, String>,
+    pub result: Result<ImageImportResult, String>,
 }
 
 #[derive(Debug)]
@@ -115,7 +115,7 @@ pub enum ImageAuthoringJob {
     Importing {
         token: DraftToken,
         destination: ImageAuthoringDestination,
-        previous_asset_id: u64,
+        previous_image: MkImageRef,
         source: PathBuf,
         completion: Receiver<ImageAuthoringCompletion>,
     },
@@ -137,14 +137,14 @@ impl ImageAuthoringJob {
         store: Arc<MkMacroStore>,
         token: DraftToken,
         destination: ImageAuthoringDestination,
-        previous_asset_id: u64,
+        previous_image: MkImageRef,
         source: PathBuf,
     ) -> Result<(), &'static str> {
         self.start_with_executor(
             store,
             token,
             destination,
-            previous_asset_id,
+            previous_image,
             source,
             &ThreadExecutor,
         )
@@ -155,8 +155,29 @@ impl ImageAuthoringJob {
         store: Arc<MkMacroStore>,
         token: DraftToken,
         destination: ImageAuthoringDestination,
-        previous_asset_id: u64,
+        previous_image: MkImageRef,
         source: PathBuf,
+        executor: &dyn ImageAuthoringExecutor,
+    ) -> Result<(), &'static str> {
+        self.start_with_choice_with_executor(
+            store,
+            token,
+            destination,
+            previous_image,
+            source,
+            None,
+            executor,
+        )
+    }
+
+    pub fn start_with_choice_with_executor(
+        &mut self,
+        store: Arc<MkMacroStore>,
+        token: DraftToken,
+        destination: ImageAuthoringDestination,
+        previous_image: MkImageRef,
+        source: PathBuf,
+        choice: Option<ImageImportChoice>,
         executor: &dyn ImageAuthoringExecutor,
     ) -> Result<(), &'static str> {
         if self.is_importing() {
@@ -166,14 +187,17 @@ impl ImageAuthoringJob {
         *self = Self::Importing {
             token,
             destination: destination.clone(),
-            previous_asset_id,
+            previous_image,
             source: source.clone(),
             completion,
         };
         executor.execute(Box::new(move || {
-            let result = crate::mkmacro::ImageAssetAuthoringService::new(&store)
-                .import_png(token.macro_id, &source)
-                .map_err(|error| format!("Reference image: {error:#}"));
+            let service = crate::mkmacro::ImageAssetAuthoringService::new(&store);
+            let result = match choice {
+                Some(choice) => service.import_png_with_choice(&source, choice),
+                None => service.import_png(&source),
+            }
+            .map_err(|error| format!("Reference image: {error:#}"));
             let _ = sender.send(ImageAuthoringCompletion {
                 token,
                 destination,
@@ -188,14 +212,14 @@ impl ImageAuthoringJob {
     ) -> Option<(
         DraftToken,
         ImageAuthoringDestination,
-        u64,
+        MkImageRef,
         PathBuf,
         ImageAuthoringCompletion,
     )> {
         let Self::Importing {
             token,
             destination,
-            previous_asset_id,
+            previous_image,
             source,
             completion,
             ..
@@ -207,7 +231,7 @@ impl ImageAuthoringJob {
             Ok(done) => Some((
                 *token,
                 destination.clone(),
-                *previous_asset_id,
+                previous_image.clone(),
                 source.clone(),
                 done,
             )),
@@ -215,7 +239,7 @@ impl ImageAuthoringJob {
             Err(mpsc::TryRecvError::Disconnected) => Some((
                 *token,
                 destination.clone(),
-                *previous_asset_id,
+                previous_image.clone(),
                 source.clone(),
                 ImageAuthoringCompletion {
                     token: *token,

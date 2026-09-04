@@ -807,7 +807,6 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
             on_error: Default::default(),
             action,
         }],
-        image_assets: vec![],
     })
     .unwrap();
     let error = Executor::new(Backends::unsupported(), Arc::new(RunControl::default()))

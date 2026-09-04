@@ -5,8 +5,8 @@ use super::image_asset_picker::ImageAssetUiContext;
 use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::{
-    AlphaPolicy, MkCompareOp, MkCondition, MkCoordinateTarget, MkImageAsset,
-    MkImageSearchCondition, MkWindowMatcher, ReturnPoint, SearchRegion,
+    AlphaPolicy, MkCompareOp, MkCondition, MkCoordinateTarget, MkImageRef, MkImageSearchCondition,
+    MkWindowMatcher, ReturnPoint, SearchRegion,
 };
 use eframe::egui;
 
@@ -108,7 +108,7 @@ pub fn default_condition(kind: ConditionKind) -> MkCondition {
         },
         ConditionKind::ImageSearch => MkCondition::ImageSearch {
             search: MkImageSearchCondition {
-                asset_id: 1,
+                image: MkImageRef::default(),
                 region: SearchRegion::Desktop,
                 tolerance: 0,
                 alpha: AlphaPolicy::Compare,
@@ -117,7 +117,7 @@ pub fn default_condition(kind: ConditionKind) -> MkCondition {
             found: true,
         },
         ConditionKind::PreviousImageResult => MkCondition::PreviousImageResult {
-            asset_id: None,
+            image: None,
             found: true,
         },
         ConditionKind::PixelResult => MkCondition::PixelResult {
@@ -202,15 +202,15 @@ pub(super) fn first_window_picker_path(condition: &MkCondition) -> Option<Vec<us
     }
 }
 
-/// Edits a condition tree using only assets from the active macro.  The same
-/// catalog is threaded through every recursive child, so nested conditions do
-/// not lose their authoring context.
+/// Edits a condition tree using references from the shared flat library. The
+/// same store context is threaded through every recursive child, so nested
+/// conditions do not lose their authoring context.
 pub(super) fn condition_ui_with_assets(
     ui: &mut egui::Ui,
     condition: &mut MkCondition,
     context: &TargetEditorContext<'_>,
 ) -> Option<ConditionEditorRequest> {
-    let assets = context.assets;
+    let assets = context.store.image_refs().unwrap_or_default();
     let mut requested = None;
     ui.group(|ui| {
         let kind = condition_kind(condition);
@@ -272,12 +272,12 @@ pub(super) fn condition_ui_with_assets(
             MkCondition::ImageSearch { search, found } => {
                 if let Some(operation) = super::image_search_controls::show_shared_fields(
                     ui,
-                    &mut search.asset_id,
+                    &mut search.image,
                     &mut search.region,
                     &mut search.tolerance,
                     &mut search.alpha,
                     &mut search.return_point,
-                    assets,
+                    &assets,
                 ) {
                     use super::image_search_controls::SharedImageOperation as S;
                     use ConditionImageOperation as O;
@@ -302,23 +302,23 @@ pub(super) fn condition_ui_with_assets(
                         ui.selectable_value(found, false, "Not found");
                     });
             }
-            MkCondition::PreviousImageResult { asset_id, found } => {
-                let mut specific = asset_id.is_some();
+            MkCondition::PreviousImageResult { image, found } => {
+                let mut specific = image.is_some();
                 if ui
                     .checkbox(&mut specific, "Use a specific image's latest result")
                     .changed()
                 {
-                    *asset_id = specific.then_some(assets.first().map_or(1, |a| a.id));
+                    *image = specific.then(|| assets.first().cloned().unwrap_or_default());
                 }
-                if let Some(id) = asset_id {
+                if let Some(image) = image {
                     egui::ComboBox::from_label("Reference image")
-                        .selected_text(super::action_editor::image_asset_label(*id, assets))
+                        .selected_text(super::action_editor::image_asset_label(image, &assets))
                         .show_ui(ui, |ui| {
                             for asset in assets {
                                 ui.selectable_value(
-                                    id,
-                                    asset.id,
-                                    super::action_editor::image_asset_label(asset.id, assets),
+                                    image,
+                                    asset.clone(),
+                                    super::action_editor::image_asset_label(&asset, &[]),
                                 );
                             }
                         });
@@ -371,8 +371,6 @@ pub fn condition_ui_with_context(
     context: ImageAssetUiContext<'_>,
 ) -> Option<ConditionEditorRequest> {
     let target_context = TargetEditorContext {
-        macro_id: context.macro_id,
-        assets: context.assets,
         store: context.store,
     };
     condition_ui_context_at(
@@ -406,15 +404,16 @@ fn condition_ui_context_at(
                         kind_label(ConditionKind::ImageSearch),
                     );
                 });
-            super::image_asset_picker::show(ui, path.indexes(), context, &mut search.asset_id);
+            super::image_asset_picker::show(ui, path.indexes(), context, &mut search.image);
+            let assets = context.store.image_refs().unwrap_or_default();
             if let Some(operation) = super::image_search_controls::show_shared_fields(
                 ui,
-                &mut search.asset_id,
+                &mut search.image,
                 &mut search.region,
                 &mut search.tolerance,
                 &mut search.alpha,
                 &mut search.return_point,
-                context.assets,
+                &assets,
             ) {
                 use super::image_search_controls::SharedImageOperation as S;
                 use ConditionImageOperation as O;
@@ -595,7 +594,7 @@ mod tests {
                             matcher: default_matcher(),
                         },
                         MkCondition::PreviousImageResult {
-                            asset_id: Some(42),
+                            image: Some(MkImageRef::from_filename("42.png")),
                             found: false,
                         },
                     ],

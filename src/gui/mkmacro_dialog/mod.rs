@@ -146,7 +146,6 @@ mod tests {
                     folder_id: None,
                     playback: Default::default(),
                     steps: vec![],
-                    image_assets: vec![],
                 })
                 .collect(),
         }
@@ -547,11 +546,6 @@ mod tests {
                 }),
             })
             .collect();
-        m.image_assets.push(crate::mkmacro::MkImageAsset {
-            id: 7,
-            name: "Preserve this asset".into(),
-            relative_path: "mkmacro_assets/3/7.png".into(),
-        });
         d.save().unwrap();
         d.selected_macro_id = Some(3);
         let rows = [11, 12, 13];
@@ -738,19 +732,13 @@ mod tests {
                     }),
                 })
                 .collect();
-            let relative_path = d
-                .store
-                .write_png_asset(
-                    m.id,
-                    1,
+            d.store
+                .write_captured_png(
                     &image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+                    crate::mkmacro::MkImageRef::from_filename("shared.png"),
+                    crate::mkmacro::ImageImportChoice::ReplaceExisting,
                 )
                 .unwrap();
-            m.image_assets.push(crate::mkmacro::MkImageAsset {
-                id: 1,
-                name: format!("Reference {}", m.id),
-                relative_path: relative_path.to_string_lossy().into_owned(),
-            });
         }
         d.save().unwrap();
         d.selected_macro_id = Some(3);
@@ -835,8 +823,11 @@ mod tests {
             let assets: Vec<_> = before
                 .macros
                 .iter()
-                .map(|m| {
-                    let path = d.store.asset_path(m.id, 1).unwrap();
+                .map(|_| {
+                    let path = d
+                        .store
+                        .image_path(&crate::mkmacro::MkImageRef::from_filename("shared.png"))
+                        .unwrap();
                     let bytes = fs::read(&path).unwrap();
                     (path, bytes)
                 })
@@ -1185,7 +1176,6 @@ mod tests {
             folder_id: Some(9),
             playback: Default::default(),
             steps: vec![],
-            image_assets: vec![],
         }
     }
 
@@ -1311,7 +1301,7 @@ mod tests {
             class: Some("Widget".into()),
         };
         let payload = MkImagePayload {
-            asset_id: 10,
+            image: crate::mkmacro::MkImageRef::from_filename("10.png"),
             region: SearchRegion::ClientArea {
                 matcher: matcher.clone(),
             },
@@ -1370,7 +1360,7 @@ mod tests {
             &steps[anchor + 1].action,
             MkAction::MouseMove(MkMouseMovePayload {
                 target: MkCoordinateTarget::Image {
-                    asset_id: 10,
+                    image: _,
                     offset: crate::mkmacro::variables::MkPoint { x: 0, y: 0 }
                 },
                 duration_ms: 500
@@ -1401,7 +1391,6 @@ mod tests {
                 folder_id,
                 playback: Default::default(),
                 steps: vec![],
-                image_assets: vec![],
             }
         );
     }
@@ -2108,21 +2097,13 @@ mod tests {
     fn image_result_details_use_friendly_catalog_description() {
         let action = MkAction::MouseMove(MkMouseMovePayload {
             target: MkCoordinateTarget::Image {
-                asset_id: 10,
+                image: crate::mkmacro::MkImageRef::from_filename("10.png"),
                 offset: crate::mkmacro::variables::MkPoint { x: 2, y: -3 },
             },
             duration_ms: 500,
         });
-        let assets = [crate::mkmacro::MkImageAsset {
-            id: 10,
-            name: "Save Button".into(),
-            relative_path: "refs/save_button.png".into(),
-        }];
-        let details = action_catalog::action_details_with_assets(&action, &assets);
-        assert_eq!(
-            details,
-            "Image Result: Save Button + (2,-3) · Smooth 500 ms"
-        );
+        let details = action_catalog::action_details(&action);
+        assert_eq!(details, "Image Result: 10.png + (2,-3) · Smooth 500 ms");
     }
 
     #[test]
@@ -2161,10 +2142,10 @@ mod tests {
         );
         assert_eq!(
             action_catalog::format_coordinate_target(&MkCoordinateTarget::Image {
-                asset_id: 9,
+                image: crate::mkmacro::MkImageRef::from_filename("9.png"),
                 offset: MkPoint { x: -3, y: 5 }
             }),
-            "Image Result: Missing image #9 + (-3,5)"
+            "Image Result: 9.png + (-3,5)"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::MouseMove(MkMouseMovePayload {
@@ -2197,7 +2178,7 @@ mod tests {
             "#00FF00 ±8 @ Screen (410, 220)"
         );
         let image = MkImagePayload {
-            asset_id: 42,
+            image: crate::mkmacro::MkImageRef::from_filename("42.png"),
             wait: MkWaitOptions {
                 timeout_ms: 2500,
                 poll_interval_ms: 100,
@@ -2211,11 +2192,11 @@ mod tests {
         };
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageFind(image.clone())),
-            "Missing image #42 · Entire Desktop · fail if missing"
+            "42.png · Entire Desktop · fail if missing"
         );
         assert_eq!(
             action_catalog::action_details(&MkAction::ImageClick(image)),
-            "Missing image #42 · Entire Desktop · center · 2500 ms"
+            "42.png · Entire Desktop · center · 2500 ms"
         );
     }
 
@@ -2677,10 +2658,10 @@ mod tests {
                     assert!(dialog.selected_macro().unwrap().steps.is_empty());
                     let draft = &dialog.action_editor.draft.as_ref().unwrap().action;
                     assert!(
-                        matches!(draft, MkAction::ImageFind(p) | MkAction::ImageClick(p) if p.asset_id == 0)
+                        matches!(draft, MkAction::ImageFind(p) | MkAction::ImageClick(p) if p.image.is_empty())
                             || matches!(draft, MkAction::WaitUntil {
                                 condition: MkCondition::ImageSearch { search, .. }, ..
-                            } if search.asset_id == 0)
+                            } if search.image.is_empty())
                     );
                 }
             }
@@ -3311,7 +3292,6 @@ mod tests {
                             },
                             set_variable(12, "result", MkValue::String("done".into())),
                         ],
-                        image_assets: vec![],
                     },
                     MkMacro {
                         id: 2,
@@ -3326,7 +3306,6 @@ mod tests {
                             delay_after_ms: 25,
                             ..set_variable(21, "fresh", MkValue::String("new".into()))
                         }],
-                        image_assets: vec![],
                     },
                 ],
                 ..Default::default()
@@ -4079,7 +4058,6 @@ impl MkMacroDialog {
             folder_id,
             playback: Default::default(),
             steps: vec![],
-            image_assets: vec![],
         });
         repair_ids(&mut self.draft);
         self.set_selected_macro(self.draft.macros.last().map(|m| m.id));

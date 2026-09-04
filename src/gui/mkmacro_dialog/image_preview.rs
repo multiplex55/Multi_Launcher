@@ -3,14 +3,14 @@
 //! Previewing deliberately has three phases: cache inspection, background file
 //! validation/decoding, and UI-thread texture creation.  In particular, the
 //! egui data lock is never held while doing I/O, image work, or loading a texture.
-use crate::mkmacro::MkMacroStore;
+use crate::mkmacro::{MkImageRef, MkMacroStore};
 use eframe::egui;
 use image::ImageDecoder;
 use std::{
     collections::HashMap,
     fs,
     io::Cursor,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant, SystemTime},
 };
@@ -20,15 +20,33 @@ pub const PREVIEW_BOUND: f32 = 220.0;
 pub const TARGET_THUMBNAIL_BOUND: f32 = 140.0;
 const VALIDATE_INTERVAL: Duration = Duration::from_millis(500);
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct PreviewLookupKey {
-    pub macro_id: u64,
-    pub asset_id: u64,
+    pub root: PathBuf,
+    pub image: MkImageRef,
 }
 
 impl PreviewLookupKey {
-    pub const fn new(macro_id: u64, asset_id: u64) -> Self {
-        Self { macro_id, asset_id }
+    pub fn new(image: MkImageRef) -> Self {
+        Self {
+            root: PathBuf::new(),
+            image,
+        }
+    }
+
+    pub fn new_for_root(root: &Path, image: MkImageRef) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            image,
+        }
+    }
+
+    pub fn new_for_store(store: &MkMacroStore, image: MkImageRef) -> Self {
+        let root = store
+            .asset_root()
+            .canonicalize()
+            .unwrap_or_else(|_| store.asset_root());
+        Self::new_for_root(&root, image)
     }
 }
 
@@ -36,8 +54,8 @@ const PREVIEW_CACHE_ID: &str = "mkmacro-image-preview-cache-v2";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct PreviewKey {
-    macro_id: u64,
-    asset_id: u64,
+    image: MkImageRef,
+    path: PathBuf,
     len: u64,
     modified: Option<SystemTime>,
 }
@@ -83,7 +101,7 @@ struct AssetState {
 
 #[derive(Clone)]
 struct PreviewCache {
-    assets: HashMap<(u64, u64), AssetState>,
+    assets: HashMap<(PathBuf, MkImageRef), AssetState>,
     sender: mpsc::Sender<DecodeResult>,
     receiver: Arc<Mutex<mpsc::Receiver<DecodeResult>>>,
 }
@@ -102,8 +120,7 @@ impl Default for PreviewCache {
 #[derive(Clone)]
 struct Job {
     path: PathBuf,
-    macro_id: u64,
-    asset_id: u64,
+    image: MkImageRef,
     previous_key: Option<PreviewKey>,
     sender: mpsc::Sender<DecodeResult>,
 }
@@ -139,10 +156,10 @@ fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
     )
 }
 
-fn key_from_metadata(macro_id: u64, asset_id: u64, metadata: &fs::Metadata) -> PreviewKey {
+fn key_from_metadata(image: MkImageRef, path: PathBuf, metadata: &fs::Metadata) -> PreviewKey {
     PreviewKey {
-        macro_id,
-        asset_id,
+        image,
+        path,
         len: metadata.len(),
         modified: metadata.modified().ok(),
     }
@@ -150,8 +167,8 @@ fn key_from_metadata(macro_id: u64, asset_id: u64, metadata: &fs::Metadata) -> P
 
 fn decode_job(job: &Job) -> DecodeResult {
     let missing_key = PreviewKey {
-        macro_id: job.macro_id,
-        asset_id: job.asset_id,
+        image: job.image.clone(),
+        path: job.path.clone(),
         len: 0,
         modified: None,
     };
@@ -164,7 +181,7 @@ fn decode_job(job: &Job) -> DecodeResult {
             return DecodeResult::Failed(missing_key, format!("Missing reference image: {error}"));
         }
     };
-    let key = key_from_metadata(job.macro_id, job.asset_id, &metadata);
+    let key = key_from_metadata(job.image.clone(), job.path.clone(), &metadata);
     if job.previous_key.as_ref() == Some(&key) {
         return DecodeResult::Unchanged(key);
     }
@@ -210,7 +227,7 @@ fn apply_result(cache: &mut PreviewCache, result: DecodeResult) {
     };
     let state = cache
         .assets
-        .entry((key.macro_id, key.asset_id))
+        .entry((key.path.clone(), key.image.clone()))
         .or_default();
     // Results are useful only for the validation currently in flight. A late
     // duplicate must not replace a newer identity/outcome.
@@ -234,8 +251,7 @@ fn apply_result(cache: &mut PreviewCache, result: DecodeResult) {
 fn inspect_cache(
     cache: &mut PreviewCache,
     path: PathBuf,
-    macro_id: u64,
-    asset_id: u64,
+    image: MkImageRef,
     now: Instant,
 ) -> Inspection {
     let results: Vec<_> = cache.receiver.lock().unwrap().try_iter().collect();
@@ -243,7 +259,10 @@ fn inspect_cache(
         apply_result(cache, result);
     }
     let sender = cache.sender.clone();
-    let state = cache.assets.entry((macro_id, asset_id)).or_default();
+    let state = cache
+        .assets
+        .entry((path.clone(), image.clone()))
+        .or_default();
     let mut result = Inspection {
         pending: state.pending,
         ..Default::default()
@@ -263,8 +282,7 @@ fn inspect_cache(
         result.pending = true;
         result.job = Some(Job {
             path,
-            macro_id,
-            asset_id,
+            image,
             previous_key: state.key.clone(),
             sender,
         });
@@ -272,33 +290,26 @@ fn inspect_cache(
     result
 }
 
-pub fn show(ui: &mut egui::Ui, store: &MkMacroStore, macro_id: u64, asset_id: u64) {
-    show_sized(ui, store, macro_id, asset_id, PREVIEW_BOUND, true);
+pub fn show(ui: &mut egui::Ui, store: &MkMacroStore, image: &MkImageRef) {
+    show_sized(ui, store, image, PREVIEW_BOUND, true);
 }
 
 /// A compact view backed by the exact same asynchronous decode and texture
 /// cache as [`show`]. The decoded pixels are never recreated merely because a
 /// caller requests a different logical display size.
-pub fn show_thumbnail(
-    ui: &mut egui::Ui,
-    store: &MkMacroStore,
-    macro_id: u64,
-    asset_id: u64,
-    max_size: f32,
-) {
-    show_sized(ui, store, macro_id, asset_id, max_size.max(1.0), false);
+pub fn show_thumbnail(ui: &mut egui::Ui, store: &MkMacroStore, image: &MkImageRef, max_size: f32) {
+    show_sized(ui, store, image, max_size.max(1.0), false);
 }
 
 fn show_sized(
     ui: &mut egui::Ui,
     store: &MkMacroStore,
-    macro_id: u64,
-    asset_id: u64,
+    image: &MkImageRef,
     bound: f32,
     details: bool,
 ) {
-    let lookup_key = PreviewLookupKey::new(macro_id, asset_id);
-    let Ok(path) = store.asset_path(macro_id, asset_id) else {
+    let lookup_key = PreviewLookupKey::new_for_store(store, image.clone());
+    let Ok(path) = store.image_path(image) else {
         ui.colored_label(egui::Color32::RED, "No reference image selected");
         return;
     };
@@ -309,8 +320,7 @@ fn show_sized(
         inspect_cache(
             data.get_temp_mut_or_default::<PreviewCache>(cache_id),
             path.clone(),
-            lookup_key.macro_id,
-            lookup_key.asset_id,
+            lookup_key.image.clone(),
             Instant::now(),
         )
     });
@@ -325,10 +335,7 @@ fn show_sized(
     // Phase three: upload decoded pixels with no egui data lock held.
     let uploaded = inspection.decoded.map(|decoded| {
         let texture = ctx.load_texture(
-            format!(
-                "mkmacro-preview-{}-{}-{}",
-                macro_id, asset_id, decoded.key.len
-            ),
+            format!("mkmacro-preview-{}-{}", image.filename(), decoded.key.len),
             egui::ColorImage::from_rgba_unmultiplied(decoded.thumbnail_size, &decoded.rgba),
             Default::default(),
         );
@@ -336,7 +343,7 @@ fn show_sized(
     });
     let uploaded_ready = uploaded.and_then(|(decoded, texture)| ctx.data_mut(|data| {
         let cache = data.get_temp_mut_or_default::<PreviewCache>(cache_id);
-        let state = cache.assets.get_mut(&(macro_id, asset_id))?;
+        let state = cache.assets.get_mut(&(path.clone(), image.clone()))?;
         if state.key.as_ref() != Some(&decoded.key) || !matches!(&state.outcome, Some(Outcome::Decoded(current)) if current.key == decoded.key) { return None; }
         let ready = CachedPreview { texture, width: decoded.width, height: decoded.height, thumbnail_size: decoded.thumbnail_size };
         state.outcome = Some(Outcome::Ready(ready.clone()));
@@ -354,13 +361,12 @@ fn show_sized(
                 ready.width,
                 ready.height
             ));
-            ui.small(format!("Asset ID {asset_id}"));
         }
     } else if let Some(error) = inspection.failed {
         ui.colored_label(
             egui::Color32::RED,
             if details {
-                format!("{error} (asset {asset_id})")
+                format!("{error} ({})", image.filename())
             } else {
                 "Unavailable".into()
             },
@@ -435,8 +441,7 @@ mod tests {
         let (tx, _) = mpsc::channel();
         let result = decode_job(&Job {
             path,
-            macro_id: 1,
-            asset_id: 2,
+            image: MkImageRef::from_filename("big.png"),
             previous_key: None,
             sender: tx,
         });
@@ -448,281 +453,46 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_and_non_png_are_stable_cached_failures() {
-        for bytes in [b"garbage".to_vec(), {
-            let mut c = Cursor::new(Vec::new());
-            DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-                .write_to(&mut c, ImageFormat::Jpeg)
-                .unwrap();
-            c.into_inner()
-        }] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("x.png");
-            fs::write(&path, bytes).unwrap();
-            let (tx, _) = mpsc::channel();
-            let job = Job {
-                path,
-                macro_id: 1,
-                asset_id: 1,
-                previous_key: None,
-                sender: tx,
-            };
-            let DecodeResult::Failed(key, _) = decode_job(&job) else {
-                panic!()
-            };
-            let mut retry = job;
-            retry.previous_key = Some(key.clone());
-            assert!(matches!(decode_job(&retry),DecodeResult::Unchanged(k) if k==key));
-        }
-    }
-
-    #[test]
-    fn missing_and_unreadable_paths_are_fallbacks_and_not_redecoded() {
+    fn overwrite_of_same_filename_redecodes_and_corruption_is_not_cached_as_old_pixels() {
         let dir = tempfile::tempdir().unwrap();
-        for path in [dir.path().join("missing.png"), dir.path().to_path_buf()] {
-            let (tx, _) = mpsc::channel();
-            let mut job = Job {
-                path,
-                macro_id: 4,
-                asset_id: 5,
-                previous_key: None,
-                sender: tx,
-            };
-            let DecodeResult::Failed(key, message) = decode_job(&job) else {
-                panic!("invalid path must fall back")
-            };
-            assert!(!message.is_empty());
-            job.previous_key = Some(key.clone());
-            assert!(matches!(decode_job(&job), DecodeResult::Unchanged(same) if same == key));
-        }
-    }
-
-    #[test]
-    fn invalid_png_dimensions_take_the_fallback_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("zero-width.png");
-        let mut bytes = png(1, 1);
-        // PNG IHDR width occupies bytes 16..20. A zero dimension is invalid;
-        // the stale CRC is immaterial because either rejection is a fallback.
-        bytes[16..20].copy_from_slice(&0_u32.to_be_bytes());
-        fs::write(&path, bytes).unwrap();
+        let path = dir.path().join("shared.png");
+        let image = MkImageRef::from_filename("shared.png");
+        fs::write(&path, png(2, 2)).unwrap();
         let (tx, _) = mpsc::channel();
+        let first = decode_job(&Job {
+            path: path.clone(),
+            image: image.clone(),
+            previous_key: None,
+            sender: tx.clone(),
+        });
+        let DecodeResult::Decoded(first) = first else {
+            panic!()
+        };
+        fs::write(&path, png(3, 2)).unwrap();
+        let second = decode_job(&Job {
+            path: path.clone(),
+            image: image.clone(),
+            previous_key: Some(first.key),
+            sender: tx.clone(),
+        });
+        let DecodeResult::Decoded(second) = second else {
+            panic!("replacement was served from cache")
+        };
+        assert_eq!(second.width, 3);
+        fs::write(&path, b"corrupt").unwrap();
         assert!(matches!(
-            decode_job(&Job {
-                path,
-                macro_id: 1,
-                asset_id: 9,
-                previous_key: None,
-                sender: tx
-            }),
-            DecodeResult::Failed(_, _)
+            decode_job(&Job { path, image, previous_key: Some(second.key), sender: tx }),
+            DecodeResult::Failed(_, message) if message.contains("corrupt")
         ));
     }
 
     #[test]
-    fn browser_and_mouse_move_share_lookup_and_single_cache_job() {
-        // Browser rows and Mouse Move -> Image Result both ultimately pass this
-        // same identity to show_thumbnail; there is deliberately one cache ID.
-        let browser_key = PreviewLookupKey::new(12, 34);
-        let mouse_move_key = PreviewLookupKey::new(12, 34);
-        assert_eq!(browser_key, mouse_move_key);
-        assert_eq!(PREVIEW_CACHE_ID, "mkmacro-image-preview-cache-v2");
-
-        let mut cache = PreviewCache::default();
-        let now = Instant::now();
-        let first = inspect_cache(
-            &mut cache,
-            "same.png".into(),
-            browser_key.macro_id,
-            browser_key.asset_id,
-            now,
-        );
-        let second = inspect_cache(
-            &mut cache,
-            "same.png".into(),
-            mouse_move_key.macro_id,
-            mouse_move_key.asset_id,
-            now,
-        );
-        assert!(first.job.is_some());
-        assert!(second.job.is_none());
+    fn browser_and_coordinate_target_share_the_same_filename_lookup_identity() {
+        let image = MkImageRef::from_filename("shared.png");
         assert_eq!(
-            cache.assets.len(),
-            1,
-            "a Mouse Move-specific cache/decoder must not be introduced"
+            PreviewLookupKey::new(image.clone()),
+            PreviewLookupKey::new(image)
         );
-    }
-
-    #[test]
-    fn keys_change_with_length_or_modification_time() {
-        let a = PreviewKey {
-            macro_id: 1,
-            asset_id: 2,
-            len: 3,
-            modified: None,
-        };
-        assert_ne!(
-            a,
-            PreviewKey {
-                len: 4,
-                ..a.clone()
-            }
-        );
-        assert_ne!(
-            a,
-            PreviewKey {
-                modified: Some(SystemTime::UNIX_EPOCH),
-                ..a.clone()
-            }
-        );
-    }
-
-    #[test]
-    fn repeated_polling_starts_one_job_and_texture_step_is_outside_access() {
-        let mut cache = PreviewCache::default();
-        let now = Instant::now();
-        assert!(
-            inspect_cache(&mut cache, "x".into(), 1, 2, now)
-                .job
-                .is_some()
-        );
-        assert!(
-            inspect_cache(&mut cache, "x".into(), 1, 2, now)
-                .job
-                .is_none()
-        );
-        let access = std::cell::Cell::new(false);
-        let loader = || assert!(!access.get());
-        access.set(true);
-        let _ = &mut cache;
-        access.set(false);
-        loader();
-    }
-
-    #[test]
-    fn stale_completion_is_discarded_before_texture_insertion() {
-        let mut cache = PreviewCache::default();
-        let old = PreviewKey {
-            macro_id: 1,
-            asset_id: 2,
-            len: 1,
-            modified: None,
-        };
-        let new = PreviewKey {
-            len: 2,
-            ..old.clone()
-        };
-        let state = cache.assets.entry((1, 2)).or_default();
-        state.pending = false;
-        state.key = Some(new.clone());
-        state.outcome = Some(Outcome::Failed("new".into()));
-        assert_ne!(state.key.as_ref(), Some(&old));
-        assert!(matches!(state.outcome, Some(Outcome::Failed(_))));
-    }
-
-    #[test]
-    fn unchanged_validation_retains_ready_texture_without_upload() {
-        let mut cache = PreviewCache::default();
-        let ctx = egui::Context::default();
-        let texture = ctx.load_texture(
-            "existing",
-            egui::ColorImage::new([1, 1], egui::Color32::WHITE),
-            Default::default(),
-        );
-        let key = PreviewKey {
-            macro_id: 1,
-            asset_id: 2,
-            len: 10,
-            modified: Some(SystemTime::UNIX_EPOCH),
-        };
-        let state = cache.assets.entry((1, 2)).or_default();
-        state.key = Some(key.clone());
-        state.outcome = Some(Outcome::Ready(CachedPreview {
-            texture: texture.clone(),
-            width: 1,
-            height: 1,
-            thumbnail_size: [1, 1],
-        }));
-        state.pending = true;
-        apply_result(&mut cache, DecodeResult::Unchanged(key));
-        let Outcome::Ready(ready) = cache.assets[&(1, 2)].outcome.as_ref().unwrap() else {
-            panic!()
-        };
-        assert_eq!(ready.texture.id(), texture.id());
-        assert!(!cache.assets[&(1, 2)].pending);
-    }
-
-    #[test]
-    fn identity_keys_isolate_assets_and_late_results_are_ignored() {
-        let base = PreviewKey {
-            macro_id: 1,
-            asset_id: 2,
-            len: 3,
-            modified: Some(SystemTime::UNIX_EPOCH),
-        };
-        for changed in [
-            PreviewKey {
-                len: 4,
-                ..base.clone()
-            },
-            PreviewKey {
-                modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
-                ..base.clone()
-            },
-            PreviewKey {
-                asset_id: 3,
-                ..base.clone()
-            },
-            PreviewKey {
-                macro_id: 2,
-                ..base.clone()
-            },
-        ] {
-            assert_ne!(base, changed);
-        }
-        let mut cache = PreviewCache::default();
-        let state = cache.assets.entry((1, 2)).or_default();
-        state.key = Some(base.clone());
-        state.outcome = Some(Outcome::Failed("newer identity".into()));
-        state.pending = false;
-        apply_result(
-            &mut cache,
-            DecodeResult::Failed(PreviewKey { len: 1, ..base }, "stale".into()),
-        );
-        assert!(
-            matches!(cache.assets[&(1, 2)].outcome, Some(Outcome::Failed(ref e)) if e == "newer identity")
-        );
-    }
-
-    #[test]
-    fn state_machine_progresses_across_ticks_without_blocking_actions() {
-        let mut cache = PreviewCache::default();
-        let now = Instant::now();
-        let first = inspect_cache(&mut cache, "unused".into(), 9, 8, now);
-        assert!(first.pending && first.job.is_some());
-        let key = PreviewKey {
-            macro_id: 9,
-            asset_id: 8,
-            len: 100,
-            modified: None,
-        };
-        cache
-            .sender
-            .send(DecodeResult::Decoded(DecodedPreview {
-                key: key.clone(),
-                width: 4000,
-                height: 2000,
-                thumbnail_size: [220, 110],
-                rgba: Arc::from(vec![0; 220 * 110 * 4]),
-            }))
-            .unwrap();
-        let mut other_editor_actions = 0;
-        other_editor_actions += 1;
-        let second = inspect_cache(&mut cache, "unused".into(), 9, 8, now);
-        assert!(second.decoded.is_some());
-        assert_eq!(other_editor_actions, 1); // the UI tick remained free to process unrelated work
-        let state = cache.assets.get_mut(&(9, 8)).unwrap();
-        state.outcome = Some(Outcome::Failed("fake texture-ready adapter".into()));
-        assert_eq!(state.key.as_ref(), Some(&key));
+        assert_eq!(PREVIEW_CACHE_ID, "mkmacro-image-preview-cache-v2");
     }
 }

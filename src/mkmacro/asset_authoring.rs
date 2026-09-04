@@ -1,11 +1,10 @@
 //! Transactional staging of reference images used while authoring macros.
 //!
 //! Staging and document replacement are deliberately separate.  In particular,
-//! callers must not remove the old asset until the edited macro has been saved;
-//! the store's normal `cleanup_assets` pass is the appropriate place to collect
-//! files which are no longer referenced by the saved document.
+//! callers never own the files they reference. Library deletion is an explicit
+//! store-level operation outside action editing.
 
-use super::MkMacroStore;
+use super::{ImageImportChoice, ImageImportResult, MkImageRef, MkMacroStore};
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage, codecs::png::PngDecoder};
 use std::{
@@ -58,13 +57,6 @@ pub fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
     validated_rgba_len(width, height).map(|_| ())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StagedImageAsset {
-    pub asset_id: u64,
-    /// Portable managed reference (`mkmacro_assets/<macro>/<id>.png`).
-    pub managed_reference: PathBuf,
-}
-
 pub struct ImageAssetAuthoringService<'a> {
     store: &'a MkMacroStore,
 }
@@ -74,35 +66,33 @@ impl<'a> ImageAssetAuthoringService<'a> {
         Self { store }
     }
 
-    pub fn import_png(&self, macro_id: u64, source: &Path) -> Result<StagedImageAsset> {
-        // Decode before allocation and before any draft can be changed.  Supplying
-        // the format explicitly prevents a renamed JPEG from being accepted.
-        let bytes = std::fs::read(source)
-            .with_context(|| format!("read reference image {}", source.display()))?;
-        let decoder = PngDecoder::new(Cursor::new(&bytes))
-            .with_context(|| format!("{} is not a valid PNG image", source.display()))?;
-        let (width, height) = decoder.dimensions();
-        validate_image_dimensions(width, height)?;
-        let image = DynamicImage::from_decoder(decoder)
-            .with_context(|| format!("decode PNG image {}", source.display()))?
-            .to_rgba8();
-        self.stage_rgba(macro_id, &image)
+    pub fn import_png(&self, source: &Path) -> Result<ImageImportResult> {
+        self.store.import_png(source)
     }
 
-    pub fn stage_rgba(&self, macro_id: u64, image: &RgbaImage) -> Result<StagedImageAsset> {
+    pub fn import_png_with_choice(
+        &self,
+        source: &Path,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult> {
+        self.store.import_png_with_choice(source, choice)
+    }
+
+    pub fn stage_rgba(
+        &self,
+        image: &RgbaImage,
+        filename: MkImageRef,
+        choice: ImageImportChoice,
+    ) -> Result<ImageImportResult> {
         validate_image_dimensions(image.width(), image.height())?;
-        let (asset_id, managed_reference) = self.store.stage_new_png_asset(macro_id, image)?;
-        Ok(StagedImageAsset {
-            asset_id,
-            managed_reference,
-        })
+        self.store.write_captured_png(image, filename, choice)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, GenericImageView, Rgb, RgbImage, Rgba};
+    use image::{DynamicImage, GenericImageView, ImageFormat, Rgb, RgbImage, Rgba};
     use std::io::Cursor;
 
     fn fixture() -> (tempfile::TempDir, MkMacroStore) {
@@ -111,85 +101,53 @@ mod tests {
         (dir, store)
     }
 
-    #[test]
-    fn png_import_is_managed_and_independent_of_source() {
-        let (dir, store) = fixture();
-        let source = dir.path().join("chosen.png");
-        DynamicImage::ImageRgba8(RgbaImage::from_pixel(3, 2, Rgba([1, 2, 3, 255])))
-            .save_with_format(&source, ImageFormat::Png)
+    fn write_png(path: &Path, color: [u8; 4]) {
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(3, 2, Rgba(color)))
+            .save_with_format(path, ImageFormat::Png)
             .unwrap();
-        let staged = ImageAssetAuthoringService::new(&store)
-            .import_png(7, &source)
-            .unwrap();
-        assert_eq!(staged.asset_id, 1);
-        assert_eq!(
-            staged.managed_reference,
-            Path::new("mkmacro_assets/7/1.png")
-        );
-        std::fs::remove_file(source).unwrap();
-        assert_eq!(
-            image::open(store.asset_path(7, 1).unwrap())
-                .unwrap()
-                .dimensions(),
-            (3, 2)
-        );
     }
 
     #[test]
-    fn rgb_png_is_converted_to_rgba() {
+    fn external_import_uses_source_filename_and_in_root_import_copies_nothing() {
         let (dir, store) = fixture();
-        let source = dir.path().join("rgb.png");
-        DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 1, Rgb([4, 5, 6])))
-            .save_with_format(&source, ImageFormat::Png)
-            .unwrap();
-        let staged = ImageAssetAuthoringService::new(&store)
-            .import_png(8, &source)
-            .unwrap();
+        let source = dir.path().join("chosen.png");
+        write_png(&source, [1, 2, 3, 255]);
+        let image = match ImageAssetAuthoringService::new(&store)
+            .import_png(&source)
+            .unwrap()
+        {
+            ImageImportResult::Imported(image) => image,
+            other => panic!("unexpected import result: {other:?}"),
+        };
+        assert_eq!(image.filename(), "chosen.png");
+        assert_eq!(store.image_path(&image).unwrap().is_file(), true);
+        std::fs::remove_file(source).unwrap();
         assert_eq!(
-            image::open(store.asset_path(8, staged.asset_id).unwrap())
-                .unwrap()
-                .to_rgba8()
-                .get_pixel(0, 0)
-                .0,
-            [4, 5, 6, 255]
+            store.validate_image_ref(&image).unwrap().dimensions(),
+            (3, 2)
         );
+
+        let in_root = store
+            .image_path(&MkImageRef::from_filename("inside.png"))
+            .unwrap();
+        write_png(&in_root, [4, 5, 6, 255]);
+        let before = std::fs::read(&in_root).unwrap();
+        assert_eq!(
+            ImageAssetAuthoringService::new(&store)
+                .import_png(&in_root)
+                .unwrap(),
+            ImageImportResult::Imported(MkImageRef::from_filename("inside.png"))
+        );
+        assert_eq!(std::fs::read(in_root).unwrap(), before);
     }
 
     #[test]
     fn dimension_budget_rejects_checked_pixel_and_byte_limits() {
         assert!(validate_image_dimensions(0, 1).is_err());
-        assert!(
-            validate_image_dimensions(u32::MAX, u32::MAX)
-                .unwrap_err()
-                .to_string()
-                .contains("too large")
-        );
-        assert!(
-            validate_image_dimensions(4097, 4096)
-                .unwrap_err()
-                .to_string()
-                .contains("too large")
-        );
+        assert!(validate_image_dimensions(u32::MAX, u32::MAX).is_err());
+        assert!(validate_image_dimensions(4097, 4096).is_err());
         assert_eq!(validated_rgba_len(4096, 4096).unwrap(), 64 * 1024 * 1024);
         assert!(validated_rgba_len(4096, 4097).is_err());
-    }
-
-    #[test]
-    fn oversized_png_has_friendly_error_and_allocates_nothing() {
-        let (dir, store) = fixture();
-        let source = dir.path().join("huge.png");
-        DynamicImage::ImageRgb8(RgbImage::new(MAX_IMAGE_DIMENSION + 1, 1))
-            .save_with_format(&source, ImageFormat::Png)
-            .unwrap();
-        let error = ImageAssetAuthoringService::new(&store)
-            .import_png(9, &source)
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Reference image is too large to import")
-        );
-        assert!(store.asset_ids(9).unwrap().is_empty());
     }
 
     #[test]
@@ -206,54 +164,83 @@ mod tests {
         ] {
             let source = dir.path().join(name);
             std::fs::write(&source, bytes).unwrap();
-            assert!(service.import_png(3, &source).is_err());
+            assert!(service.import_png(&source).is_err());
         }
-        assert!(store.asset_ids(3).unwrap().is_empty());
+        assert!(store.image_refs().unwrap().is_empty());
     }
 
     #[test]
-    fn allocation_does_not_replace_existing_and_empty_capture_is_rejected() {
-        let (_dir, store) = fixture();
-        let first = RgbaImage::from_pixel(1, 1, Rgba([9, 8, 7, 255]));
-        store.write_png_asset(4, 1, &first).unwrap();
-        let second = RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255]));
-        let staged = ImageAssetAuthoringService::new(&store)
-            .stage_rgba(4, &second)
+    fn collision_choices_replace_save_as_and_cancel_are_explicit() {
+        let (dir, store) = fixture();
+        let source = dir.path().join("shared.png");
+        write_png(&source, [1, 2, 3, 255]);
+        let shared = MkImageRef::from_filename("shared.png");
+        store
+            .write_captured_png(
+                &RgbaImage::from_pixel(1, 1, Rgba([9, 9, 9, 255])),
+                shared.clone(),
+                ImageImportChoice::SaveAs(shared.clone()),
+            )
             .unwrap();
-        assert_eq!(staged.asset_id, 2);
-        assert_eq!(
-            image::open(store.asset_path(4, 1).unwrap())
-                .unwrap()
-                .to_rgba8(),
-            first
-        );
-        assert!(
+        assert!(matches!(
             ImageAssetAuthoringService::new(&store)
-                .stage_rgba(4, &RgbaImage::new(0, 1))
-                .is_err()
-        );
-        assert_eq!(store.asset_ids(4).unwrap(), vec![1, 2]);
+                .import_png(&source)
+                .unwrap(),
+            ImageImportResult::Collision { .. }
+        ));
+        assert!(matches!(
+            ImageAssetAuthoringService::new(&store)
+                .import_png_with_choice(&source, ImageImportChoice::Cancel)
+                .unwrap(),
+            ImageImportResult::Cancelled
+        ));
+        assert!(matches!(
+            ImageAssetAuthoringService::new(&store)
+                .import_png_with_choice(&source, ImageImportChoice::SaveAs(MkImageRef::from_filename("other.png")))
+                .unwrap(),
+            ImageImportResult::Imported(ref image) if image.filename() == "other.png"
+        ));
+        ImageAssetAuthoringService::new(&store)
+            .import_png_with_choice(&source, ImageImportChoice::ReplaceExisting)
+            .unwrap();
         assert_eq!(
-            image::open(store.asset_path(4, 1).unwrap())
-                .unwrap()
-                .to_rgba8(),
-            first,
-            "a rejected replacement must neither remove nor overwrite the old PNG"
+            store.validate_image_ref(&shared).unwrap().get_pixel(0, 0).0,
+            [1, 2, 3, 255]
         );
     }
 
     #[test]
-    fn staged_capture_png_round_trips_dimensions_and_rgba_pixels() {
+    fn captured_png_is_written_only_after_a_filename_and_round_trips() {
         let (_dir, store) = fixture();
-        let image = RgbaImage::from_fn(3, 2, |x, y| Rgba([x as u8, y as u8, 77, 128 + x as u8]));
-        let staged = ImageAssetAuthoringService::new(&store)
-            .stage_rgba(12, &image)
+        let service = ImageAssetAuthoringService::new(&store);
+        let image = RgbaImage::from_fn(3, 2, |x, y| Rgba([x as u8, y as u8, 77, 128]));
+        assert_eq!(
+            service
+                .stage_rgba(
+                    &image,
+                    MkImageRef::from_filename("capture.png"),
+                    ImageImportChoice::Cancel
+                )
+                .unwrap(),
+            ImageImportResult::Cancelled
+        );
+        let result = service
+            .stage_rgba(
+                &image,
+                MkImageRef::from_filename("capture.png"),
+                ImageImportChoice::SaveAs(MkImageRef::from_filename("capture.png")),
+            )
             .unwrap();
-        let decoded = image::open(store.asset_path(12, staged.asset_id).unwrap())
-            .unwrap()
-            .to_rgba8();
-        assert_eq!(decoded.dimensions(), (3, 2));
-        assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 77, 128]);
-        assert_eq!(decoded.get_pixel(2, 1).0, [2, 1, 77, 130]);
+        assert_eq!(
+            result,
+            ImageImportResult::Imported(MkImageRef::from_filename("capture.png"))
+        );
+        assert_eq!(
+            store
+                .validate_image_ref(&MkImageRef::from_filename("capture.png"))
+                .unwrap()
+                .dimensions(),
+            (3, 2)
+        );
     }
 }

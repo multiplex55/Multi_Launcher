@@ -645,7 +645,6 @@ mod tests {
             folder_id,
             playback: Default::default(),
             steps: vec![],
-            image_assets: vec![],
         }
     }
 

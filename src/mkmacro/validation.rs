@@ -466,7 +466,7 @@ pub fn validate_document_with_context(
                 }
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                     wait(&p.wait, m.id, sid, &mut out);
-                    asset(p.asset_id, m.id, sid, asset_root, &mut out);
+                    asset(&p.image, m.id, sid, asset_root, &mut out);
                     image_outputs(p, m.id, sid, &mut out);
                     match &p.region {
                         SearchRegion::Rectangle { rect } => {
@@ -877,7 +877,6 @@ mod delay_validation_tests {
                         on_error: MkErrorPolicy::default(),
                         action: MkAction::Delay(payload),
                     }],
-                    image_assets: vec![],
                 }],
                 ..MkMacroDocument::default()
             },
@@ -1069,7 +1068,6 @@ mod optional_wait_validation_tests {
                     on_error: MkErrorPolicy::default(),
                     action: MkAction::WaitForVisualChange(payload),
                 }],
-                image_assets: vec![],
             }],
             ..MkMacroDocument::default()
         };
@@ -1151,33 +1149,78 @@ fn matcher(x: &MkWindowMatcher, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic
         push(o, m, s, error.code, error.message);
     }
 }
-fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDiagnostic>) {
-    if id == 0 {
+fn asset(
+    image: &MkImageRef,
+    m: u64,
+    s: Option<u64>,
+    root: Option<&Path>,
+    o: &mut Vec<MkDiagnostic>,
+) {
+    let name = image.filename();
+    if image.is_empty() {
         push(
             o,
             m,
             s,
-            "reference_image_missing",
-            "Reference image is missing",
+            "reference_image_empty",
+            "No reference image is selected",
+        )
+    } else if !image.is_valid_filename() {
+        push(
+            o,
+            m,
+            s,
+            "reference_image_invalid_filename",
+            format!("Reference image '{name}' has an invalid direct-child PNG filename"),
         )
     } else if let Some(root) = root {
-        let Ok(path) = super::store::managed_asset_path(root, m, id) else {
+        let path = root.join(name);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                push(
+                    o,
+                    m,
+                    s,
+                    "reference_image_missing",
+                    format!("Reference image '{name}' is missing"),
+                );
+                return;
+            }
+            Err(_) => {
+                push(
+                    o,
+                    m,
+                    s,
+                    "reference_image_unreadable",
+                    format!("Reference image '{name}' could not be read"),
+                );
+                return;
+            }
+        };
+        let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let safe = !metadata.file_type().is_symlink()
+            && path
+                .canonicalize()
+                .ok()
+                .is_some_and(|canonical| canonical.parent() == Some(root_canonical.as_path()));
+        if !safe {
             push(
                 o,
                 m,
                 s,
-                "reference_image_missing",
-                "Reference image is missing",
+                "reference_image_invalid_filename",
+                format!("Reference image '{name}' is not a safe direct-child file"),
             );
             return;
         };
-        if !path.exists() {
+        if !metadata.is_file() {
             push(
                 o,
                 m,
                 s,
-                "reference_image_missing",
-                "Reference image is missing",
+                "reference_image_unreadable",
+                format!("Reference image '{name}' is not a regular file"),
             );
             return;
         }
@@ -1189,7 +1232,7 @@ fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDia
                     m,
                     s,
                     "reference_image_unreadable",
-                    "Reference image could not be read",
+                    format!("Reference image '{name}' could not be read"),
                 );
                 return;
             }
@@ -1202,7 +1245,7 @@ fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDia
                     m,
                     s,
                     "reference_image_undecodable",
-                    "Reference image could not be decoded",
+                    format!("Reference image '{name}' is not valid PNG data"),
                 );
                 return;
             }
@@ -1213,7 +1256,7 @@ fn asset(id: u64, m: u64, s: Option<u64>, root: Option<&Path>, o: &mut Vec<MkDia
                 m,
                 s,
                 "reference_image_invalid_dimensions",
-                "Reference image has invalid dimensions",
+                format!("Reference image '{name}' has invalid dimensions"),
             );
         }
     }
@@ -1257,7 +1300,7 @@ fn target(
             "invalid_point_variable",
             "Point variable name is invalid",
         ),
-        MkCoordinateTarget::Image { asset_id, .. } => asset(*asset_id, m, s, root, out),
+        MkCoordinateTarget::Image { image, .. } => asset(image, m, s, root, out),
         MkCoordinateTarget::Pixel { search_id, .. } if *search_id == 0 => push(
             out,
             m,
@@ -1334,7 +1377,7 @@ fn condition(
             matcher(x, m, s, o)
         }
         MkCondition::ImageSearch { search, .. } => {
-            asset(search.asset_id, m, s, root, o);
+            asset(&search.image, m, s, root, o);
             match &search.region {
                 SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => push(
                     o,
@@ -1350,10 +1393,9 @@ fn condition(
             }
         }
         MkCondition::PreviousImageResult {
-            asset_id: Some(asset_id),
-            ..
-        } => asset(*asset_id, m, s, root, o),
-        MkCondition::PreviousImageResult { asset_id: None, .. } => {}
+            image: Some(image), ..
+        } => asset(image, m, s, root, o),
+        MkCondition::PreviousImageResult { image: None, .. } => {}
         MkCondition::PixelResult {
             target: coordinate_target,
             ..
@@ -1419,7 +1461,6 @@ mod coordinate_target_tests {
                         on_error: MkErrorPolicy::default(),
                         action,
                     }],
-                    image_assets: vec![],
                 }],
                 ..MkMacroDocument::default()
             },
@@ -1575,28 +1616,45 @@ mod coordinate_target_tests {
         let root = &dir.path().join(crate::mkmacro::store::ASSET_DIRECTORY);
         std::fs::create_dir(root).unwrap();
         let mut out = Vec::new();
-        asset(0, 7, Some(8), Some(root), &mut out);
-        assert!(out.iter().any(|d| d.code == "reference_image_missing"));
+        asset(&MkImageRef::default(), 7, Some(8), Some(root), &mut out);
+        assert!(out.iter().any(|d| d.code == "reference_image_empty"));
         out.clear();
-        asset(1, 7, Some(8), Some(root), &mut out);
+        asset(
+            &MkImageRef::from_filename("login.png"),
+            7,
+            Some(8),
+            Some(root),
+            &mut out,
+        );
         assert!(out.iter().any(|d| d.code == "reference_image_missing"));
 
-        let macro_dir = root.join("7");
-        std::fs::create_dir_all(&macro_dir).unwrap();
+        let image_path = root.join("login.png");
         RgbaImage::from_pixel(2, 3, Rgba([1, 2, 3, 255]))
-            .save_with_format(macro_dir.join("1.png"), image::ImageFormat::Png)
+            .save_with_format(&image_path, image::ImageFormat::Png)
             .unwrap();
         out.clear();
-        asset(1, 7, Some(8), Some(root), &mut out);
+        asset(
+            &MkImageRef::from_filename("login.png"),
+            7,
+            Some(8),
+            Some(root),
+            &mut out,
+        );
         assert!(out.is_empty());
 
         for bytes in [
             b"corrupt".as_slice(),
             b"\xff\xd8\xff\xe0renamed jpeg".as_slice(),
         ] {
-            std::fs::write(macro_dir.join("1.png"), bytes).unwrap();
+            std::fs::write(&image_path, bytes).unwrap();
             out.clear();
-            asset(1, 7, Some(8), Some(root), &mut out);
+            asset(
+                &MkImageRef::from_filename("login.png"),
+                7,
+                Some(8),
+                Some(root),
+                &mut out,
+            );
             assert!(out.iter().any(|d| d.code == "reference_image_undecodable"));
             assert!(!can_run(&out));
         }
@@ -1609,30 +1667,38 @@ mod reference_image_tests {
     use image::{DynamicImage, ImageFormat, RgbaImage};
     use std::io::Cursor;
 
-    fn validate(id: u64, root: Option<&Path>) -> Vec<MkDiagnostic> {
+    fn validate(image: &str, root: Option<&Path>) -> Vec<MkDiagnostic> {
         let mut out = Vec::new();
-        asset(id, 7, Some(11), root, &mut out);
+        let image = if image.is_empty() {
+            MkImageRef::default()
+        } else {
+            MkImageRef::from_filename(image)
+        };
+        asset(&image, 7, Some(11), root, &mut out);
         out
     }
 
     #[test]
     fn unset_absent_corrupt_and_valid_assets_have_distinct_results() {
-        assert_eq!(validate(0, None)[0].code, "reference_image_missing");
+        assert_eq!(validate("", None)[0].code, "reference_image_empty");
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(crate::mkmacro::store::ASSET_DIRECTORY);
-        std::fs::create_dir_all(root.join("7")).unwrap();
-        assert_eq!(validate(4, Some(&root))[0].code, "reference_image_missing");
-        std::fs::write(root.join("7/4.png"), b"not png").unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         assert_eq!(
-            validate(4, Some(&root))[0].code,
+            validate("login.png", Some(&root))[0].code,
+            "reference_image_missing"
+        );
+        std::fs::write(root.join("login.png"), b"not png").unwrap();
+        assert_eq!(
+            validate("login.png", Some(&root))[0].code,
             "reference_image_undecodable"
         );
         let mut bytes = Cursor::new(Vec::new());
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut bytes, ImageFormat::Png)
             .unwrap();
-        std::fs::write(root.join("7/4.png"), bytes.into_inner()).unwrap();
-        assert!(validate(4, Some(&root)).is_empty());
+        std::fs::write(root.join("login.png"), bytes.into_inner()).unwrap();
+        assert!(validate("login.png", Some(&root)).is_empty());
         assert!(!usable_image_dimensions(0, 1));
         assert!(!usable_image_dimensions(1, 0));
     }
@@ -1663,7 +1729,6 @@ mod notification_action_tests {
                         on_error: MkErrorPolicy::default(),
                         action,
                     }],
-                    image_assets: vec![],
                 }],
                 ..MkMacroDocument::default()
             },
@@ -1744,7 +1809,6 @@ mod launcher_command_action_tests {
                         on_error: MkErrorPolicy::default(),
                         action: MkAction::LauncherCommand(payload),
                     }],
-                    image_assets: vec![],
                 }],
                 ..MkMacroDocument::default()
             },
@@ -1837,7 +1901,6 @@ mod click_within_region_validation_tests {
                             edge_padding_px,
                         }),
                     }],
-                    image_assets: vec![],
                 }],
                 ..MkMacroDocument::default()
             },
@@ -1984,7 +2047,6 @@ mod virtual_desktop_validation_tests {
                         on_error: MkErrorPolicy::default(),
                         action: MkAction::VirtualDesktop(MkVirtualDesktopAction::GoTo { desktop }),
                     }],
-                    image_assets: vec![],
                 }],
                 ..MkMacroDocument::default()
             },

@@ -64,7 +64,6 @@ pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) ->
             folder_id: None,
             playback: Default::default(),
             steps: steps.clone(),
-            image_assets: vec![],
         }],
         folders: vec![],
     };
@@ -462,7 +461,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         }
                     });
                     r.col(|ui| {
-                        let full=super::action_catalog::action_details_with_assets(&s.action, &m.image_assets); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure, breakpoint_locked);response.context_menu(|ui|render_context_menu(ui, &menu, &mut command));
+                        let full=super::action_catalog::action_details(&s.action); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure, breakpoint_locked);response.context_menu(|ui|render_context_menu(ui, &menu, &mut command));
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();

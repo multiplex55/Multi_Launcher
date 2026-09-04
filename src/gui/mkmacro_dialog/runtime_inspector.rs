@@ -652,7 +652,6 @@ mod tests {
                         action: MkAction::Delay(MkDelayPayload::default()),
                     },
                 ],
-                image_assets: vec![],
             }],
         }
     }

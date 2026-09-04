@@ -133,7 +133,7 @@ fn image_cond(found: bool) -> MkCondition {
         search: MkImageSearchCondition {
             // Required-asset draft sentinel; Apply remains disabled until the
             // user imports, captures, or selects a reference image.
-            asset_id: 0,
+            image: MkImageRef::default(),
             region: SearchRegion::Desktop,
             tolerance: 0,
             alpha: AlphaPolicy::Compare,
@@ -166,7 +166,7 @@ fn ip(not_found_policy: MkImageNotFoundPolicy) -> MkImagePayload {
     MkImagePayload {
         // Zero is the documented editor-draft sentinel. The editor requires an
         // imported/captured asset before enabling Apply.
-        asset_id: 0,
+        image: MkImageRef::default(),
         wait: wait(),
         region: SearchRegion::Desktop,
         tolerance: 0,
@@ -961,13 +961,15 @@ pub enum DraftValidationContract {
 
 pub fn draft_validation_contract(action: &MkAction) -> DraftValidationContract {
     match action {
-        MkAction::ImageFind(payload) | MkAction::ImageClick(payload) if payload.asset_id == 0 => {
+        MkAction::ImageFind(payload) | MkAction::ImageClick(payload)
+            if payload.image.filename().is_empty() =>
+        {
             DraftValidationContract::AwaitingRequiredAsset
         }
         MkAction::WaitUntil {
             condition: MkCondition::ImageSearch { search, .. },
             ..
-        } if search.asset_id == 0 => DraftValidationContract::AwaitingRequiredAsset,
+        } if search.image.filename().is_empty() => DraftValidationContract::AwaitingRequiredAsset,
         _ => DraftValidationContract::CommitReady,
     }
 }
@@ -1200,10 +1202,10 @@ pub fn action_details(a: &MkAction) -> String {
 pub fn action_details_with_asset_name(a: &MkAction, asset_name: Option<&str>) -> String {
     action_details_core(a, asset_name, &[])
 }
-pub fn action_details_with_assets(a: &MkAction, assets: &[MkImageAsset]) -> String {
+pub fn action_details_with_assets(a: &MkAction, assets: &[MkImageRef]) -> String {
     action_details_core(a, None, assets)
 }
-fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImageAsset]) -> String {
+fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImageRef]) -> String {
     match a {
         MkAction::KeyDown(k) | MkAction::KeyUp(k) | MkAction::KeyPress(k) => {
             super::key_capture::key_name(k)
@@ -1430,21 +1432,13 @@ fn matcher_summary(m: &MkWindowMatcher) -> String {
     .collect::<Vec<_>>()
     .join(" / ")
 }
-fn asset_display_name(id: u64, preferred: Option<&str>, assets: &[MkImageAsset]) -> String {
-    assets
-        .iter()
-        .find(|asset| asset.id == id)
-        .and_then(|asset| {
-            let name = asset.name.trim();
-            if !name.is_empty() {
-                Some(name.to_owned())
-            } else {
-                std::path::Path::new(&asset.relative_path)
-                    .file_name()?
-                    .to_str()
-                    .map(str::to_owned)
-            }
-        })
+fn asset_display_name(
+    image: &MkImageRef,
+    preferred: Option<&str>,
+    _assets: &[MkImageRef],
+) -> String {
+    (!image.filename().is_empty())
+        .then(|| image.filename().to_owned())
         .or_else(|| {
             preferred.filter(|s| !s.trim().is_empty()).map(|s| {
                 std::path::Path::new(s)
@@ -1454,7 +1448,7 @@ fn asset_display_name(id: u64, preferred: Option<&str>, assets: &[MkImageAsset])
                     .to_owned()
             })
         })
-        .unwrap_or_else(|| format!("Missing image #{id}"))
+        .unwrap_or_else(|| "Missing reference image".into())
 }
 pub(super) fn region_summary(region: &SearchRegion) -> String {
     match region {
@@ -1474,18 +1468,19 @@ fn condition_region_summary(region: &SearchRegion) -> String {
         other => region_summary(other),
     }
 }
-fn condition_summary(c: &MkCondition, preferred: Option<&str>, assets: &[MkImageAsset]) -> String {
+fn condition_summary(c: &MkCondition, preferred: Option<&str>, assets: &[MkImageRef]) -> String {
     match c {
         MkCondition::ImageSearch { search, found } => format!(
             "Image currently {}: {} · {}",
             if *found { "visible" } else { "not visible" },
-            asset_display_name(search.asset_id, preferred, assets),
+            asset_display_name(&search.image, preferred, assets),
             condition_region_summary(&search.region)
         ),
-        MkCondition::PreviousImageResult { asset_id, found } => format!(
+        MkCondition::PreviousImageResult { image, found } => format!(
             "Previous image search: {} = {}",
-            asset_id
-                .map(|id| asset_display_name(id, preferred, assets))
+            image
+                .as_ref()
+                .map(|image| asset_display_name(image, preferred, assets))
                 .unwrap_or_else(|| "any image".into()),
             if *found { "Found" } else { "Not Found" }
         ),
@@ -1529,12 +1524,12 @@ fn format_wait_until(
     c: &MkCondition,
     wait: &MkWaitOptions,
     preferred: Option<&str>,
-    assets: &[MkImageAsset],
+    assets: &[MkImageRef],
 ) -> String {
     if let MkCondition::ImageSearch { search, found } = c {
         let mut parts = vec![format!(
             "{} {}",
-            asset_display_name(search.asset_id, preferred, assets),
+            asset_display_name(&search.image, preferred, assets),
             if *found { "appears" } else { "disappears" }
         )];
         if !matches!(search.region, SearchRegion::Desktop) {
@@ -1563,10 +1558,10 @@ fn format_wait_timeout(timeout_ms: u64) -> String {
 fn format_image_details(
     p: &MkImagePayload,
     asset_name: Option<&str>,
-    assets: &[MkImageAsset],
+    assets: &[MkImageRef],
     click: bool,
 ) -> String {
-    let image = asset_display_name(p.asset_id, asset_name, assets);
+    let image = asset_display_name(&p.image, asset_name, assets);
     let mut parts = vec![image, region_summary(&p.region)];
     if !click && p.tolerance != 0 {
         parts.push(format!("tolerance {}", p.tolerance));
@@ -1978,14 +1973,10 @@ mod paste_tests {
     }
 
     #[test]
-    fn image_summaries_use_friendly_names_and_exact_intent() {
-        let assets = [MkImageAsset {
-            id: 7,
-            name: "save.png".into(),
-            relative_path: "images/original.png".into(),
-        }];
+    fn image_summaries_use_filenames_and_exact_intent() {
+        let assets = [MkImageRef::from_filename("save.png")];
         let mut payload = ip(MkImageNotFoundPolicy::Continue);
-        payload.asset_id = 7;
+        payload.image = MkImageRef::from_filename("save.png");
         payload.region = SearchRegion::Window {
             matcher: MkWindowMatcher {
                 process: Some("explorer.exe".into()),
@@ -1998,7 +1989,7 @@ mod paste_tests {
         );
 
         let target = MkCoordinateTarget::Image {
-            asset_id: 7,
+            image: MkImageRef::from_filename("save.png"),
             offset: MkPoint { x: 0, y: 0 },
         };
         assert_eq!(
@@ -2033,14 +2024,10 @@ mod paste_tests {
 
     #[test]
     fn recursive_image_conditions_keep_live_and_previous_results_distinct() {
-        let assets = [MkImageAsset {
-            id: 7,
-            name: "save.png".into(),
-            relative_path: String::new(),
-        }];
+        let assets = [MkImageRef::from_filename("save.png")];
         let live = MkCondition::ImageSearch {
             search: MkImageSearchCondition {
-                asset_id: 7,
+                image: MkImageRef::from_filename("save.png"),
                 region: SearchRegion::Rectangle {
                     rect: ScreenRect {
                         x: 10,
@@ -2064,7 +2051,7 @@ mod paste_tests {
                 live,
                 MkCondition::Not {
                     condition: Box::new(MkCondition::PreviousImageResult {
-                        asset_id: Some(7),
+                        image: Some(MkImageRef::from_filename("save.png")),
                         found: false,
                     }),
                 },
@@ -2074,7 +2061,10 @@ mod paste_tests {
             condition_summary(&nested, None, &assets),
             "All (Image currently visible: save.png · Rectangle 800×500; Not (Previous image search: save.png = Not Found))"
         );
-        assert_eq!(asset_display_name(9, None, &assets), "Missing image #9");
+        assert_eq!(
+            asset_display_name(&MkImageRef::from_filename("missing.png"), None, &assets),
+            "missing.png"
+        );
     }
 }
 pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
@@ -2082,7 +2072,7 @@ pub fn format_coordinate_target(target: &MkCoordinateTarget) -> String {
 }
 pub fn format_coordinate_target_with_assets(
     target: &MkCoordinateTarget,
-    assets: &[MkImageAsset],
+    assets: &[MkImageRef],
 ) -> String {
     match target {
         MkCoordinateTarget::CurrentPosition => "Current Position".into(),
@@ -2101,10 +2091,10 @@ pub fn format_coordinate_target_with_assets(
             format!("Matched Window {identity} ({}, {})", point.x, point.y)
         }
         MkCoordinateTarget::Variable { name } => format!("Variable <{name}>"),
-        MkCoordinateTarget::Image { asset_id, offset } => {
+        MkCoordinateTarget::Image { image, offset } => {
             format!(
                 "Image Result: {} + ({},{})",
-                asset_display_name(*asset_id, None, assets),
+                asset_display_name(image, None, assets),
                 offset.x,
                 offset.y
             )

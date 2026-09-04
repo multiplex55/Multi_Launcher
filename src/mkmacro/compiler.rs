@@ -130,7 +130,6 @@ mod tests {
             folder_id: None,
             playback: Default::default(),
             steps,
-            image_assets: vec![],
         }
     }
     #[test]

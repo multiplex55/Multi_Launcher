@@ -893,7 +893,6 @@ mod tests {
             folder_id: None,
             playback: MkPlayback::default(),
             steps: vec![],
-            image_assets: vec![],
         }
     }
     fn ctrl_k() -> MkHotkey {

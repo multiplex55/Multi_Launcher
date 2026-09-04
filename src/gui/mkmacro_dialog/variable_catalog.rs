@@ -390,7 +390,7 @@ fn add_visual_outputs(
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        AlphaPolicy, MkBlockKind, MkCondition, MkFileCollisionPolicy, MkImagePayload,
+        AlphaPolicy, MkBlockKind, MkCondition, MkFileCollisionPolicy, MkImagePayload, MkImageRef,
         MkPixelSearchPayload, MkPoint, MkPromptInputPayload, MkScreenshotDestination,
         MkScreenshotFormat, MkScreenshotPayload, MkWaitOptions, ReturnPoint, SearchRegion,
     };
@@ -416,7 +416,7 @@ mod tests {
     }
     fn image(outputs: MkImageOutputs) -> MkAction {
         MkAction::ImageFind(MkImagePayload {
-            asset_id: 1,
+            image: MkImageRef::from_filename("1.png"),
             wait: MkWaitOptions::default(),
             region: SearchRegion::Desktop,
             tolerance: 0,

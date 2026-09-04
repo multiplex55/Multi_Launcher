@@ -22,7 +22,6 @@ fn mac(steps: Vec<MkStep>) -> MkMacro {
         folder_id: None,
         playback: Default::default(),
         steps,
-        image_assets: vec![],
     }
 }
 

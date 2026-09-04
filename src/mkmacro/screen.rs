@@ -3,19 +3,38 @@
 //! virtual-desktop coordinates (and may therefore be negative).
 use crate::mkmacro::{
     DiagnosticKind, ExecResult, ExecutionDiagnostic, MkCoordinateTarget, MkImagePayload,
-    MkPixelSearchPayload, MkPoint, MkValue, MkWindowMatcher, RuntimeVariables, ScreenBackend,
+    MkImageRef, MkPixelSearchPayload, MkPoint, MkValue, MkWindowMatcher, RuntimeVariables,
+    ScreenBackend,
 };
 use image::RgbaImage;
 use std::sync::Arc;
 
-/// Runtime-only variable holding the result of the most recent search for one asset.
-pub(crate) fn image_result_variable(asset_id: u64) -> String {
-    format!("__image.{asset_id}")
+/// Runtime-only variable holding the result of the most recent search for one
+/// exact shared image reference. Length-prefixing plus byte escaping keeps the
+/// internal key unambiguous even if a future filename policy permits separators.
+pub(crate) fn image_result_variable(image: &MkImageRef) -> String {
+    format!(
+        "__image.{}:{}",
+        image.filename().len(),
+        encode_key(image.filename())
+    )
 }
 
-/// Runtime-only variable recording whether the latest search for an asset found it.
-pub(crate) fn image_found_variable(asset_id: u64) -> String {
-    format!("__image_found.{asset_id}")
+/// Runtime-only variable recording whether the latest search for a reference found it.
+pub(crate) fn image_found_variable(image: &MkImageRef) -> String {
+    format!(
+        "__image_found.{}:{}",
+        image.filename().len(),
+        encode_key(image.filename())
+    )
+}
+
+fn encode_key(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 pub(crate) fn pixel_result_variable(search_id: u64) -> String {
     format!("__pixel.{search_id}")
@@ -237,23 +256,26 @@ impl ScreenBackend for WindowsScreenBackend {
                 .context("variable", name)
                 .context("expected", "Point")),
             },
-            MkCoordinateTarget::Image { asset_id, offset } => {
-                let key = image_result_variable(*asset_id);
+            MkCoordinateTarget::Image { image, offset } => {
+                let key = image_result_variable(image);
                 match variables.get(&key) {
                     Some(MkValue::Point(point)) => Ok(MkPoint {
                         x: point.x.checked_add(offset.x).ok_or_else(|| {
-                            invalid(format!("image asset {asset_id} X offset overflow"))
+                            invalid(format!("image '{}' X offset overflow", image.filename()))
                         })?,
                         y: point.y.checked_add(offset.y).ok_or_else(|| {
-                            invalid(format!("image asset {asset_id} Y offset overflow"))
+                            invalid(format!("image '{}' Y offset overflow", image.filename()))
                         })?,
                     }),
                     Some(value) => Err(type_mismatch(&key, value)),
                     None => Err(ExecutionDiagnostic::new(
                         DiagnosticKind::TargetNotFound,
-                        format!("image asset {asset_id} has no result in the current run"),
+                        format!(
+                            "image '{}' has no result in the current run",
+                            image.filename()
+                        ),
                     )
-                    .context("asset_id", asset_id.to_string())
+                    .context("image", image.filename())
                     .context("variable", key)),
                 }
             }
@@ -1188,12 +1210,12 @@ mod windows_backend_tests {
     }
     #[derive(Default)]
     struct Visual {
-        requested: Mutex<Vec<u64>>,
+        requested: Mutex<Vec<MkImageRef>>,
     }
     impl VisualSearch for Visual {
         fn find_image(&self, _: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
-            let id = payload.asset_id;
-            self.requested.lock().unwrap().push(id);
+            let image = payload.image.clone();
+            self.requested.lock().unwrap().push(image);
             Ok(None)
         }
         fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {
@@ -1503,7 +1525,7 @@ mod windows_backend_tests {
     fn images_are_asset_specific_typed_and_offset_checked() {
         let b = backend((0, 0, 10, 10), None, MkPoint { x: 0, y: 0 });
         let target = |id, x, y| MkCoordinateTarget::Image {
-            asset_id: id,
+            image: MkImageRef::from_filename(format!("{id}.png")),
             offset: MkPoint { x, y },
         };
         let mut vars = RuntimeVariables::new();
@@ -1512,7 +1534,7 @@ mod windows_backend_tests {
             MkValue::Point(MkPoint { x: 99, y: 99 }),
         );
         vars.insert(
-            image_result_variable(2),
+            image_result_variable(&MkImageRef::from_filename("2.png")),
             MkValue::Point(MkPoint { x: 10, y: 20 }),
         );
         assert_eq!(
@@ -1523,13 +1545,16 @@ mod windows_backend_tests {
             b.resolve(&target(1, 0, 0), &vars).unwrap_err().kind,
             DiagnosticKind::TargetNotFound
         );
-        vars.insert(image_result_variable(1), MkValue::String("bad".into()));
+        vars.insert(
+            image_result_variable(&MkImageRef::from_filename("1.png")),
+            MkValue::String("bad".into()),
+        );
         assert_eq!(
             b.resolve(&target(1, 0, 0), &vars).unwrap_err().kind,
             DiagnosticKind::TypeMismatch
         );
         vars.insert(
-            image_result_variable(1),
+            image_result_variable(&MkImageRef::from_filename("1.png")),
             MkValue::Point(MkPoint { x: i32::MAX, y: 0 }),
         );
         assert!(

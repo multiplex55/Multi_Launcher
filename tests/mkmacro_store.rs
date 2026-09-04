@@ -27,7 +27,6 @@ fn invalid_doc() -> MkMacroDocument {
                 on_error: Default::default(),
                 action: MkAction::Else,
             }],
-            image_assets: vec![],
         }],
     }
 }
@@ -97,7 +96,6 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                         mode: MkTextMode::Type,
                     }),
                 }],
-                image_assets: vec![],
             },
             MkMacro {
                 id: 102,
@@ -120,7 +118,6 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                         ..Default::default()
                     }),
                 }],
-                image_assets: vec![],
             },
         ],
     };
@@ -335,7 +332,6 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
                 folder_id: None,
                 playback: Default::default(),
                 steps,
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -354,7 +350,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
 }
 
 #[test]
-fn schema_eight_migrates_through_store_and_persists_canonical_schema_ten() {
+fn schema_eight_migrates_through_store_and_persists_canonical_schema_eleven() {
     let dir = tempdir().unwrap();
     let path = dir.path().join(MKMACROS_FILE);
     let fixture = include_str!("fixtures/mkmacros_v8.json");
@@ -364,7 +360,7 @@ fn schema_eight_migrates_through_store_and_persists_canonical_schema_ten() {
     assert!(matches!(disposition, LoadDisposition::Loaded));
     let first = (*store.snapshot()).clone();
     assert_eq!(first.schema_version, SCHEMA_VERSION);
-    assert_eq!(first.schema_version, 10);
+    assert_eq!(first.schema_version, 11);
     assert!(first.folders.is_empty());
     for mac in &first.macros {
         assert_eq!(mac.hotkey_scope, MkHotkeyScope::AnyWindow);
@@ -385,11 +381,12 @@ fn schema_eight_migrates_through_store_and_persists_canonical_schema_ten() {
     // Full JSON equality also protects IDs, ordering, executable content, and
     // nondefault macro/step options from accidental normalization or loss.
     let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
-    expected["schema_version"] = serde_json::json!(10);
+    expected["schema_version"] = serde_json::json!(11);
     expected["folders"] = serde_json::json!([]);
     for mac in expected["macros"].as_array_mut().unwrap() {
         mac["hotkey_scope"] = serde_json::json!({"type": "any_window"});
         mac["folder_id"] = serde_json::Value::Null;
+        mac.as_object_mut().unwrap().remove("image_assets");
         for step in mac["steps"].as_array_mut().unwrap() {
             step["breakpoint"] = serde_json::Value::Bool(false);
         }
@@ -423,7 +420,11 @@ fn schema_nine_load_adds_breakpoints_and_repairs_only_dangling_folder_membership
     let path = dir.path().join(MKMACROS_FILE);
     let fixture = include_str!("fixtures/mkmacros_v9_dangling_folder.json");
     fs::write(&path, fixture).unwrap();
-    let original: MkMacroDocument = serde_json::from_str(fixture).unwrap();
+    let mut original_json: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    for mac in original_json["macros"].as_array_mut().unwrap() {
+        mac.as_object_mut().unwrap().remove("image_assets");
+    }
+    let original: MkMacroDocument = serde_json::from_value(original_json).unwrap();
     assert_eq!(original.schema_version, 9);
     assert_eq!(original.macros[1].folder_id, Some(999));
     assert!(!original.folders.iter().any(|folder| folder.id == 999));
@@ -456,9 +457,10 @@ fn schema_nine_load_adds_breakpoints_and_repairs_only_dangling_folder_membership
     // Verify the on-load repair reaches disk without changing anything else,
     // including the deliberately unsorted arrays and the unused folder.
     let mut expected_json: serde_json::Value = serde_json::from_str(fixture).unwrap();
-    expected_json["schema_version"] = serde_json::json!(10);
+    expected_json["schema_version"] = serde_json::json!(11);
     expected_json["macros"][1]["folder_id"] = serde_json::Value::Null;
     for mac in expected_json["macros"].as_array_mut().unwrap() {
+        mac.as_object_mut().unwrap().remove("image_assets");
         for step in mac["steps"].as_array_mut().unwrap() {
             step["breakpoint"] = serde_json::Value::Bool(false);
         }
@@ -544,7 +546,7 @@ fn schema_nine_normal_documents_load_through_public_store_without_manual_migrati
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let loaded = store.snapshot();
-        assert_eq!(loaded.schema_version, 10);
+        assert_eq!(loaded.schema_version, 11);
         assert_eq!(
             loaded.macros.len(),
             original["macros"].as_array().unwrap().len()
@@ -571,17 +573,27 @@ fn schema_nine_normal_documents_load_through_public_store_without_manual_migrati
                     serde_json::to_value(&loaded_step.on_error).unwrap(),
                     original_step["on_error"]
                 );
-                assert_eq!(
-                    serde_json::to_value(&loaded_step.action).unwrap(),
-                    original_step["action"]
-                );
+                let actual_action = serde_json::to_value(&loaded_step.action).unwrap();
+                if original_step["action"]["type"] == "image_find" {
+                    assert_eq!(actual_action["data"]["image"], "missing_image_10_21.png");
+                    assert!(actual_action["data"].get("asset_id").is_none());
+                } else {
+                    assert_eq!(actual_action, original_step["action"]);
+                }
                 assert!(!loaded_step.breakpoint);
             }
         }
 
         let persisted: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted["schema_version"], 10);
+        assert_eq!(persisted["schema_version"], 11);
+        assert!(
+            persisted["macros"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|mac| mac.get("image_assets").is_none())
+        );
         for mac in persisted["macros"].as_array().unwrap() {
             for step in mac["steps"].as_array().unwrap() {
                 assert_eq!(step["breakpoint"], serde_json::Value::Bool(false));
@@ -592,7 +604,7 @@ fn schema_nine_normal_documents_load_through_public_store_without_manual_migrati
         drop(store);
         let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
-        assert_eq!(reopened.snapshot().schema_version, 10);
+        assert_eq!(reopened.snapshot().schema_version, 11);
         assert_eq!(fs::read(&path).unwrap(), persisted_bytes);
     }
 }
@@ -658,7 +670,6 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 folder_id: Some(42),
                 playback: Default::default(),
                 steps: vec![],
-                image_assets: vec![],
             },
             MkMacro {
                 id: 12,
@@ -670,7 +681,6 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 folder_id: Some(999),
                 playback: Default::default(),
                 steps: vec![],
-                image_assets: vec![],
             },
             MkMacro {
                 id: 42,
@@ -682,7 +692,6 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 folder_id: Some(7),
                 playback: Default::default(),
                 steps: vec![],
-                image_assets: vec![],
             },
             MkMacro {
                 id: 3,
@@ -694,7 +703,6 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![],
-                image_assets: vec![],
             },
         ],
     };

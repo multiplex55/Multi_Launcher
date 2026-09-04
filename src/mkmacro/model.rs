@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-// Schema 10 adds persisted debugging breakpoints to macro steps while retaining
-// schema 9's folders, scoped hotkeys, configurable delays, region clicks, and desktop selection.
-pub const SCHEMA_VERSION: u32 = 10;
+// Schema 11 replaces macro-owned numeric image assets with shared flat-library
+// filename references while retaining schema 10's authoring/debug fields.
+pub const SCHEMA_VERSION: u32 = 11;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -18,6 +18,109 @@ fn yes() -> bool {
 }
 fn one() -> u32 {
     1
+}
+
+/// A portable reference to one PNG directly inside the shared `mkmacro_assets`
+/// directory. Filesystem roots are owned by the store, never by this value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MkImageRef(String);
+
+impl MkImageRef {
+    pub fn new(filename: impl Into<String>) -> Result<Self, String> {
+        let filename = filename.into();
+        validate_image_filename(&filename)?;
+        Ok(Self(filename))
+    }
+
+    /// Constructs a reference without checking the filesystem. Migration uses
+    /// this for deterministic missing references so normal validation can report them.
+    pub fn from_filename(filename: impl Into<String>) -> Self {
+        Self(filename.into())
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.filename()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn is_valid_filename(&self) -> bool {
+        validate_image_filename(&self.0).is_ok()
+    }
+}
+
+fn validate_image_filename(filename: &str) -> Result<(), String> {
+    if filename.is_empty() {
+        return Err("image filename must not be empty".into());
+    }
+    if filename == "." || filename == ".." {
+        return Err("image filename must not be '.' or '..'".into());
+    }
+    if filename.contains('/') || filename.contains('\\') {
+        return Err("image filename must be a direct child of mkmacro_assets".into());
+    }
+    if filename.starts_with('/')
+        || filename.starts_with("\\\\")
+        || (filename.as_bytes().get(1) == Some(&b':')
+            && filename
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic))
+    {
+        return Err("image filename must not be an absolute or drive/UNC path".into());
+    }
+    if !filename.to_ascii_lowercase().ends_with(".png") {
+        return Err("image filename must end with .png".into());
+    }
+    if filename
+        .chars()
+        .any(|c| c.is_control() || "<>:\"|?*".contains(c))
+    {
+        return Err("image filename contains invalid characters".into());
+    }
+    if filename.ends_with('.') || filename.ends_with(' ') {
+        return Err("image filename must not end with a dot or space".into());
+    }
+    let stem = filename[..filename.len() - 4].trim_end_matches(['.', ' ']);
+    if stem.is_empty() {
+        return Err("image filename must have a non-empty basename".into());
+    }
+    let reserved = stem.split('.').next().unwrap_or(stem).to_ascii_uppercase();
+    if matches!(
+        reserved.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err("image filename uses a reserved device name".into());
+    }
+    Ok(())
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMacroDocument {
@@ -80,9 +183,6 @@ pub struct MkMacro {
     pub playback: MkPlayback,
     #[serde(default)]
     pub steps: Vec<MkStep>,
-    /// Reference images owned by this macro. IDs remain the persisted action reference.
-    #[serde(default)]
-    pub image_assets: Vec<MkImageAsset>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkStep {
@@ -217,7 +317,7 @@ pub enum MkCoordinateTarget {
         name: String,
     },
     Image {
-        asset_id: u64,
+        image: MkImageRef,
         offset: MkPoint,
     },
     /// Result produced by a particular Find Pixel Color action.
@@ -237,13 +337,6 @@ pub struct MkWindowMatcher {
     pub process: Option<String>,
     #[serde(default)]
     pub class: Option<String>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MkImageAsset {
-    #[serde(default)]
-    pub id: u64,
-    pub name: String,
-    pub relative_path: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkUiSelector {
@@ -357,7 +450,7 @@ pub enum MkCondition {
         found: bool,
     },
     PreviousImageResult {
-        asset_id: Option<u64>,
+        image: Option<MkImageRef>,
         found: bool,
     },
     PixelResult {
@@ -379,7 +472,8 @@ pub enum MkCondition {
 /// output policy deliberately live in [`MkImagePayload`], not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkImageSearchCondition {
-    pub asset_id: u64,
+    #[serde(default)]
+    pub image: MkImageRef,
     #[serde(default)]
     pub region: SearchRegion,
     #[serde(default)]
@@ -393,7 +487,7 @@ pub struct MkImageSearchCondition {
 impl MkImageSearchCondition {
     pub fn as_payload(&self) -> MkImagePayload {
         MkImagePayload {
-            asset_id: self.asset_id,
+            image: self.image.clone(),
             wait: MkWaitOptions {
                 timeout_ms: 0,
                 poll_interval_ms: 1,
@@ -635,7 +729,8 @@ impl MkImageOutputs {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkImagePayload {
-    pub asset_id: u64,
+    #[serde(default)]
+    pub image: MkImageRef,
     pub wait: MkWaitOptions,
     #[serde(default)]
     pub region: SearchRegion,
@@ -1015,7 +1110,7 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_10_with_query_payload() {
+    fn current_document_round_trips_as_schema_11_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 id: 1,
@@ -1038,13 +1133,12 @@ mod launcher_command_payload_tests {
                         legacy_resolved_action: None,
                     }),
                 }],
-                image_assets: vec![],
             }],
             ..MkMacroDocument::default()
         };
 
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"schema_version\":10"));
+        assert!(json.contains("\"schema_version\":11"));
         assert!(json.contains(r#""data":{"query":"note list"}"#));
         assert_eq!(
             serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
@@ -1057,8 +1151,9 @@ mod image_payload_tests {
     use super::*;
     #[test]
     fn missing_image_search_fields_default_and_current_round_trips() {
-        let legacy = r#"{"asset_id":4,"wait":{"timeout_ms":10,"poll_interval_ms":2}}"#;
-        let p: MkImagePayload = serde_json::from_str(legacy).unwrap();
+        let current =
+            r#"{"image":"login_button.png","wait":{"timeout_ms":10,"poll_interval_ms":2}}"#;
+        let p: MkImagePayload = serde_json::from_str(current).unwrap();
         assert_eq!(p.region, SearchRegion::Desktop);
         assert_eq!(p.tolerance, 0);
         assert_eq!(p.alpha, AlphaPolicy::Compare);
@@ -1070,9 +1165,10 @@ mod image_payload_tests {
     }
     #[test]
     fn image_policy_and_outputs_have_stable_json_and_round_trip() {
-        let mut p: MkImagePayload =
-            serde_json::from_str(r#"{"asset_id":4,"wait":{"timeout_ms":10,"poll_interval_ms":2}}"#)
-                .unwrap();
+        let mut p: MkImagePayload = serde_json::from_str(
+            r#"{"image":"login_button.png","wait":{"timeout_ms":10,"poll_interval_ms":2}}"#,
+        )
+        .unwrap();
         p.not_found_policy = MkImageNotFoundPolicy::Continue;
         p.outputs = MkImageOutputs {
             found: Some("found_out".into()),
@@ -1089,6 +1185,38 @@ mod image_payload_tests {
                 .unwrap()
                 .contains(r#""not_found_policy":"fail""#)
         );
+    }
+
+    #[test]
+    fn schema_eleven_image_consumers_serialize_filename_references_only() {
+        let image = MkImageRef::from_filename("login_button.png");
+        let values = [
+            serde_json::to_value(MkAction::ImageFind(MkImagePayload {
+                image: image.clone(),
+                wait: MkWaitOptions::default(),
+                region: SearchRegion::Desktop,
+                tolerance: 0,
+                alpha: AlphaPolicy::Compare,
+                return_point: ReturnPoint::Center,
+                not_found_policy: MkImageNotFoundPolicy::Fail,
+                outputs: MkImageOutputs::default(),
+            }))
+            .unwrap(),
+            serde_json::to_value(MkCondition::PreviousImageResult {
+                image: Some(image.clone()),
+                found: true,
+            })
+            .unwrap(),
+            serde_json::to_value(MkCoordinateTarget::Image {
+                image,
+                offset: MkPoint { x: 2, y: -1 },
+            })
+            .unwrap(),
+        ];
+        let text = serde_json::to_string(&values).unwrap();
+        assert!(text.contains(r#""image":"login_button.png""#));
+        assert!(!text.contains("asset_id"));
+        assert!(!text.contains("image_assets"));
     }
     #[test]
     fn matched_window_coordinate_has_stable_tag_and_round_trips() {
@@ -1271,7 +1399,6 @@ mod screenshot_region_serialization_tests {
                 folder_id: None,
                 playback: MkPlayback::default(),
                 steps,
-                image_assets: vec![],
             }],
             settings: MkMacroSettings::default(),
         };
@@ -1457,7 +1584,6 @@ mod breakpoint_serialization_tests {
                 folder_id: None,
                 playback: MkPlayback::default(),
                 steps: vec![step(true)],
-                image_assets: vec![],
             }],
             ..Default::default()
         };
@@ -1508,9 +1634,9 @@ mod schema_v10_serialization_tests {
     use super::*;
 
     #[test]
-    fn document_defaults_to_schema_ten_and_no_folders() {
+    fn document_defaults_to_schema_eleven_and_no_folders() {
         let document: MkMacroDocument = serde_json::from_str("{}").unwrap();
-        assert_eq!(document.schema_version, 10);
+        assert_eq!(document.schema_version, 11);
         assert!(document.folders.is_empty());
         assert!(MkMacroDocument::default().folders.is_empty());
     }
@@ -1526,7 +1652,6 @@ mod schema_v10_serialization_tests {
             folder_id: Some(42),
             playback: MkPlayback::default(),
             steps: vec![],
-            image_assets: vec![],
         }
     }
 

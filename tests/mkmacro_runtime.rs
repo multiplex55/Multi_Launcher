@@ -56,7 +56,6 @@ fn run_window_action(
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![s(1, action)],
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -141,7 +140,6 @@ fn notification_sequence(policy: MkErrorPolicy) -> MkMacro {
                 }),
             ),
         ],
-        image_assets: vec![],
     }
 }
 
@@ -226,15 +224,16 @@ fn notification_error_policies_gate_sound_and_following_action() {
 fn image_find_result_drives_following_mouse_move_without_platform_effects() {
     let d = tempdir().unwrap();
     let (store, _) = MkMacroStore::open(d.path()).unwrap();
-    let asset_path = store
-        .write_png_asset(
-            70,
-            10,
+    let image_ref = MkImageRef::from_filename("fixture.png");
+    store
+        .write_captured_png(
             &image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255])),
+            image_ref.clone(),
+            ImageImportChoice::SaveAs(image_ref.clone()),
         )
         .unwrap();
     let image = MkImagePayload {
-        asset_id: 10,
+        image: image_ref.clone(),
         wait: MkWaitOptions {
             timeout_ms: 1,
             poll_interval_ms: 1,
@@ -266,7 +265,7 @@ fn image_find_result_drives_following_mouse_move_without_platform_effects() {
                         2,
                         MkAction::MouseMove(MkMouseMovePayload {
                             target: MkCoordinateTarget::Image {
-                                asset_id: 10,
+                                image: image_ref.clone(),
                                 offset: MkPoint { x: 4, y: -3 },
                             },
                             duration_ms: 250,
@@ -280,16 +279,11 @@ fn image_find_result_drives_following_mouse_move_without_platform_effects() {
                         }),
                     ),
                 ],
-                image_assets: vec![MkImageAsset {
-                    id: 10,
-                    name: "fixture".into(),
-                    relative_path: asset_path.to_string_lossy().into_owned(),
-                }],
             }],
         })
         .unwrap();
     let fake = Arc::new(FakeBackend::default());
-    fake.script_image(10, Ok(Some(MkPoint { x: 30, y: 40 })));
+    fake.script_image(image_ref, Ok(Some(MkPoint { x: 30, y: 40 })));
     let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
     assert_eq!(
         runtime.command(RuntimeCommand::Run(70)),
@@ -338,7 +332,6 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
                         }),
                     ),
                 ],
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -408,7 +401,6 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
                         }),
                     ),
                 ],
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -632,7 +624,6 @@ fn window_wait_is_cancellable_without_window_mutation() {
                         }),
                     }),
                 )],
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -761,7 +752,6 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
                         }),
                     ),
                 ],
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -820,7 +810,6 @@ fn stop_during_held_key_wakes_and_cleans_up() {
                     ),
                     s(3, MkAction::KeyPress(MkKey::Enter)),
                 ],
-                image_assets: vec![],
             }],
         })
         .unwrap();
@@ -874,7 +863,6 @@ fn explicit_run_commands_execute_despite_unmatched_hotkey_scope() {
                         mode: MkTextMode::Type,
                     }),
                 )],
-                image_assets: vec![],
             }],
         })
         .unwrap();

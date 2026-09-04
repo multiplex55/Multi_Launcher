@@ -77,6 +77,8 @@ pub struct ActionEditorState {
     pub insertion: Option<InsertionIntent>,
     pub capture_keys: bool,
     pub capture_message: Option<String>,
+    pub capture_filename: String,
+    pub image_import_filename: String,
     pub editor: Option<super::action_catalog::EditorKind>,
     position_capture: Option<PositionCaptureState>,
     pub(crate) draft_generation: u64,
@@ -87,6 +89,7 @@ pub struct ActionEditorState {
     pub add_smooth_move: bool,
     pub add_activate_before: bool,
     pub image_authoring: super::image_authoring_job::ImageAuthoringJob,
+    pub(crate) pending_image_import: Option<PendingImageImport>,
     /// Cloneable operation client borrowed from the dialog-wide visual-overlay service.
     /// The editor owns only the operation IDs it starts, not the native service itself.
     pub visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
@@ -166,8 +169,16 @@ struct PendingVisualRegionOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingImageImport {
+    pub source: std::path::PathBuf,
+    pub token: super::image_authoring_job::DraftToken,
+    pub destination: super::image_authoring_job::ImageAuthoringDestination,
+    pub previous_image: MkImageRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConditionOperationResult {
-    Asset(u64),
+    Asset(MkImageRef),
     Rectangle(ScreenRect),
     Matcher(MkWindowMatcher),
 }
@@ -334,6 +345,8 @@ impl ActionEditorState {
             insertion: None,
             capture_keys: false,
             capture_message: None,
+            capture_filename: String::new(),
+            image_import_filename: String::new(),
             editor: None,
             position_capture: None,
             draft_generation: 0,
@@ -342,6 +355,7 @@ impl ActionEditorState {
             add_smooth_move: false,
             add_activate_before: false,
             image_authoring: Default::default(),
+            pending_image_import: None,
             visual_overlay,
             visual_capture: None,
             overlay_diagnostic: None,
@@ -465,7 +479,7 @@ impl ActionEditorState {
                 | super::condition_editor::ConditionImageOperation::CaptureRectangle,
                 ConditionOperationResult::Asset(id),
             ) => {
-                search.asset_id = id;
+                search.image = id;
                 true
             }
             (
@@ -513,6 +527,7 @@ impl ActionEditorState {
         path: std::path::PathBuf,
         executor: &dyn super::image_authoring_job::ImageAuthoringExecutor,
     ) -> anyhow::Result<()> {
+        self.pending_image_import = None;
         let token = super::image_authoring_job::DraftToken {
             macro_id,
             draft_generation: self.draft_generation,
@@ -522,7 +537,8 @@ impl ActionEditorState {
             .as_mut()
             .and_then(image_payload_mut)
             .ok_or_else(|| anyhow::anyhow!("no image-action draft is open"))?
-            .asset_id;
+            .image
+            .clone();
         self.image_authoring
             .start_with_executor(
                 store,
@@ -556,6 +572,7 @@ impl ActionEditorState {
         path: std::path::PathBuf,
         executor: &dyn super::image_authoring_job::ImageAuthoringExecutor,
     ) -> anyhow::Result<()> {
+        self.pending_image_import = None;
         let previous = self
             .draft
             .as_ref()
@@ -568,7 +585,7 @@ impl ActionEditorState {
                 _ => None,
             })
             .and_then(|c| match c {
-                MkCondition::ImageSearch { search, .. } => Some(search.asset_id),
+                MkCondition::ImageSearch { search, .. } => Some(search.image.clone()),
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("the selected image condition no longer exists"))?;
@@ -741,6 +758,9 @@ impl ActionEditorState {
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
+        self.pending_image_import = None;
+        self.capture_filename.clear();
+        self.image_import_filename.clear();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
@@ -779,6 +799,9 @@ impl ActionEditorState {
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
+        self.pending_image_import = None;
+        self.capture_filename.clear();
+        self.image_import_filename.clear();
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
@@ -804,6 +827,9 @@ impl ActionEditorState {
     pub fn cancel(&mut self) {
         self.pending_visual_region = None;
         self.image_authoring = Default::default();
+        self.pending_image_import = None;
+        self.capture_filename.clear();
+        self.image_import_filename.clear();
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
             // Cancellation synchronously releases the active overlay before the draft is discarded.
@@ -942,7 +968,7 @@ impl ActionEditorState {
                     self.draft_changed = true;
                 }
             }
-            WorkflowOutcome::Asset { token, asset_id } => {
+            WorkflowOutcome::Asset { token, image } => {
                 if self.pending_visual_region.as_ref().is_some_and(|pending| {
                     pending.macro_id == token.macro_id
                         && pending.draft_generation == token.draft_generation
@@ -954,14 +980,14 @@ impl ActionEditorState {
                     match pending.destination {
                         VisualRegionDestination::ImageActionReferenceAsset => {
                             if let Some(payload) = self.draft.as_mut().and_then(image_payload_mut) {
-                                payload.asset_id = asset_id;
+                                payload.image = image.clone();
                                 self.draft_changed = true;
                             }
                         }
                         VisualRegionDestination::ConditionSearchRegion(destination) => {
                             self.apply_condition_result(
                                 &destination,
-                                ConditionOperationResult::Asset(asset_id),
+                                ConditionOperationResult::Asset(image),
                                 current_macro_id,
                             );
                         }
@@ -1079,7 +1105,7 @@ impl ActionEditorState {
         self.capture_message = None;
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
-        if self.image_authoring.is_importing() {
+        if self.image_authoring.is_importing() || self.pending_image_import.is_some() {
             return None;
         }
         // Keep invalid drafts open for correction without changing the step.
@@ -1087,6 +1113,9 @@ impl ActionEditorState {
             return None;
         }
         self.image_authoring = Default::default();
+        self.pending_image_import = None;
+        self.capture_filename.clear();
+        self.image_import_filename.clear();
         self.pending_visual_region = None;
         if let Some(workflow) = &mut self.visual_capture {
             workflow.cancel();
@@ -1149,11 +1178,8 @@ impl ActionEditorState {
         Some(id)
     }
 
-    fn poll_image_authoring(
-        &mut self,
-        current_macro_id: Option<u64>,
-    ) -> Option<crate::mkmacro::StagedImageAsset> {
-        let Some((active_token, active_destination, previous_asset_id, source, completion)) =
+    fn poll_image_authoring(&mut self, current_macro_id: Option<u64>) -> Option<MkImageRef> {
+        let Some((active_token, active_destination, previous_image, source, completion)) =
             self.image_authoring.try_take()
         else {
             return None;
@@ -1165,7 +1191,8 @@ impl ActionEditorState {
         }
         self.image_authoring = Default::default();
         match completion.result {
-            Ok(staged) => {
+            Ok(ImageImportResult::Imported(image)) => {
+                self.pending_image_import = None;
                 let applied = match &active_destination {
                     super::image_authoring_job::ImageAuthoringDestination::ImageActionReference => {
                         if current_macro_id != Some(active_token.macro_id)
@@ -1175,10 +1202,10 @@ impl ActionEditorState {
                         } else if let Some(payload) =
                             self.draft.as_mut().and_then(image_payload_mut)
                         {
-                            if payload.asset_id != previous_asset_id {
+                            if payload.image != previous_image {
                                 false
                             } else {
-                                payload.asset_id = staged.asset_id;
+                                payload.image = image.clone();
                                 true
                             }
                         } else {
@@ -1213,9 +1240,9 @@ impl ActionEditorState {
                                 });
                             match node {
                                 Some(MkCondition::ImageSearch { search, .. })
-                                    if search.asset_id == previous_asset_id =>
+                                    if search.image == previous_image =>
                                 {
-                                    search.asset_id = staged.asset_id;
+                                    search.image = image.clone();
                                     true
                                 }
                                 _ => false,
@@ -1226,8 +1253,24 @@ impl ActionEditorState {
                 if applied {
                     self.draft_changed = true;
                     self.capture_message = None;
-                    return Some(staged);
+                    return Some(image);
                 }
+            }
+            Ok(ImageImportResult::Collision { image }) => {
+                self.pending_image_import = Some(PendingImageImport {
+                    source: source.clone(),
+                    token: active_token,
+                    destination: active_destination.clone(),
+                    previous_image,
+                });
+                self.image_import_filename = image.filename().to_owned();
+                self.capture_message = Some(format!(
+                    "Reference image filename already exists: {}",
+                    image.filename()
+                ));
+            }
+            Ok(ImageImportResult::Cancelled) => {
+                self.capture_message = Some("Reference image authoring cancelled".into());
             }
             Err(error) => {
                 let name = source
@@ -1238,6 +1281,33 @@ impl ActionEditorState {
             }
         }
         None
+    }
+
+    pub(crate) fn resolve_pending_image_import(
+        &mut self,
+        store: Arc<MkMacroStore>,
+        choice: ImageImportChoice,
+        executor: &dyn super::image_authoring_job::ImageAuthoringExecutor,
+    ) -> anyhow::Result<()> {
+        let Some(pending) = self.pending_image_import.clone() else {
+            return Ok(());
+        };
+        if matches!(choice, ImageImportChoice::Cancel) {
+            self.pending_image_import = None;
+            self.capture_message = Some("Reference image import cancelled".into());
+            return Ok(());
+        }
+        self.image_authoring
+            .start_with_choice_with_executor(
+                store,
+                pending.token,
+                pending.destination,
+                pending.previous_image,
+                pending.source,
+                Some(choice),
+                executor,
+            )
+            .map_err(anyhow::Error::msg)
     }
     fn stop_position_capture(&mut self) {
         self.position_capture = None;
@@ -1807,38 +1877,22 @@ fn variable_picker_ui(
 }
 
 /// Produces one consistent, stable description wherever an image asset is shown.
-pub(crate) fn image_asset_label(asset_id: u64, assets: &[MkImageAsset]) -> String {
-    let Some(asset) = assets.iter().find(|asset| asset.id == asset_id) else {
-        return format!("Missing asset · ID {asset_id}");
-    };
-    let filename = std::path::Path::new(&asset.relative_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .trim();
-    let friendly = asset.name.trim();
-    let mut parts = Vec::new();
-    if !friendly.is_empty() {
-        parts.push(friendly.to_owned());
+pub(crate) fn image_asset_label(image: &MkImageRef, _assets: &[MkImageRef]) -> String {
+    if image.filename().is_empty() {
+        "No reference image selected".into()
+    } else {
+        image.filename().into()
     }
-    if !filename.is_empty() && filename != friendly {
-        parts.push(filename.to_owned());
-    }
-    if parts.is_empty() {
-        parts.push("Image asset".to_owned());
-    }
-    parts.push(format!("ID {}", asset.id));
-    parts.join(" · ")
 }
 
-pub(crate) fn select_image_asset(asset_id: &mut u64, selected: u64) {
-    *asset_id = selected;
+pub(crate) fn select_image_asset(image: &mut MkImageRef, selected: &MkImageRef) {
+    *image = selected.clone();
 }
 
 pub(crate) fn change_target_kind(
     target: &mut MkCoordinateTarget,
     next: usize,
-    assets: &[MkImageAsset],
+    assets: &[MkImageRef],
 ) {
     let next = standard_target_kinds()
         .get(next)
@@ -1917,7 +1971,7 @@ fn coordinate_target_kind(target: &MkCoordinateTarget) -> CoordinateTargetKind {
 fn change_target_kind_for_kind(
     target: &mut MkCoordinateTarget,
     next: CoordinateTargetKind,
-    assets: &[MkImageAsset],
+    assets: &[MkImageRef],
 ) {
     *target = match next {
         CoordinateTargetKind::CurrentPosition => MkCoordinateTarget::CurrentPosition,
@@ -1935,7 +1989,7 @@ fn change_target_kind_for_kind(
             name: String::new(),
         },
         CoordinateTargetKind::ImageResult => MkCoordinateTarget::Image {
-            asset_id: assets.first().map_or(0, |a| a.id),
+            image: assets.first().cloned().unwrap_or_default(),
             offset: MkPoint { x: 0, y: 0 },
         },
         CoordinateTargetKind::PixelResult => MkCoordinateTarget::Pixel {
@@ -1951,16 +2005,14 @@ fn change_target_kind_for_kind(
 /// widget to silently repair (or replace) a dangling asset reference.
 #[derive(Clone, Copy)]
 pub(super) struct TargetEditorContext<'a> {
-    pub macro_id: u64,
-    pub assets: &'a [MkImageAsset],
     pub store: &'a MkMacroStore,
 }
 
 impl<'a> TargetEditorContext<'a> {
-    pub(super) fn resolve_asset(&self, asset_id: u64) -> Option<&'a MkImageAsset> {
-        (asset_id != 0)
-            .then(|| self.assets.iter().find(|asset| asset.id == asset_id))
-            .flatten()
+    pub(super) fn has_image(&self, image: &MkImageRef) -> bool {
+        self.store
+            .image_refs()
+            .map_or(false, |images| images.contains(image))
     }
 }
 
@@ -1979,7 +2031,7 @@ fn target_ui_with_variables(
     context: &TargetEditorContext<'_>,
     options: TargetUiOptions<'_>,
 ) -> TargetUiOutcome {
-    let assets = context.assets;
+    let assets = context.store.image_refs().unwrap_or_default();
     let kind = coordinate_target_kind(target);
     let mut next = kind;
     egui::ComboBox::from_label("Target")
@@ -1997,7 +2049,7 @@ fn target_ui_with_variables(
             }
         });
     if next != kind {
-        change_target_kind_for_kind(target, next, assets);
+        change_target_kind_for_kind(target, next, &assets);
     }
     match target {
         MkCoordinateTarget::CurrentPosition => {}
@@ -2062,7 +2114,7 @@ fn target_ui_with_variables(
                 });
             }
         }
-        MkCoordinateTarget::Image { asset_id, offset } => {
+        MkCoordinateTarget::Image { image, offset } => {
             if assets.is_empty() {
                 ui.add_enabled(
                     false,
@@ -2070,32 +2122,31 @@ fn target_ui_with_variables(
                 );
             } else {
                 egui::ComboBox::from_label("Result from")
-                    .selected_text(image_asset_label(*asset_id, assets))
+                    .selected_text(image_asset_label(image, &assets))
                     .show_ui(ui, |ui| {
                         for asset in assets {
-                            let label = image_asset_label(asset.id, assets);
-                            if ui.selectable_label(*asset_id == asset.id, label).clicked() {
-                                select_image_asset(asset_id, asset.id);
+                            let label = image_asset_label(&asset, &[]);
+                            if ui.selectable_label(*image == asset, label).clicked() {
+                                select_image_asset(image, &asset);
                             }
                         }
                     });
             }
             ui.label("Reference/result image:");
-            if *asset_id == 0 {
+            if image.filename().is_empty() {
                 ui.weak("No image result selected");
-            } else if context.resolve_asset(*asset_id).is_some() {
+            } else if context.has_image(image) {
                 super::image_preview::show_thumbnail(
                     ui,
                     context.store,
-                    context.macro_id,
-                    *asset_id,
+                    image,
                     super::image_preview::TARGET_THUMBNAIL_BOUND,
                 );
                 ui.weak("Visual reference for the selected image-search result; Mouse Move does not run a new search.");
             } else {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
-                    format!("Missing asset · ID {}", *asset_id),
+                    format!("Missing reference image · {}", image.filename()),
                 );
             }
             ui.heading("Offset");
@@ -2239,8 +2290,6 @@ fn action_ui(
     bool,
 ) {
     let target_context = TargetEditorContext {
-        macro_id: image_context.macro_id,
-        assets: image_context.assets,
         store: image_context.store,
     };
     let mut pick = None;
@@ -3256,7 +3305,7 @@ pub(crate) fn insert_smooth_move_after(
             on_error: MkErrorPolicy::Stop,
             action: MkAction::MouseMove(MkMouseMovePayload {
                 target: MkCoordinateTarget::Image {
-                    asset_id: payload.asset_id,
+                    image: payload.image.clone(),
                     offset: MkPoint { x: 0, y: 0 },
                 },
                 duration_ms: 500,
@@ -3317,49 +3366,11 @@ fn repair_and_report_change(dialog: &mut MkMacroDialog) {
     dialog.mark_dirty();
 }
 
-fn ensure_image_asset_catalog_entry(dialog: &mut MkMacroDialog, asset_id: u64) {
-    if asset_id == 0 {
-        return;
-    }
-    let Some(macro_) = dialog.selected_macro_mut() else {
-        return;
-    };
-    if !macro_.image_assets.iter().any(|asset| asset.id == asset_id) {
-        macro_.image_assets.push(MkImageAsset {
-            id: asset_id,
-            name: String::new(),
-            relative_path: format!("mkmacro_assets/{}/{}.png", macro_.id, asset_id),
-        });
-        dialog.mark_dirty();
-    }
-}
-
 /// Non-egui completion reducer used by the frame loop and authoring tests.
-/// A staged file becomes visible in the live macro asset browser only when the
-/// editor still owns the exact destination that initiated the operation.
 fn reduce_image_authoring_completion(dialog: &mut MkMacroDialog) {
-    let selected_macro_id = dialog.selected_macro_id;
-    let Some(staged) = dialog.action_editor.poll_image_authoring(selected_macro_id) else {
-        return;
-    };
-    let Some(macro_) = dialog.selected_macro_mut() else {
-        return;
-    };
-    if !macro_
-        .image_assets
-        .iter()
-        .any(|asset| asset.id == staged.asset_id)
-    {
-        macro_.image_assets.push(MkImageAsset {
-            id: staged.asset_id,
-            name: String::new(),
-            relative_path: staged
-                .managed_reference
-                .to_string_lossy()
-                .replace('\\', "/"),
-        });
-        dialog.mark_dirty();
-    }
+    let _ = dialog
+        .action_editor
+        .poll_image_authoring(dialog.selected_macro_id);
 }
 
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
@@ -3392,13 +3403,35 @@ fn image_output_names_valid(action: &MkAction) -> bool {
 
 fn apply_capture(
     store: &MkMacroStore,
-    macro_id: u64,
+    _macro_id: u64,
     payload: &mut MkImagePayload,
     image: &image::RgbaImage,
 ) -> anyhow::Result<()> {
-    let staged = ImageAssetAuthoringService::new(store).stage_rgba(macro_id, image)?;
-    payload.asset_id = staged.asset_id;
-    Ok(())
+    let result = ImageAssetAuthoringService::new(store).stage_rgba(
+        image,
+        MkImageRef::from_filename("capture.png"),
+        ImageImportChoice::ReplaceExisting,
+    )?;
+    match result {
+        ImageImportResult::Imported(image) => {
+            payload.image = image;
+            Ok(())
+        }
+        ImageImportResult::Collision { image } => {
+            anyhow::bail!("image filename collision: {}", image.filename())
+        }
+        ImageImportResult::Cancelled => anyhow::bail!("image authoring cancelled"),
+    }
+}
+
+pub(crate) fn normalize_image_filename(input: &str) -> Result<MkImageRef, String> {
+    let trimmed = input.trim();
+    let filename = if trimmed.to_ascii_lowercase().ends_with(".png") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.png")
+    };
+    MkImageRef::new(filename)
 }
 
 fn condition_at_path<'a>(
@@ -3498,6 +3531,152 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if workflow_active {
         ctx.request_repaint();
     }
+    let captured_filename_suggestion = d
+        .action_editor
+        .visual_capture
+        .as_ref()
+        .and_then(|workflow| workflow.suggested_filename())
+        .map(str::to_owned);
+    if let Some(suggestion) = captured_filename_suggestion
+        && d.action_editor.capture_filename.is_empty()
+    {
+        d.action_editor.capture_filename = suggestion;
+    }
+    if d.action_editor
+        .visual_capture
+        .as_ref()
+        .is_some_and(|workflow| {
+            matches!(
+                workflow.state(),
+                super::visual_capture_workflow::WorkflowState::Naming { .. }
+            )
+        })
+    {
+        egui::Window::new("Save captured reference image")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let state = &mut d.action_editor;
+                ui.label("Choose the shared PNG filename for this capture.");
+                let display_filename = normalize_image_filename(&state.capture_filename)
+                    .map(|image| image.filename().to_owned())
+                    .unwrap_or_else(|_| state.capture_filename.clone());
+                ui.label(format!("mkmacro_assets/{display_filename}"));
+                ui.text_edit_singleline(&mut state.capture_filename);
+                ui.horizontal(|ui| {
+                    if ui.button("Replace Existing").clicked() {
+                        match normalize_image_filename(&state.capture_filename) {
+                            Ok(image) => {
+                                if let Some(workflow) = state.visual_capture.as_mut() {
+                                    match workflow
+                                        .confirm_filename(image, ImageImportChoice::ReplaceExisting)
+                                    {
+                                        Ok(ImageImportResult::Collision { image }) => {
+                                            state.capture_message = Some(format!(
+                                                "Reference image filename already exists: {}",
+                                                image.filename()
+                                            ))
+                                        }
+                                        Ok(ImageImportResult::Cancelled) => {
+                                            state.capture_message =
+                                                Some("Reference image capture cancelled".into())
+                                        }
+                                        Ok(ImageImportResult::Imported(_)) => {
+                                            state.capture_message = None
+                                        }
+                                        Err(error) => {
+                                            state.capture_message =
+                                                Some(format!("Reference image: {error}"))
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => state.capture_message = Some(error),
+                        }
+                    }
+                    if ui.button("Save As...").clicked() {
+                        match normalize_image_filename(&state.capture_filename) {
+                            Ok(image) => {
+                                if let Some(workflow) = state.visual_capture.as_mut() {
+                                    match workflow.confirm_filename(
+                                        image.clone(),
+                                        ImageImportChoice::SaveAs(image),
+                                    ) {
+                                        Ok(ImageImportResult::Collision { image }) => {
+                                            state.capture_message = Some(format!(
+                                                "Reference image filename already exists: {}",
+                                                image.filename()
+                                            ))
+                                        }
+                                        Ok(ImageImportResult::Cancelled) => {
+                                            state.capture_message =
+                                                Some("Reference image capture cancelled".into())
+                                        }
+                                        Ok(ImageImportResult::Imported(_)) => {
+                                            state.capture_message = None
+                                        }
+                                        Err(error) => {
+                                            state.capture_message =
+                                                Some(format!("Reference image: {error}"))
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => state.capture_message = Some(error),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        if let Some(workflow) = state.visual_capture.as_mut() {
+                            workflow.cancel();
+                        }
+                    }
+                });
+                if let Some(message) = &state.capture_message {
+                    ui.colored_label(egui::Color32::YELLOW, message);
+                }
+            });
+    }
+    if d.action_editor.pending_image_import.is_some() {
+        egui::Window::new("Reference image already exists")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let state = &mut d.action_editor;
+                ui.label("A shared library image with this filename already exists.");
+                ui.label("Choose whether to replace it or save the imported bytes under another filename.");
+                ui.text_edit_singleline(&mut state.image_import_filename);
+                ui.horizontal(|ui| {
+                    if ui.button("Replace Existing").clicked() {
+                        let result = state.resolve_pending_image_import(
+                            d.store.clone(),
+                            ImageImportChoice::ReplaceExisting,
+                            &super::image_authoring_job::ThreadExecutor,
+                        );
+                        if let Err(error) = result { state.capture_message = Some(error.to_string()); }
+                    }
+                    if ui.button("Save As...").clicked() {
+                        match normalize_image_filename(&state.image_import_filename) {
+                            Ok(image) => {
+                                let result = state.resolve_pending_image_import(
+                                    d.store.clone(),
+                                    ImageImportChoice::SaveAs(image),
+                                    &super::image_authoring_job::ThreadExecutor,
+                                );
+                                if let Err(error) = result { state.capture_message = Some(error.to_string()); }
+                            }
+                            Err(error) => state.capture_message = Some(error),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        let _ = state.resolve_pending_image_import(
+                            d.store.clone(),
+                            ImageImportChoice::Cancel,
+                            &super::image_authoring_job::ThreadExecutor,
+                        );
+                    }
+                });
+            });
+    }
     let mut apply = false;
     let mut cancel = false;
     let mut captured = None;
@@ -3521,10 +3700,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut point_pick_request = false;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
-    let image_assets = d
-        .selected_macro()
-        .map(|m| m.image_assets.clone())
-        .unwrap_or_default();
+    let image_refs = d.store.image_refs().unwrap_or_default();
     let live_steps = d
         .selected_macro()
         .map(|macro_| macro_.steps.clone())
@@ -3545,8 +3721,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
             let action_before = step.action.clone();
             let image_context = super::image_asset_picker::ImageAssetUiContext {
-                macro_id: d.selected_macro_id.unwrap_or(0),
-                assets: &image_assets,
                 store: &d.store,
             };
             let (position, mut window, launcher, image, condition_image, preview, pick_point)=action_ui(
@@ -3603,7 +3777,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
             let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action, image_assets.iter().any(|asset| asset.id == payload.asset_id));
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action, image_refs.contains(&payload.image));
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -3753,6 +3927,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         let macro_id = d.selected_macro_id.unwrap_or(0);
         let result = match request {
             ImageAuthoringRequest::Import => rfd::FileDialog::new()
+                .set_directory(d.store.asset_root())
                 .add_filter("PNG image", &["png"])
                 .pick_file()
                 .map(|path| {
@@ -3802,6 +3977,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .action_editor
                 .condition_destination(d.selected_macro_id.unwrap_or(0), request.clone());
             if let Some(path) = rfd::FileDialog::new()
+                .set_directory(d.store.asset_root())
                 .add_filter("PNG image", &["png"])
                 .pick_file()
                 && let Err(error) = d.action_editor.start_condition_import_from_selected_path(
@@ -3903,7 +4079,6 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             if smooth {
                 insert_smooth_move_after(d, anchor, payload);
             }
-            ensure_image_asset_catalog_entry(d, payload.asset_id);
         }
         d.action_editor = state;
         d.window_picker
@@ -4054,7 +4229,7 @@ mod tests {
             marker(
                 403,
                 MkAction::ImageFind(MkImagePayload {
-                    asset_id: 1,
+                    image: MkImageRef::from_filename("1.png"),
                     wait: MkWaitOptions::default(),
                     region: SearchRegion::Desktop,
                     tolerance: 0,
@@ -4206,23 +4381,12 @@ mod tests {
     }
 
     #[test]
-    fn target_context_resolves_only_nonzero_current_macro_assets() {
+    fn target_context_resolves_only_existing_shared_references() {
         let directory = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();
-        let assets = vec![MkImageAsset {
-            id: 14,
-            name: "needle".into(),
-            relative_path: "mkmacro_assets/7/14.png".into(),
-        }];
-        let context = TargetEditorContext {
-            macro_id: 7,
-            assets: &assets,
-            store: &store,
-        };
-
-        assert_eq!(context.resolve_asset(14).map(|asset| asset.id), Some(14));
-        assert!(context.resolve_asset(0).is_none());
-        assert!(context.resolve_asset(99).is_none());
+        let context = TargetEditorContext { store: &store };
+        assert!(!context.has_image(&MkImageRef::from_filename("14.png")));
+        assert!(!context.has_image(&MkImageRef::from_filename("missing.png")));
     }
 
     struct TestDesktop;
@@ -4239,8 +4403,13 @@ mod tests {
     }
     struct TestAssets;
     impl super::super::visual_capture_workflow::AssetStoreAdapter for TestAssets {
-        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
-            Ok(91)
+        fn write_captured_image(
+            &mut self,
+            _: &RgbaImage,
+            filename: MkImageRef,
+            _: ImageImportChoice,
+        ) -> Result<ImageImportResult, String> {
+            Ok(ImageImportResult::Imported(filename))
         }
     }
 
@@ -4269,7 +4438,7 @@ mod tests {
 
     fn image_action() -> MkAction {
         MkAction::ImageFind(MkImagePayload {
-            asset_id: 1,
+            image: MkImageRef::from_filename("1.png"),
             region: SearchRegion::Rectangle {
                 rect: ScreenRect::new(1, 2, 30, 40),
             },
@@ -4380,7 +4549,12 @@ mod tests {
     }
     struct UnusedAssetStore;
     impl super::super::visual_capture_workflow::AssetStoreAdapter for UnusedAssetStore {
-        fn write_png_asset(&mut self, _: u64, _: &RgbaImage) -> Result<u64, String> {
+        fn write_captured_image(
+            &mut self,
+            _: &RgbaImage,
+            _: MkImageRef,
+            _: ImageImportChoice,
+        ) -> Result<ImageImportResult, String> {
             panic!("search-region selection must not import an asset")
         }
     }
@@ -5244,10 +5418,10 @@ mod tests {
         }
     }
 
-    fn condition_search(asset_id: u64) -> MkCondition {
+    fn condition_search(image: &str) -> MkCondition {
         MkCondition::ImageSearch {
             search: MkImageSearchCondition {
-                asset_id,
+                image: MkImageRef::from_filename(image),
                 region: SearchRegion::Rectangle {
                     rect: ScreenRect::new(11, 12, 130, 140),
                 },
@@ -5262,13 +5436,13 @@ mod tests {
     fn condition_import_dialog() -> (tempfile::TempDir, MkMacroDialog, HeldExecutor) {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        // Reserve IDs 1..=8 in storage so the real importer deterministically returns 9.
+        // Seed a shared flat library without assigning ownership to this macro.
         for id in 1..=8 {
             store
-                .write_png_asset(
-                    4,
-                    id,
+                .write_captured_png(
                     &RgbaImage::from_pixel(1, 1, Rgba([id as u8, 0, 0, 255])),
+                    MkImageRef::from_filename(format!("{id}.png")),
+                    ImageImportChoice::ReplaceExisting,
                 )
                 .unwrap();
         }
@@ -5282,7 +5456,7 @@ mod tests {
             poll_interval_ms: 321,
         };
         let selected = step(MkAction::WaitUntil {
-            condition: condition_search(4),
+            condition: condition_search("original.png"),
             wait,
         });
         dialog.draft.macros = vec![
@@ -5296,7 +5470,6 @@ mod tests {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![selected.clone()],
-                image_assets: vec![asset(4, "Original", "mkmacro_assets/4/4.png")],
             },
             MkMacro {
                 id: 40,
@@ -5308,7 +5481,6 @@ mod tests {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![],
-                image_assets: vec![asset(77, "Other", "mkmacro_assets/40/77.png")],
             },
         ];
         dialog.set_selected_macro(Some(4));
@@ -5331,7 +5503,7 @@ mod tests {
         let super::super::image_authoring_job::ImageAuthoringJob::Importing {
             token,
             destination: actual,
-            previous_asset_id,
+            previous_image,
             ..
         } = &dialog.action_editor.image_authoring
         else {
@@ -5339,7 +5511,7 @@ mod tests {
         };
         assert_eq!(token.macro_id, 4);
         assert_eq!(token.draft_generation, destination.draft_generation);
-        assert_eq!(previous_asset_id, &4);
+        assert_eq!(previous_image, &MkImageRef::from_filename("original.png"));
         assert_eq!(
             actual,
             &super::super::image_authoring_job::ImageAuthoringDestination::ConditionImage(
@@ -5353,7 +5525,6 @@ mod tests {
     fn condition_png_completion_is_transactional_integrated_and_single_use() {
         let (_dir, mut dialog, executor) = condition_import_dialog();
         let original = dialog.action_editor.draft.clone().unwrap();
-        let other_assets = dialog.draft.macros[1].image_assets.clone();
         executor.release();
         reduce_image_authoring_completion(&mut dialog);
 
@@ -5365,7 +5536,7 @@ mod tests {
         let MkCondition::ImageSearch { search, found } = condition else {
             panic!("condition type changed")
         };
-        assert_eq!(search.asset_id, 9);
+        assert_eq!(search.image, MkImageRef::from_filename("condition.png"));
         assert!(!found);
         let MkAction::WaitUntil {
             condition: original_condition,
@@ -5387,15 +5558,22 @@ mod tests {
         assert_eq!(search.alpha, original_search.alpha);
         assert_eq!(search.return_point, original_search.return_point);
         assert_eq!(found, original_found);
-        let current = dialog.selected_macro().unwrap();
-        assert_eq!(current.image_assets.iter().filter(|a| a.id == 9).count(), 1);
-        assert_eq!(dialog.draft.macros[1].image_assets, other_assets);
+        assert!(
+            dialog
+                .store
+                .image_refs()
+                .unwrap()
+                .contains(&MkImageRef::from_filename("condition.png"))
+        );
         assert_eq!(
-            super::super::image_asset_picker::filtered_assets(&current.image_assets, "9")
-                .iter()
-                .map(|asset| asset.id)
-                .collect::<Vec<_>>(),
-            vec![9]
+            super::super::image_asset_picker::filtered_assets(
+                &dialog.store.image_refs().unwrap(),
+                "condition",
+            )
+            .iter()
+            .map(|image| image.filename())
+            .collect::<Vec<_>>(),
+            vec!["condition.png"]
         );
 
         // Polling the consumed operation again cannot duplicate it or overwrite a later edit.
@@ -5414,15 +5592,12 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(
+        assert!(
             dialog
-                .selected_macro()
+                .store
+                .image_refs()
                 .unwrap()
-                .image_assets
-                .iter()
-                .filter(|a| a.id == 9)
-                .count(),
-            1
+                .contains(&MkImageRef::from_filename("condition.png"))
         );
     }
 
@@ -5449,12 +5624,11 @@ mod tests {
             }
         ));
         assert!(
-            !dialog
-                .selected_macro()
+            dialog
+                .store
+                .image_refs()
                 .unwrap()
-                .image_assets
-                .iter()
-                .any(|a| a.id == 9)
+                .contains(&MkImageRef::from_filename("condition.png"))
         );
 
         let (_dir, mut dialog, executor) = condition_import_dialog();
@@ -5474,12 +5648,11 @@ mod tests {
             MkAction::WaitUntil { .. }
         ));
         assert!(
-            !dialog
-                .selected_macro()
+            dialog
+                .store
+                .image_refs()
                 .unwrap()
-                .image_assets
-                .iter()
-                .any(|a| a.id == 9)
+                .contains(&MkImageRef::from_filename("condition.png"))
         );
 
         let (_dir, mut dialog, executor) = condition_import_dialog();
@@ -5488,12 +5661,11 @@ mod tests {
         reduce_image_authoring_completion(&mut dialog);
         assert!(dialog.action_editor.draft.is_none());
         assert!(
-            !dialog
-                .selected_macro()
+            dialog
+                .store
+                .image_refs()
                 .unwrap()
-                .image_assets
-                .iter()
-                .any(|a| a.id == 9)
+                .contains(&MkImageRef::from_filename("condition.png"))
         );
     }
 
@@ -5516,8 +5688,14 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(search.asset_id, 4);
-        assert_eq!(dialog.selected_macro().unwrap().image_assets.len(), 1);
+        assert_eq!(search.image, MkImageRef::from_filename("original.png"));
+        assert!(
+            !dialog
+                .store
+                .image_refs()
+                .unwrap()
+                .contains(&MkImageRef::from_filename("condition.png"))
+        );
         assert!(
             dialog
                 .action_editor
@@ -5624,59 +5802,39 @@ mod tests {
         ));
     }
 
-    fn asset(id: u64, name: &str, path: &str) -> MkImageAsset {
-        MkImageAsset {
-            id,
-            name: name.into(),
-            relative_path: path.into(),
-        }
-    }
-
     #[test]
-    fn asset_labels_cover_names_paths_duplicates_missing_and_id_fallback() {
+    fn asset_labels_are_filename_oriented() {
         assert_eq!(
-            image_asset_label(10, &[asset(10, "Save Button", "images/save_button.png")]),
-            "Save Button · save_button.png · ID 10"
+            image_asset_label(&MkImageRef::from_filename("save_button.png"), &[]),
+            "save_button.png"
         );
         assert_eq!(
-            image_asset_label(10, &[asset(10, "", "images/save_button.png")]),
-            "save_button.png · ID 10"
-        );
-        assert_eq!(
-            image_asset_label(
-                10,
-                &[asset(10, "save_button.png", "images/save_button.png")]
-            ),
-            "save_button.png · ID 10"
-        );
-        assert_eq!(image_asset_label(44, &[]), "Missing asset · ID 44");
-        assert_eq!(
-            image_asset_label(10, &[asset(10, "", "")]),
-            "Image asset · ID 10"
+            image_asset_label(&MkImageRef::default(), &[]),
+            "No reference image selected"
         );
     }
 
     #[test]
     fn selecting_asset_preserves_offset_and_image_kind_uses_first_asset() {
         let mut target = MkCoordinateTarget::Image {
-            asset_id: 5,
+            image: MkImageRef::from_filename("old.png"),
             offset: MkPoint { x: 12, y: -7 },
         };
-        if let MkCoordinateTarget::Image { asset_id, .. } = &mut target {
-            select_image_asset(asset_id, 10);
+        if let MkCoordinateTarget::Image { image, .. } = &mut target {
+            select_image_asset(image, &MkImageRef::from_filename("new.png"));
         }
         assert_eq!(
             target,
             MkCoordinateTarget::Image {
-                asset_id: 10,
+                image: MkImageRef::from_filename("new.png"),
                 offset: MkPoint { x: 12, y: -7 }
             }
         );
-        change_target_kind(&mut target, 4, &[asset(22, "", "22.png")]);
+        change_target_kind(&mut target, 4, &[MkImageRef::from_filename("22.png")]);
         assert_eq!(
             target,
             MkCoordinateTarget::Image {
-                asset_id: 22,
+                image: MkImageRef::from_filename("22.png"),
                 offset: MkPoint { x: 0, y: 0 }
             }
         );
@@ -5715,7 +5873,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         let mut payload = MkImagePayload {
-            asset_id: 9,
+            image: MkImageRef::from_filename("old.png"),
             wait: MkWaitOptions {
                 timeout_ms: 5_000,
                 poll_interval_ms: 100,
@@ -5731,25 +5889,25 @@ mod tests {
         std::fs::write(&bad, b"not png").unwrap();
         assert!(
             ImageAssetAuthoringService::new(&store)
-                .import_png(4, &bad)
+                .import_png(&bad)
                 .is_err()
         );
-        assert_eq!(payload.asset_id, 9);
+        assert_eq!(payload.image, MkImageRef::from_filename("old.png"));
 
         let image = RgbaImage::from_pixel(3, 2, Rgba([1, 2, 3, 255]));
         apply_capture(&store, 4, &mut payload, &image).unwrap();
-        assert_eq!(payload.asset_id, 1);
+        assert_eq!(payload.image, MkImageRef::from_filename("capture.png"));
         assert_eq!(
-            image::open(store.asset_path(4, 1).unwrap())
+            image::open(store.image_path(&payload.image).unwrap())
                 .unwrap()
                 .width(),
             3
         );
     }
 
-    fn image_payload(asset_id: u64, region: SearchRegion) -> MkImagePayload {
+    fn image_payload(image: &str, region: SearchRegion) -> MkImagePayload {
         MkImagePayload {
-            asset_id,
+            image: MkImageRef::from_filename(image),
             wait: MkWaitOptions {
                 timeout_ms: 5_000,
                 poll_interval_ms: 100,
@@ -5769,7 +5927,11 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         let store = std::sync::Arc::new(store);
         store
-            .write_png_asset(4, 1, &RgbaImage::from_pixel(1, 1, Rgba([9, 9, 9, 255])))
+            .write_captured_png(
+                &RgbaImage::from_pixel(1, 1, Rgba([9, 9, 9, 255])),
+                MkImageRef::from_filename("1.png"),
+                ImageImportChoice::ReplaceExisting,
+            )
             .unwrap();
         let source = dir.path().join("selected.png");
         RgbaImage::from_pixel(2, 3, Rgba([1, 2, 3, 255]))
@@ -5780,22 +5942,38 @@ mod tests {
         };
         let mut editor = test_editor();
         editor.draft_generation = 7;
-        editor.draft = Some(step(MkAction::ImageFind(image_payload(1, region.clone()))));
+        editor.draft = Some(step(MkAction::ImageFind(image_payload(
+            "1.png",
+            region.clone(),
+        ))));
         let executor = HeldExecutor::default();
         editor
             .start_import_from_selected_path_with_executor(store.clone(), 4, source, &executor)
             .unwrap();
-        assert_eq!(draft_image_payload(&editor).asset_id, 1);
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("1.png")
+        );
         editor.poll_image_authoring(Some(4));
-        assert_eq!(draft_image_payload(&editor).asset_id, 1);
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("1.png")
+        );
         executor.release();
         editor.poll_image_authoring(Some(4));
-        assert_eq!(draft_image_payload(&editor).asset_id, 2);
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("selected.png")
+        );
         assert_eq!(draft_image_payload(&editor).region, region);
         assert_eq!(
-            image::open(store.asset_path(4, 2).unwrap())
-                .unwrap()
-                .dimensions(),
+            image::open(
+                store
+                    .image_path(&draft_image_payload(&editor).image)
+                    .unwrap()
+            )
+            .unwrap()
+            .dimensions(),
             (2, 3)
         );
         assert!(!editor.image_authoring.is_importing());
@@ -5813,14 +5991,20 @@ mod tests {
         };
         let mut editor = test_editor();
         editor.draft_generation = 1;
-        editor.draft = Some(step(MkAction::ImageFind(image_payload(41, region.clone()))));
+        editor.draft = Some(step(MkAction::ImageFind(image_payload(
+            "old.png",
+            region.clone(),
+        ))));
         let executor = HeldExecutor::default();
         editor
             .start_import_from_selected_path_with_executor(store.clone(), 4, source, &executor)
             .unwrap();
         executor.release();
         editor.poll_image_authoring(Some(4));
-        assert_eq!(draft_image_payload(&editor).asset_id, 41);
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("old.png")
+        );
         assert_eq!(draft_image_payload(&editor).region, region);
         assert!(
             editor
@@ -5829,7 +6013,7 @@ mod tests {
                 .unwrap()
                 .contains("Reference image")
         );
-        assert!(store.asset_ids(4).unwrap().is_empty());
+        assert!(store.image_refs().unwrap().is_empty());
         assert!(!editor.image_authoring.is_importing());
     }
 
@@ -5842,13 +6026,13 @@ mod tests {
     ) {
         let mut editor = test_editor();
         editor.draft_generation = token.draft_generation;
-        editor.draft = Some(step(MkAction::ImageFind(image_payload(9, region))));
+        editor.draft = Some(step(MkAction::ImageFind(image_payload("old.png", region))));
         let (sender, completion) = mpsc::channel();
         editor.image_authoring = super::super::image_authoring_job::ImageAuthoringJob::Importing {
             token,
             destination:
                 super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
-            previous_asset_id: 9,
+            previous_image: MkImageRef::from_filename("old.png"),
             source: "chosen.png".into(),
             completion,
         };
@@ -5870,15 +6054,12 @@ mod tests {
             .send(ImageAuthoringCompletion {
                 token,
                 destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
-                result: Ok(crate::mkmacro::StagedImageAsset {
-                    asset_id: 10,
-                    managed_reference: "mkmacro_assets/4/10.png".into(),
-                }),
+                result: Ok(ImageImportResult::Imported(MkImageRef::from_filename("10.png"))),
             })
             .unwrap();
         editor.poll_image_authoring(Some(4));
         let payload = editor.draft.as_mut().and_then(image_payload_mut).unwrap();
-        assert_eq!(payload.asset_id, 10);
+        assert_eq!(payload.image, MkImageRef::from_filename("10.png"));
         assert_eq!(payload.region, region);
         assert!(!editor.image_authoring.is_importing());
 
@@ -5892,7 +6073,7 @@ mod tests {
             .unwrap();
         editor.poll_image_authoring(Some(4));
         let payload = editor.draft.as_mut().and_then(image_payload_mut).unwrap();
-        assert_eq!(payload.asset_id, 9);
+        assert_eq!(payload.image, MkImageRef::from_filename("old.png"));
         assert_eq!(payload.region, region);
         assert!(
             editor
@@ -5917,10 +6098,7 @@ mod tests {
                 .send(ImageAuthoringCompletion {
                     token,
                     destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
-                    result: Ok(crate::mkmacro::StagedImageAsset {
-                        asset_id: 55,
-                        managed_reference: "unused.png".into(),
-                    }),
+                    result: Ok(ImageImportResult::Imported(MkImageRef::from_filename("55.png"))),
                 })
                 .unwrap();
             editor.poll_image_authoring(Some(macro_id));
@@ -5930,8 +6108,8 @@ mod tests {
                     .as_mut()
                     .and_then(image_payload_mut)
                     .unwrap()
-                    .asset_id,
-                9
+                    .image,
+                MkImageRef::from_filename("old.png")
             );
         }
         let (mut editor, sender) = importing_editor(token, SearchRegion::Desktop);
@@ -5940,10 +6118,7 @@ mod tests {
             .send(ImageAuthoringCompletion {
                 token,
                 destination: super::super::image_authoring_job::ImageAuthoringDestination::ImageActionReference,
-                result: Ok(crate::mkmacro::StagedImageAsset {
-                    asset_id: 55,
-                    managed_reference: "unused.png".into(),
-                }),
+                result: Ok(ImageImportResult::Imported(MkImageRef::from_filename("55.png"))),
             })
             .unwrap_err();
         editor.poll_image_authoring(Some(4));
@@ -5970,7 +6145,7 @@ mod tests {
         };
         let mut editor = test_editor();
         editor.begin_edit(&step(MkAction::ImageFind(image_payload(
-            4,
+            "4.png",
             original_region.clone(),
         ))));
         let token = DraftToken {
@@ -5985,9 +6160,17 @@ mod tests {
             draft_generation: editor.draft_generation,
             expected_action: ExpectedVisualAction::ImageFind,
         });
-        editor
-            .apply_visual_capture_outcome(Some(11), WorkflowOutcome::Asset { token, asset_id: 5 });
-        assert_eq!(draft_image_payload(&editor).asset_id, 5);
+        editor.apply_visual_capture_outcome(
+            Some(11),
+            WorkflowOutcome::Asset {
+                token,
+                image: MkImageRef::from_filename("5.png"),
+            },
+        );
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("5.png")
+        );
         assert_eq!(
             format!("{:?}", editor.image_search.as_ref().unwrap()),
             before_editor
@@ -6012,7 +6195,10 @@ mod tests {
         let image = editor.image_search.as_ref().unwrap();
         assert_eq!(image.rectangle, picked);
         assert_eq!(image.kind, SearchRegionKind::Rectangle);
-        assert_eq!(draft_image_payload(&editor).asset_id, 5);
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("5.png")
+        );
         assert_eq!(draft_image_payload(&editor).region, original_region);
 
         editor.sync_image_region_to_draft();
@@ -6028,7 +6214,7 @@ mod tests {
 
         let region = SearchRegion::Monitor { index: 2 };
         let mut editor = test_editor();
-        editor.begin_edit(&step(MkAction::ImageClick(image_payload(4, region))));
+        editor.begin_edit(&step(MkAction::ImageClick(image_payload("4.png", region))));
         let generation = editor.draft_generation;
         let before_draft = serde_json::to_vec(editor.draft.as_ref().unwrap()).unwrap();
         let before_editor = format!("{:?}", editor.image_search.as_ref().unwrap());
@@ -6038,7 +6224,7 @@ mod tests {
                     macro_id: 12,
                     draft_generation: generation,
                 },
-                asset_id: 5,
+                image: MkImageRef::from_filename("5.png"),
             },
             WorkflowOutcome::Region {
                 token: DraftToken {
@@ -6060,7 +6246,10 @@ mod tests {
                 before_editor
             );
         }
-        assert_eq!(draft_image_payload(&editor).asset_id, 4);
+        assert_eq!(
+            draft_image_payload(&editor).image,
+            MkImageRef::from_filename("4.png")
+        );
     }
     fn capture(slot: PositionCaptureSlot) -> PositionCaptureState {
         PositionCaptureState {
@@ -6099,7 +6288,7 @@ mod tests {
             ),
             (
                 MkAction::ImageFind(MkImagePayload {
-                    asset_id: 1,
+                    image: MkImageRef::from_filename("1.png"),
                     tolerance: 0,
                     alpha: AlphaPolicy::Compare,
                     region: SearchRegion::Window {
@@ -6168,7 +6357,7 @@ mod tests {
     #[test]
     fn both_image_actions_use_the_same_typed_image_editor_state() {
         let payload = MkImagePayload {
-            asset_id: 4,
+            image: MkImageRef::from_filename("4.png"),
             tolerance: 12,
             alpha: AlphaPolicy::Ignore,
             region: SearchRegion::Rectangle {
@@ -6557,7 +6746,7 @@ mod tests {
             purposes: Vec<RectanglePurpose>,
             selection: Option<SelectionEvent>,
             capture_result: Option<Result<RgbaImage, String>>,
-            stage_result: Option<Result<u64, String>>,
+            stage_result: Option<Result<ImageImportResult, String>>,
             capture_rects: Vec<ScreenRect>,
             staged_dimensions: Vec<(u32, u32)>,
         }
@@ -6590,10 +6779,18 @@ mod tests {
         }
         struct Assets(Arc<Mutex<FakeState>>);
         impl AssetStoreAdapter for Assets {
-            fn write_png_asset(&mut self, _: u64, image: &RgbaImage) -> Result<u64, String> {
+            fn write_captured_image(
+                &mut self,
+                image: &RgbaImage,
+                filename: MkImageRef,
+                _: ImageImportChoice,
+            ) -> Result<ImageImportResult, String> {
                 let mut state = self.0.lock().unwrap();
                 state.staged_dimensions.push(image.dimensions());
-                state.stage_result.take().unwrap_or(Ok(8))
+                state
+                    .stage_result
+                    .take()
+                    .unwrap_or(Ok(ImageImportResult::Imported(filename)))
             }
         }
         struct Fixture {
@@ -6609,7 +6806,7 @@ mod tests {
                     Box::new(Assets(fake.clone())),
                 );
                 let payload = MkImagePayload {
-                    asset_id: 7,
+                    image: MkImageRef::from_filename("7.png"),
                     region: SearchRegion::Rectangle { rect: ORIGINAL },
                     wait: MkWaitOptions {
                         timeout_ms: 1_234,
@@ -6682,8 +6879,8 @@ mod tests {
             f.tick();
             f.tick();
             assert_eq!(
-                f.draft_payload().asset_id,
-                7,
+                f.draft_payload().image,
+                MkImageRef::from_filename("7.png"),
                 "Pick Region must not replace the reference asset"
             );
             assert_eq!(
@@ -6728,17 +6925,27 @@ mod tests {
             f.tick();
             f.tick();
             f.tick();
+            f.editor
+                .visual_capture
+                .as_mut()
+                .unwrap()
+                .confirm_filename(
+                    MkImageRef::from_filename("8.png"),
+                    ImageImportChoice::ReplaceExisting,
+                )
+                .unwrap();
+            f.tick();
             assert_eq!(
-                f.draft_payload().asset_id,
-                8,
-                "Capture must install the newly staged reference asset"
+                f.draft_payload().image,
+                MkImageRef::from_filename("8.png"),
+                "Confirmed Capture must install the newly written reference image"
             );
             let mut captured = unrelated.clone();
-            captured.asset_id = 8;
+            captured.image = MkImageRef::from_filename("8.png");
             assert_eq!(
                 f.draft_payload(),
                 &captured,
-                "Capture must change only the reference asset ID"
+                "Capture must change only the reference image reference"
             );
             assert_eq!(
                 f.draft_payload().region,
@@ -6823,6 +7030,19 @@ mod tests {
             f.tick();
             f.tick();
             f.tick();
+            if stage_failure {
+                let error = f
+                    .editor
+                    .visual_capture
+                    .as_mut()
+                    .unwrap()
+                    .confirm_filename(
+                        MkImageRef::from_filename("8.png"),
+                        ImageImportChoice::ReplaceExisting,
+                    )
+                    .unwrap_err();
+                assert!(error.contains("failed visibly"));
+            }
             assert_eq!(
                 f.draft_payload(),
                 &unrelated,
@@ -6833,13 +7053,17 @@ mod tests {
                 ORIGINAL,
                 "Failed Capture must not overwrite the search rectangle"
             );
-            assert!(
-                f.editor
-                    .capture_message
-                    .as_deref()
-                    .is_some_and(|m| m.contains("failed visibly")),
-                "Capture failure must be visible to the user"
-            );
+            if stage_failure {
+                assert!(f.editor.capture_message.is_none());
+            } else {
+                assert!(
+                    f.editor
+                        .capture_message
+                        .as_deref()
+                        .is_some_and(|m| m.contains("failed visibly")),
+                    "Capture failure must be visible to the user"
+                );
+            }
             let state = f.fake.lock().unwrap();
             assert_eq!(
                 state.capture_rects.len(),
