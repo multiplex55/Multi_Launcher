@@ -12,8 +12,19 @@ use std::{
 
 use super::{
     MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload, MkImageRef, MkPoint,
-    ScreenCaptureBackend, SearchRegion, VisualSearch,
+    ScreenCaptureBackend, ScreenRect, SearchRegion, VisualSearch,
 };
+
+/// One exact template match in virtual-desktop coordinates.
+///
+/// `point` follows the action's configured return-point policy. `bounds` is
+/// always the matched template rectangle, so changing that policy never moves
+/// the rectangle presented to an author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSearchMatch {
+    pub point: MkPoint,
+    pub bounds: ScreenRect,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageFileIdentity {
@@ -179,7 +190,11 @@ impl ProductionVisualSearch {
 }
 
 impl VisualSearch for ProductionVisualSearch {
-    fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+    fn find_image_match(
+        &self,
+        macro_id: u64,
+        payload: &MkImagePayload,
+    ) -> ExecResult<Option<ImageSearchMatch>> {
         let reference = &payload.image;
         let needle = self
             .cache
@@ -191,7 +206,7 @@ impl VisualSearch for ProductionVisualSearch {
                     .context("macro_id", macro_id.to_string())
             })?;
         let frame = self.capture.capture(&payload.region, &|| false)?;
-        find_template(
+        find_template_match(
             &frame,
             &needle,
             MatchOptions {
@@ -202,7 +217,20 @@ impl VisualSearch for ProductionVisualSearch {
             },
             &|| false,
         )
-        .map(|point| point.map(|(x, y)| MkPoint { x, y }))
+        .map(|matched| {
+            matched.map(|matched| ImageSearchMatch {
+                point: MkPoint {
+                    x: matched.point.0,
+                    y: matched.point.1,
+                },
+                bounds: ScreenRect::new(
+                    matched.top_left.0,
+                    matched.top_left.1,
+                    needle.width(),
+                    needle.height(),
+                ),
+            })
+        })
     }
 
     fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]> {
@@ -267,14 +295,20 @@ impl Default for MatchOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TemplateMatch {
+    pub top_left: (i32, i32),
+    pub point: (i32, i32),
+}
+
 /// Searches rows top-to-bottom and columns left-to-right. Anchors (corners and
 /// center, de-duplicated) are checked first; survivors receive a complete comparison.
-pub fn find_template(
+pub fn find_template_match(
     frame: &CapturedRegion,
     needle: &RgbaImage,
     options: MatchOptions,
     cancelled: &dyn Fn() -> bool,
-) -> ExecResult<Option<(i32, i32)>> {
+) -> ExecResult<Option<TemplateMatch>> {
     if needle.width() == 0 || needle.height() == 0 {
         return Err(invalid("reference image is empty"));
     }
@@ -329,15 +363,34 @@ pub fn find_template(
                 }
             }
             if ok {
-                let local = match options.return_point {
+                let point_local = match options.return_point {
                     ReturnPoint::TopLeft => (x, y),
                     ReturnPoint::Center => (x + needle.width() / 2, y + needle.height() / 2),
                 };
-                return Ok(frame.desktop_point(local));
+                let top_left = frame
+                    .desktop_point((x, y))
+                    .ok_or_else(|| invalid("template match X/Y coordinate overflow"))?;
+                let point = frame
+                    .desktop_point(point_local)
+                    .ok_or_else(|| invalid("template return point X/Y coordinate overflow"))?;
+                return Ok(Some(TemplateMatch { top_left, point }));
             }
         }
     }
     Ok(None)
+}
+
+/// Compatibility point-only view of [`find_template_match`]. Runtime and
+/// authoring use the same matching implementation; this helper preserves the
+/// original point-search API for callers that do not need bounds.
+pub fn find_template(
+    frame: &CapturedRegion,
+    needle: &RgbaImage,
+    options: MatchOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<Option<(i32, i32)>> {
+    find_template_match(frame, needle, options, cancelled)
+        .map(|matched| matched.map(|matched| matched.point))
 }
 fn pixel_eq(a: &Rgba<u8>, b: &Rgba<u8>, tolerance: u8, alpha: AlphaPolicy) -> bool {
     let n = if alpha == AlphaPolicy::Compare { 4 } else { 3 };
@@ -441,6 +494,33 @@ mod tests {
         o.tolerance = 1;
         assert_eq!(find_template(&f, &n, o, &|| false).unwrap(), None)
     }
+
+    struct MatchOnlyVisual;
+    impl VisualSearch for MatchOnlyVisual {
+        fn find_image_match(
+            &self,
+            _: u64,
+            _: &MkImagePayload,
+        ) -> ExecResult<Option<ImageSearchMatch>> {
+            Ok(Some(ImageSearchMatch {
+                point: MkPoint { x: 11, y: -7 },
+                bounds: ScreenRect::new(10, -8, 4, 3),
+            }))
+        }
+
+        fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {
+            Ok([0, 0, 0, 255])
+        }
+    }
+
+    #[test]
+    fn point_only_visual_search_delegates_to_match_operation() {
+        let visual = MatchOnlyVisual;
+        assert_eq!(
+            visual.find_image(1, &payload("needle.png", 0)).unwrap(),
+            Some(MkPoint { x: 11, y: -7 })
+        );
+    }
     #[test]
     fn cancellation_is_reported_without_finishing_the_scan() {
         let calls = AtomicUsize::new(0);
@@ -531,6 +611,32 @@ mod tests {
             adapter.find_image(7, &payload("needle.png", 2)).unwrap(),
             Some(MkPoint { x: -117, y: 37 })
         );
+    }
+
+    #[test]
+    fn production_adapter_returns_reference_bounds_independent_of_return_point() {
+        let mut frame = CapturedRegion {
+            image: RgbaImage::from_pixel(5, 4, Rgba([0, 0, 0, 255])),
+            origin: (-120, -35),
+        };
+        let needle = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+        for y in 1..3 {
+            for x in 2..4 {
+                frame.image.put_pixel(x, y, Rgba([12, 20, 30, 255]));
+            }
+        }
+        let (_dir, _store, adapter) = adapter_fixture(frame, &needle);
+        let mut center = payload("needle.png", 2);
+        center.return_point = ReturnPoint::Center;
+        let mut top_left = center.clone();
+        top_left.return_point = ReturnPoint::TopLeft;
+
+        let center_match = adapter.find_image_match(7, &center).unwrap().unwrap();
+        let top_left_match = adapter.find_image_match(7, &top_left).unwrap().unwrap();
+        assert_eq!(center_match.point, MkPoint { x: -117, y: -33 });
+        assert_eq!(top_left_match.point, MkPoint { x: -118, y: -34 });
+        assert_eq!(center_match.bounds, ScreenRect::new(-118, -34, 2, 2));
+        assert_eq!(top_left_match.bounds, center_match.bounds);
     }
     #[test]
     fn production_adapter_distinguishes_asset_failures() {

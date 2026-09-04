@@ -1496,6 +1496,19 @@ impl eframe::App for LauncherApp {
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
         self.mkmacro_dialog.ui(ctx);
+        while let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
+            if self.enable_toasts {
+                push_toast(
+                    &mut self.toasts,
+                    Toast {
+                        text: notice.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    },
+                );
+            }
+        }
         self.crop_dialog.show(ctx);
         let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
         mg_dlg.ui(ctx, self);

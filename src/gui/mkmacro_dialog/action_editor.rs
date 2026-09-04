@@ -90,6 +90,7 @@ pub struct ActionEditorState {
     pub add_smooth_move: bool,
     pub add_activate_before: bool,
     pub image_authoring: super::image_authoring_job::ImageAuthoringJob,
+    pub(crate) image_test: super::image_search_test_job::ImageSearchTestJob,
     pub(crate) pending_image_import: Option<PendingImageImport>,
     /// Cloneable operation client borrowed from the dialog-wide visual-overlay service.
     /// The editor owns only the operation IDs it starts, not the native service itself.
@@ -356,6 +357,7 @@ impl ActionEditorState {
             add_smooth_move: false,
             add_activate_before: false,
             image_authoring: Default::default(),
+            image_test: Default::default(),
             pending_image_import: None,
             visual_overlay,
             visual_capture: None,
@@ -862,6 +864,7 @@ impl ActionEditorState {
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
+        self.image_test.cancel();
         self.pending_image_import = None;
         self.capture_filename.clear();
         self.image_import_filename.clear();
@@ -903,6 +906,7 @@ impl ActionEditorState {
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
+        self.image_test.cancel();
         self.pending_image_import = None;
         self.capture_filename.clear();
         self.image_import_filename.clear();
@@ -931,6 +935,7 @@ impl ActionEditorState {
     pub fn cancel(&mut self) {
         self.pending_visual_region = None;
         self.image_authoring = Default::default();
+        self.image_test.cancel();
         self.pending_image_import = None;
         self.capture_filename.clear();
         self.image_import_filename.clear();
@@ -949,6 +954,142 @@ impl ActionEditorState {
         self.capture_keys = false;
         self.editor = None;
         self.image_search = None;
+    }
+
+    /// Clones the visible image-search values for a single test attempt. The
+    /// action editor keeps its region picker in UI-only state, so its current
+    /// selection is explicitly merged into the cloned action payload here.
+    pub(crate) fn image_search_test_snapshot(
+        &self,
+        macro_id: u64,
+        condition_path: Option<super::image_authoring_destination::ConditionPath>,
+    ) -> ExecResult<(
+        super::image_search_test_job::ImageSearchTestTarget,
+        MkImagePayload,
+    )> {
+        let step = self.draft.as_ref().ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "The image-search editor is no longer open",
+            )
+        })?;
+        let target = super::image_search_test_job::ImageSearchTestTarget {
+            macro_id,
+            step_id: self.editing_id,
+            draft_generation: self.draft_generation,
+            condition_path: condition_path.clone(),
+        };
+        match (condition_path, &step.action) {
+            (None, MkAction::ImageFind(payload) | MkAction::ImageClick(payload)) => {
+                let mut payload = payload.clone();
+                if let Some(region) = self
+                    .image_search
+                    .as_ref()
+                    .map(|state| state.selected_region())
+                {
+                    payload.region = region;
+                }
+                Ok((target, payload))
+            }
+            (Some(path), action) => {
+                let root = match action {
+                    MkAction::If(condition)
+                    | MkAction::WhileStart { condition }
+                    | MkAction::WaitUntil { condition, .. } => condition,
+                    _ => {
+                        return Err(image_test_target_error(
+                            "The current draft does not contain conditions",
+                            &path,
+                        ));
+                    }
+                };
+                let Some(MkCondition::ImageSearch { search, .. }) =
+                    super::condition_editor::resolve_condition(root, &path)
+                else {
+                    return Err(image_test_target_error(
+                        "The condition path no longer points to an image-search condition",
+                        &path,
+                    ));
+                };
+                Ok((
+                    target,
+                    MkImagePayload {
+                        image: search.image.clone(),
+                        wait: MkWaitOptions::default(),
+                        region: search.region.clone(),
+                        tolerance: search.tolerance,
+                        alpha: search.alpha,
+                        return_point: search.return_point,
+                        not_found_policy: MkImageNotFoundPolicy::Fail,
+                        outputs: MkImageOutputs::default(),
+                    },
+                ))
+            }
+            (None, _) => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "The current draft is not an image-search action",
+            )),
+        }
+    }
+
+    pub(crate) fn start_image_search_test(
+        &mut self,
+        search: Arc<dyn crate::mkmacro::VisualSearch>,
+        macro_id: u64,
+        condition_path: Option<super::image_authoring_destination::ConditionPath>,
+    ) -> anyhow::Result<()> {
+        let (target, payload) = self
+            .image_search_test_snapshot(macro_id, condition_path)
+            .map_err(|error| anyhow::anyhow!(image_test_diagnostic_text(&error)))?;
+        self.image_test
+            .start(search, target, payload)
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub(crate) fn poll_image_search_test(
+        &mut self,
+    ) -> Option<super::image_search_test_job::ImageSearchTestCompletion> {
+        self.image_test.try_take()
+    }
+
+    pub(crate) fn image_search_test_busy(&self) -> bool {
+        self.image_test.is_testing()
+    }
+
+    pub(crate) fn image_search_test_target_is_current(
+        &self,
+        target: &super::image_search_test_job::ImageSearchTestTarget,
+        current_macro_id: Option<u64>,
+    ) -> bool {
+        if current_macro_id != Some(target.macro_id)
+            || self.draft_generation != target.draft_generation
+            || self.editing_id != target.step_id
+        {
+            return false;
+        }
+        let Some(step) = self.draft.as_ref() else {
+            return false;
+        };
+        match &target.condition_path {
+            None => matches!(
+                step.action,
+                MkAction::ImageFind(_) | MkAction::ImageClick(_)
+            ),
+            Some(path) => {
+                let Some(root) = (match &step.action {
+                    MkAction::If(condition)
+                    | MkAction::WhileStart { condition }
+                    | MkAction::WaitUntil { condition, .. } => Some(condition),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                matches!(
+                    super::condition_editor::resolve_condition(root, path),
+                    Some(MkCondition::ImageSearch { .. })
+                )
+            }
+        }
     }
 
     pub fn tick_visual_capture(&mut self, current_macro_id: Option<u64>) {
@@ -1212,6 +1353,7 @@ impl ActionEditorState {
         if self.image_authoring.is_importing() || self.pending_image_import.is_some() {
             return None;
         }
+        self.image_test.cancel();
         // Keep invalid drafts open for correction without changing the step.
         if !virtual_desktop_number_valid(&self.draft.as_ref()?.action) {
             return None;
@@ -2385,6 +2527,7 @@ fn action_ui(
     variable_catalog: &VariableCatalog,
     point_pick_active: bool,
     authoring_busy: bool,
+    test_busy: bool,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -2945,6 +3088,7 @@ fn action_ui(
                 condition,
                 image_context,
                 authoring_busy,
+                test_busy,
             ) {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
@@ -2963,6 +3107,7 @@ fn action_ui(
                 condition,
                 image_context,
                 authoring_busy,
+                test_busy,
             ) {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
@@ -3488,6 +3633,85 @@ fn reduce_image_authoring_completion(dialog: &mut MkMacroDialog) {
         .poll_image_authoring(dialog.selected_macro_id);
 }
 
+fn reduce_image_search_test_completion(dialog: &mut MkMacroDialog) {
+    let Some(completion) = dialog.action_editor.poll_image_search_test() else {
+        return;
+    };
+    if !dialog
+        .action_editor
+        .image_search_test_target_is_current(&completion.target, dialog.selected_macro_id)
+    {
+        return;
+    }
+    match completion.result {
+        Ok(Some(matched)) => {
+            dialog
+                .action_editor
+                .visual_overlay
+                .preview_rectangle(matched.bounds);
+        }
+        Ok(None) => dialog.queue_ui_notice("Image not found"),
+        Err(error) => {
+            dialog.action_editor.capture_message = Some(image_test_diagnostic_text(&error));
+        }
+    }
+}
+
+fn image_test_target_error(
+    message: impl Into<String>,
+    path: &super::image_authoring_destination::ConditionPath,
+) -> ExecutionDiagnostic {
+    ExecutionDiagnostic::new(DiagnosticKind::InvalidTarget, message)
+        .context("condition_path", format!("{:?}", path.indexes()))
+}
+
+fn image_test_diagnostic_text(error: &ExecutionDiagnostic) -> String {
+    if error.context.is_empty() {
+        return error.to_string();
+    }
+    let context = error
+        .context
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} ({}; context: {})",
+        error.kind.kind_as_str(),
+        error.message,
+        context
+    )
+}
+
+trait DiagnosticKindLabel {
+    fn kind_as_str(&self) -> &'static str;
+}
+
+impl DiagnosticKindLabel for DiagnosticKind {
+    fn kind_as_str(&self) -> &'static str {
+        match self {
+            DiagnosticKind::TargetNotFound => "TargetNotFound",
+            DiagnosticKind::AmbiguousTarget => "AmbiguousTarget",
+            DiagnosticKind::Timeout => "Timeout",
+            DiagnosticKind::UnsupportedOperation => "UnsupportedOperation",
+            DiagnosticKind::InputRejected => "InputRejected",
+            DiagnosticKind::InvalidTarget => "InvalidTarget",
+            DiagnosticKind::InvalidPlan => "InvalidPlan",
+            DiagnosticKind::InvalidSelection => "InvalidSelection",
+            DiagnosticKind::Backend => "Backend",
+            DiagnosticKind::Cancelled => "Cancelled",
+            DiagnosticKind::Panic => "Panic",
+            DiagnosticKind::RuntimeUnavailable => "RuntimeUnavailable",
+            DiagnosticKind::TypeMismatch => "TypeMismatch",
+            DiagnosticKind::InvalidRegex => "InvalidRegex",
+            DiagnosticKind::IterationLimit => "IterationLimit",
+            DiagnosticKind::UnsupportedPattern => "UnsupportedPattern",
+            DiagnosticKind::StaleElement => "StaleElement",
+            DiagnosticKind::ComFailure => "ComFailure",
+        }
+    }
+}
+
 fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
     if !super::image_search_editor::supports_reference_image_authoring(&step.action) {
         return None;
@@ -3616,15 +3840,18 @@ fn matcher_at_path<'a>(
 }
 
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
+    reduce_image_search_test_completion(d);
     if d.action_editor.draft.is_none() {
         return;
     }
     let mut open = true;
     d.action_editor.tick_visual_capture(d.selected_macro_id);
     reduce_image_authoring_completion(d);
-    let importing = d.action_editor.image_authoring.is_importing();
+    let importing = d.action_editor.image_authoring.is_importing()
+        || d.action_editor.pending_image_import.is_some();
     let crop_open = d.image_crop_editor.is_open();
-    if importing {
+    let test_busy = d.action_editor.image_search_test_busy();
+    if importing || test_busy {
         ctx.request_repaint();
     }
     let overlay_was_active = d.action_editor.visual_overlay.operation_id().is_some();
@@ -3805,6 +4032,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut wait_visual_region_request = false;
     let mut screenshot_region_request = false;
     let mut condition_image_request = None;
+    let mut image_test_request: Option<Option<super::image_authoring_destination::ConditionPath>> =
+        None;
     let mut preview_request = None;
     let mut point_pick_request = false;
     // Execute after egui releases the mutable draft borrow held by `step`.
@@ -3841,6 +4070,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 &state.variable_catalog,
                 point_pick_active,
                 workflow_active || importing || crop_open,
+                test_busy,
             );
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
@@ -3891,11 +4121,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     &payload.image,
                     &image_refs,
                 );
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing || crop_open, find_action, valid_asset);
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
                     Some(CropImage) => image_request = Some(ImageAuthoringRequest::CropImage),
+                    Some(TestImage) => image_test_request = Some(None),
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
                     Some(SelectRegion) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::VisualRegion),
@@ -4019,6 +4250,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             });
           });
         });
+    if let Some(request) = condition_image_request.as_ref()
+        && matches!(
+            request.operation,
+            super::condition_editor::ConditionImageOperation::TestImage
+        )
+    {
+        image_test_request = Some(Some(request.path.clone()));
+    }
     if let Some(request) = preview_request {
         dispatch_preview(&mut d.action_editor, request);
     }
@@ -4119,6 +4358,23 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             {
                 d.action_editor.capture_message = Some(format!("Condition image: {error:#}"));
             }
+        }
+    }
+    if let Some(condition_path) = image_test_request {
+        if workflow_active || importing || crop_open {
+            d.action_editor.capture_message =
+                Some("Finish or cancel the active authoring operation first".into());
+        } else if test_busy {
+            d.action_editor.capture_message =
+                Some("Wait for the active image search test to finish".into());
+        } else if let Err(error) = d.action_editor.start_image_search_test(
+            d.image_search_backend.clone(),
+            d.selected_macro_id.unwrap_or(0),
+            condition_path,
+        ) {
+            d.action_editor.capture_message = Some(format!("Image search test: {error:#}"));
+        } else {
+            ctx.request_repaint();
         }
     }
     if let Some(ref request) = condition_image_request
@@ -4261,7 +4517,7 @@ mod tests {
     };
     use super::*;
     use image::RgbaImage;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn variable_step(id: u64, name: &str, value: MkValue) -> MkStep {
@@ -5550,6 +5806,7 @@ mod tests {
             ConditionImageOperation::PickWindow,
             ConditionImageOperation::HighlightWindow,
             ConditionImageOperation::CropImage,
+            ConditionImageOperation::TestImage,
         ] {
             assert_eq!(operation.rectangle_purpose(), None);
         }
@@ -5594,6 +5851,229 @@ mod tests {
             },
             found: false,
         }
+    }
+
+    struct TestSearch {
+        calls: Arc<AtomicUsize>,
+        outcome: Mutex<Option<Result<Option<ImageSearchMatch>, ExecutionDiagnostic>>>,
+    }
+
+    impl VisualSearch for TestSearch {
+        fn find_image_match(
+            &self,
+            _: u64,
+            _: &MkImagePayload,
+        ) -> ExecResult<Option<ImageSearchMatch>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.outcome.lock().unwrap().take().unwrap()
+        }
+
+        fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {
+            Ok([0, 0, 0, 255])
+        }
+    }
+
+    fn test_search(
+        outcome: Result<Option<ImageSearchMatch>, ExecutionDiagnostic>,
+    ) -> (Arc<TestSearch>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Arc::new(TestSearch {
+                calls: calls.clone(),
+                outcome: Mutex::new(Some(outcome)),
+            }),
+            calls,
+        )
+    }
+
+    fn start_image_test_job(
+        dialog: &mut MkMacroDialog,
+        search: Arc<dyn VisualSearch>,
+        executor: &HeldExecutor,
+    ) {
+        dialog.action_editor.begin_edit(&step(image_action()));
+        let (target, payload) = dialog
+            .action_editor
+            .image_search_test_snapshot(1, None)
+            .unwrap();
+        dialog
+            .action_editor
+            .image_test
+            .start_with_executor(search, target, payload, executor)
+            .unwrap();
+    }
+
+    #[test]
+    fn image_search_test_snapshot_uses_live_region_without_mutating_draft() {
+        let mut editor = test_editor();
+        editor.begin_edit(&step(image_action()));
+        let before = editor.draft.clone();
+        let selected = ScreenRect::new(-123, 45, 67, 89);
+        let state = editor.image_search.as_mut().unwrap();
+        state.select(super::super::image_search_editor::SearchRegionKind::Rectangle);
+        state.rectangle = selected;
+
+        let (target, payload) = editor.image_search_test_snapshot(42, None).unwrap();
+        assert_eq!(target.macro_id, 42);
+        assert_eq!(target.step_id, Some(7));
+        assert_eq!(payload.region, SearchRegion::Rectangle { rect: selected });
+        assert_eq!(payload.image, MkImageRef::from_filename("1.png"));
+        assert_eq!(payload.tolerance, 0);
+        assert_eq!(payload.alpha, AlphaPolicy::Ignore);
+        assert_eq!(payload.return_point, ReturnPoint::TopLeft);
+        assert_eq!(editor.draft, before);
+    }
+
+    #[test]
+    fn image_search_test_snapshot_resolves_typed_all_any_not_paths() {
+        let nested = MkCondition::All {
+            conditions: vec![
+                condition_search("all.png"),
+                MkCondition::Any {
+                    conditions: vec![MkCondition::Not {
+                        condition: Box::new(condition_search("not.png")),
+                    }],
+                },
+            ],
+        };
+        let mut editor = test_editor();
+        editor.begin_edit(&step(MkAction::If(nested)));
+        let before = editor.draft.clone();
+
+        let mut all_path = super::super::image_authoring_destination::ConditionPath::root();
+        all_path.push(super::super::image_authoring_destination::ConditionBranch::All(0));
+        let (_, all_payload) = editor
+            .image_search_test_snapshot(42, Some(all_path))
+            .unwrap();
+        assert_eq!(all_payload.image, MkImageRef::from_filename("all.png"));
+
+        let mut nested_path = super::super::image_authoring_destination::ConditionPath::root();
+        nested_path.push(super::super::image_authoring_destination::ConditionBranch::All(1));
+        nested_path.push(super::super::image_authoring_destination::ConditionBranch::Any(0));
+        nested_path.push(super::super::image_authoring_destination::ConditionBranch::Not);
+        let (_, not_payload) = editor
+            .image_search_test_snapshot(42, Some(nested_path))
+            .unwrap();
+        assert_eq!(not_payload.image, MkImageRef::from_filename("not.png"));
+        assert_eq!(not_payload.tolerance, 17);
+        assert_eq!(not_payload.alpha, AlphaPolicy::Ignore);
+        assert_eq!(not_payload.return_point, ReturnPoint::TopLeft);
+        assert_eq!(editor.draft, before);
+
+        let error = editor
+            .image_search_test_snapshot(
+                42,
+                Some(
+                    super::super::image_authoring_destination::ConditionPath::from_indexes(vec![9]),
+                ),
+            )
+            .unwrap_err();
+        assert!(error.context.contains_key("condition_path"));
+    }
+
+    #[test]
+    fn image_search_test_match_is_one_passive_rectangle_with_no_notice() {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        let bounds = ScreenRect::new(-118, 36, 2, 2);
+        let (search, calls) = test_search(Ok(Some(ImageSearchMatch {
+            point: MkPoint { x: -117, y: 37 },
+            bounds,
+        })));
+        let executor = HeldExecutor::default();
+        start_image_test_job(&mut dialog, search, &executor);
+        assert!(dialog.action_editor.image_search_test_busy());
+        executor.release();
+        reduce_image_search_test_completion(&mut dialog);
+
+        fixture.observer.wait_for_commands(1);
+        let commands = fixture.observer.commands.lock().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            commands.as_slice(),
+            [VisualOverlayCommand::PreviewRectangle { rect, .. }] if *rect == bounds
+        ));
+        assert!(!dialog.action_editor.image_search_test_busy());
+        assert!(dialog.take_ui_notice().is_none());
+        assert!(dialog.action_editor.capture_message.is_none());
+    }
+
+    #[test]
+    fn image_search_test_no_match_notifies_once_without_overlay() {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        let (search, calls) = test_search(Ok(None));
+        let executor = HeldExecutor::default();
+        start_image_test_job(&mut dialog, search, &executor);
+        executor.release();
+        reduce_image_search_test_completion(&mut dialog);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.observer.commands.lock().unwrap().is_empty());
+        assert_eq!(dialog.take_ui_notice().as_deref(), Some("Image not found"));
+        assert!(dialog.take_ui_notice().is_none());
+        assert!(!dialog.action_editor.image_search_test_busy());
+    }
+
+    #[test]
+    fn image_search_test_error_preserves_diagnostic_context_without_not_found_notice() {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        let error = ExecutionDiagnostic::new(DiagnosticKind::Backend, "capture failed")
+            .context("region", "desktop");
+        let (search, calls) = test_search(Err(error));
+        let executor = HeldExecutor::default();
+        start_image_test_job(&mut dialog, search, &executor);
+        executor.release();
+        reduce_image_search_test_completion(&mut dialog);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.observer.commands.lock().unwrap().is_empty());
+        let message = dialog.action_editor.capture_message.as_deref().unwrap();
+        assert!(message.contains("capture failed"));
+        assert!(message.contains("region=desktop"));
+        assert!(dialog.take_ui_notice().is_none());
+        assert!(!dialog.action_editor.image_search_test_busy());
+    }
+
+    #[test]
+    fn stale_image_search_test_completion_is_discarded_and_clears_busy_state() {
+        let (_dir, mut dialog, fixture) = shared_dialog();
+        let (search, calls) = test_search(Ok(Some(ImageSearchMatch {
+            point: MkPoint { x: 5, y: 6 },
+            bounds: ScreenRect::new(4, 5, 10, 10),
+        })));
+        let executor = HeldExecutor::default();
+        start_image_test_job(&mut dialog, search, &executor);
+        executor.release();
+        dialog.action_editor.draft_generation =
+            dialog.action_editor.draft_generation.wrapping_add(1);
+        reduce_image_search_test_completion(&mut dialog);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.observer.commands.lock().unwrap().is_empty());
+        assert!(dialog.take_ui_notice().is_none());
+        assert!(dialog.action_editor.capture_message.is_none());
+        assert!(!dialog.action_editor.image_search_test_busy());
+    }
+
+    #[test]
+    fn second_image_search_test_cannot_start_while_first_is_active() {
+        let (_dir, mut dialog, _fixture) = shared_dialog();
+        let (search, calls) = test_search(Ok(None));
+        let executor = HeldExecutor::default();
+        start_image_test_job(&mut dialog, search.clone(), &executor);
+        let (target, payload) = dialog
+            .action_editor
+            .image_search_test_snapshot(1, None)
+            .unwrap();
+        assert!(
+            dialog
+                .action_editor
+                .image_test
+                .start_with_executor(search, target, payload, &executor)
+                .is_err()
+        );
+        executor.release();
+        reduce_image_search_test_completion(&mut dialog);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     fn crop_completion(

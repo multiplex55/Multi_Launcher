@@ -19,6 +19,7 @@ pub enum ImageEditorRequest {
     ImportPng,
     CaptureRectangle,
     CropImage,
+    TestImage,
     SelectRegion,
     PreviewRegion,
     HighlightMonitor,
@@ -61,6 +62,7 @@ pub(super) fn show(
     store: &crate::mkmacro::MkMacroStore,
     _macro_id: u64,
     authoring_busy: bool,
+    test_busy: bool,
     find_action: bool,
     valid_asset: bool,
 ) -> Option<ImageEditorRequest> {
@@ -88,9 +90,25 @@ pub(super) fn show(
             ImageEditorRequest::CropImage,
             &mut out,
         );
+        if valid_asset {
+            disabled_request(
+                ui,
+                "Test",
+                super::image_search_controls::test_button_enabled(
+                    valid_asset,
+                    authoring_busy,
+                    test_busy,
+                ),
+                ImageEditorRequest::TestImage,
+                &mut out,
+            );
+        }
     });
     if authoring_busy {
         ui.label("Importing reference image...");
+    }
+    if test_busy {
+        ui.label("Testing image search...");
     }
     if payload.image.filename().is_empty() {
         ui.label("No reference image selected.");

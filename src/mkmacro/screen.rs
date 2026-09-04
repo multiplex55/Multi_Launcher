@@ -2,9 +2,9 @@
 //! Coordinates in a [`CapturedRegion`] are local; `origin` converts them back to
 //! virtual-desktop coordinates (and may therefore be negative).
 use crate::mkmacro::{
-    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkCoordinateTarget, MkImagePayload,
-    MkImageRef, MkPixelSearchPayload, MkPoint, MkValue, MkWindowMatcher, RuntimeVariables,
-    ScreenBackend,
+    DiagnosticKind, ExecResult, ExecutionDiagnostic, ImageSearchMatch, MkCoordinateTarget,
+    MkImagePayload, MkImageRef, MkPixelSearchPayload, MkPoint, MkValue, MkWindowMatcher,
+    RuntimeVariables, ScreenBackend,
 };
 use image::RgbaImage;
 use std::sync::Arc;
@@ -53,7 +53,15 @@ pub(crate) trait WindowsGeometry: Send + Sync {
 }
 
 pub(crate) trait VisualSearch: Send + Sync {
-    fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>>;
+    fn find_image_match(
+        &self,
+        macro_id: u64,
+        payload: &MkImagePayload,
+    ) -> ExecResult<Option<ImageSearchMatch>>;
+    fn find_image(&self, macro_id: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+        self.find_image_match(macro_id, payload)
+            .map(|matched| matched.map(|matched| matched.point))
+    }
     fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]>;
     fn find_pixel(&self, _: &MkPixelSearchPayload) -> ExecResult<Option<MkPoint>> {
         Err(ExecutionDiagnostic::new(
@@ -407,7 +415,7 @@ impl WindowsGeometry for SystemWindowsGeometry {
 struct SystemVisualSearch;
 #[cfg(windows)]
 impl VisualSearch for SystemVisualSearch {
-    fn find_image(&self, _: u64, _: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+    fn find_image_match(&self, _: u64, _: &MkImagePayload) -> ExecResult<Option<ImageSearchMatch>> {
         Err(ExecutionDiagnostic::new(
             DiagnosticKind::UnsupportedOperation,
             "production image lookup is not configured",
@@ -416,6 +424,28 @@ impl VisualSearch for SystemVisualSearch {
     }
     fn read_pixel(&self, point: MkPoint) -> ExecResult<[u8; 4]> {
         WindowsScreenCaptureBackend::system().read_pixel(point)
+    }
+}
+
+/// Fallback used by non-Windows hosts and tests that have not installed a
+/// capture/search fixture. The dialog still exercises its asynchronous state
+/// machine and presents this diagnostic without touching runtime state.
+pub(crate) struct UnsupportedVisualSearch;
+
+impl VisualSearch for UnsupportedVisualSearch {
+    fn find_image_match(&self, _: u64, _: &MkImagePayload) -> ExecResult<Option<ImageSearchMatch>> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "production image lookup is not configured",
+        )
+        .context("backend", "VisualSearch"))
+    }
+
+    fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "pixel lookup is not configured",
+        ))
     }
 }
 
@@ -1213,7 +1243,11 @@ mod windows_backend_tests {
         requested: Mutex<Vec<MkImageRef>>,
     }
     impl VisualSearch for Visual {
-        fn find_image(&self, _: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+        fn find_image_match(
+            &self,
+            _: u64,
+            payload: &MkImagePayload,
+        ) -> ExecResult<Option<ImageSearchMatch>> {
             let image = payload.image.clone();
             self.requested.lock().unwrap().push(image);
             Ok(None)
@@ -1254,7 +1288,11 @@ mod windows_backend_tests {
 
     struct PixelVisual([u8; 4]);
     impl VisualSearch for PixelVisual {
-        fn find_image(&self, _: u64, _: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
+        fn find_image_match(
+            &self,
+            _: u64,
+            _: &MkImagePayload,
+        ) -> ExecResult<Option<ImageSearchMatch>> {
             Ok(None)
         }
         fn read_pixel(&self, _: MkPoint) -> ExecResult<[u8; 4]> {

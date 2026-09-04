@@ -9,6 +9,7 @@ pub mod image_crop_editor;
 pub mod image_preview;
 pub mod image_search_controls;
 pub mod image_search_editor;
+mod image_search_test_job;
 mod key_capture;
 pub mod launcher_action_picker;
 mod macro_list;
@@ -29,7 +30,7 @@ use crate::mkmacro::{
     DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroFolder, MkMacroStore,
     MkWindowMatcher, NormalizationConfig, RecordedStep, repair_ids, validate_document,
 };
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
 use visual_capture_workflow::SharedVisualOverlayController;
@@ -98,10 +99,12 @@ pub struct MkMacroDialog {
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
+    pub(crate) image_search_backend: Arc<dyn crate::mkmacro::VisualSearch>,
     pub image_crop_editor: image_crop_editor::ImageCropEditorState,
     pub window_picker: window_picker::WindowPickerState,
     pub launcher_action_picker: launcher_action_picker::LauncherActionPickerState,
     pub command_error: Option<String>,
+    ui_notices: VecDeque<String>,
     /// Editable options are copied into the runtime at Start and never mutate an active session.
     pub recorder_options: NormalizationConfig,
     /// Kept when the target was deleted so the user can restore it without losing captured data.
@@ -3639,6 +3642,19 @@ impl MkMacroDialog {
         authoring_context: MkMacroAuthoringContext,
     ) -> Self {
         let baseline = store.snapshot();
+        let image_search_backend: Arc<dyn crate::mkmacro::VisualSearch> = {
+            #[cfg(windows)]
+            {
+                Arc::new(crate::mkmacro::image_search::ProductionVisualSearch::new(
+                    store.clone(),
+                    Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system()),
+                ))
+            }
+            #[cfg(not(windows))]
+            {
+                Arc::new(crate::mkmacro::screen::UnsupportedVisualSearch)
+            }
+        };
         // The dialog is the sole production ownership boundary for the native
         // visual-overlay worker; every authoring surface receives a clone.
         let visual_overlay = SharedVisualOverlayController::new_dialog_owner();
@@ -3649,6 +3665,7 @@ impl MkMacroDialog {
             store,
             authoring_context,
             action_editor: action_editor::ActionEditorState::new(visual_overlay.clone()),
+            image_search_backend,
             image_crop_editor: Default::default(),
             visual_overlay,
             dirty: false,
@@ -3676,6 +3693,7 @@ impl MkMacroDialog {
             window_picker: Default::default(),
             launcher_action_picker: Default::default(),
             command_error: None,
+            ui_notices: VecDeque::new(),
             recorder_options: Default::default(),
             pending_recording: None,
             runtime_inspector_open: false,
@@ -3692,6 +3710,22 @@ impl MkMacroDialog {
         self.open = true;
         crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
         crate::mkmacro::runtime::set_recording_options(self.recorder_options.clone());
+    }
+
+    pub fn take_ui_notice(&mut self) -> Option<String> {
+        self.ui_notices.pop_front()
+    }
+
+    pub(crate) fn queue_ui_notice(&mut self, notice: impl Into<String>) {
+        self.ui_notices.push_back(notice.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_image_search_backend_for_test(
+        &mut self,
+        backend: Arc<dyn crate::mkmacro::VisualSearch>,
+    ) {
+        self.image_search_backend = backend;
     }
     pub fn sync_external(&mut self) {
         let current = self.store.snapshot();

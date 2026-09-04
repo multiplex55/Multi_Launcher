@@ -52,6 +52,7 @@ pub enum ConditionImageOperation {
     ImportPng,
     CaptureRectangle,
     CropImage,
+    TestImage,
     PickRectangle,
     PreviewRectangle,
     HighlightMonitor,

@@ -216,6 +216,7 @@ pub(super) fn condition_ui_with_assets(
     condition: &mut MkCondition,
     context: &TargetEditorContext<'_>,
     authoring_busy: bool,
+    test_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     let assets = context.store.image_refs().unwrap_or_default();
     let mut requested = None;
@@ -286,6 +287,7 @@ pub(super) fn condition_ui_with_assets(
                     &mut search.return_point,
                     &assets,
                     authoring_busy,
+                    test_busy,
                 ) {
                     use super::image_search_controls::SharedImageOperation as S;
                     use ConditionImageOperation as O;
@@ -293,6 +295,7 @@ pub(super) fn condition_ui_with_assets(
                         S::ImportPng => O::ImportPng,
                         S::CaptureRectangle => O::CaptureRectangle,
                         S::CropImage => O::CropImage,
+                        S::TestImage => O::TestImage,
                         S::PickRectangle => O::PickRectangle,
                         S::PreviewRectangle => O::PreviewRectangle,
                         S::HighlightMonitor => O::HighlightMonitor,
@@ -358,15 +361,15 @@ pub(super) fn condition_ui_with_assets(
                 });
             }
             MkCondition::All { conditions } => {
-                requested = group_ui(ui, conditions, context, true, authoring_busy)
+                requested = group_ui(ui, conditions, context, true, authoring_busy, test_busy)
             }
             MkCondition::Any { conditions } => {
-                requested = group_ui(ui, conditions, context, false, authoring_busy)
+                requested = group_ui(ui, conditions, context, false, authoring_busy, test_busy)
             }
             MkCondition::Not { condition } => {
                 ui.indent("not-child", |ui| {
                     if let Some(mut request) =
-                        condition_ui_with_assets(ui, condition, context, authoring_busy)
+                        condition_ui_with_assets(ui, condition, context, authoring_busy, test_busy)
                     {
                         prepend_request(&mut request, ConditionBranch::Not);
                         requested = Some(request)
@@ -385,6 +388,7 @@ pub fn condition_ui_with_context(
     condition: &mut MkCondition,
     context: ImageAssetUiContext<'_>,
     authoring_busy: bool,
+    test_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     let target_context = TargetEditorContext {
         store: context.store,
@@ -396,6 +400,7 @@ pub fn condition_ui_with_context(
         &target_context,
         &ConditionPath::root(),
         authoring_busy,
+        test_busy,
     )
 }
 
@@ -406,6 +411,7 @@ fn condition_ui_context_at(
     target_context: &TargetEditorContext<'_>,
     path: &ConditionPath,
     authoring_busy: bool,
+    test_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     // The established editor handles all non-browser controls and request
     // routing. Temporarily rendering ImageSearch ourselves avoids maintaining
@@ -436,6 +442,7 @@ fn condition_ui_context_at(
                 &mut search.return_point,
                 &assets,
                 authoring_busy,
+                test_busy,
             ) {
                 use super::image_search_controls::SharedImageOperation as S;
                 use ConditionImageOperation as O;
@@ -443,6 +450,7 @@ fn condition_ui_context_at(
                     S::ImportPng => O::ImportPng,
                     S::CaptureRectangle => O::CaptureRectangle,
                     S::CropImage => O::CropImage,
+                    S::TestImage => O::TestImage,
                     S::PickRectangle => O::PickRectangle,
                     S::PreviewRectangle => O::PreviewRectangle,
                     S::HighlightMonitor => O::HighlightMonitor,
@@ -480,6 +488,7 @@ fn condition_ui_context_at(
                         target_context,
                         &child_path,
                         authoring_busy,
+                        test_busy,
                     ) {
                         request = Some(r);
                     }
@@ -503,6 +512,7 @@ fn condition_ui_context_at(
                         target_context,
                         &child_path,
                         authoring_busy,
+                        test_busy,
                     ) {
                         request = Some(r);
                     }
@@ -524,12 +534,13 @@ fn condition_ui_context_at(
                     target_context,
                     &child_path,
                     authoring_busy,
+                    test_busy,
                 )
             })
             .inner
         }
-        _ => condition_ui_with_assets(ui, condition, target_context, authoring_busy).map(
-            |mut request| {
+        _ => condition_ui_with_assets(ui, condition, target_context, authoring_busy, test_busy)
+            .map(|mut request| {
                 match &mut request {
                     ConditionEditorRequest::WindowMatcher { path: p }
                     | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. }) => {
@@ -537,8 +548,7 @@ fn condition_ui_context_at(
                     }
                 }
                 request
-            },
-        ),
+            }),
     }
 }
 fn group_ui(
@@ -547,12 +557,14 @@ fn group_ui(
     context: &TargetEditorContext<'_>,
     is_all: bool,
     authoring_busy: bool,
+    test_busy: bool,
 ) -> Option<ConditionEditorRequest> {
     let mut remove = None;
     let mut requested = None;
     for (index, child) in conditions.iter_mut().enumerate() {
         ui.indent(index, |ui| {
-            if let Some(mut request) = condition_ui_with_assets(ui, child, context, authoring_busy)
+            if let Some(mut request) =
+                condition_ui_with_assets(ui, child, context, authoring_busy, test_busy)
             {
                 prepend_request(
                     &mut request,
@@ -729,6 +741,7 @@ mod tests {
             ConditionImageOperation::ImportPng,
             ConditionImageOperation::CaptureRectangle,
             ConditionImageOperation::CropImage,
+            ConditionImageOperation::TestImage,
             ConditionImageOperation::PickRectangle,
             ConditionImageOperation::PreviewRectangle,
             ConditionImageOperation::HighlightMonitor,

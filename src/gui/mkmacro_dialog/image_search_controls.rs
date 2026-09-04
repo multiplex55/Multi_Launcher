@@ -212,6 +212,7 @@ pub enum SharedImageOperation {
     ImportPng,
     CaptureRectangle,
     CropImage,
+    TestImage,
     PickRectangle,
     PreviewRectangle,
     HighlightMonitor,
@@ -235,6 +236,14 @@ pub(crate) fn crop_button_enabled(valid_asset: bool, authoring_busy: bool) -> bo
     reference_authoring_buttons_enabled(authoring_busy) && valid_asset
 }
 
+pub(crate) fn test_button_enabled(
+    valid_asset: bool,
+    authoring_busy: bool,
+    test_busy: bool,
+) -> bool {
+    valid_asset && !authoring_busy && !test_busy
+}
+
 /// Render the persisted fields that deliberately have identical semantics in actions and conditions.
 pub fn show_shared_fields(
     ui: &mut egui::Ui,
@@ -245,6 +254,7 @@ pub fn show_shared_fields(
     return_point: &mut ReturnPoint,
     assets: &[crate::mkmacro::MkImageRef],
     authoring_busy: bool,
+    test_busy: bool,
 ) -> Option<SharedImageOperation> {
     let mut request = None;
     let valid_asset = managed_image_is_available(image, assets);
@@ -276,6 +286,16 @@ pub fn show_shared_fields(
             .clicked()
         {
             request = Some(SharedImageOperation::CropImage)
+        }
+        if valid_asset
+            && ui
+                .add_enabled(
+                    test_button_enabled(valid_asset, authoring_busy, test_busy),
+                    egui::Button::new("Test"),
+                )
+                .clicked()
+        {
+            request = Some(SharedImageOperation::TestImage)
         }
     });
     ui.add(egui::Slider::new(tolerance, 0..=255).text("Tolerance"));
@@ -352,6 +372,10 @@ mod tests {
         assert!(crop_button_enabled(true, false));
         assert!(!crop_button_enabled(false, false));
         assert!(!crop_button_enabled(true, true));
+        assert!(test_button_enabled(true, false, false));
+        assert!(!test_button_enabled(false, false, false));
+        assert!(!test_button_enabled(true, true, false));
+        assert!(!test_button_enabled(true, false, true));
     }
 
     #[test]
