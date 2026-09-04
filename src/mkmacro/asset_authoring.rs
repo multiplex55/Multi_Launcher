@@ -16,6 +16,48 @@ use std::{
 pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
 pub const MAX_DECODED_RGBA_BYTES: u64 = 64 * 1024 * 1024;
 
+/// A rectangle in the original source image's pixel coordinate system.
+///
+/// This is intentionally distinct from ScreenRect, whose coordinates describe
+/// the desktop rather than image pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImageCropRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Returns an owned, exact-size RGBA crop without changing any source pixels.
+pub fn crop_rgba(source: &RgbaImage, rect: ImageCropRect) -> Result<RgbaImage> {
+    validate_image_dimensions(source.width(), source.height())?;
+    if rect.width == 0 || rect.height == 0 {
+        anyhow::bail!("image crop width and height must be positive")
+    }
+    if rect.x >= source.width() {
+        anyhow::bail!("image crop x coordinate is outside the source image")
+    }
+    if rect.y >= source.height() {
+        anyhow::bail!("image crop y coordinate is outside the source image")
+    }
+    let right = rect
+        .x
+        .checked_add(rect.width)
+        .ok_or_else(|| anyhow::anyhow!("image crop right edge overflows u32"))?;
+    let bottom = rect
+        .y
+        .checked_add(rect.height)
+        .ok_or_else(|| anyhow::anyhow!("image crop bottom edge overflows u32"))?;
+    if right > source.width() {
+        anyhow::bail!("image crop extends beyond the source image width")
+    }
+    if bottom > source.height() {
+        anyhow::bail!("image crop extends beyond the source image height")
+    }
+    validate_image_dimensions(rect.width, rect.height)?;
+    Ok(image::imageops::crop_imm(source, rect.x, rect.y, rect.width, rect.height).to_image())
+}
+
 pub fn validated_rgba_len(width: u32, height: u32) -> Result<usize> {
     if width == 0 || height == 0 {
         anyhow::bail!(
@@ -242,5 +284,158 @@ mod tests {
                 .dimensions(),
             (3, 2)
         );
+    }
+
+    fn distinct_rgba_fixture() -> RgbaImage {
+        RgbaImage::from_fn(4, 4, |x, y| {
+            Rgba([
+                (x + y * 4) as u8,
+                (x * 17 + y) as u8,
+                (200 - x * 4 - y) as u8,
+                (31 + x + y * 4) as u8,
+            ])
+        })
+    }
+
+    #[test]
+    fn crop_preserves_exact_pixels_dimensions_alpha_and_source() {
+        let source = distinct_rgba_fixture();
+        let before = source.clone();
+        let cropped = crop_rgba(
+            &source,
+            ImageCropRect {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(cropped.dimensions(), (2, 2));
+        assert_eq!(cropped.get_pixel(0, 0).0, [5, 18, 195, 36]);
+        assert_eq!(cropped.get_pixel(1, 0).0, [6, 35, 191, 37]);
+        assert_eq!(cropped.get_pixel(0, 1).0, [9, 19, 194, 40]);
+        assert_eq!(cropped.get_pixel(1, 1).0, [10, 36, 190, 41]);
+        assert_eq!(source, before);
+    }
+
+    #[test]
+    fn crop_accepts_full_image_one_pixel_and_both_boundaries() {
+        let source = distinct_rgba_fixture();
+        assert_eq!(
+            crop_rgba(
+                &source,
+                ImageCropRect {
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 4,
+                }
+            )
+            .unwrap(),
+            source
+        );
+        assert_eq!(
+            crop_rgba(
+                &source,
+                ImageCropRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }
+            )
+            .unwrap()
+            .get_pixel(0, 0)
+            .0,
+            [0, 0, 200, 31]
+        );
+        assert_eq!(
+            crop_rgba(
+                &source,
+                ImageCropRect {
+                    x: 3,
+                    y: 3,
+                    width: 1,
+                    height: 1,
+                }
+            )
+            .unwrap()
+            .get_pixel(0, 0)
+            .0,
+            [15, 54, 185, 46]
+        );
+    }
+
+    #[test]
+    fn crop_rejects_invalid_rectangles_and_checked_add_overflow() {
+        let source = distinct_rgba_fixture();
+        for rect in [
+            ImageCropRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 0,
+            },
+            ImageCropRect {
+                x: 4,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 0,
+                y: 4,
+                width: 1,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 3,
+                y: 0,
+                width: 2,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 0,
+                y: 3,
+                width: 1,
+                height: 2,
+            },
+            ImageCropRect {
+                x: u32::MAX,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 0,
+                y: u32::MAX,
+                width: 1,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 1,
+                y: 1,
+                width: u32::MAX,
+                height: 1,
+            },
+            ImageCropRect {
+                x: 1,
+                y: 1,
+                width: 1,
+                height: u32::MAX,
+            },
+        ] {
+            assert!(
+                crop_rgba(&source, rect).is_err(),
+                "unexpectedly accepted {rect:?}"
+            );
+        }
     }
 }

@@ -301,6 +301,20 @@ pub fn show_thumbnail(ui: &mut egui::Ui, store: &MkMacroStore, image: &MkImageRe
     show_sized(ui, store, image, max_size.max(1.0), false);
 }
 
+/// Invalidates a managed image preview unconditionally. Metadata is not
+/// consulted: an overwrite must evict the old texture even when the
+/// replacement has the same length and timestamp.
+pub(crate) fn invalidate(ctx: &egui::Context, store: &MkMacroStore, image: &MkImageRef) {
+    let Ok(path) = store.image_path(image) else {
+        return;
+    };
+    ctx.data_mut(|data| {
+        let cache = data.get_temp_mut_or_default::<PreviewCache>(egui::Id::new(PREVIEW_CACHE_ID));
+        cache.assets.remove(&(path, image.clone()));
+    });
+    ctx.request_repaint();
+}
+
 fn show_sized(
     ui: &mut egui::Ui,
     store: &MkMacroStore,

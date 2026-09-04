@@ -2,8 +2,10 @@ pub mod action_catalog;
 pub mod action_editor;
 pub mod condition_editor;
 pub mod image_asset_picker;
+pub mod image_authoring;
 pub mod image_authoring_destination;
 pub mod image_authoring_job;
+pub mod image_crop_editor;
 pub mod image_preview;
 pub mod image_search_controls;
 pub mod image_search_editor;
@@ -96,6 +98,7 @@ pub struct MkMacroDialog {
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
     pub uia_editor: uia_editor::UiaEditorState,
     pub action_editor: action_editor::ActionEditorState,
+    pub image_crop_editor: image_crop_editor::ImageCropEditorState,
     pub window_picker: window_picker::WindowPickerState,
     pub launcher_action_picker: launcher_action_picker::LauncherActionPickerState,
     pub command_error: Option<String>,
@@ -3646,6 +3649,7 @@ impl MkMacroDialog {
             store,
             authoring_context,
             action_editor: action_editor::ActionEditorState::new(visual_overlay.clone()),
+            image_crop_editor: Default::default(),
             visual_overlay,
             dirty: false,
             conflict: false,
@@ -3981,6 +3985,7 @@ impl MkMacroDialog {
         self.cancel_folder_operations();
         self.prune_folder_ui_state();
         self.action_editor.cancel();
+        self.image_crop_editor.cancel();
         self.open = false;
         self.set_selected_macro(None);
         true
@@ -4326,6 +4331,7 @@ impl MkMacroDialog {
         self.cancel_folder_operations();
         self.action_catalog_visible = false;
         self.action_editor.cancel();
+        self.image_crop_editor.cancel();
         self.structural_insertion = None;
         self.window_picker
             .cancel("Window picker closed because the macro dialog closed");
@@ -4370,6 +4376,7 @@ impl MkMacroDialog {
         }
         action_catalog::show_modal(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
+        image_crop_editor::show(ui.ctx(), self);
         launcher_action_picker::show(ui.ctx(), self);
         window_picker::show(ui.ctx(), &mut self.window_picker);
         if self.window_picker.confirm_ready {

@@ -2,6 +2,7 @@
 //!
 //! The editor owns a complete `MkStep` clone.  No document field is borrowed by
 //! the modal, which makes closing/cancelling it a genuinely lossless operation.
+use super::image_authoring::normalize_image_filename;
 pub use super::image_authoring_destination::ConditionOperationDestination;
 use super::variable_catalog::{VariableCatalog, VariableDescriptor, VariableValueType};
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
@@ -3257,6 +3258,7 @@ mod scroll_editor_tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageAuthoringRequest {
     Import,
+    Crop,
     CaptureRectangle,
     PickRectangle,
     PickClickWithinRegion,
@@ -3266,7 +3268,7 @@ impl ImageAuthoringRequest {
     fn rectangle_purpose(self) -> Option<super::visual_overlay::RectanglePurpose> {
         use super::visual_overlay::RectanglePurpose;
         match self {
-            Self::Import => None,
+            Self::Import | Self::Crop => None,
             Self::CaptureRectangle => Some(RectanglePurpose::ReferenceImageCapture),
             Self::PickRectangle | Self::PickClickWithinRegion => {
                 Some(RectanglePurpose::SearchRegion)
@@ -3424,16 +3426,6 @@ fn apply_capture(
     }
 }
 
-pub(crate) fn normalize_image_filename(input: &str) -> Result<MkImageRef, String> {
-    let trimmed = input.trim();
-    let filename = if trimmed.to_ascii_lowercase().ends_with(".png") {
-        trimmed.to_owned()
-    } else {
-        format!("{trimmed}.png")
-    };
-    MkImageRef::new(filename)
-}
-
 fn condition_at_path<'a>(
     mut c: &'a mut MkCondition,
     path: &[usize],
@@ -3515,6 +3507,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     d.action_editor.tick_visual_capture(d.selected_macro_id);
     reduce_image_authoring_completion(d);
     let importing = d.action_editor.image_authoring.is_importing();
+    let crop_open = d.image_crop_editor.is_open();
     if importing {
         ctx.request_repaint();
     }
@@ -3777,10 +3770,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
             let find_action = matches!(step.action, MkAction::ImageFind(_));
             if let Some(payload) = image_payload_mut(step) {
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing, find_action, image_refs.contains(&payload.image));
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), importing || crop_open, find_action, image_refs.contains(&payload.image));
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
+                    Some(Crop) => image_request = Some(ImageAuthoringRequest::Crop),
                     Some(CaptureRectangle) => image_request = Some(ImageAuthoringRequest::CaptureRectangle),
                     Some(SelectRegion) => image_request = Some(ImageAuthoringRequest::PickRectangle),
                     Some(PickWindow { .. }) => window = Some(super::window_picker::MatcherPath::VisualRegion),
@@ -3899,7 +3893,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
                     )
                     && state.image_search.as_ref().and_then(|image| image.validation_error()).is_none();
-                apply = ui.add_enabled(valid && !workflow_active && !importing, egui::Button::new("Apply")).clicked();
+                apply = ui.add_enabled(valid && !workflow_active && !importing && !crop_open, egui::Button::new("Apply")).clicked();
                 cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
           });
@@ -3914,10 +3908,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if let Some(region) = region_preview_request {
         d.action_editor.preview_region(region);
     }
-    if (workflow_active || importing) && image_request.is_some() {
+    if (workflow_active || importing || crop_open) && image_request.is_some() {
         d.action_editor.capture_message = Some(
             if importing {
                 "Wait for the active reference image import to finish"
+            } else if crop_open {
+                "Finish or cancel the active image crop first"
             } else {
                 "Finish or cancel the active visual capture first"
             }
@@ -3936,6 +3932,32 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 })
                 .transpose()
                 .map(|_| ()),
+            ImageAuthoringRequest::Crop => {
+                let source = d
+                    .action_editor
+                    .draft
+                    .as_ref()
+                    .and_then(image_payload)
+                    .map(|payload| payload.image.clone());
+                match source {
+                    Some(source) if !source.is_empty() && image_refs.contains(&source) => {
+                        d.image_crop_editor.open(
+                            d.store.clone(),
+                            source,
+                            super::image_crop_editor::ImageCropDestination {
+                                macro_id,
+                                step_id: d.action_editor.editing_id,
+                                draft_generation: d.action_editor.draft_generation,
+                            },
+                        );
+                        Ok(())
+                    }
+                    Some(_) => Err(anyhow::anyhow!(
+                        "Select an existing managed reference image before cropping"
+                    )),
+                    None => Err(anyhow::anyhow!("No reference image is selected")),
+                }
+            }
             request @ (ImageAuthoringRequest::CaptureRectangle
             | ImageAuthoringRequest::PickRectangle
             | ImageAuthoringRequest::PickClickWithinRegion) => {
@@ -4085,6 +4107,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             .cancel("Window picker closed because the action editor was applied");
         d.launcher_action_picker.cancel();
     } else if cancel || !open {
+        d.image_crop_editor.cancel();
         d.action_editor.cancel();
         d.window_picker
             .cancel("Window picker closed because the action editor was cancelled");

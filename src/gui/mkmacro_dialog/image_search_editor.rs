@@ -12,6 +12,7 @@ pub type ImageSearchEditorState = super::image_search_controls::SearchRegionEdit
 pub enum ImageEditorRequest {
     ImportPng,
     CaptureRectangle,
+    Crop,
     SelectRegion,
     PreviewRegion,
     HighlightMonitor,
@@ -72,6 +73,13 @@ pub(super) fn show(
             "Capture…",
             !authoring_busy,
             ImageEditorRequest::CaptureRectangle,
+            &mut out,
+        );
+        disabled_request(
+            ui,
+            "Crop…",
+            !authoring_busy && valid_asset,
+            ImageEditorRequest::Crop,
             &mut out,
         );
     });
