@@ -202,6 +202,7 @@ pub enum MkMouseButton {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MkCoordinateTarget {
+    CurrentPosition,
     Screen {
         point: MkPoint,
     },
@@ -1112,6 +1113,19 @@ mod image_payload_tests {
             MkCoordinateTarget::ActiveWindow {
                 point: MkPoint { x: 1, y: 2 }
             }
+        );
+    }
+
+    #[test]
+    fn current_position_coordinate_has_stable_tag_and_round_trips() {
+        let target = MkCoordinateTarget::CurrentPosition;
+        assert_eq!(
+            serde_json::to_string(&target).unwrap(),
+            r#"{"kind":"current_position"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<MkCoordinateTarget>(r#"{"kind":"current_position"}"#).unwrap(),
+            target
         );
     }
     #[test]

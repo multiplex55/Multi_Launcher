@@ -2018,6 +2018,20 @@ mod paste_tests {
     }
 
     #[test]
+    fn current_position_formats_in_mouse_click_summaries() {
+        let target = MkCoordinateTarget::CurrentPosition;
+        assert_eq!(format_coordinate_target(&target), "Current Position");
+        assert_eq!(
+            action_details(&MkAction::MouseClick(MkMousePayload {
+                target,
+                button: MkMouseButton::Left,
+                clicks: 2,
+            })),
+            "Left ×2 @ Current Position"
+        );
+    }
+
+    #[test]
     fn recursive_image_conditions_keep_live_and_previous_results_distinct() {
         let assets = [MkImageAsset {
             id: 7,
@@ -2071,6 +2085,7 @@ pub fn format_coordinate_target_with_assets(
     assets: &[MkImageAsset],
 ) -> String {
     match target {
+        MkCoordinateTarget::CurrentPosition => "Current Position".into(),
         MkCoordinateTarget::Screen { point } => format!("Screen ({}, {})", point.x, point.y),
         MkCoordinateTarget::ActiveWindow { point } => {
             format!("Active Window ({}, {})", point.x, point.y)

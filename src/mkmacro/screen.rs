@@ -167,6 +167,10 @@ impl ScreenBackend for WindowsScreenBackend {
         variables: &RuntimeVariables,
     ) -> ExecResult<MkPoint> {
         match target {
+            MkCoordinateTarget::CurrentPosition => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::UnsupportedOperation,
+                "Current Position is resolved by Mouse Click from the input backend",
+            )),
             MkCoordinateTarget::Screen { point } => self.require_on_desktop(*point),
             MkCoordinateTarget::ActiveWindow { point } => {
                 let hwnd = self.geometry.foreground_window()?.ok_or_else(|| {

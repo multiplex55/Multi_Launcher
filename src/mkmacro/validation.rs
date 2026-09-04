@@ -707,11 +707,27 @@ pub fn validate_document_with_context(
                     }
                 }
                 MkAction::MouseMove(p) => {
-                    target(&p.target, m.id, sid, asset_root, &mut out);
+                    target(
+                        &p.target,
+                        "Mouse Move",
+                        false,
+                        m.id,
+                        sid,
+                        asset_root,
+                        &mut out,
+                    );
                     validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
                 }
                 MkAction::MouseClick(p) => {
-                    target(&p.target, m.id, sid, asset_root, &mut out);
+                    target(
+                        &p.target,
+                        "Mouse Click",
+                        true,
+                        m.id,
+                        sid,
+                        asset_root,
+                        &mut out,
+                    );
                     validate_pixel_reference(&p.target, &pixel_search_ids, m.id, sid, &mut out);
                 }
                 MkAction::ClickWithinRegion(p) => {
@@ -770,15 +786,23 @@ pub fn validate_document_with_context(
                     }
                 }
                 MkAction::MouseDrag(p) => {
-                    target(&p.from, m.id, sid, asset_root, &mut out);
-                    target(&p.to, m.id, sid, asset_root, &mut out);
+                    target(
+                        &p.from,
+                        "Mouse Drag",
+                        false,
+                        m.id,
+                        sid,
+                        asset_root,
+                        &mut out,
+                    );
+                    target(&p.to, "Mouse Drag", false, m.id, sid, asset_root, &mut out);
                     validate_pixel_reference(&p.from, &pixel_search_ids, m.id, sid, &mut out);
                     validate_pixel_reference(&p.to, &pixel_search_ids, m.id, sid, &mut out);
                 }
                 MkAction::PixelCheck {
                     target: t, color, ..
                 } => {
-                    target(t, m.id, sid, asset_root, &mut out);
+                    target(t, "Pixel Check", false, m.id, sid, asset_root, &mut out);
                     if super::screen::parse_rgb(color).is_err() {
                         push(
                             &mut out,
@@ -1200,12 +1224,24 @@ fn usable_image_dimensions(width: u32, height: u32) -> bool {
 
 fn target(
     target: &MkCoordinateTarget,
+    consumer: &'static str,
+    allow_current_position: bool,
     m: u64,
     s: Option<u64>,
     root: Option<&Path>,
     out: &mut Vec<MkDiagnostic>,
 ) {
     match target {
+        MkCoordinateTarget::CurrentPosition if !allow_current_position => push(
+            out,
+            m,
+            s,
+            "unsupported_current_position",
+            format!(
+                "{consumer} does not support Current Position; Current Position is valid only for Mouse Click."
+            ),
+        ),
+        MkCoordinateTarget::CurrentPosition => {}
         MkCoordinateTarget::WindowClient { matcher: value, .. } => matcher(value, m, s, out),
         MkCoordinateTarget::Variable { name } if name.trim().is_empty() => push(
             out,
@@ -1318,13 +1354,26 @@ fn condition(
             ..
         } => asset(*asset_id, m, s, root, o),
         MkCondition::PreviousImageResult { asset_id: None, .. } => {}
+        MkCondition::PixelResult {
+            target: coordinate_target,
+            ..
+        } => {
+            target(
+                coordinate_target,
+                "Pixel Result condition",
+                false,
+                m,
+                s,
+                root,
+                o,
+            );
+        }
         MkCondition::All { conditions } | MkCondition::Any { conditions } => {
             for x in conditions {
                 condition(x, m, s, root, o)
             }
         }
         MkCondition::Not { condition: x } => condition(x, m, s, root, o),
-        _ => {}
     }
 }
 
@@ -1339,12 +1388,113 @@ mod coordinate_target_tests {
                 matcher,
                 point: MkPoint { x: 0, y: 0 },
             },
+            "Mouse Move",
+            false,
             1,
             Some(2),
             None,
             &mut out,
         );
         out
+    }
+
+    fn action_diagnostics(action: MkAction) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    id: 1,
+                    name: "test".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
+                    playback: MkPlayback::default(),
+                    steps: vec![MkStep {
+                        id: 2,
+                        enabled: true,
+                        breakpoint: false,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: MkErrorPolicy::default(),
+                        action,
+                    }],
+                    image_assets: vec![],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn current_position_is_valid_only_for_mouse_click() {
+        assert!(
+            action_diagnostics(MkAction::MouseClick(MkMousePayload {
+                target: MkCoordinateTarget::CurrentPosition,
+                button: MkMouseButton::Left,
+                clicks: 1,
+            }))
+            .is_empty()
+        );
+
+        for (consumer, action) in [
+            (
+                "Mouse Move",
+                MkAction::MouseMove(MkMouseMovePayload {
+                    target: MkCoordinateTarget::CurrentPosition,
+                    duration_ms: 0,
+                }),
+            ),
+            (
+                "Pixel Check",
+                MkAction::PixelCheck {
+                    target: MkCoordinateTarget::CurrentPosition,
+                    color: "#000000".into(),
+                    tolerance: 0,
+                },
+            ),
+            (
+                "Pixel Result condition",
+                MkAction::If(MkCondition::PixelResult {
+                    target: MkCoordinateTarget::CurrentPosition,
+                    color: "#000000".into(),
+                    tolerance: 0,
+                }),
+            ),
+        ] {
+            let found = action_diagnostics(action);
+            let diagnostic = found
+                .iter()
+                .find(|diagnostic| diagnostic.code == "unsupported_current_position")
+                .unwrap_or_else(|| panic!("missing Current Position diagnostic for {consumer}"));
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Fatal);
+            assert!(diagnostic.message.contains(consumer));
+            assert!(
+                diagnostic
+                    .message
+                    .contains("Current Position is valid only for Mouse Click")
+            );
+            assert!(!can_run(&found));
+        }
+    }
+
+    #[test]
+    fn both_mouse_drag_endpoints_reject_current_position() {
+        let found = action_diagnostics(MkAction::MouseDrag(MkMouseDragPayload {
+            from: MkCoordinateTarget::CurrentPosition,
+            to: MkCoordinateTarget::CurrentPosition,
+            button: MkMouseButton::Left,
+            duration_ms: 0,
+        }));
+        assert_eq!(
+            found
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unsupported_current_position")
+                .count(),
+            2
+        );
+        assert!(!can_run(&found));
     }
 
     #[test]

@@ -2972,6 +2972,137 @@ mod tests {
     }
 
     #[test]
+    fn current_position_click_reads_cursor_once_at_action_entry_and_never_moves() {
+        let fake = Arc::new(FakeBackend::default());
+        let cursor = MkPoint { x: -321, y: 654 };
+        *fake.cursor.lock().unwrap() = cursor;
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let action = MkAction::MouseClick(super::super::MkMousePayload {
+            target: MkCoordinateTarget::CurrentPosition,
+            button: MkMouseButton::Right,
+            clicks: 3,
+        });
+        let playback = MkPlayback {
+            random_offset_px: u32::MAX,
+            ..MkPlayback::default()
+        };
+        let mut variables = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        executor
+            .action(1, &action, &playback, &mut variables, &mut guard)
+            .unwrap();
+
+        // Current Position is sampled once when this action starts, not once
+        // per click. The same backend point is used for every button pair.
+        assert_eq!(
+            fake.events(),
+            [
+                "cursor_position",
+                "button_down:Right",
+                "button_up:Right",
+                "button_down:Right",
+                "button_up:Right",
+                "button_down:Right",
+                "button_up:Right",
+            ]
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|event| *event == "cursor_position")
+                .count(),
+            1
+        );
+        assert!(!fake.events().iter().any(|event| event.starts_with("move:")));
+        assert!(fake.finalized_points.lock().unwrap().is_empty());
+        assert!(fake.resolved_variables.lock().unwrap().is_empty());
+        for prefix in ["mouse", "last_point"] {
+            assert_eq!(
+                runtime_coordinate(&variables, &format!("{prefix}.x")),
+                cursor.x
+            );
+            assert_eq!(
+                runtime_coordinate(&variables, &format!("{prefix}.y")),
+                cursor.y
+            );
+        }
+    }
+
+    #[test]
+    fn current_position_cursor_failure_stops_before_buttons_without_fabricating_point() {
+        let fake = Arc::new(FakeBackend::default());
+        let error = ExecutionDiagnostic::new(DiagnosticKind::Backend, "cursor unavailable");
+        fake.fail("cursor_position", error.clone());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let action = MkAction::MouseClick(super::super::MkMousePayload {
+            target: MkCoordinateTarget::CurrentPosition,
+            button: MkMouseButton::Left,
+            clicks: 2,
+        });
+        let mut variables = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        assert_eq!(
+            executor
+                .action(
+                    1,
+                    &action,
+                    &MkPlayback::default(),
+                    &mut variables,
+                    &mut guard,
+                )
+                .unwrap_err(),
+            error
+        );
+        assert_eq!(fake.events(), ["cursor_position"]);
+        assert!(variables.is_empty());
+        assert!(fake.finalized_points.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ordinary_click_still_finalizes_and_moves_before_first_button_event() {
+        let fake = Arc::new(FakeBackend::default());
+        let point = MkPoint { x: 12, y: -8 };
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor = Executor::new(fake.clone().backends(), control);
+        let action = MkAction::MouseClick(super::super::MkMousePayload {
+            target: MkCoordinateTarget::Screen { point },
+            button: MkMouseButton::Left,
+            clicks: 1,
+        });
+        let mut variables = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+
+        assert_eq!(*fake.finalized_points.lock().unwrap(), [point]);
+        assert_eq!(
+            fake.events(),
+            ["move:12,-8", "button_down:Left", "button_up:Left"]
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .position(|event| event.starts_with("button_down:")),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn usable_region_bounds_are_inclusive_and_padding_is_edge_based() {
         assert_eq!(
             usable_region(super::super::ScreenRect::new(100, 200, 400, 300), 0).unwrap(),
@@ -4332,8 +4463,13 @@ impl Executor {
                 Ok(())
             }
             MkAction::MouseClick(p) => {
-                let point = self.finalize_target(&p.target, playback, v, "Mouse Click")?;
-                self.click_at(point, p.button.clone(), p.clicks, v, g)
+                if matches!(&p.target, MkCoordinateTarget::CurrentPosition) {
+                    let point = self.backends.input.cursor_position()?;
+                    self.click_at_current_position(point, p.button.clone(), p.clicks, v, g)
+                } else {
+                    let point = self.finalize_target(&p.target, playback, v, "Mouse Click")?;
+                    self.click_at(point, p.button.clone(), p.clicks, v, g)
+                }
             }
             MkAction::ClickWithinRegion(p) => {
                 if p.clicks == 0 {
@@ -4651,6 +4787,26 @@ impl Executor {
         set_point(v, "last_point", point);
         self.backends.input.move_mouse(point)?;
         set_point(v, "mouse", point);
+        self.click_buttons(button, clicks, g)
+    }
+    fn click_at_current_position(
+        &self,
+        point: MkPoint,
+        button: MkMouseButton,
+        clicks: u32,
+        v: &mut RuntimeVariables,
+        g: &mut InputCleanupGuard,
+    ) -> ExecResult {
+        set_point(v, "last_point", point);
+        set_point(v, "mouse", point);
+        self.click_buttons(button, clicks, g)
+    }
+    fn click_buttons(
+        &self,
+        button: MkMouseButton,
+        clicks: u32,
+        g: &mut InputCleanupGuard,
+    ) -> ExecResult {
         for _ in 0..clicks {
             g.down_button(button.clone())?;
             g.up_button(button.clone())?;
@@ -5526,6 +5682,7 @@ pub mod fake {
         pub virtual_desktop_calls: Mutex<Vec<super::super::MkVirtualDesktopAction>>,
         pub image_results: Mutex<HashMap<u64, VecDeque<ExecResult<Option<MkPoint>>>>>,
         pub resolved_variables: Mutex<Vec<RuntimeVariables>>,
+        pub finalized_points: Mutex<Vec<MkPoint>>,
     }
     impl Default for FakeBackend {
         fn default() -> Self {
@@ -5547,6 +5704,7 @@ pub mod fake {
                 virtual_desktop_calls: Mutex::new(Vec::new()),
                 image_results: Mutex::new(HashMap::new()),
                 resolved_variables: Mutex::new(Vec::new()),
+                finalized_points: Mutex::new(Vec::new()),
             }
         }
     }
@@ -5756,6 +5914,10 @@ pub mod fake {
         fn resolve(&self, t: &MkCoordinateTarget, v: &RuntimeVariables) -> ExecResult<MkPoint> {
             self.resolved_variables.lock().unwrap().push(v.clone());
             match t {
+                MkCoordinateTarget::CurrentPosition => Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::UnsupportedOperation,
+                    "Current Position must be handled by Mouse Click",
+                )),
                 MkCoordinateTarget::Screen { point }
                 | MkCoordinateTarget::ActiveWindow { point } => Ok(*point),
                 MkCoordinateTarget::Variable { name } => match v.get(name) {
@@ -5801,6 +5963,10 @@ pub mod fake {
                     "target not found",
                 )),
             }
+        }
+        fn finalize_point(&self, point: MkPoint) -> ExecResult<MkPoint> {
+            self.finalized_points.lock().unwrap().push(point);
+            Ok(point)
         }
         fn find_image(&self, _: u64, payload: &MkImagePayload) -> ExecResult<Option<MkPoint>> {
             if let Some(result) = self

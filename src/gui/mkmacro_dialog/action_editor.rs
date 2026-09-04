@@ -1641,6 +1641,25 @@ pub(super) struct TargetUiOutcome {
     pick_matcher: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct TargetUiOptions<'a> {
+    pub allow_current_position: bool,
+    pub variable_catalog: Option<&'a VariableCatalog>,
+    pub consumer_name: &'static str,
+    pub picker_id: u64,
+}
+
+impl<'a> TargetUiOptions<'a> {
+    pub(super) const fn standard(consumer_name: &'static str) -> Self {
+        Self {
+            allow_current_position: false,
+            variable_catalog: None,
+            consumer_name,
+            picker_id: 0,
+        }
+    }
+}
+
 const RUNTIME_SCOPE_TOOLTIP: &str = "Runtime outputs are available when the producing and consuming steps execute in the same macro run.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1821,25 +1840,105 @@ pub(crate) fn change_target_kind(
     next: usize,
     assets: &[MkImageAsset],
 ) {
+    let next = standard_target_kinds()
+        .get(next)
+        .copied()
+        .unwrap_or(CoordinateTargetKind::PixelResult);
+    change_target_kind_for_kind(target, next, assets);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoordinateTargetKind {
+    CurrentPosition,
+    Screen,
+    ActiveWindow,
+    MatchedWindow,
+    Variable,
+    ImageResult,
+    PixelResult,
+}
+
+impl CoordinateTargetKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CurrentPosition => "Current Position",
+            Self::Screen => "Screen",
+            Self::ActiveWindow => "Active Window",
+            Self::MatchedWindow => "Matched Window",
+            Self::Variable => "Variable",
+            Self::ImageResult => "Image Result",
+            Self::PixelResult => "Pixel Result",
+        }
+    }
+}
+
+const STANDARD_TARGET_KINDS: [CoordinateTargetKind; 6] = [
+    CoordinateTargetKind::Screen,
+    CoordinateTargetKind::ActiveWindow,
+    CoordinateTargetKind::MatchedWindow,
+    CoordinateTargetKind::Variable,
+    CoordinateTargetKind::ImageResult,
+    CoordinateTargetKind::PixelResult,
+];
+const MOUSE_CLICK_TARGET_KINDS: [CoordinateTargetKind; 7] = [
+    CoordinateTargetKind::CurrentPosition,
+    CoordinateTargetKind::Screen,
+    CoordinateTargetKind::ActiveWindow,
+    CoordinateTargetKind::MatchedWindow,
+    CoordinateTargetKind::Variable,
+    CoordinateTargetKind::ImageResult,
+    CoordinateTargetKind::PixelResult,
+];
+
+fn standard_target_kinds() -> &'static [CoordinateTargetKind] {
+    &STANDARD_TARGET_KINDS
+}
+
+fn available_target_kinds(allow_current_position: bool) -> &'static [CoordinateTargetKind] {
+    if allow_current_position {
+        &MOUSE_CLICK_TARGET_KINDS
+    } else {
+        standard_target_kinds()
+    }
+}
+
+fn coordinate_target_kind(target: &MkCoordinateTarget) -> CoordinateTargetKind {
+    match target {
+        MkCoordinateTarget::CurrentPosition => CoordinateTargetKind::CurrentPosition,
+        MkCoordinateTarget::Screen { .. } => CoordinateTargetKind::Screen,
+        MkCoordinateTarget::ActiveWindow { .. } => CoordinateTargetKind::ActiveWindow,
+        MkCoordinateTarget::WindowClient { .. } => CoordinateTargetKind::MatchedWindow,
+        MkCoordinateTarget::Variable { .. } => CoordinateTargetKind::Variable,
+        MkCoordinateTarget::Image { .. } => CoordinateTargetKind::ImageResult,
+        MkCoordinateTarget::Pixel { .. } => CoordinateTargetKind::PixelResult,
+    }
+}
+
+fn change_target_kind_for_kind(
+    target: &mut MkCoordinateTarget,
+    next: CoordinateTargetKind,
+    assets: &[MkImageAsset],
+) {
     *target = match next {
-        0 => MkCoordinateTarget::Screen {
+        CoordinateTargetKind::CurrentPosition => MkCoordinateTarget::CurrentPosition,
+        CoordinateTargetKind::Screen => MkCoordinateTarget::Screen {
             point: MkPoint { x: 0, y: 0 },
         },
-        1 => MkCoordinateTarget::ActiveWindow {
+        CoordinateTargetKind::ActiveWindow => MkCoordinateTarget::ActiveWindow {
             point: MkPoint { x: 0, y: 0 },
         },
-        2 => MkCoordinateTarget::WindowClient {
+        CoordinateTargetKind::MatchedWindow => MkCoordinateTarget::WindowClient {
             matcher: MkWindowMatcher::default(),
             point: MkPoint { x: 0, y: 0 },
         },
-        3 => MkCoordinateTarget::Variable {
+        CoordinateTargetKind::Variable => MkCoordinateTarget::Variable {
             name: String::new(),
         },
-        4 => MkCoordinateTarget::Image {
+        CoordinateTargetKind::ImageResult => MkCoordinateTarget::Image {
             asset_id: assets.first().map_or(0, |a| a.id),
             offset: MkPoint { x: 0, y: 0 },
         },
-        _ => MkCoordinateTarget::Pixel {
+        CoordinateTargetKind::PixelResult => MkCoordinateTarget::Pixel {
             search_id: 0,
             offset: MkPoint { x: 0, y: 0 },
         },
@@ -1869,52 +1968,39 @@ pub(super) fn target_ui(
     ui: &mut egui::Ui,
     target: &mut MkCoordinateTarget,
     context: &TargetEditorContext<'_>,
+    options: TargetUiOptions<'_>,
 ) -> TargetUiOutcome {
-    target_ui_with_variables(ui, target, context, None, 0)
+    target_ui_with_variables(ui, target, context, options)
 }
 
 fn target_ui_with_variables(
     ui: &mut egui::Ui,
     target: &mut MkCoordinateTarget,
     context: &TargetEditorContext<'_>,
-    variable_catalog: Option<&VariableCatalog>,
-    picker_id: u64,
+    options: TargetUiOptions<'_>,
 ) -> TargetUiOutcome {
     let assets = context.assets;
-    let kind = match target {
-        MkCoordinateTarget::Screen { .. } => 0,
-        MkCoordinateTarget::ActiveWindow { .. } => 1,
-        MkCoordinateTarget::WindowClient { .. } => 2,
-        MkCoordinateTarget::Variable { .. } => 3,
-        MkCoordinateTarget::Image { .. } => 4,
-        MkCoordinateTarget::Pixel { .. } => 5,
-    };
+    let kind = coordinate_target_kind(target);
     let mut next = kind;
     egui::ComboBox::from_label("Target")
-        .selected_text(
-            [
-                "Screen",
-                "Active Window",
-                "Matched Window",
-                "Variable",
-                "Image Result",
-                "Pixel Result",
-            ][kind],
-        )
+        .selected_text(kind.label())
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut next, 0, "Screen");
-            ui.selectable_value(&mut next, 1, "Active Window");
-            ui.selectable_value(&mut next, 2, "Matched Window");
-            ui.selectable_value(&mut next, 3, "Variable");
-            ui.add_enabled_ui(!assets.is_empty(), |ui| {
-                ui.selectable_value(&mut next, 4, "Image Result");
-            });
-            ui.selectable_value(&mut next, 5, "Pixel Result");
+            for option in available_target_kinds(options.allow_current_position) {
+                let mut option_ui = |ui: &mut egui::Ui| {
+                    ui.selectable_value(&mut next, *option, option.label());
+                };
+                if *option == CoordinateTargetKind::ImageResult {
+                    ui.add_enabled_ui(!assets.is_empty(), option_ui);
+                } else {
+                    option_ui(ui);
+                }
+            }
         });
     if next != kind {
-        change_target_kind(target, next, assets);
+        change_target_kind_for_kind(target, next, assets);
     }
     match target {
+        MkCoordinateTarget::CurrentPosition => {}
         MkCoordinateTarget::Screen { point } | MkCoordinateTarget::ActiveWindow { point } => {
             ui.horizontal(|ui| {
                 ui.label("X");
@@ -1957,8 +2043,8 @@ fn target_ui_with_variables(
             };
         }
         MkCoordinateTarget::Variable { name } => {
-            if let Some(catalog) = variable_catalog {
-                variable_picker_ui(ui, picker_id, name, catalog, |value_type| {
+            if let Some(catalog) = options.variable_catalog {
+                variable_picker_ui(ui, options.picker_id, name, catalog, |value_type| {
                     value_type == VariableValueType::Point
                 });
                 if let Some(warning) =
@@ -1966,7 +2052,7 @@ fn target_ui_with_variables(
                 {
                     ui.colored_label(
                         egui::Color32::YELLOW,
-                        format!("⚠ {}", warning.message_for_consumer("Mouse Move")),
+                        format!("⚠ {}", warning.message_for_consumer(options.consumer_name)),
                     );
                 }
             } else {
@@ -2267,8 +2353,12 @@ fn action_ui(
                 ui,
                 &mut p.target,
                 &target_context,
-                Some(variable_catalog),
-                draft_id,
+                TargetUiOptions {
+                    allow_current_position: false,
+                    variable_catalog: Some(variable_catalog),
+                    consumer_name: "Mouse Move",
+                    picker_id: draft_id,
+                },
             );
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::MoveTarget);
@@ -2299,7 +2389,12 @@ fn action_ui(
         }
         MkAction::MouseDrag(p) => {
             ui.label("Start");
-            let response = target_ui(ui, &mut p.from, &target_context);
+            let response = target_ui(
+                ui,
+                &mut p.from,
+                &target_context,
+                TargetUiOptions::standard("Mouse Drag"),
+            );
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragFrom);
             }
@@ -2309,7 +2404,12 @@ fn action_ui(
                 ));
             }
             ui.label("Destination");
-            let response = target_ui(ui, &mut p.to, &target_context);
+            let response = target_ui(
+                ui,
+                &mut p.to,
+                &target_context,
+                TargetUiOptions::standard("Mouse Drag"),
+            );
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::DragTo);
             }
@@ -2337,7 +2437,17 @@ fn action_ui(
             });
         }
         MkAction::MouseClick(p) => {
-            let response = target_ui(ui, &mut p.target, &target_context);
+            let response = target_ui_with_variables(
+                ui,
+                &mut p.target,
+                &target_context,
+                TargetUiOptions {
+                    allow_current_position: true,
+                    variable_catalog: Some(variable_catalog),
+                    consumer_name: "Mouse Click",
+                    picker_id: draft_id,
+                },
+            );
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::ClickTarget);
             }
@@ -2974,7 +3084,12 @@ fn action_ui(
             tolerance,
         } => {
             ui.heading("Coordinate");
-            let response = target_ui(ui, target, &target_context);
+            let response = target_ui(
+                ui,
+                target,
+                &target_context,
+                TargetUiOptions::standard("Pixel Check"),
+            );
             if response.pick_position {
                 pick = Some(PositionCaptureSlot::PixelPosition);
             }
@@ -3856,6 +3971,51 @@ mod tests {
     }
 
     #[test]
+    fn coordinate_target_options_only_enable_current_position_for_mouse_click() {
+        let labels = |allow| {
+            available_target_kinds(allow)
+                .iter()
+                .map(|kind| kind.label())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(true),
+            [
+                "Current Position",
+                "Screen",
+                "Active Window",
+                "Matched Window",
+                "Variable",
+                "Image Result",
+                "Pixel Result",
+            ]
+        );
+        assert_eq!(
+            labels(false),
+            [
+                "Screen",
+                "Active Window",
+                "Matched Window",
+                "Variable",
+                "Image Result",
+                "Pixel Result",
+            ]
+        );
+        assert!(!available_target_kinds(false).contains(&CoordinateTargetKind::CurrentPosition));
+    }
+
+    #[test]
+    fn coordinate_target_options_keep_invalid_persisted_current_position_hidden() {
+        let target = MkCoordinateTarget::CurrentPosition;
+        assert_eq!(
+            coordinate_target_kind(&target),
+            CoordinateTargetKind::CurrentPosition
+        );
+        assert!(!available_target_kinds(false).contains(&coordinate_target_kind(&target)));
+        assert!(available_target_kinds(true).contains(&coordinate_target_kind(&target)));
+    }
+
+    #[test]
     fn editor_catalog_re_resolves_stable_consumer_after_reorder() {
         let producer = variable_step(1, "point", MkValue::Point(MkPoint { x: 1, y: 2 }));
         let consumer = variable_step(2, "unused", MkValue::Null);
@@ -3872,7 +4032,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_move_editor_uses_the_catalog_point_filter() {
+    fn mouse_click_and_mouse_move_editors_use_the_same_catalog_point_filter() {
         let marker = |id, action| MkStep {
             id,
             enabled: true,
@@ -3926,8 +4086,12 @@ mod tests {
         let integrated = VariablePickerModel::new(&editor.variable_catalog, |kind| {
             kind == VariableValueType::Point
         });
+        let click = VariablePickerModel::new(&editor.variable_catalog, |kind| {
+            kind == VariableValueType::Point
+        });
 
         assert_eq!(integrated, pure);
+        assert_eq!(click, integrated);
         assert_eq!(
             integrated
                 .suggestions
@@ -3945,6 +4109,39 @@ mod tests {
                 .help_text
                 .unwrap()
                 .contains("Null")
+        );
+        assert_eq!(
+            integrated
+                .suggestions
+                .iter()
+                .filter(|item| item.value_type != VariableValueType::Point)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn coordinate_consumers_use_their_own_incompatible_type_warning_label() {
+        let steps = [
+            variable_step(501, "name", MkValue::String("text".into())),
+            variable_step(502, "point", MkValue::Point(MkPoint { x: 1, y: 2 })),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, 2);
+        let warning = catalog
+            .warning_for_expected_type("name", VariableValueType::Point)
+            .unwrap();
+        assert_eq!(
+            warning.message_for_consumer("Mouse Click"),
+            "\"name\" is currently known as String; Mouse Click requires Point."
+        );
+        assert_eq!(
+            warning.message_for_consumer("Mouse Move"),
+            "\"name\" is currently known as String; Mouse Move requires Point."
+        );
+        assert!(
+            !warning
+                .message_for_consumer("Mouse Click")
+                .contains("Mouse Move")
         );
     }
 

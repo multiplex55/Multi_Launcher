@@ -1,6 +1,6 @@
 //! Recursive editor and pure mutation operations for macro conditions.
 
-use super::action_editor::{TargetEditorContext, target_ui, value_ui};
+use super::action_editor::{TargetEditorContext, TargetUiOptions, target_ui, value_ui};
 use super::image_asset_picker::ImageAssetUiContext;
 use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::variables::{MkPoint, MkValue};
@@ -335,7 +335,12 @@ pub(super) fn condition_ui_with_assets(
                 color,
                 tolerance,
             } => {
-                let _ = target_ui(ui, target, context);
+                let _ = target_ui(
+                    ui,
+                    target,
+                    context,
+                    TargetUiOptions::standard("Pixel Result condition"),
+                );
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.text_edit_singleline(color);
