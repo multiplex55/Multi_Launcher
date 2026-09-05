@@ -1,7 +1,8 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
     handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_link,
-    handle_mouse_gesture, handle_note, handle_query, handle_simple_dialog, handle_todo,
+    handle_mouse_gesture, handle_multi_manager, handle_note, handle_query, handle_simple_dialog,
+    handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -31,6 +32,7 @@ impl CommandBus {
             Command::Link(command) => handle_link(host, command),
             Command::Todo(command) => handle_todo(host, command, invocation),
             Command::MouseGesture(command) => handle_mouse_gesture(host, command),
+            Command::MultiManager(command) => Ok(handle_multi_manager(host, command)),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -47,7 +49,8 @@ mod tests {
     use crate::commands::{
         ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
         HeadlessCommandHost, LauncherCommand, LauncherCommandHost, LegacyCommandHost,
-        NoteCommandHost, QueryCommand, QueryPolicy, TodoCommandHost, VisibilityPolicy,
+        MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy, TodoCommandHost,
+        VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -188,6 +191,26 @@ mod tests {
             false
         }
     }
+    impl MultiManagerCommandHost for FakeHost {
+        fn open_multi_manager(&mut self) {}
+        fn open_multi_manager_settings(&mut self) {}
+        fn multi_manager_save(&mut self) {}
+        fn multi_manager_reload(&mut self) {}
+        fn multi_manager_send_all_home(&mut self) {}
+        fn multi_manager_start_manual_reconnect(&mut self) {}
+        fn multi_manager_save_bindings(&mut self) {}
+        fn multi_manager_restore_bindings(&mut self) {}
+        fn multi_manager_import(&mut self) {}
+        fn multi_manager_start_recapture_all(&mut self) {}
+        fn multi_manager_toggle_workspace(&mut self, _: &str) {}
+        fn multi_manager_send_home(&mut self, _: &str) {}
+        fn multi_manager_send_target(&mut self, _: &str) {}
+        fn multi_manager_start_capture(&mut self, _: &str) {}
+        fn multi_manager_set_workspace_disabled(&mut self, _: &str, _: bool) {}
+        fn multi_manager_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -321,6 +344,16 @@ mod tests {
             .dispatch(
                 &invocation(Command::MouseGesture(
                     crate::commands::MouseGestureCommand::Dialog,
+                )),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::MultiManager(
+                    crate::commands::MultiManagerCommand::Open,
                 )),
                 &mut host,
             )

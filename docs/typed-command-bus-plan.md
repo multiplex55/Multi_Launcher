@@ -120,18 +120,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: characterize then migrate dialogs/focus/settings/toggle; decode JSON once and preserve malformed/missing claimed no-op behavior, persistence, dashboard refresh, and source behavior.
 - Acceptance: typed payloads reach handler; no raw JSON execution parsing; behavior remains compatible.
 - Verification: mouse gesture suites and `cargo check`.
-- Commit: `refactor(commands): migrate mouse gestures` (hash recorded after commit)
+- Commit: `6dc22a0 refactor(commands): migrate mouse gestures`
 - Verification record: focused Mouse Gesture 24/24, parser 17/17, bus 1/1, standalone gesture suites 41/41, and dashboard/hide/preserve 21/21 passed; `cargo check`, formatting, diff, typed-payload, and stale-route audits passed. Parent review made the settings host delegation explicit.
 
 ### 11. Migrate MultiManager
 
-- Status: pending
+- Status: complete
 - Dependencies: 4, 6
 - Work: characterize and migrate the full `mm:*` namespace while retaining operational state/lifecycle in existing domain methods.
 - Acceptance: every variant routes through the typed handler; bus contains no implementation logic; async/error/no-history/focus behavior is preserved.
 - Verification: MultiManager launcher/plugin tests and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate multi-manager domain` (hash recorded after commit)
+- Verification record: MultiManager selection 246/246, launcher/plugin 14/14, parser/bus 18/18, GUI activation 26/26, dashboard 9/9, and final focused regressions 4/4 passed; `cargo check`, formatting, diff, and raw-route audits passed. Parent review found no remaining scope issue.
 
 ### 12. Migrate File Search and Diff
 

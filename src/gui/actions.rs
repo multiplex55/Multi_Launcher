@@ -134,39 +134,7 @@ impl LauncherApp {
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
-        if a.action == "mm:open" {
-            self.open_multi_manager();
-        } else if a.action == "mm:settings" {
-            self.open_multi_manager_settings();
-        } else if a.action == "mm:save" {
-            self.multi_manager_save();
-        } else if a.action == "mm:reload" {
-            self.multi_manager_reload();
-        } else if a.action == "mm:send-all-home" {
-            self.multi_manager_send_all_home();
-        } else if a.action == "mm:reconnect" {
-            self.multi_manager_start_manual_reconnect();
-        } else if a.action == "mm:save-bindings" {
-            self.multi_manager_save_bindings();
-        } else if a.action == "mm:restore-bindings" {
-            self.multi_manager_restore_bindings();
-        } else if a.action == "mm:import" {
-            self.multi_manager_import();
-        } else if a.action == "mm:recapture-all" {
-            self.multi_manager_start_recapture_all();
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:toggle:") {
-            self.multi_manager_toggle_workspace(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:home:") {
-            self.multi_manager_send_home(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:target:") {
-            self.multi_manager_send_target(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:capture:") {
-            self.multi_manager_start_capture(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:disable:") {
-            self.multi_manager_set_workspace_disabled(workspace_id, true);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:enable:") {
-            self.multi_manager_set_workspace_disabled(workspace_id, false);
-        } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
+        if let Some(mode) = a.action.strip_prefix("screenshot:") {
             use crate::actions::screenshot::Mode as ScreenshotMode;
             let (mode, clip, tool) = match mode {
                 "window" => (ScreenshotMode::Window, false, MarkupTool::Rectangle),
@@ -1607,6 +1575,33 @@ mod tests {
         assert_eq!(app.test_activation_trace[0].1, ActivationSource::Macro);
         set_execute_action_hook(None);
     }
+    #[test]
+    fn typed_multi_manager_commands_preserve_interactive_lifecycle_exemptions() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep me".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        app.activate_action(
+            Action {
+                label: "MultiManager settings".into(),
+                desc: "MultiManager".into(),
+                action: "mm:settings".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert!(app.multi_manager_settings_dialog.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.query, "keep me");
+        assert!(!app.usage.contains_key("mm:settings"));
+    }
+
     fn mouse_gesture_action(action: &str, args: Option<String>) -> Action {
         Action {
             label: "Mouse gesture".into(),

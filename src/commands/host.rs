@@ -68,6 +68,25 @@ pub trait MouseGestureCommandHost {
     fn mouse_gesture_launcher_should_refocus(&self) -> bool;
 }
 
+pub trait MultiManagerCommandHost {
+    fn open_multi_manager(&mut self);
+    fn open_multi_manager_settings(&mut self);
+    fn multi_manager_save(&mut self);
+    fn multi_manager_reload(&mut self);
+    fn multi_manager_send_all_home(&mut self);
+    fn multi_manager_start_manual_reconnect(&mut self);
+    fn multi_manager_save_bindings(&mut self);
+    fn multi_manager_restore_bindings(&mut self);
+    fn multi_manager_import(&mut self);
+    fn multi_manager_start_recapture_all(&mut self);
+    fn multi_manager_toggle_workspace(&mut self, workspace_id: &str);
+    fn multi_manager_send_home(&mut self, workspace_id: &str);
+    fn multi_manager_send_target(&mut self, workspace_id: &str);
+    fn multi_manager_start_capture(&mut self, workspace_id: &str);
+    fn multi_manager_set_workspace_disabled(&mut self, workspace_id: &str, disabled: bool);
+    fn multi_manager_launcher_should_refocus(&self) -> bool;
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -99,6 +118,7 @@ pub trait CommandHost:
     + NoteCommandHost
     + TodoCommandHost
     + MouseGestureCommandHost
+    + MultiManagerCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -112,6 +132,7 @@ impl<T> CommandHost for T where
         + NoteCommandHost
         + TodoCommandHost
         + MouseGestureCommandHost
+        + MultiManagerCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

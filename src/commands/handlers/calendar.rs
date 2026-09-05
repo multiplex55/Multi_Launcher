@@ -322,6 +322,26 @@ mod tests {
             false
         }
     }
+    impl crate::commands::MultiManagerCommandHost for Host {
+        fn open_multi_manager(&mut self) {}
+        fn open_multi_manager_settings(&mut self) {}
+        fn multi_manager_save(&mut self) {}
+        fn multi_manager_reload(&mut self) {}
+        fn multi_manager_send_all_home(&mut self) {}
+        fn multi_manager_start_manual_reconnect(&mut self) {}
+        fn multi_manager_save_bindings(&mut self) {}
+        fn multi_manager_restore_bindings(&mut self) {}
+        fn multi_manager_import(&mut self) {}
+        fn multi_manager_start_recapture_all(&mut self) {}
+        fn multi_manager_toggle_workspace(&mut self, _: &str) {}
+        fn multi_manager_send_home(&mut self, _: &str) {}
+        fn multi_manager_send_target(&mut self, _: &str) {}
+        fn multi_manager_start_capture(&mut self, _: &str) {}
+        fn multi_manager_set_workspace_disabled(&mut self, _: &str, _: bool) {}
+        fn multi_manager_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(
             &mut self,
