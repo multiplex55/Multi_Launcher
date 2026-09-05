@@ -360,6 +360,7 @@ fn parse_todo(s: &str) -> Option<TodoCommand> {
                 priority: p.priority,
                 tags: p.tags,
                 refs: p.refs,
+                toast_text: rest.to_string(),
             });
         }
         let mut parts = rest.splitn(3, '|');
@@ -376,6 +377,7 @@ fn parse_todo(s: &str) -> Option<TodoCommand> {
                     .map(str::to_string)
                     .collect(),
                 refs: Vec::new(),
+                toast_text: text.to_string(),
             });
         }
     }
@@ -920,10 +922,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(parse(&format!("todo:add:{encoded}")).command,Command::Todo(TodoCommand::Add{text,tags,..}) if text=="a|b"&&tags==["x,y"])
+            matches!(parse(&format!("todo:add:{encoded}")).command,Command::Todo(TodoCommand::Add{text,tags,toast_text,..}) if text=="a|b"&&tags==["x,y"]&&toast_text==encoded)
         );
         assert!(
-            matches!(parse("todo:add:legacy|3| a, b ,, ").command,Command::Todo(TodoCommand::Add{text,priority,tags,..}) if text=="legacy"&&priority==3&&tags==["a","b"])
+            matches!(parse("todo:add:legacy|3| a, b ,, ").command,Command::Todo(TodoCommand::Add{text,priority,tags,toast_text,..}) if text=="legacy"&&priority==3&&tags==["a","b"]&&toast_text=="legacy")
         );
         assert!(matches!(
             parse("todo:add:broken").command,

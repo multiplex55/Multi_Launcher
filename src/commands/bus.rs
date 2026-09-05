@@ -1,7 +1,7 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
     handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_link, handle_note,
-    handle_query, handle_simple_dialog,
+    handle_query, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -29,6 +29,7 @@ impl CommandBus {
             Command::Calendar(command) => Ok(handle_calendar(host, command)),
             Command::Note(command) => handle_note(host, command, invocation),
             Command::Link(command) => handle_link(host, command),
+            Command::Todo(command) => handle_todo(host, command, invocation),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -45,7 +46,7 @@ mod tests {
     use crate::commands::{
         ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
         HeadlessCommandHost, LauncherCommand, LauncherCommandHost, LegacyCommandHost,
-        NoteCommandHost, QueryCommand, QueryPolicy, VisibilityPolicy,
+        NoteCommandHost, QueryCommand, QueryPolicy, TodoCommandHost, VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -56,6 +57,7 @@ mod tests {
         dialog_calls: usize,
         crop_calls: usize,
         note_calls: usize,
+        todo_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -156,6 +158,14 @@ mod tests {
         fn open_note_link(&mut self, _: &str) {}
         fn wrap_note_plain_links(&mut self, _: &str) {}
         fn delete_note(&mut self, _: &str) {}
+    }
+    impl TodoCommandHost for FakeHost {
+        fn open_todo_view(&mut self) {
+            self.todo_calls += 1;
+        }
+        fn open_todo_editor(&mut self, _: usize) {
+            self.todo_calls += 1;
+        }
     }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
@@ -273,6 +283,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.note_calls, 1);
+        CommandBus
+            .dispatch(
+                &invocation(Command::Todo(crate::commands::TodoCommand::View)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.todo_calls, 1);
         assert_eq!(
             linked_todo.query,
             QueryPolicy::Set("todo links id:7".into())

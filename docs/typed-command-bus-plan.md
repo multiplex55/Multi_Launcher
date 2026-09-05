@@ -100,18 +100,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: characterize then migrate dialogs/graph/assets/open/new/tags/links/wrap/remove/reload, including legacy payloads, mutation ownership, typed confirmation, errors, query behavior, and external `note:template:*` compatibility.
 - Acceptance: Note/Link routing is typed; confirmation retains invocation; persistence/panel behavior remains compatible.
 - Verification: note, wrap-links, confirmation, and note integration tests plus `cargo check`.
-- Commit: `refactor(commands): migrate notes and linking` (hash recorded after commit)
+- Commit: `7bc37bc refactor(commands): migrate notes and linking`
 - Verification record: handler 6/6, Note library 335/335, Note integrations 30/30, parser 17/17, activation 21/21, confirmation 26/26, linking 9/9, GUI note-link 1/1, and bus 1/1 passed; `cargo check`, formatting, diff, and raw-route audits passed. Parent review remediated final-refocus and reload favorite-logging parity.
 
 ### 9. Migrate Todo
 
-- Status: pending
+- Status: complete
 - Dependencies: 4-5
 - Work: migrate dialog/view/edit/add/priority/tags/remove/done/clear/export with encoded and legacy delimiter compatibility and typed post-policy.
 - Acceptance: GUI/headless share typed operations; no Todo raw post-policy; confirmation, persistence, pending query, toasts, history, preserve and hide rules match existing behavior.
 - Verification: Todo plugin/dialog/hide/preserve tests and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate todo domain` (hash recorded after commit)
+- Verification record: handler 8/8, Todo plugin/dialog 31/31, parser 17/17, headless 8/8, confirmation 26/26, hide/preserve/history/dashboard/activation 47/47, and bus/GUI lifecycle 2/2 passed; `cargo check`, formatting, diff, raw-route, and stale-cache audits passed. Parent review moved compatibility toast data into the parser and removed a new cache side effect.
 
 ### 10. Migrate Mouse Gestures
 

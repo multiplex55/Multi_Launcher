@@ -4,6 +4,12 @@ pub enum QueryPolicy {
     Set(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingQueryPolicy {
+    Keep,
+    Set(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisibilityPolicy {
     Keep,
@@ -42,6 +48,7 @@ pub enum ResultsPolicy {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandOutcome {
     pub query: QueryPolicy,
+    pub pending_query: PendingQueryPolicy,
     pub search: bool,
     pub invalidate_results: bool,
     pub results: ResultsPolicy,
@@ -59,6 +66,7 @@ impl Default for CommandOutcome {
     fn default() -> Self {
         Self {
             query: QueryPolicy::Keep,
+            pending_query: PendingQueryPolicy::Keep,
             search: false,
             invalidate_results: false,
             results: ResultsPolicy::Keep,

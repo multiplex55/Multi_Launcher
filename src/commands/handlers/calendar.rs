@@ -231,7 +231,7 @@ mod tests {
     use super::*;
     use crate::commands::{
         CalendarCommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
-        LauncherCommandHost, LegacyCommandHost, NoteCommandHost,
+        LauncherCommandHost, LegacyCommandHost, NoteCommandHost, TodoCommandHost,
     };
 
     #[derive(Default)]
@@ -297,6 +297,10 @@ mod tests {
         fn open_volume_dialog(&mut self) {}
         fn open_brightness_dialog(&mut self) {}
         fn open_cpu_list_dialog(&mut self, _: usize) {}
+    }
+    impl TodoCommandHost for Host {
+        fn open_todo_view(&mut self) {}
+        fn open_todo_editor(&mut self, _: usize) {}
     }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(

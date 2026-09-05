@@ -230,6 +230,7 @@ fn execute_todo(command: TodoCommand, original: &Action) -> anyhow::Result<()> {
             priority,
             tags,
             refs,
+            ..
         } => todo::add(&text, priority, &tags, &refs),
         TodoCommand::SetPriority { index, priority } => todo::set_priority(index, priority),
         TodoCommand::SetTags { index, tags } => todo::set_tags(index, &tags),
@@ -347,6 +348,7 @@ mod tests {
                 priority: payload.priority,
                 tags: payload.tags,
                 refs: payload.refs,
+                toast_text: encoded,
             })
         );
     }

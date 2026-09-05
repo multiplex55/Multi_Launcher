@@ -134,7 +134,6 @@ impl LauncherApp {
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
-        let mut command_changed_query = false;
         if a.action == "mg:dialog" {
             self.mouse_gestures_dialog.open();
         } else if a.action == "mg:dialog:add" {
@@ -176,12 +175,6 @@ impl LauncherApp {
                         self.dashboard_data_cache.refresh_gestures();
                     }
                 }
-            }
-        } else if a.action == "todo:view" {
-            self.todo_view_dialog.open();
-        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
-            if let Ok(i) = idx.parse::<usize>() {
-                self.todo_view_dialog.open_edit(i);
             }
         } else if a.action == "mm:open" {
             self.open_multi_manager();
@@ -259,122 +252,12 @@ impl LauncherApp {
                 );
             }
             self.record_history_usage(&a, &current, source);
-            if a.action.starts_with("todo:add:") {
-                if self.preserve_command {
-                    self.query = "todo add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts
-                    && let Some(text) = a
-                        .action
-                        .strip_prefix("todo:add:")
-                        .and_then(|r| r.split('|').next())
-                {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Added todo {text}").into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:remove:") {
-                refresh = true;
-                set_focus = true;
-                if current.starts_with("note list") {
-                    self.pending_query = Some(current.clone());
-                    command_changed_query = true;
-                }
-                if self.enable_toasts {
-                    let label = a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Removed todo {label}").into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:done:") {
-                refresh = true;
-                set_focus = true;
-                self.pending_query = Some(current.clone());
-                command_changed_query = true;
-                if self.enable_toasts {
-                    let label = a
-                        .label
-                        .trim_start_matches("[x] ")
-                        .trim_start_matches("[ ] ");
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Toggled todo {label}").into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:pset:") {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Updated todo priority".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:tag:") {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Updated todo tags".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action == "todo:clear" {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Cleared completed todos".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            }
-            if self.clear_query_after_run && !command_changed_query {
+            if self.clear_query_after_run {
                 self.query.clear();
                 refresh = true;
                 set_focus = true;
             }
-            if self.hide_after_run
-                && !a.action.starts_with("screenshot:")
-                && !a.action.starts_with("todo:done:")
-            {
+            if self.hide_after_run && !a.action.starts_with("screenshot:") {
                 self.visible_flag.store(false, Ordering::SeqCst);
             }
         }
@@ -382,7 +265,6 @@ impl LauncherApp {
             self.last_results_valid = false;
             self.search();
         }
-        let _ = command_changed_query;
         if set_focus {
             self.focus_input();
         } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
@@ -1516,6 +1398,45 @@ mod tests {
         std::env::set_current_dir(original_dir).unwrap();
     }
 
+    #[test]
+    fn typed_todo_done_applies_pending_query_history_and_hide_exemption() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        history::clear_history().unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.query = "todo list active".into();
+        let action = Action {
+            label: "[ ] Ship it".into(),
+            desc: "Todo".into(),
+            action: "todo:done:3".into(),
+            args: None,
+        };
+
+        set_execute_action_hook(Some(Box::new(|received| {
+            assert_eq!(received.action, "todo:done:3");
+            Ok(())
+        })));
+        app.activate_action(action.clone(), None, ActivationSource::Dashboard);
+        set_execute_action_hook(None);
+
+        assert_eq!(app.pending_query.as_deref(), Some("todo list active"));
+        assert_eq!(app.query, "todo list active");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.usage.get("todo:done:3"), Some(&1));
+        let latest = history::get_history().pop_front().unwrap();
+        assert_eq!(latest.action, action);
+        assert_eq!(latest.query, "todo list active");
+        assert_eq!(latest.source.as_deref(), Some("dashboard"));
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
     #[test]
     fn interactive_activation_restores_hidden_launcher_but_external_work_does_not() {
         let ctx = egui::Context::default();

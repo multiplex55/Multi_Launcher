@@ -223,6 +223,7 @@ pub enum TodoCommand {
         priority: u8,
         tags: Vec<String>,
         refs: Vec<EntityRef>,
+        toast_text: String,
     },
     SetPriority {
         index: usize,

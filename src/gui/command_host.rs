@@ -3,7 +3,8 @@ use std::sync::atomic::Ordering;
 use crate::commands::{
     CalendarCommandHost, Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost,
     DialogCommandHost, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    LegacyCommandHost, NoteCommandHost, QueryPolicy, ResultsPolicy, ToastPolicy, VisibilityPolicy,
+    LegacyCommandHost, NoteCommandHost, PendingQueryPolicy, QueryPolicy, ResultsPolicy,
+    ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -154,6 +155,16 @@ impl NoteCommandHost for LauncherApp {
     }
 }
 
+impl TodoCommandHost for LauncherApp {
+    fn open_todo_view(&mut self) {
+        self.todo_view_dialog.open();
+    }
+
+    fn open_todo_editor(&mut self, index: usize) {
+        self.todo_view_dialog.open_edit(index);
+    }
+}
+
 impl CropCommandHost for LauncherApp {
     fn crop_image(&mut self) {
         self.handle_crop_image_action();
@@ -267,6 +278,9 @@ impl LauncherApp {
             self.last_timer_query =
                 query.starts_with("timer list") || query.starts_with("alarm list");
             self.query = query;
+        }
+        if let PendingQueryPolicy::Set(query) = outcome.pending_query {
+            self.pending_query = Some(query);
         }
         if let ResultsPolicy::Replace(results) = outcome.results {
             self.results = results;

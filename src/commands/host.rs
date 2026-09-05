@@ -52,6 +52,11 @@ pub trait NoteCommandHost {
     fn delete_note(&mut self, slug: &str);
 }
 
+pub trait TodoCommandHost {
+    fn open_todo_view(&mut self);
+    fn open_todo_editor(&mut self, index: usize);
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -81,6 +86,7 @@ pub trait CommandHost:
     + CropCommandHost
     + CalendarCommandHost
     + NoteCommandHost
+    + TodoCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -92,6 +98,7 @@ impl<T> CommandHost for T where
         + CropCommandHost
         + CalendarCommandHost
         + NoteCommandHost
+        + TodoCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

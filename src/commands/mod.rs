@@ -14,7 +14,7 @@ pub use bus::CommandBus;
 pub use error::CommandError;
 pub use host::{
     CalendarCommandHost, CommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
-    LauncherCommandHost, LegacyCommandHost, NoteCommandHost,
+    LauncherCommandHost, LegacyCommandHost, NoteCommandHost, TodoCommandHost,
 };
 pub use model::*;
 pub use outcome::*;
