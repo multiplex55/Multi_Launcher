@@ -69,19 +69,19 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: migrate generic/static execution families and encode favorite logging, toasts, history/usage, clear/hide exemptions, refresh, focus, and browser-tab async behavior as typed outcomes. Preserve the Action-based execution hook without reparsing.
 - Acceptance: scoped families leave the legacy chain; success/error/history/hide/preserve behavior matches characterization; no generic second parse.
 - Verification: history/hide/preserve and affected domain tests plus `cargo check`.
-- Commit: `refactor(commands): migrate generic GUI execution policy` (hash recorded after commit)
+- Commit: `7c104bf refactor(commands): migrate generic GUI execution policy`
 - Verification record: `cargo check`, formatting, and diff checks passed; focused handler/query/bus tests passed 8/8; Snippet/history/hide/preserve tests 26/26; Storage 31/31; Timer/System/Shell 34/34; Media/Macro 8/8; GUI actions 16/16. Stale-route and parse-boundary audits passed; review findings for multi-toast parity and explicit result invalidation were remediated.
 
 ### 6. Migrate low-risk dialogs and crop commands
 
-- Status: pending
+- Status: complete
 - Dependencies: 4-5
 - Likely areas: dialog handler, GUI host/actions, dialog/settings/crop tests.
 - Work: migrate simple dialogs, settings/theme/convert/crop commands through typed host methods.
 - Acceptance: no scoped raw string checks; hidden-launcher panel restoration and history/clear/hide exemptions are preserved.
 - Verification: dialog/settings/theme/crop and migrated-action tests plus `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate interactive dialogs and crop` (hash recorded after commit)
+- Verification record: `cargo check`, formatting, and diff checks passed; handler/bus 5/5, GUI lifecycle 5/5, help/convert/timer/shell/storage 67/67, macro/MkMacro/todo/clipboard/system 53/53, settings/theme 14/14, and crop 16/16. Review corrected generic clear/hide policy and expanded Stage C coverage to all assigned simple dialogs; stale-route audit passed.
 
 ### 7. Migrate Calendar
 

@@ -1,5 +1,7 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
-use crate::commands::handlers::{handle_headless_gui, handle_launcher, handle_query};
+use crate::commands::handlers::{
+    handle_crop, handle_headless_gui, handle_launcher, handle_query, handle_simple_dialog,
+};
 
 #[derive(Debug, Default)]
 pub struct CommandBus;
@@ -16,9 +18,13 @@ impl CommandBus {
             source = invocation.source.label(),
             "dispatching typed command"
         );
+        if let Some(outcome) = handle_simple_dialog(host, &invocation.command) {
+            return Ok(outcome);
+        }
         match &invocation.command {
             Command::Launcher(command) => Ok(handle_launcher(host, command)),
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
+            Command::Crop(command) => Ok(handle_crop(host, command)),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -33,8 +39,8 @@ mod tests {
     use super::*;
     use crate::actions::Action;
     use crate::commands::{
-        ActivationSource, HeadlessCommandHost, LauncherCommand, LauncherCommandHost,
-        LegacyCommandHost, QueryCommand, QueryPolicy, VisibilityPolicy,
+        ActivationSource, CropCommandHost, DialogCommandHost, HeadlessCommandHost, LauncherCommand,
+        LauncherCommandHost, LegacyCommandHost, QueryCommand, QueryPolicy, VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -42,6 +48,8 @@ mod tests {
         visible: bool,
         legacy_calls: usize,
         headless_calls: usize,
+        dialog_calls: usize,
+        crop_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -50,6 +58,77 @@ mod tests {
         }
     }
 
+    impl DialogCommandHost for FakeHost {
+        fn open_help_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_timer_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_alarm_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_shell_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_bookmark_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_snippet_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_snippet_editor(&mut self, _: &str) {
+            self.dialog_calls += 1;
+        }
+        fn open_favorite_dialog(&mut self, _: &str) {
+            self.dialog_calls += 1;
+        }
+        fn open_legacy_macro_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_mkmacro_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_todo_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_clipboard_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_convert_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_tempfile_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_settings_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_dashboard_settings_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_theme_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_volume_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_brightness_dialog(&mut self) {
+            self.dialog_calls += 1;
+        }
+        fn open_cpu_list_dialog(&mut self, _: usize) {
+            self.dialog_calls += 1;
+        }
+    }
+
+    impl CropCommandHost for FakeHost {
+        fn crop_image(&mut self) {
+            self.crop_calls += 1;
+        }
+        fn crop_screenshot(&mut self) {
+            self.crop_calls += 1;
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -117,6 +196,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(query.query, QueryPolicy::Set("abc".into()));
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::Dialog(crate::commands::DialogCommand::Help)),
+                &mut host,
+            )
+            .unwrap();
+        CommandBus
+            .dispatch(
+                &invocation(Command::Crop(crate::commands::CropCommand::Screenshot)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.dialog_calls, 1);
+        assert_eq!(host.crop_calls, 1);
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus

@@ -145,13 +145,7 @@ impl LauncherApp {
         let mut refresh = false;
         let mut set_focus = false;
         let mut command_changed_query = false;
-        if a.action == "help:show" {
-            self.help_window.open = true;
-        } else if a.action == "timer:dialog:timer" {
-            self.timer_dialog.open_timer();
-        } else if a.action == "timer:dialog:alarm" {
-            self.timer_dialog.open_alarm();
-        } else if a.action == "calendar:open" || a.action.starts_with("calendar:open:") {
+        if a.action == "calendar:open" || a.action.starts_with("calendar:open:") {
             let view = a.action.strip_prefix("calendar:open:").unwrap_or("default");
             let now = chrono::Local::now().naive_local();
             let mut state =
@@ -372,28 +366,12 @@ impl LauncherApp {
             } else {
                 self.add_error_toast("Provide a duration and event id to snooze");
             }
-        } else if a.action == "shell:dialog" {
-            self.shell_cmd_dialog.open();
         } else if a.action == "note:dialog" {
             self.notes_dialog.open();
         } else if a.action == "note:graph_dialog" {
             self.note_graph_dialog.open_with_args(a.args.as_deref());
         } else if a.action == "note:unused_assets" {
             self.unused_assets_dialog.open();
-        } else if a.action == "bookmark:dialog" {
-            self.add_bookmark_dialog.open();
-        } else if a.action == "snippet:dialog" {
-            self.snippet_dialog.open();
-        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
-            self.snippet_dialog.open_edit(alias);
-        } else if a.action == "macro:dialog" {
-            self.macro_dialog.open();
-        } else if a.action == "mkmacro:dialog" {
-            self.mkmacro_dialog.open();
-        } else if a.action == "crop:image" {
-            self.handle_crop_image_action();
-        } else if a.action == "crop:screenshot" {
-            self.begin_crop_screenshot();
         } else if a.action == "mg:dialog" {
             self.mouse_gestures_dialog.open();
         } else if a.action == "mg:dialog:add" {
@@ -436,22 +414,12 @@ impl LauncherApp {
                     }
                 }
             }
-        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
-            if label.is_empty() {
-                self.fav_dialog.open();
-            } else {
-                self.fav_dialog.open_edit(label);
-            }
-        } else if a.action == "todo:dialog" {
-            self.todo_dialog.open();
         } else if a.action == "todo:view" {
             self.todo_view_dialog.open();
         } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
             if let Ok(i) = idx.parse::<usize>() {
                 self.todo_view_dialog.open_edit(i);
             }
-        } else if a.action == "clipboard:dialog" {
-            self.clipboard_dialog.open();
         } else if let Some(slug) = a.action.strip_prefix("note:open:") {
             let slug = slug.to_string();
             self.open_note_panel(&slug, None);
@@ -532,26 +500,6 @@ impl LauncherApp {
             }
         } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
             self.delete_note(slug);
-        } else if a.action == "convert:panel" {
-            self.convert_panel.open();
-        } else if a.action == "tempfile:dialog" {
-            self.tempfile_dialog.open();
-        } else if a.action == "settings:dialog" {
-            self.open_settings_dialog();
-        } else if a.action == "dashboard:settings" {
-            let registry = self.dashboard.registry().clone();
-            self.dashboard_editor.open(&self.dashboard_path, &registry);
-            self.show_dashboard_editor = true;
-        } else if a.action == "theme:dialog" {
-            self.open_theme_settings_dialog();
-        } else if a.action == "volume:dialog" {
-            self.volume_dialog.open();
-        } else if a.action == "brightness:dialog" {
-            self.brightness_dialog.open();
-        } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
-            if let Ok(count) = n.parse::<usize>() {
-                self.cpu_list_dialog.open(count);
-            }
         } else if a.action == "mm:open" {
             self.open_multi_manager();
         } else if a.action == "mm:settings" {
@@ -598,7 +546,7 @@ impl LauncherApp {
             };
             let screenshot_result =
                 crate::plugins::screenshot::launch_editor(self, mode, clip, tool);
-            if self.handle_screenshot_launch_result(screenshot_result) && a.action != "help:show" {
+            if self.handle_screenshot_launch_result(screenshot_result) {
                 self.record_history_usage(&a, &current, source);
             }
         } else if let Err(e) = execute_action(&a) {
@@ -627,9 +575,7 @@ impl LauncherApp {
                     },
                 );
             }
-            if a.action != "help:show" {
-                self.record_history_usage(&a, &current, source);
-            }
+            self.record_history_usage(&a, &current, source);
             if a.action == "note:reload" {
                 refresh = true;
                 set_focus = true;
@@ -1209,7 +1155,7 @@ impl LauncherApp {
         result
     }
 
-    fn handle_crop_image_action(&mut self) {
+    pub(crate) fn handle_crop_image_action(&mut self) {
         let path = rfd::FileDialog::new()
             .add_filter("PNG, JPEG, or BMP image", &["png", "jpg", "jpeg", "bmp"])
             .pick_file();
@@ -1229,7 +1175,7 @@ impl LauncherApp {
         }
     }
 
-    fn begin_crop_screenshot(&mut self) {
+    pub(crate) fn begin_crop_screenshot(&mut self) {
         if self.crop_screenshot_operation.is_some() {
             self.add_error_toast("A screenshot crop selection is already active");
             return;
@@ -1352,7 +1298,130 @@ mod tests {
         assert_eq!(LauncherApp::reduce_crop_image_picker_result(None), None);
         assert!(!app.crop_dialog.is_open());
     }
+    fn dialog_action(action: &str) -> Action {
+        Action {
+            label: action.into(),
+            desc: "Test".into(),
+            action: action.into(),
+            args: None,
+        }
+    }
 
+    #[test]
+    fn typed_dialog_commands_open_their_existing_gui_panels() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+
+        let mut help = new_app(&ctx);
+        help.activate_action(dialog_action("help:show"), None, ActivationSource::Enter);
+        assert!(help.help_window.open);
+
+        let mut convert = new_app(&ctx);
+        convert.activate_action(
+            dialog_action("convert:panel"),
+            None,
+            ActivationSource::Click,
+        );
+        assert!(convert.convert_panel.open);
+
+        let dir = tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        Settings::default()
+            .save(settings_path.to_str().unwrap())
+            .unwrap();
+        let mut settings = new_app(&ctx);
+        settings.settings_path = settings_path.to_string_lossy().into_owned();
+        settings.activate_action(
+            dialog_action("settings:dialog"),
+            None,
+            ActivationSource::Dashboard,
+        );
+        assert!(settings.show_settings);
+        assert!(settings.error.is_none());
+
+        let mut dashboard = new_app(&ctx);
+        dashboard.dashboard_enabled = false;
+        dashboard.activate_action(
+            dialog_action("dashboard:settings"),
+            None,
+            ActivationSource::Gesture,
+        );
+        assert!(dashboard.show_dashboard_editor && dashboard.dashboard_editor.open);
+
+        let mut theme = new_app(&ctx);
+        theme.activate_action(dialog_action("theme:dialog"), None, ActivationSource::Macro);
+        assert!(theme.theme_settings_dialog_open);
+    }
+
+    #[test]
+    fn typed_dialog_preserves_query_launcher_interactivity_restore_and_history_exemption() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "help query".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+
+        app.activate_action(
+            dialog_action("help:show"),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert!(app.help_window.open);
+        assert_eq!(app.query, "help query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.usage.contains_key("help:show"));
+    }
+
+    #[test]
+    fn typed_simple_dialogs_preserve_interactive_lifecycle() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let cases = [
+            ("timer:dialog:timer", Panel::TimerDialog),
+            ("timer:dialog:alarm", Panel::TimerDialog),
+            ("shell:dialog", Panel::ShellCmdDialog),
+            ("bookmark:dialog", Panel::AddBookmarkDialog),
+            ("snippet:dialog", Panel::SnippetDialog),
+            ("snippet:edit:sample", Panel::SnippetDialog),
+            ("fav:dialog:", Panel::FavDialog),
+            ("macro:dialog", Panel::MacroDialog),
+            ("mkmacro:dialog", Panel::MkMacroDialog),
+            ("todo:dialog", Panel::TodoDialog),
+            ("clipboard:dialog", Panel::ClipboardDialog),
+            ("tempfile:dialog", Panel::TempfileDialog),
+            ("volume:dialog", Panel::VolumeDialog),
+            ("brightness:dialog", Panel::BrightnessDialog),
+            ("sysinfo:cpu_list:4", Panel::CpuListDialog),
+        ];
+
+        for (raw, panel) in cases {
+            let mut app = new_app(&ctx);
+            app.query = "keep me".into();
+            app.clear_query_after_run = true;
+            app.hide_after_run = true;
+            app.visible_flag.store(false, Ordering::SeqCst);
+            app.restore_flag.store(false, Ordering::SeqCst);
+
+            app.activate_action(dialog_action(raw), None, ActivationSource::Dashboard);
+
+            assert!(app.is_panel_open(panel), "{raw} did not open {panel:?}");
+            assert_eq!(app.query, "keep me", "{raw} cleared the query");
+            assert!(
+                app.visible_flag.load(Ordering::SeqCst),
+                "{raw} stayed hidden"
+            );
+            assert!(
+                app.restore_flag.load(Ordering::SeqCst),
+                "{raw} did not restore"
+            );
+            assert!(!app.usage.contains_key(raw), "{raw} recorded history");
+        }
+    }
     fn note(title: &str, slug: &str, content: &str) -> Note {
         Note {
             title: title.into(),

@@ -1,9 +1,9 @@
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    Command, CommandError, CommandInvocation, CommandOutcome, FavoriteLogPolicy,
-    HeadlessCommandHost, HistoryPolicy, LauncherCommandHost, LegacyCommandHost, QueryPolicy,
-    ToastPolicy, VisibilityPolicy,
+    Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost, DialogCommandHost,
+    FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost, LegacyCommandHost,
+    QueryPolicy, ToastPolicy, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -14,6 +14,103 @@ impl LauncherCommandHost for LauncherApp {
     }
 }
 
+impl DialogCommandHost for LauncherApp {
+    fn open_help_dialog(&mut self) {
+        self.help_window.open = true;
+    }
+
+    fn open_timer_dialog(&mut self) {
+        self.timer_dialog.open_timer();
+    }
+
+    fn open_alarm_dialog(&mut self) {
+        self.timer_dialog.open_alarm();
+    }
+
+    fn open_shell_dialog(&mut self) {
+        self.shell_cmd_dialog.open();
+    }
+
+    fn open_bookmark_dialog(&mut self) {
+        self.add_bookmark_dialog.open();
+    }
+
+    fn open_snippet_dialog(&mut self) {
+        self.snippet_dialog.open();
+    }
+
+    fn open_snippet_editor(&mut self, alias: &str) {
+        self.snippet_dialog.open_edit(alias);
+    }
+
+    fn open_favorite_dialog(&mut self, label: &str) {
+        if label.is_empty() {
+            self.fav_dialog.open();
+        } else {
+            self.fav_dialog.open_edit(label);
+        }
+    }
+
+    fn open_legacy_macro_dialog(&mut self) {
+        self.macro_dialog.open();
+    }
+
+    fn open_mkmacro_dialog(&mut self) {
+        self.mkmacro_dialog.open();
+    }
+
+    fn open_todo_dialog(&mut self) {
+        self.todo_dialog.open();
+    }
+
+    fn open_clipboard_dialog(&mut self) {
+        self.clipboard_dialog.open();
+    }
+
+    fn open_convert_dialog(&mut self) {
+        self.convert_panel.open();
+    }
+
+    fn open_tempfile_dialog(&mut self) {
+        self.tempfile_dialog.open();
+    }
+
+    fn open_settings_dialog(&mut self) {
+        LauncherApp::open_settings_dialog(self);
+    }
+
+    fn open_dashboard_settings_dialog(&mut self) {
+        let registry = self.dashboard.registry().clone();
+        self.dashboard_editor.open(&self.dashboard_path, &registry);
+        self.show_dashboard_editor = true;
+    }
+
+    fn open_theme_dialog(&mut self) {
+        self.open_theme_settings_dialog();
+    }
+
+    fn open_volume_dialog(&mut self) {
+        self.volume_dialog.open();
+    }
+
+    fn open_brightness_dialog(&mut self) {
+        self.brightness_dialog.open();
+    }
+
+    fn open_cpu_list_dialog(&mut self, count: usize) {
+        self.cpu_list_dialog.open(count);
+    }
+}
+
+impl CropCommandHost for LauncherApp {
+    fn crop_image(&mut self) {
+        self.handle_crop_image_action();
+    }
+
+    fn crop_screenshot(&mut self) {
+        self.begin_crop_screenshot();
+    }
+}
 impl HeadlessCommandHost for LauncherApp {
     fn execute_headless_command(
         &mut self,
