@@ -100,7 +100,7 @@ use crate::actions::folders;
 use crate::actions::{Action, load_actions};
 use crate::actions_editor::ActionsEditor;
 use crate::clipboard_modify::coordinator::{
-    ImmediateCompletionEvent, ImmediateExecutionCoordinator, ImmediateRequestMetadata,
+    ImmediateCompletionEvent, ImmediateExecutionCoordinator,
 };
 use crate::clipboard_modify::runtime::{ClipboardModifyRuntime, clipboard_service};
 use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_action_filters};
@@ -556,7 +556,6 @@ pub struct LauncherApp {
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
-    pending_clipboard_modify_immediate: HashMap<u64, ImmediateRequestMetadata>,
     pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
     clipboard_modify_immediate: ImmediateExecutionCoordinator<
         crate::clipboard_modify::clipboard::ProductionClipboardService,
@@ -1538,7 +1537,6 @@ impl LauncherApp {
             ),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
-            pending_clipboard_modify_immediate: HashMap::new(),
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
                 .hide_launcher_after_apply,
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),

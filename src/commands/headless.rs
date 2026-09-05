@@ -249,6 +249,42 @@ fn execute_clipboard_modify(
     original: &Action,
 ) -> anyhow::Result<()> {
     match command {
+        ClipboardModifyCommand::Execute {
+            payload: Some(payload),
+            ..
+        } => {
+            use crate::clipboard_modify::actions::ClipboardModifyActionPayload;
+            use crate::clipboard_modify::parser::ClipboardModifyIntent;
+            let intent = match payload {
+                ClipboardModifyActionPayload::ExecuteAdHocStages { stages, .. } => {
+                    ClipboardModifyIntent::Stages(stages)
+                }
+                ClipboardModifyActionPayload::ExecuteTemplate { name, .. } => {
+                    ClipboardModifyIntent::ApplyTemplate { name }
+                }
+                ClipboardModifyActionPayload::ExecuteSavedPipeline { name, .. } => {
+                    ClipboardModifyIntent::ApplySavedPipeline { name }
+                }
+                ClipboardModifyActionPayload::Undo => ClipboardModifyIntent::Undo,
+                ClipboardModifyActionPayload::OpenDialogSection { .. } => {
+                    return Err(crate::clipboard_modify::clipboard::ClipboardError::Config(
+                        "open-dialog payload cannot be executed".into(),
+                    )
+                    .into());
+                }
+            };
+            let cancellation = std::sync::atomic::AtomicBool::new(false);
+            crate::clipboard_modify::runtime::execute_intent(
+                intent,
+                &crate::clipboard_modify::store::shared_default_catalog(),
+                &cancellation,
+            )?;
+            Ok(())
+        }
+        ClipboardModifyCommand::Execute {
+            payload_error: Some(error),
+            ..
+        } => Err(crate::clipboard_modify::clipboard::ClipboardError::Config(error).into()),
         ClipboardModifyCommand::Execute { raw_argument, .. } => {
             crate::clipboard_modify::runtime::execute_action_args(
                 raw_argument.as_deref(),

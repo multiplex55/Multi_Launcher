@@ -122,9 +122,6 @@ impl LauncherApp {
     }
 
     pub(crate) fn activate_action_legacy(&mut self, a: Action, source: ActivationSource) {
-        if self.handle_clipboard_modify_action(&a, source) {
-            return;
-        }
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
@@ -175,184 +172,16 @@ impl LauncherApp {
         }
     }
 
-    pub(crate) fn handle_clipboard_modify_action(
-        &mut self,
-        action: &Action,
-        source: ActivationSource,
-    ) -> bool {
-        use crate::clipboard_modify::actions::{
-            ClipboardModifyActionPayload, ClipboardModifySectionPayload, EXECUTE_PREFIX,
-            OPEN_PREFIX, UNDO_PREFIX, decode_action_payload,
-        };
-        use crate::clipboard_modify::parser::ClipboardModifyIntent;
-
-        if action.action.starts_with("query:") {
-            return false;
-        }
-        let is_clipboard_modify = action.action.starts_with("clipboard_modify:");
-        if !is_clipboard_modify {
-            return false;
-        }
-
-        let payload = action
-            .args
-            .as_deref()
-            .and_then(|args| decode_action_payload::<ClipboardModifyActionPayload>(args).ok());
-
-        if action.action.starts_with(OPEN_PREFIX) || action.action == "clipboard_modify:open" {
-            let section = match payload {
-                Some(ClipboardModifyActionPayload::OpenDialogSection { section }) => section,
-                _ if action.action.ends_with(":templates") => {
-                    ClipboardModifySectionPayload::Templates
-                }
-                _ if action.action.ends_with(":saved-pipelines") => {
-                    ClipboardModifySectionPayload::SavedPipelines
-                }
-                _ if action.action.ends_with(":manage-templates") => {
-                    ClipboardModifySectionPayload::ManageTemplates
-                }
-                _ if action.action.ends_with(":manage-pipelines") => {
-                    ClipboardModifySectionPayload::ManagePipelines
-                }
-                _ if action.action.ends_with(":help") => ClipboardModifySectionPayload::Help,
-                _ => ClipboardModifySectionPayload::Modify,
-            };
-            let section = match section {
-                ClipboardModifySectionPayload::Modify => ClipboardModifyDialogSection::Modify,
-                ClipboardModifySectionPayload::Templates => ClipboardModifyDialogSection::Templates,
-                ClipboardModifySectionPayload::SavedPipelines => {
-                    ClipboardModifyDialogSection::SavedPipelines
-                }
-                ClipboardModifySectionPayload::ManageTemplates => {
-                    ClipboardModifyDialogSection::ManageTemplates
-                }
-                ClipboardModifySectionPayload::ManagePipelines => {
-                    ClipboardModifyDialogSection::ManagePipelines
-                }
-                ClipboardModifySectionPayload::Help => ClipboardModifyDialogSection::Help,
-            };
-            self.clipboard_modify_dialog.open_section(
-                section,
-                &crate::clipboard_modify::runtime::clipboard_service(),
-            );
-            return true;
-        }
-
-        if action.action.starts_with(UNDO_PREFIX) || action.action == "clipboard_modify:undo" {
-            match crate::clipboard_modify::runtime::undo() {
-                Ok(()) => {
-                    self.handle_clipboard_modify_gui_event(
-                        ClipboardModifyGuiEvent::ImmediateOperationComplete,
-                    );
-                    self.visible_flag.store(false, Ordering::SeqCst);
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: "Undid Clipboard Modify".into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                Err(err) => self.report_clipboard_modify_action_error(err.to_string()),
-            }
-            return true;
-        }
-
-        if action.action.starts_with(EXECUTE_PREFIX) || action.action == "clipboard_modify:execute"
-        {
-            let payload = match payload {
-                Some(payload) => payload,
-                None => {
-                    self.report_clipboard_modify_action_error("missing execute payload".into());
-                    return true;
-                }
-            };
-            let (intent, canonical_command, hide_launcher_on_success) = match payload {
-                ClipboardModifyActionPayload::ExecuteAdHocStages {
-                    canonical_command,
-                    stages,
-                } => (
-                    ClipboardModifyIntent::Stages(stages),
-                    canonical_command,
-                    true,
-                ),
-                ClipboardModifyActionPayload::ExecuteTemplate {
-                    canonical_command,
-                    name,
-                } => (
-                    ClipboardModifyIntent::ApplyTemplate { name },
-                    canonical_command,
-                    self.clipboard_modify_hide_launcher_after_apply,
-                ),
-                ClipboardModifyActionPayload::ExecuteSavedPipeline {
-                    canonical_command,
-                    name,
-                } => (
-                    ClipboardModifyIntent::ApplySavedPipeline { name },
-                    canonical_command,
-                    self.clipboard_modify_hide_launcher_after_apply,
-                ),
-                _ => {
-                    self.report_clipboard_modify_action_error("unexpected execute payload".into());
-                    return true;
-                }
-            };
-            let meta = ImmediateRequestMetadata {
-                action: action.clone(),
-                query: canonical_command,
-                source,
-                hide_launcher_on_success,
-            };
-            match self.clipboard_modify_immediate.start(
-                intent,
-                self.clipboard_modify_runtime.catalog_snapshot(),
-                meta.clone(),
-            ) {
-                Ok(id) => {
-                    self.pending_clipboard_modify_immediate.insert(id.0, meta);
-                }
-                Err(err) => {
-                    self.report_clipboard_modify_action_error(err.message);
-                    self.visible_flag.store(true, Ordering::SeqCst);
-                    self.move_cursor_end = true;
-                    self.focus_input();
-                }
-            }
-            return true;
-        }
-
-        if action.action == "clipboard_modify:error" {
-            self.report_clipboard_modify_action_error(action.desc.clone());
-            return true;
-        }
-
-        false
-    }
-
     pub(crate) fn drain_clipboard_modify_immediate(&mut self) {
         let mut typed_events = Vec::new();
-        for ev in self.clipboard_modify_immediate.drain_completions() {
-            let meta = self
-                .pending_clipboard_modify_immediate
-                .remove(&ev.request_id.0);
+        for (meta, ev) in self.clipboard_modify_immediate.drain_completions() {
             match ev.result {
                 Ok(()) => {
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationComplete,
                     ));
-                    if let Some(meta) = meta.as_ref() {
-                        self.record_history_usage(&meta.action, &meta.query, meta.source);
-                    }
-                    // Missing metadata uses the conservative historical policy: hide.
-                    if meta
-                        .as_ref()
-                        .map(|meta| meta.hide_launcher_on_success)
-                        .unwrap_or(true)
-                    {
+                    self.record_history_usage(&meta.action, &meta.query, meta.source);
+                    if meta.hide_launcher_on_success {
                         self.visible_flag.store(false, Ordering::SeqCst);
                     } else {
                         self.visible_flag.store(true, Ordering::SeqCst);
@@ -375,11 +204,9 @@ impl LauncherApp {
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationFailed,
                     ));
-                    if let Some(meta) = meta {
-                        self.query = meta.query;
-                        self.last_results_valid = false;
-                        self.search();
-                    }
+                    self.query = meta.query;
+                    self.last_results_valid = false;
+                    self.search();
                     self.visible_flag.store(true, Ordering::SeqCst);
                     self.move_cursor_end = true;
                     self.focus_input();
@@ -454,12 +281,6 @@ impl LauncherApp {
         } else {
             self.update_suggestions();
         }
-    }
-
-    fn report_clipboard_modify_action_error(&mut self, err: String) {
-        let msg = format!("Invalid clipboard modify action: {err}");
-        self.set_inline_error(msg.clone());
-        self.add_error_toast(msg);
     }
 
     pub(crate) fn record_history_usage(
@@ -1741,6 +1562,7 @@ mod clipboard_modify_gui_action_tests {
         encode_action_payload, execute_saved_pipeline_payload, execute_stages_payload,
         execute_template_payload, open_dialog_payload, undo_payload,
     };
+    use crate::clipboard_modify::coordinator::ImmediateRequestMetadata;
     use crate::clipboard_modify::model::{OperationId, StageArguments, StageSpec};
     use crate::clipboard_modify::parser::ModifySection;
 
@@ -1753,11 +1575,20 @@ mod clipboard_modify_gui_action_tests {
         }
     }
 
+    fn activate(app: &mut LauncherApp, action: &Action, source: ActivationSource) -> bool {
+        let claimed = matches!(
+            crate::commands::parse_action(action),
+            Ok(crate::commands::Command::ClipboardModify(_))
+        );
+        app.activate_action(action.clone(), None, source);
+        claimed
+    }
     #[test]
     fn query_clipboard_modify_completion_is_not_claimed() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(!app.handle_clipboard_modify_action(
+        assert!(!activate(
+            &mut app,
             &action("query:cm camel-case", None),
             ActivationSource::Enter
         ));
@@ -1767,11 +1598,12 @@ mod clipboard_modify_gui_action_tests {
     fn execute_without_payload_reports_missing_and_does_not_start() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:execute", None),
             ActivationSource::Enter
         ));
-        assert!(app.pending_clipboard_modify_immediate.is_empty());
+        assert!(!app.clipboard_modify_immediate.has_pending());
         assert!(
             app.error
                 .as_deref()
@@ -1786,11 +1618,12 @@ mod clipboard_modify_gui_action_tests {
         for payload in [open_dialog_payload(ModifySection::Help), undo_payload()] {
             let mut app = super::tests::new_app(&ctx);
             let args = encode_action_payload(&payload).unwrap();
-            assert!(app.handle_clipboard_modify_action(
+            assert!(activate(
+                &mut app,
                 &action("clipboard_modify:execute", Some(args)),
                 ActivationSource::Enter
             ));
-            assert!(app.pending_clipboard_modify_immediate.is_empty());
+            assert!(!app.clipboard_modify_immediate.has_pending());
             assert!(
                 app.error
                     .as_deref()
@@ -1811,11 +1644,10 @@ mod clipboard_modify_gui_action_tests {
         }]))
         .unwrap();
         let action = action("clipboard_modify:execute", Some(args));
-        assert!(app.handle_clipboard_modify_action(&action, ActivationSource::Enter));
+        assert!(activate(&mut app, &action, ActivationSource::Enter));
         let meta = app
-            .pending_clipboard_modify_immediate
-            .values()
-            .next()
+            .clipboard_modify_immediate
+            .pending_metadata(crate::clipboard_modify::coordinator::OperationId(1))
             .expect("pending immediate metadata");
         assert_eq!(meta.query, "cm camel-case");
         assert_eq!(meta.action.action, "clipboard_modify:execute");
@@ -1833,14 +1665,14 @@ mod clipboard_modify_gui_action_tests {
                 let mut app = super::tests::new_app(&ctx);
                 app.clipboard_modify_hide_launcher_after_apply = expected;
                 let args = encode_action_payload(&payload).unwrap();
-                assert!(app.handle_clipboard_modify_action(
+                assert!(activate(
+                    &mut app,
                     &action("clipboard_modify:execute", Some(args)),
                     ActivationSource::Enter,
                 ));
                 let meta = app
-                    .pending_clipboard_modify_immediate
-                    .values()
-                    .next()
+                    .clipboard_modify_immediate
+                    .pending_metadata(crate::clipboard_modify::coordinator::OperationId(1))
                     .unwrap();
                 assert_eq!(meta.hide_launcher_on_success, expected);
             }
@@ -1851,11 +1683,13 @@ mod clipboard_modify_gui_action_tests {
     fn clipboard_modify_handler_claims_only_clipboard_modify_actions() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(!app.handle_clipboard_modify_action(
+        assert!(!activate(
+            &mut app,
             &action("clipboard:upper", None),
             ActivationSource::Enter
         ));
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:error", None),
             ActivationSource::Enter
         ));
@@ -1866,7 +1700,8 @@ mod clipboard_modify_gui_action_tests {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
         let args = encode_action_payload(&open_dialog_payload(ModifySection::Templates)).unwrap();
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:open:templates", Some(args)),
             ActivationSource::Click
         ));
@@ -1902,7 +1737,8 @@ mod clipboard_modify_gui_action_tests {
             (ModifySection::Help, ClipboardModifyDialogSection::Help),
         ] {
             let args = encode_action_payload(&open_dialog_payload(modify_section)).unwrap();
-            assert!(app.handle_clipboard_modify_action(
+            assert!(activate(
+                &mut app,
                 &action("clipboard_modify:open", Some(args)),
                 ActivationSource::Click
             ));
@@ -1925,7 +1761,8 @@ mod clipboard_modify_gui_action_tests {
             ),
             ("help", ClipboardModifyDialogSection::Help),
         ] {
-            assert!(app.handle_clipboard_modify_action(
+            assert!(activate(
+                &mut app,
                 &action(&format!("clipboard_modify:open:{suffix}"), None),
                 ActivationSource::Click
             ));
@@ -1944,9 +1781,9 @@ mod clipboard_modify_gui_action_tests {
         }]))
         .unwrap();
         let act = action("clipboard_modify:execute", Some(args));
-        assert!(app.handle_clipboard_modify_action(&act, ActivationSource::Enter));
+        assert!(activate(&mut app, &act, ActivationSource::Enter));
         let query_before = app.query.clone();
-        assert!(app.handle_clipboard_modify_action(&act, ActivationSource::Enter));
+        assert!(activate(&mut app, &act, ActivationSource::Enter));
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert_eq!(app.query, query_before);
         assert!(app.move_cursor_end);
@@ -1968,8 +1805,6 @@ mod clipboard_modify_gui_action_tests {
             source: ActivationSource::Enter,
             hide_launcher_on_success: false,
         };
-        app.pending_clipboard_modify_immediate
-            .insert(7, meta.clone());
         app.query = "changed".into();
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta.clone(),
@@ -2008,8 +1843,6 @@ mod clipboard_modify_gui_action_tests {
             source: ActivationSource::Gesture,
             hide_launcher_on_success: true,
         };
-        app.pending_clipboard_modify_immediate
-            .insert(8, meta.clone());
         let before_len = history::get_history().len();
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta.clone(),
@@ -2046,8 +1879,6 @@ mod clipboard_modify_gui_action_tests {
             source: ActivationSource::Enter,
             hide_launcher_on_success: false,
         };
-        app.pending_clipboard_modify_immediate
-            .insert(9, meta.clone());
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta,
             crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
@@ -2069,7 +1900,8 @@ mod clipboard_modify_gui_action_tests {
     fn malformed_payload_failure_leaves_coordinator_ready_for_valid_command() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:execute", Some("not-json".into())),
             ActivationSource::Enter
         ));
@@ -2079,7 +1911,8 @@ mod clipboard_modify_gui_action_tests {
             arguments: StageArguments::default(),
         }]))
         .unwrap();
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:execute", Some(args)),
             ActivationSource::Enter
         ));

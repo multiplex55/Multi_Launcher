@@ -1,6 +1,6 @@
 use crate::actions::Action;
 use crate::clipboard_modify::actions::{
-    ClipboardModifyActionPayload, ClipboardModifySectionPayload, decode_action_payload,
+    ClipboardModifyActionPayload, ClipboardModifySectionPayload,
 };
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
@@ -272,11 +272,10 @@ fn parse_clipboard_modify(action: &Action) -> Option<ClipboardModifyCommand> {
             message: action.desc.clone(),
         });
     }
-    let decoded = action
-        .args
-        .as_deref()
-        .map(decode_action_payload::<ClipboardModifyActionPayload>);
     if s == "clipboard_modify:open" || s.starts_with("clipboard_modify:open:") {
+        let decoded = action.args.as_deref().map(
+            crate::clipboard_modify::actions::decode_action_payload::<ClipboardModifyActionPayload>,
+        );
         let section = match decoded.and_then(Result::ok) {
             Some(ClipboardModifyActionPayload::OpenDialogSection { section }) => section,
             _ if s.ends_with(":templates") => ClipboardModifySectionPayload::Templates,
@@ -297,17 +296,20 @@ fn parse_clipboard_modify(action: &Action) -> Option<ClipboardModifyCommand> {
         });
     }
     if s == "clipboard_modify:execute" || s.starts_with("clipboard_modify:execute:") {
+        let raw_argument = action.args.clone().or_else(|| {
+            s.strip_prefix("clipboard_modify:execute:")
+                .map(str::to_string)
+        });
+        let decoded = crate::clipboard_modify::runtime::decode_execute_payload_for_gui(
+            raw_argument.as_deref().unwrap_or(""),
+        );
         let (payload, payload_error) = match decoded {
-            Some(Ok(payload)) => (Some(payload), None),
-            Some(Err(e)) => (None, Some(e)),
-            None => (None, None),
+            Ok(payload) => (Some(payload), None),
+            Err(error) => (None, Some(error)),
         };
         return Some(ClipboardModifyCommand::Execute {
             payload,
-            raw_argument: action.args.clone().or_else(|| {
-                s.strip_prefix("clipboard_modify:execute:")
-                    .map(str::to_string)
-            }),
+            raw_argument,
             payload_error,
         });
     }
@@ -1007,7 +1009,7 @@ mod tests {
             matches!(parse_with_args("clipboard_modify:execute",&encoded).command,Command::ClipboardModify(ClipboardModifyCommand::Execute{payload:Some(ClipboardModifyActionPayload::ExecuteTemplate{name,..}),raw_argument:Some(raw),payload_error:None}) if name=="email"&&raw==encoded)
         );
         assert!(
-            matches!(parse("clipboard_modify:execute:cm upper").command,Command::ClipboardModify(ClipboardModifyCommand::Execute{payload:None,raw_argument:Some(raw),payload_error:None}) if raw=="cm upper")
+            matches!(parse("clipboard_modify:execute:cm upper").command,Command::ClipboardModify(ClipboardModifyCommand::Execute{payload:None,raw_argument:Some(raw),payload_error:Some(_)}) if raw=="cm upper")
         );
         assert!(matches!(
             parse_with_args("clipboard_modify:execute", "bad").command,

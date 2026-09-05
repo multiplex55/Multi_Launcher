@@ -1,8 +1,8 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_crop, handle_diff, handle_file_search, handle_headless_gui,
-    handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager, handle_note,
-    handle_query, handle_screenshot, handle_simple_dialog, handle_todo,
+    handle_calendar, handle_clipboard_modify, handle_crop, handle_diff, handle_file_search,
+    handle_headless_gui, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
+    handle_note, handle_query, handle_screenshot, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -36,6 +36,9 @@ impl CommandBus {
             Command::FileSearch(command) => Ok(handle_file_search(host, command)),
             Command::Diff(command) => handle_diff(host, command),
             Command::Screenshot(command) => handle_screenshot(host, command),
+            Command::ClipboardModify(command) => {
+                Ok(handle_clipboard_modify(host, command, invocation))
+            }
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -68,6 +71,7 @@ mod tests {
         file_search_calls: usize,
         diff_calls: usize,
         screenshot_calls: usize,
+        clipboard_modify_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -254,6 +258,32 @@ mod tests {
             false
         }
     }
+    impl crate::commands::ClipboardModifyCommandHost for FakeHost {
+        fn open_clipboard_modify(
+            &mut self,
+            _: crate::clipboard_modify::actions::ClipboardModifySectionPayload,
+        ) {
+            self.clipboard_modify_calls += 1;
+        }
+        fn undo_clipboard_modify(&mut self) -> Result<(), String> {
+            self.clipboard_modify_calls += 1;
+            Ok(())
+        }
+        fn start_clipboard_modify(
+            &mut self,
+            _: crate::clipboard_modify::parser::ClipboardModifyIntent,
+            _: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
+        ) -> Result<(), String> {
+            self.clipboard_modify_calls += 1;
+            Ok(())
+        }
+        fn clipboard_modify_hide_launcher_after_apply(&self) -> bool {
+            false
+        }
+        fn report_clipboard_modify_action_error(&mut self, _: String) {
+            self.clipboard_modify_calls += 1;
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -436,6 +466,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.screenshot_calls, 1);
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::ClipboardModify(
+                    crate::commands::ClipboardModifyCommand::Open {
+                        section:
+                            crate::clipboard_modify::actions::ClipboardModifySectionPayload::Help,
+                    },
+                )),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.clipboard_modify_calls, 1);
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus

@@ -1,5 +1,8 @@
 use super::{Command, CommandError, CommandInvocation, CommandOutcome};
 use crate::actions::Action;
+use crate::clipboard_modify::actions::ClipboardModifySectionPayload;
+use crate::clipboard_modify::coordinator::ImmediateRequestMetadata;
+use crate::clipboard_modify::parser::ClipboardModifyIntent;
 use crate::diff::query::DiffOpenPayload;
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
@@ -117,6 +120,18 @@ pub trait ScreenshotCommandHost {
     fn screenshot_launcher_should_refocus(&self) -> bool;
 }
 
+pub trait ClipboardModifyCommandHost {
+    fn open_clipboard_modify(&mut self, section: ClipboardModifySectionPayload);
+    fn undo_clipboard_modify(&mut self) -> Result<(), String>;
+    fn start_clipboard_modify(
+        &mut self,
+        intent: ClipboardModifyIntent,
+        metadata: ImmediateRequestMetadata,
+    ) -> Result<(), String>;
+    fn clipboard_modify_hide_launcher_after_apply(&self) -> bool;
+    fn report_clipboard_modify_action_error(&mut self, message: String);
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -152,6 +167,7 @@ pub trait CommandHost:
     + FileSearchCommandHost
     + DiffCommandHost
     + ScreenshotCommandHost
+    + ClipboardModifyCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -169,6 +185,7 @@ impl<T> CommandHost for T where
         + FileSearchCommandHost
         + DiffCommandHost
         + ScreenshotCommandHost
+        + ClipboardModifyCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

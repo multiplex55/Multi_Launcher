@@ -150,18 +150,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: represent mode/destination/markup explicitly; preserve GUI/headless unknown-mode differences, editor/capture outcomes, completed-only history, cancellation, errors, and panel restoration.
 - Acceptance: typed screenshot execution has deterministic host coverage and no generic clear/hide behavior.
 - Verification: Screenshot tests and `cargo check`.
-- Commit: `refactor(commands): migrate screenshot domain` (hash recorded after commit)
+- Commit: `d0bd347 refactor(commands): migrate screenshot domain`
 - Verification record: handler 4/4, screenshot-filtered library 17/17, screenshot cancellation 3/3, screenshot plugin 3/3, parser 17/17, bus 1/1, GUI activation 29/29, and GUI query-override policy 1/1 passed; `cargo check`, `cargo fmt --all --check`, `git diff --check`, and stale-route audits passed. Parent review found no remaining scope issue; native capture prevents a fully injected GUI activation test, so lifecycle policy is covered deterministically at the typed handler boundary.
 
 ### 14. Migrate Clipboard Modify asynchronous dispatch
 
-- Status: pending
+- Status: complete
 - Dependencies: 2, 4-5
 - Work: migrate open/execute/undo/error protocols into typed commands while retaining the coordinator/runtime; store original Action/source/canonical query/hide preference through deferred completion; remove raw helper.
 - Acceptance: decode once; no query misclassification or premature history; async success/failure/visibility and legacy headless behavior remain compatible.
 - Verification: all Clipboard Modify suites and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate clipboard modify dispatch` (hash recorded after commit)
+- Verification record: handler 7/7, parser 17/17, bus 1/1, GUI activation/completion 15/15, query policy 2/2, headless compatibility 2/2, six integrations 27/27, serial Clipboard Modify library 163/163, and coordinator metadata 1/1 passed; `cargo check`, `cargo fmt --all --check`, `git diff --check`, and stale/decode audits passed. One parallel library run hit a shared-global store collision; its isolated rerun and the full serial filter passed. Parent review found no remaining scope issue.
 
 ### 15. Remove legacy router and enforce architecture
 

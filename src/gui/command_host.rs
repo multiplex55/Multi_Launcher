@@ -1,11 +1,11 @@
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    CalendarCommandHost, Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost,
-    DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
-    HeadlessCommandHost, HistoryPolicy, LauncherCommandHost, LegacyCommandHost,
-    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
+    CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
+    CommandOutcome, CropCommandHost, DialogCommandHost, DiffCommandHost, FavoriteLogPolicy,
+    FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
+    LegacyCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
+    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
     ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
     VisibilityPolicy,
 };
@@ -332,6 +332,68 @@ impl DiffCommandHost for LauncherApp {
     }
 }
 
+impl ClipboardModifyCommandHost for LauncherApp {
+    fn open_clipboard_modify(
+        &mut self,
+        section: crate::clipboard_modify::actions::ClipboardModifySectionPayload,
+    ) {
+        use crate::clipboard_modify::actions::ClipboardModifySectionPayload;
+        let section = match section {
+            ClipboardModifySectionPayload::Modify => super::ClipboardModifyDialogSection::Modify,
+            ClipboardModifySectionPayload::Templates => {
+                super::ClipboardModifyDialogSection::Templates
+            }
+            ClipboardModifySectionPayload::SavedPipelines => {
+                super::ClipboardModifyDialogSection::SavedPipelines
+            }
+            ClipboardModifySectionPayload::ManageTemplates => {
+                super::ClipboardModifyDialogSection::ManageTemplates
+            }
+            ClipboardModifySectionPayload::ManagePipelines => {
+                super::ClipboardModifyDialogSection::ManagePipelines
+            }
+            ClipboardModifySectionPayload::Help => super::ClipboardModifyDialogSection::Help,
+        };
+        self.clipboard_modify_dialog.open_section(
+            section,
+            &crate::clipboard_modify::runtime::clipboard_service(),
+        );
+    }
+
+    fn undo_clipboard_modify(&mut self) -> Result<(), String> {
+        crate::clipboard_modify::runtime::undo().map_err(|error| error.to_string())?;
+        self.handle_clipboard_modify_gui_event(
+            super::ClipboardModifyGuiEvent::ImmediateOperationComplete,
+        );
+        Ok(())
+    }
+
+    fn start_clipboard_modify(
+        &mut self,
+        intent: crate::clipboard_modify::parser::ClipboardModifyIntent,
+        metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
+    ) -> Result<(), String> {
+        self.clipboard_modify_immediate
+            .start(
+                intent,
+                self.clipboard_modify_runtime.catalog_snapshot(),
+                metadata,
+            )
+            .map(|_| ())
+            .map_err(|error| error.message)
+    }
+
+    fn clipboard_modify_hide_launcher_after_apply(&self) -> bool {
+        self.clipboard_modify_hide_launcher_after_apply
+    }
+
+    fn report_clipboard_modify_action_error(&mut self, message: String) {
+        let message = format!("Invalid clipboard modify action: {message}");
+        self.set_inline_error(message.clone());
+        self.add_error_toast(message);
+    }
+}
+
 impl ScreenshotCommandHost for LauncherApp {
     fn capture_screenshot(
         &mut self,
@@ -562,6 +624,15 @@ impl LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_modify_commands_reject_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::ClipboardModify(
+            crate::commands::ClipboardModifyCommand::Open {
+                section: crate::clipboard_modify::actions::ClipboardModifySectionPayload::Modify,
+            },
+        )));
+    }
 
     #[test]
     fn screenshot_commands_keep_query_override_compatibility() {

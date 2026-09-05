@@ -368,6 +368,27 @@ mod tests {
             false
         }
     }
+    impl crate::commands::ClipboardModifyCommandHost for Host {
+        fn open_clipboard_modify(
+            &mut self,
+            _: crate::clipboard_modify::actions::ClipboardModifySectionPayload,
+        ) {
+        }
+        fn undo_clipboard_modify(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn start_clipboard_modify(
+            &mut self,
+            _: crate::clipboard_modify::parser::ClipboardModifyIntent,
+            _: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn clipboard_modify_hide_launcher_after_apply(&self) -> bool {
+            false
+        }
+        fn report_clipboard_modify_action_error(&mut self, _: String) {}
+    }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(
             &mut self,
