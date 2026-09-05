@@ -1145,6 +1145,12 @@ impl ActionEditorState {
                 let valid = current_macro_id == Some(pending.macro_id)
                     && self.draft_generation == pending.draft_generation
                     && self.editing_id == pending.step_id
+                    && (!matches!(
+                        &pending.destination,
+                        VisualRegionDestination::FindPixelSearchRegion
+                    ) || self.image_search.as_ref().is_some_and(|region| {
+                        region.kind == super::image_search_editor::SearchRegionKind::Rectangle
+                    }))
                     && self
                         .draft
                         .as_ref()
@@ -3812,6 +3818,29 @@ fn image_output_names_valid(action: &MkAction) -> bool {
     super::image_search_controls::image_outputs_valid(outputs)
 }
 
+fn draft_apply_valid(
+    step: &MkStep,
+    image_search: Option<&super::image_search_editor::ImageSearchEditorState>,
+) -> bool {
+    !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
+        && virtual_desktop_number_valid(&step.action)
+        && !matches!(&step.action, MkAction::Notify(p) if p.title.trim().is_empty())
+        && !matches!(&step.action, MkAction::PlaySound(p) if !play_sound_is_supported(&p.sound))
+        && image_output_names_valid(&step.action)
+        && !matches!(
+            &step.action,
+            MkAction::ClickWithinRegion(payload)
+                if click_within_region_validation_error(payload).is_some()
+        )
+        && !matches!(
+            super::action_catalog::draft_validation_contract(&step.action),
+            super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
+        )
+        && image_search
+            .and_then(|image| image.validation_error())
+            .is_none()
+}
+
 fn reduce_related_action_request(
     state: &mut ActionEditorState,
     request: super::image_search_editor::ImageEditorRequest,
@@ -4322,21 +4351,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 });
             ui.separator();
             ui.horizontal(|ui| {
-                let valid = !matches!(&step.action, MkAction::PromptInput(p) if crate::mkmacro::variables::validate_variable_name(&p.variable).is_err())
-                    && virtual_desktop_number_valid(&step.action)
-                    && !matches!(&step.action, MkAction::Notify(p) if p.title.trim().is_empty())
-                    && !matches!(&step.action, MkAction::PlaySound(p) if !play_sound_is_supported(&p.sound))
-                    && image_output_names_valid(&step.action)
-                    && !matches!(
-                        &step.action,
-                        MkAction::ClickWithinRegion(payload)
-                            if click_within_region_validation_error(payload).is_some()
-                    )
-                    && !matches!(
-                        super::action_catalog::draft_validation_contract(&step.action),
-                        super::action_catalog::DraftValidationContract::AwaitingRequiredAsset
-                    )
-                    && state.image_search.as_ref().and_then(|image| image.validation_error()).is_none();
+                let valid = draft_apply_valid(step, state.image_search.as_ref());
                 apply = ui.add_enabled(valid && !workflow_active && !importing && !crop_open, egui::Button::new("Apply")).clicked();
                 cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
@@ -5083,22 +5098,33 @@ mod tests {
     fn image_and_pixel_output_names_share_apply_validation() {
         let cases = [
             (
+                "valid unique identifiers",
                 MkImageOutputs {
-                    found: Some("result_found".into()),
-                    point: Some("result_point".into()),
-                    x: Some("result_x".into()),
-                    y: Some("result_y".into()),
+                    found: Some("result_found_1".into()),
+                    point: Some("_result_point".into()),
+                    x: Some("result_x2".into()),
+                    y: Some("RESULT_Y".into()),
                 },
                 true,
             ),
             (
+                "invalid characters",
                 MkImageOutputs {
-                    found: Some("bad name".into()),
+                    found: Some("bad-name".into()),
                     ..Default::default()
                 },
                 false,
             ),
             (
+                "invalid leading character",
+                MkImageOutputs {
+                    point: Some("9point".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "duplicate found and point",
                 MkImageOutputs {
                     found: Some("duplicate".into()),
                     point: Some("duplicate".into()),
@@ -5107,21 +5133,85 @@ mod tests {
                 false,
             ),
             (
+                "duplicate found and x",
+                MkImageOutputs {
+                    found: Some("duplicate".into()),
+                    x: Some("duplicate".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "duplicate found and y",
+                MkImageOutputs {
+                    found: Some("duplicate".into()),
+                    y: Some("duplicate".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "duplicate point and x",
+                MkImageOutputs {
+                    point: Some("duplicate".into()),
+                    x: Some("duplicate".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "duplicate point and y",
+                MkImageOutputs {
+                    point: Some("duplicate".into()),
+                    y: Some("duplicate".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "duplicate x and y",
+                MkImageOutputs {
+                    x: Some("duplicate".into()),
+                    y: Some("duplicate".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "all blank optionals",
                 MkImageOutputs {
                     found: Some("   ".into()),
                     point: Some(String::new()),
                     x: None,
-                    y: Some("result_y".into()),
+                    y: Some("	".into()),
+                },
+                true,
+            ),
+            (
+                "partially configured outputs",
+                MkImageOutputs {
+                    found: None,
+                    point: Some("only_point".into()),
+                    x: None,
+                    y: Some("only_y".into()),
                 },
                 true,
             ),
         ];
         for pixel in [false, true] {
-            for (outputs, expected) in &cases {
+            for (case, outputs, expected) in &cases {
+                let action = action_with_outputs(pixel, outputs.clone());
                 assert_eq!(
-                    image_output_names_valid(&action_with_outputs(pixel, outputs.clone())),
+                    image_output_names_valid(&action),
                     *expected,
-                    "pixel={pixel}, outputs={outputs:?}"
+                    "direct validation: case={case}, pixel={pixel}, outputs={outputs:?}"
+                );
+                let mut editor = test_editor();
+                editor.begin_edit(&step(action));
+                assert_eq!(
+                    draft_apply_valid(editor.draft.as_ref().unwrap(), editor.image_search.as_ref()),
+                    *expected,
+                    "Apply gating: case={case}, pixel={pixel}, outputs={outputs:?}"
                 );
             }
         }
@@ -5129,6 +5219,12 @@ mod tests {
             unreachable!()
         };
         assert!(image_output_names_valid(&MkAction::ImageClick(payload)));
+        let unrelated = step(MkAction::Text(MkTextPayload {
+            text: "unrelated".into(),
+            mode: MkTextMode::Type,
+        }));
+        assert!(image_output_names_valid(&unrelated.action));
+        assert!(draft_apply_valid(&unrelated, None));
     }
 
     #[test]
@@ -5220,6 +5316,26 @@ mod tests {
         assert!(matches!(steps[0].action, MkAction::WindowActivate(_)));
         assert!(matches!(steps[1].action, MkAction::ImageFind(_)));
         assert!(matches!(steps[2].action, MkAction::MouseMove(_)));
+    }
+
+    #[test]
+    fn cancelling_after_queueing_never_inserts_a_related_action() {
+        use super::super::image_search_editor::ImageEditorRequest;
+
+        for request in [
+            ImageEditorRequest::AddSmoothMouseMove,
+            ImageEditorRequest::AddActivateWindowBefore,
+        ] {
+            let (_dir, mut dialog, _fixture) = shared_dialog();
+            dialog.action_editor.begin_new(image_action());
+            let step_count = dialog.selected_macro().unwrap().steps.len();
+            assert!(reduce_related_action_request(&mut dialog.action_editor, request).is_some());
+
+            dialog.action_editor.cancel();
+
+            assert!(dialog.action_editor.draft.is_none());
+            assert_eq!(dialog.selected_macro().unwrap().steps.len(), step_count);
+        }
     }
 
     #[test]
@@ -7540,6 +7656,7 @@ mod tests {
         let mut editor = test_editor();
         editor.begin_edit(&step(find_pixel_action(SearchRegion::Monitor { index: 4 })));
         let before = find_pixel_payload(&editor).clone();
+        editor.image_search.as_mut().unwrap().kind = SearchRegionKind::Rectangle;
         let generation = editor.draft_generation;
         editor.pending_visual_region = Some(PendingVisualRegionOperation {
             destination: VisualRegionDestination::FindPixelSearchRegion,
@@ -7575,12 +7692,12 @@ mod tests {
     fn stale_find_pixel_rectangle_captures_do_not_mutate_region_state() {
         use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
 
-        for stale in ["macro", "generation", "step", "action"] {
+        for stale in ["macro", "generation", "step", "action", "region kind"] {
             let mut editor = test_editor();
             editor.begin_edit(&step(find_pixel_action(SearchRegion::Monitor { index: 4 })));
+            editor.image_search.as_mut().unwrap().kind =
+                super::super::image_search_editor::SearchRegionKind::Rectangle;
             let generation = editor.draft_generation;
-            let original_state = editor.image_search.as_ref().unwrap().selected_region();
-            let original_payload = find_pixel_payload(&editor).clone();
             editor.pending_visual_region = Some(PendingVisualRegionOperation {
                 destination: VisualRegionDestination::FindPixelSearchRegion,
                 macro_id: 11,
@@ -7604,8 +7721,15 @@ mod tests {
                     };
                     Some(11)
                 }
+                "region kind" => {
+                    editor.image_search.as_mut().unwrap().kind =
+                        super::super::image_search_editor::SearchRegionKind::Window;
+                    Some(11)
+                }
                 _ => unreachable!(),
             };
+            let before_draft = editor.draft.clone();
+            let before_editor = editor.image_search.clone();
             editor.apply_visual_capture_outcome(
                 current_macro,
                 WorkflowOutcome::Region {
@@ -7616,13 +7740,8 @@ mod tests {
                     rect: ScreenRect::new(-900, -125, 777, 333),
                 },
             );
-            assert_eq!(
-                editor.image_search.as_ref().unwrap().selected_region(),
-                original_state
-            );
-            if stale != "action" {
-                assert_eq!(find_pixel_payload(&editor), &original_payload);
-            }
+            assert_eq!(editor.draft, before_draft, "stale case: {stale}");
+            assert_eq!(editor.image_search, before_editor, "stale case: {stale}");
             assert!(!editor.draft_changed);
         }
     }
@@ -7669,6 +7788,21 @@ mod tests {
                 },
                 &replacement
             );
+            let before_sync = find_pixel_payload(&editor).clone();
+            editor.sync_search_region_to_draft();
+            let after_sync = find_pixel_payload(&editor);
+            let expected_region = if kind == SearchRegionKind::Window {
+                SearchRegion::Window {
+                    matcher: replacement.clone(),
+                }
+            } else {
+                SearchRegion::ClientArea {
+                    matcher: replacement.clone(),
+                }
+            };
+            let mut expected = before_sync;
+            expected.region = expected_region;
+            assert_eq!(after_sync, &expected);
 
             for stale in ["macro", "generation", "step", "kind", "action"] {
                 let mut stale_editor = test_editor();
@@ -7718,20 +7852,17 @@ mod tests {
                     }
                     _ => unreachable!(),
                 };
-                let before = stale_editor
-                    .image_search
-                    .as_ref()
-                    .unwrap()
-                    .window_matcher
-                    .clone();
+                let before_draft = stale_editor.draft.clone();
+                let before_editor = stale_editor.image_search.clone();
                 assert!(!stale_editor.apply_window_matcher(
                     &stale_request,
                     replacement.clone(),
                     current_macro
                 ));
+                assert_eq!(stale_editor.draft, before_draft, "stale case: {stale}");
                 assert_eq!(
-                    stale_editor.image_search.as_ref().unwrap().window_matcher,
-                    before
+                    stale_editor.image_search, before_editor,
+                    "stale case: {stale}"
                 );
             }
         }
@@ -9033,9 +9164,14 @@ mod tests {
                 .inject_editor_event_for_test(VisualOverlayEvent::Cancelled {
                     operation_id: cancelled_id,
                 });
-            editor.poll_visual_overlay_with(Some(7), |_| Ok([1, 2, 3]));
+            let cancelled_reads = std::cell::Cell::new(0);
+            editor.poll_visual_overlay_with(Some(7), |_| {
+                cancelled_reads.set(cancelled_reads.get() + 1);
+                Ok([1, 2, 3])
+            });
             assert_eq!(find_pixel_payload(&editor).color, "#123456");
             assert_eq!(editor.active_point_pick, None);
+            assert_eq!(cancelled_reads.get(), 0, "Escape must not sample RGB");
 
             editor.request_point_pick(7, VisualPointDestination::FindPixelColor);
             let old_id = editor.active_point_pick.unwrap();
@@ -9069,12 +9205,15 @@ mod tests {
                 current_request,
                 MkPoint { x: 9, y: 9 },
             ));
+            let completed_reads = std::cell::Cell::new(0);
             editor.poll_visual_overlay_with(Some(7), |point| {
+                completed_reads.set(completed_reads.get() + 1);
                 assert_eq!(point, MkPoint { x: -320, y: 650 });
                 Ok([0xAB, 0x00, 0xFF])
             });
             assert_eq!(find_pixel_payload(&editor).color, "#AB00FF");
             assert_eq!(editor.active_point_pick, None);
+            assert_eq!(completed_reads.get(), 1);
         }
 
         #[test]

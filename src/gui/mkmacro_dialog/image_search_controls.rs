@@ -557,23 +557,4 @@ mod tests {
             assert_eq!(original, unchanged);
         }
     }
-
-    #[test]
-    fn shared_output_validation_ignores_blank_optionals() {
-        let valid = MkImageOutputs {
-            found: Some("found".into()),
-            point: Some("   ".into()),
-            x: None,
-            y: Some("y".into()),
-        };
-        assert!(image_outputs_valid(&valid));
-        assert!(!image_outputs_valid(&MkImageOutputs {
-            x: Some("not valid".into()),
-            ..valid.clone()
-        }));
-        assert!(!image_outputs_valid(&MkImageOutputs {
-            y: Some("found".into()),
-            ..valid
-        }));
-    }
 }

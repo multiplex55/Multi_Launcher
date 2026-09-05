@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn return_key_held_down_emits_only_one_pressed_transition() {
-        let states = [false, true, true, true, false, true];
+        let states = [true, true, false, true];
         let mut previous = false;
         let transitions = states
             .into_iter()

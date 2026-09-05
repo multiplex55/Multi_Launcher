@@ -167,8 +167,36 @@ pub fn show_browser(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::{
+        AlphaPolicy, ImageImportChoice, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
+        MkWaitOptions, ReturnPoint, SearchRegion,
+    };
+
     fn image(name: &str) -> MkImageRef {
         MkImageRef::from_filename(name)
+    }
+
+    fn payload(name: &str) -> MkImagePayload {
+        MkImagePayload {
+            image: image(name),
+            wait: MkWaitOptions {
+                timeout_ms: 8_765,
+                poll_interval_ms: 43,
+            },
+            region: SearchRegion::Rectangle {
+                rect: crate::mkmacro::ScreenRect::new(-700, -90, 640, 480),
+            },
+            tolerance: 27,
+            alpha: AlphaPolicy::Ignore,
+            return_point: ReturnPoint::TopLeft,
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs {
+                found: Some("found".into()),
+                point: Some("point".into()),
+                x: Some("x".into()),
+                y: Some("y".into()),
+            },
+        }
     }
 
     #[test]
@@ -216,12 +244,40 @@ mod tests {
     }
 
     #[test]
-    fn selection_event_updates_only_the_passed_value() {
-        let event = ImageAssetSelection {
-            image: image("new.png"),
-        };
-        let selected = event.image;
-        assert_eq!(selected.filename(), "new.png");
+    fn selection_reducer_updates_only_image_in_a_full_cloned_payload() {
+        let original = payload("old.png");
+        let mut updated = original.clone();
+        let event = select_browser_entry(&mut updated.image, "new.png");
+        let mut expected = original;
+        expected.image = image("new.png");
+
+        assert_eq!(event.image, image("new.png"));
+        assert_eq!(updated, expected);
+    }
+
+    #[test]
+    fn selecting_a_managed_asset_performs_no_store_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let managed = image("managed.png");
+        store
+            .write_captured_png(
+                &image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 255])),
+                managed.clone(),
+                ImageImportChoice::ReplaceExisting,
+            )
+            .unwrap();
+        let before_refs = store.image_refs().unwrap();
+        let managed_path = store.image_path(&managed).unwrap();
+        let before_bytes = std::fs::read(&managed_path).unwrap();
+        let mut current = image("old.png");
+
+        let event = select_browser_entry(&mut current, managed.filename());
+
+        assert_eq!(event.image, managed);
+        assert_eq!(current, managed);
+        assert_eq!(store.image_refs().unwrap(), before_refs);
+        assert_eq!(std::fs::read(managed_path).unwrap(), before_bytes);
     }
 
     #[test]
