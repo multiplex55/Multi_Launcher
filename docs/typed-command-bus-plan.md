@@ -58,19 +58,19 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: add stateless bus, coherent host traits, `Arc<CommandBus>`, typed Launcher/Query handling, parsed pending confirmation, centralized outcome/error application, and structured tracing. A temporary typed-to-legacy bridge may exist only for not-yet-migrated domains.
 - Acceptance: Launcher/Query bypass raw routing; destructive classification is typed; confirmation never reparses; hooks remain compatible; bus contains typed routing only.
 - Verification: bus, destructive, query, macro-launcher tests and `cargo check`.
-- Commit: `refactor(commands): establish typed activation bus` (hash recorded after commit)
+- Commit: `8e22b46 refactor(commands): establish typed activation bus`
 - Verification record: `cargo check`, `cargo fmt --all --check`, and `git diff --check` passed; focused bus, destructive, query, pending-confirmation, parser-error, and macro-launcher Nextest filters passed; affected history/hide/preserve/dashboard/visibility/MultiManager integrations passed 34/34; stale-route audit found no production Launcher/Query raw routing.
 
 ### 5. Migrate headless-backed GUI execution and generic post-policy
 
-- Status: pending
+- Status: complete
 - Dependencies: 4
 - Likely areas: external/storage/timer/system handlers, outcome, GUI host/actions, history/hide/preserve tests.
 - Work: migrate generic/static execution families and encode favorite logging, toasts, history/usage, clear/hide exemptions, refresh, focus, and browser-tab async behavior as typed outcomes. Preserve the Action-based execution hook without reparsing.
 - Acceptance: scoped families leave the legacy chain; success/error/history/hide/preserve behavior matches characterization; no generic second parse.
 - Verification: history/hide/preserve and affected domain tests plus `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate generic GUI execution policy` (hash recorded after commit)
+- Verification record: `cargo check`, formatting, and diff checks passed; focused handler/query/bus tests passed 8/8; Snippet/history/hide/preserve tests 26/26; Storage 31/31; Timer/System/Shell 34/34; Media/Macro 8/8; GUI actions 16/16. Stale-route and parse-boundary audits passed; review findings for multi-toast parity and explicit result invalidation were remediated.
 
 ### 6. Migrate low-risk dialogs and crop commands
 

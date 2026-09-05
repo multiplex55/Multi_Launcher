@@ -78,5 +78,6 @@ mod tests {
         );
         assert_eq!(outcome.query, QueryPolicy::Set("notes".into()));
         assert_eq!(outcome.activate_first_result, Some(ActivationSource::Macro));
+        assert!(!outcome.invalidate_results);
     }
 }

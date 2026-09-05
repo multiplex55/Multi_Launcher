@@ -20,15 +20,31 @@ pub enum HistoryPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FavoriteLogPolicy {
+    None,
+    Ran { label: String, command: String },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastPolicy {
+    Launched(String),
+    Copied(String),
+    Info(String),
+    Success(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub query: QueryPolicy,
     pub search: bool,
+    pub invalidate_results: bool,
     pub visibility: VisibilityPolicy,
     pub restore: bool,
     pub focus: bool,
     pub move_cursor_end: bool,
     pub activate_first_result: Option<crate::commands::ActivationSource>,
     pub history: HistoryPolicy,
+    pub toasts: Vec<ToastPolicy>,
+    pub favorite_log: FavoriteLogPolicy,
 }
 
 impl Default for CommandOutcome {
@@ -36,12 +52,15 @@ impl Default for CommandOutcome {
         Self {
             query: QueryPolicy::Keep,
             search: false,
+            invalidate_results: false,
             visibility: VisibilityPolicy::Keep,
             restore: false,
             focus: false,
             move_cursor_end: false,
             activate_first_result: None,
             history: HistoryPolicy::Skip,
+            toasts: Vec::new(),
+            favorite_log: FavoriteLogPolicy::None,
         }
     }
 }

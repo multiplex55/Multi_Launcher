@@ -552,27 +552,6 @@ impl LauncherApp {
             if let Ok(count) = n.parse::<usize>() {
                 self.cpu_list_dialog.open(count);
             }
-        } else if a.action.starts_with("tab:switch:") {
-            if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: format!("Switching to {}", a.label).into(),
-                        kind: ToastKind::Info,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
-            let act = a.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = launch_action(&act) {
-                    tracing::error!(?e, "failed to switch tab");
-                }
-            });
-            if a.action != "help:show" {
-                self.record_history_usage(&a, &current, source);
-            }
         } else if a.action == "mm:open" {
             self.open_multi_manager();
         } else if a.action == "mm:settings" {
@@ -665,36 +644,6 @@ impl LauncherApp {
                         },
                     );
                 }
-            } else if a.action.starts_with("bookmark:add:") {
-                if self.preserve_command {
-                    self.query = "bm add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("bookmark:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("folder:add:") {
-                if self.preserve_command {
-                    self.query = "f add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("folder:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("fav:add:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("fav:remove:") {
-                refresh = true;
-                set_focus = true;
             } else if a.action.starts_with("todo:add:") {
                 if self.preserve_command {
                     self.query = "todo add ".into();
@@ -801,51 +750,6 @@ impl LauncherApp {
                         },
                     );
                 }
-            } else if a.action.starts_with("snippet:remove:") {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Removed snippet {}", a.label).into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("tempfile:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("tempfile:alias:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action == "tempfile:new" || a.action.starts_with("tempfile:new:") {
-                if self.preserve_command {
-                    self.query = "tmp new ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:cancel:") && current.starts_with("timer rm") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:pause:") && current.starts_with("timer pause") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:resume:") && current.starts_with("timer resume") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:start:") && current.starts_with("timer add") {
-                if self.preserve_command {
-                    self.query = "timer add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                set_focus = true;
             }
             if self.clear_query_after_run && !command_changed_query {
                 self.query.clear();
@@ -853,15 +757,7 @@ impl LauncherApp {
                 set_focus = true;
             }
             if self.hide_after_run
-                && !a.action.starts_with("bookmark:add:")
-                && !a.action.starts_with("bookmark:remove:")
-                && !a.action.starts_with("folder:add:")
-                && !a.action.starts_with("folder:remove:")
-                && !a.action.starts_with("snippet:remove:")
-                && !a.action.starts_with("fav:add:")
-                && !a.action.starts_with("fav:remove:")
                 && !a.action.starts_with("screenshot:")
-                && !a.action.starts_with("calc:")
                 && !a.action.starts_with("todo:done:")
             {
                 self.visible_flag.store(false, Ordering::SeqCst);

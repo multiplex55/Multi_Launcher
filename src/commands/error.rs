@@ -1,10 +1,13 @@
 use std::fmt;
 
-/// A failure to decode a claimed launcher command protocol.
+/// A failure to decode or execute a launcher command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandError {
     pub domain: &'static str,
     pub message: String,
+    pub toast: bool,
+    pub refocus: bool,
+    pub favorite: Option<String>,
 }
 
 impl CommandError {
@@ -12,7 +15,20 @@ impl CommandError {
         Self {
             domain,
             message: message.into(),
+            toast: false,
+            refocus: false,
+            favorite: None,
         }
+    }
+
+    pub fn with_gui_failure_policy(mut self) -> Self {
+        self.toast = true;
+        self.refocus = true;
+        self
+    }
+    pub fn with_favorite(mut self, label: String) -> Self {
+        self.favorite = Some(label);
+        self
     }
 }
 

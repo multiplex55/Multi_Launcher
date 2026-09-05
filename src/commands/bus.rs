@@ -1,5 +1,5 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
-use crate::commands::handlers::{handle_launcher, handle_query};
+use crate::commands::handlers::{handle_headless_gui, handle_launcher, handle_query};
 
 #[derive(Debug, Default)]
 pub struct CommandBus;
@@ -19,8 +19,11 @@ impl CommandBus {
         match &invocation.command {
             Command::Launcher(command) => Ok(handle_launcher(host, command)),
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
-            // Temporary bridge: milestones 5-14 migrate these enum families.
-            _ => host.execute_legacy_command(invocation),
+            // Temporary bridge: milestones 6-14 migrate the remaining enum families.
+            _ => match handle_headless_gui(host, invocation) {
+                Some(result) => result,
+                None => host.execute_legacy_command(invocation),
+            },
         }
     }
 }
@@ -30,14 +33,15 @@ mod tests {
     use super::*;
     use crate::actions::Action;
     use crate::commands::{
-        ActivationSource, LauncherCommand, LauncherCommandHost, LegacyCommandHost, QueryCommand,
-        QueryPolicy, VisibilityPolicy,
+        ActivationSource, HeadlessCommandHost, LauncherCommand, LauncherCommandHost,
+        LegacyCommandHost, QueryCommand, QueryPolicy, VisibilityPolicy,
     };
 
     #[derive(Default)]
     struct FakeHost {
         visible: bool,
         legacy_calls: usize,
+        headless_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -46,6 +50,28 @@ mod tests {
         }
     }
 
+    impl HeadlessCommandHost for FakeHost {
+        fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
+            self.headless_calls += 1;
+            Ok(())
+        }
+        fn spawn_headless_command(&mut self, _: Command, _: Action) {}
+        fn clear_query_after_run(&self) -> bool {
+            false
+        }
+        fn hide_after_run(&self) -> bool {
+            false
+        }
+        fn preserve_command(&self) -> bool {
+            false
+        }
+        fn current_query(&self) -> &str {
+            ""
+        }
+        fn launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl LegacyCommandHost for FakeHost {
         fn execute_legacy_command(
             &mut self,
@@ -91,6 +117,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(query.query, QueryPolicy::Set("abc".into()));
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::External(crate::commands::ExternalCommand {
+                    target: "tool".into(),
+                    args: None,
+                })),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.headless_calls, 1);
         assert_eq!(host.legacy_calls, 0);
     }
 }

@@ -305,7 +305,17 @@ pub(crate) fn execute_action(action: &Action) -> anyhow::Result<()> {
     }
     launch_action(action)
 }
-
+pub(crate) fn execute_parsed_action(
+    command: &crate::commands::Command,
+    action: &Action,
+) -> anyhow::Result<()> {
+    if let Ok(guard) = EXECUTE_ACTION_HOOK.lock()
+        && let Some(ref hook) = *guard
+    {
+        return hook(action);
+    }
+    crate::commands::headless::execute(command.clone(), action)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Panel {
     AliasDialog,
