@@ -153,7 +153,8 @@ use std::time::{Duration, Instant};
 use url::Url;
 use watch::watch_file;
 
-pub use state::{ActivationSource, ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
+pub use crate::commands::ActivationSource;
+pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
 pub(crate) use state::{PendingConfirmAction, ResultContextMenuKind, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[

@@ -25,19 +25,19 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: add activation-level characterization for Query/QueryExec focus, restore, search, recursion/source; query-override ordering; real hide/preserve behavior; success-only history/usage; original Action retention; errors; hidden external execution. Preserve confirmation, hook, macro, and panel-restoration contracts.
 - Acceptance: tests pass against the legacy implementation; production behavior is unchanged; hide/preserve assertions exercise normal activation instead of duplicated prefix logic.
 - Verification: targeted history/hide/preserve/dashboard, activation, and query Nextest filters.
-- Commit: `test(commands): characterize activation lifecycle policies` (hash recorded after commit)
+- Commit: `66cc83c test(commands): characterize activation lifecycle policies`
 - Verification record: `cargo fmt --all --check` passed; `git diff --check` passed; history/hide/preserve/dashboard integration targets passed 26/26; six focused GUI activation tests passed 6/6; final isolated hide/preserve rerun passed 12/12.
 
 ### 2. Add owned command model and canonical parser
 
-- Status: pending
+- Status: complete
 - Dependencies: 1
 - Likely areas: new `src/commands/{mod,model,parser,error}.rs`, `src/lib.rs`, `src/gui/state.rs`, parser tests in launcher modules.
 - Work: add owned nested command enums, `CommandInvocation`, stable domain/kind metadata, neutral `ActivationSource`, unified error, and a complete side-effect-free parser with typed structured payloads and compatible precedence/fallback.
 - Acceptance: every produced protocol maps to an owned command or intentional external fallback; Action/Plugin APIs and JSON remain unchanged; comprehensive compatibility/parser tests pass.
 - Verification: command parser/source-label/legacy parse tests and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): add owned command model and parser` (hash recorded after commit)
+- Verification record: parser/model `cargo nextest run --lib commands::parser::tests` passed 17/17; source-label Nextest passed 1/1; `cargo check`, `cargo fmt --all --check`, and `git diff --check` passed. A focused parity audit found and drove fixes for the public headless parse boundary, typed system variants, malformed known-protocol compatibility, explicit `timer:show` fallback, semantic payload naming, and broader protocol coverage.
 
 ### 3. Migrate headless execution and remove old parser/plan
 
