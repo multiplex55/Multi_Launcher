@@ -22,7 +22,6 @@ pub enum VisibilityPolicy {
 pub enum HistoryPolicy {
     Skip,
     Record,
-    AlreadyApplied,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

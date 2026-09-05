@@ -231,7 +231,7 @@ mod tests {
     use super::*;
     use crate::commands::{
         CalendarCommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
-        LauncherCommandHost, LegacyCommandHost, NoteCommandHost, TodoCommandHost,
+        LauncherCommandHost, NoteCommandHost, TodoCommandHost,
     };
 
     #[derive(Default)]
@@ -412,14 +412,6 @@ mod tests {
         }
         fn launcher_should_refocus(&self) -> bool {
             self.refocus
-        }
-    }
-    impl LegacyCommandHost for Host {
-        fn execute_legacy_command(
-            &mut self,
-            _: &crate::commands::CommandInvocation,
-        ) -> Result<CommandOutcome, crate::commands::CommandError> {
-            unreachable!()
         }
     }
 

@@ -160,18 +160,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: migrate open/execute/undo/error protocols into typed commands while retaining the coordinator/runtime; store original Action/source/canonical query/hide preference through deferred completion; remove raw helper.
 - Acceptance: decode once; no query misclassification or premature history; async success/failure/visibility and legacy headless behavior remain compatible.
 - Verification: all Clipboard Modify suites and `cargo check`.
-- Commit: `refactor(commands): migrate clipboard modify dispatch` (hash recorded after commit)
+- Commit: `2b1c944 refactor(commands): migrate clipboard modify dispatch`
 - Verification record: handler 7/7, parser 17/17, bus 1/1, GUI activation/completion 15/15, query policy 2/2, headless compatibility 2/2, six integrations 27/27, serial Clipboard Modify library 163/163, and coordinator metadata 1/1 passed; `cargo check`, `cargo fmt --all --check`, `git diff --check`, and stale/decode audits passed. One parallel library run hit a shared-global store collision; its isolated rerun and the full serial filter passed. Parent review found no remaining scope issue.
 
 ### 15. Remove legacy router and enforce architecture
 
-- Status: pending
+- Status: complete
 - Dependencies: 1-14
 - Work: delete temporary bridge and remaining feature string routing; reduce activation to lifecycle; keep bus exhaustive and short; migrate helper-coupled tests; add architectural regression coverage; remove stale compatibility paths.
 - Acceptance: raw action routing lives only in canonical parser; no giant GUI chain, old parser/plan, raw helper, or legacy bridge remains; compatibility formats are unchanged.
 - Verification: stale-reference searches, `cargo fmt --all --check`, `cargo check`, `cargo nextest run`, and `cargo clippy --all-targets`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): remove legacy activation router` (hash recorded after commit)
+- Verification record: architecture 2/2 and focused headless GUI/bus 6/6 passed; clean-environment full Nextest passed 2948/2948 with 7 skipped across 127 binaries; `cargo clippy --all-targets` exited 0 with existing warnings only; `cargo fmt --all --check`, `cargo check`, `git diff --check`, exhaustive dispatch, raw-routing, and stale-symbol audits passed. An initial full run inherited `RUST_LOG=warn` and failed only the logging info-event test; that target passed 2/2 with the variable removed before the clean full run. Parent review found no remaining scope issue.
 
 ## Integration and independent review
 

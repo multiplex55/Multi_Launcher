@@ -4,8 +4,8 @@ use crate::commands::{
     CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
     CommandOutcome, CropCommandHost, DialogCommandHost, DiffCommandHost, FavoriteLogPolicy,
     FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    LegacyCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
+    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
+    QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
     ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
     VisibilityPolicy,
 };
@@ -473,19 +473,6 @@ impl HeadlessCommandHost for LauncherApp {
 
     fn launcher_should_refocus(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
-    }
-}
-
-impl LegacyCommandHost for LauncherApp {
-    fn execute_legacy_command(
-        &mut self,
-        invocation: &CommandInvocation,
-    ) -> Result<CommandOutcome, CommandError> {
-        self.activate_action_legacy(invocation.original_action.clone(), invocation.source);
-        Ok(CommandOutcome {
-            history: HistoryPolicy::AlreadyApplied,
-            ..CommandOutcome::default()
-        })
     }
 }
 

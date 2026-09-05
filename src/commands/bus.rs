@@ -39,11 +39,18 @@ impl CommandBus {
             Command::ClipboardModify(command) => {
                 Ok(handle_clipboard_modify(host, command, invocation))
             }
-            // Temporary bridge: milestones 6-14 migrate the remaining enum families.
-            _ => match handle_headless_gui(host, invocation) {
-                Some(result) => result,
-                None => host.execute_legacy_command(invocation),
-            },
+            Command::Shell(_)
+            | Command::Clipboard(_)
+            | Command::Calculator(_)
+            | Command::Storage(_)
+            | Command::Timer(_)
+            | Command::System(_)
+            | Command::BrowserTab(_)
+            | Command::Media(_)
+            | Command::Layout(_)
+            | Command::Macro(_)
+            | Command::External(_) => handle_headless_gui(host, invocation),
+            Command::Dialog(_) => unreachable!("dialog commands are handled before dispatch"),
         }
     }
 }
@@ -54,15 +61,13 @@ mod tests {
     use crate::actions::Action;
     use crate::commands::{
         ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
-        HeadlessCommandHost, LauncherCommand, LauncherCommandHost, LegacyCommandHost,
-        MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy, TodoCommandHost,
-        VisibilityPolicy,
+        HeadlessCommandHost, LauncherCommand, LauncherCommandHost, MultiManagerCommandHost,
+        NoteCommandHost, QueryCommand, QueryPolicy, TodoCommandHost, VisibilityPolicy,
     };
 
     #[derive(Default)]
     struct FakeHost {
         visible: bool,
-        legacy_calls: usize,
         headless_calls: usize,
         dialog_calls: usize,
         crop_calls: usize,
@@ -306,15 +311,6 @@ mod tests {
             false
         }
     }
-    impl LegacyCommandHost for FakeHost {
-        fn execute_legacy_command(
-            &mut self,
-            _: &CommandInvocation,
-        ) -> Result<CommandOutcome, CommandError> {
-            self.legacy_calls += 1;
-            Ok(CommandOutcome::default())
-        }
-    }
 
     fn invocation(command: Command) -> CommandInvocation {
         CommandInvocation {
@@ -331,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn command_bus_routes_launcher_and_query_without_legacy_bridge() {
+    fn command_bus_routes_typed_and_headless_families() {
         let mut host = FakeHost::default();
         let launcher = CommandBus
             .dispatch(
@@ -351,7 +347,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(query.query, QueryPolicy::Set("abc".into()));
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -367,7 +362,6 @@ mod tests {
             .unwrap();
         assert_eq!(host.dialog_calls, 1);
         assert_eq!(host.crop_calls, 1);
-        assert_eq!(host.legacy_calls, 0);
 
         let calendar = CommandBus
             .dispatch(
@@ -383,7 +377,6 @@ mod tests {
             calendar.results,
             crate::commands::ResultsPolicy::Replace(_)
         ));
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -411,7 +404,6 @@ mod tests {
             linked_todo.query,
             QueryPolicy::Set("todo links id:7".into())
         );
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -421,7 +413,6 @@ mod tests {
                 &mut host,
             )
             .unwrap();
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -431,7 +422,6 @@ mod tests {
                 &mut host,
             )
             .unwrap();
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -466,7 +456,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.screenshot_calls, 1);
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -480,7 +469,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.clipboard_modify_calls, 1);
-        assert_eq!(host.legacy_calls, 0);
 
         CommandBus
             .dispatch(
@@ -492,6 +480,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.headless_calls, 1);
-        assert_eq!(host.legacy_calls, 0);
     }
 }

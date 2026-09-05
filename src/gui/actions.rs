@@ -121,57 +121,6 @@ impl LauncherApp {
         }
     }
 
-    pub(crate) fn activate_action_legacy(&mut self, a: Action, source: ActivationSource) {
-        let current = self.query.clone();
-        let mut refresh = false;
-        let mut set_focus = false;
-        if let Err(e) = execute_action(&a) {
-            if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                tracing::error!(?e, fav=%a.label, "failed to run favorite");
-            }
-            self.report_error_message("launcher", format!("Failed: {e}"));
-            self.add_error_toast(format!("Failed: {e}"));
-        } else {
-            if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
-            }
-            if self.enable_toasts && a.action != "recycle:clean" {
-                let msg = if a.action.starts_with("clipboard:") {
-                    format!("Copied {}", a.label)
-                } else {
-                    format!("Launched {}", a.label)
-                };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: msg.into(),
-                        kind: ToastKind::Success,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
-            self.record_history_usage(&a, &current, source);
-            if self.clear_query_after_run {
-                self.query.clear();
-                refresh = true;
-                set_focus = true;
-            }
-            if self.hide_after_run {
-                self.visible_flag.store(false, Ordering::SeqCst);
-            }
-        }
-        if refresh {
-            self.last_results_valid = false;
-            self.search();
-        }
-        if set_focus {
-            self.focus_input();
-        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
-            self.focus_input();
-        }
-    }
-
     pub(crate) fn drain_clipboard_modify_immediate(&mut self) {
         let mut typed_events = Vec::new();
         for (meta, ev) in self.clipboard_modify_immediate.drain_completions() {

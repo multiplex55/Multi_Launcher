@@ -1,23 +1,19 @@
 use super::super::{
-    BrowserTabCommand, ClipboardCommand, Command, CommandError, CommandInvocation, CommandOutcome,
-    FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, MacroCommand, QueryPolicy, ShellCommand,
-    StorageCommand, SystemCommand, TimerCommand, ToastPolicy, VisibilityPolicy,
+    BrowserTabCommand, Command, CommandError, CommandInvocation, CommandOutcome, FavoriteLogPolicy,
+    HeadlessCommandHost, HistoryPolicy, QueryPolicy, StorageCommand, TimerCommand, ToastPolicy,
+    VisibilityPolicy,
 };
 
 pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
     host: &mut H,
     invocation: &CommandInvocation,
-) -> Option<Result<CommandOutcome, CommandError>> {
-    if !is_migrated(&invocation.command) {
-        return None;
-    }
-
+) -> Result<CommandOutcome, CommandError> {
     if let Command::BrowserTab(BrowserTabCommand::Switch(_)) = &invocation.command {
         host.spawn_headless_command(
             invocation.command.clone(),
             invocation.original_action.clone(),
         );
-        return Some(Ok(CommandOutcome {
+        return Ok(CommandOutcome {
             focus: host.launcher_should_refocus(),
             history: HistoryPolicy::Record,
             toasts: vec![ToastPolicy::Info(format!(
@@ -25,7 +21,7 @@ pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
                 invocation.original_action.label
             ))],
             ..CommandOutcome::default()
-        }));
+        });
     }
 
     if let Err(error) =
@@ -36,43 +32,10 @@ pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
         if is_external_favorite(invocation) {
             error = error.with_favorite(invocation.original_action.label.clone());
         }
-        return Some(Err(error));
+        return Err(error);
     }
 
-    Some(Ok(success_outcome(host, invocation)))
-}
-
-fn is_migrated(command: &Command) -> bool {
-    match command {
-        Command::Shell(command) => !matches!(command, ShellCommand::Dialog),
-        Command::Clipboard(command) => !matches!(command, ClipboardCommand::Dialog),
-        Command::Calculator(_) => true,
-        Command::Storage(command) => !matches!(
-            command,
-            StorageCommand::BookmarkDialog
-                | StorageCommand::SnippetEdit(_)
-                | StorageCommand::SnippetDialog
-                | StorageCommand::FavoriteDialog(_)
-                | StorageCommand::TempfileDialog
-        ),
-        Command::Timer(command) => !matches!(
-            command,
-            TimerCommand::TimerDialog | TimerCommand::AlarmDialog | TimerCommand::StopwatchShow(_)
-        ),
-        Command::System(command) => !matches!(
-            command,
-            SystemCommand::BrightnessDialog
-                | SystemCommand::VolumeDialog
-                | SystemCommand::CpuList(_)
-        ),
-        Command::BrowserTab(_) | Command::Media(_) | Command::Layout(_) | Command::External(_) => {
-            true
-        }
-        Command::Macro(command) => {
-            !matches!(command, MacroCommand::LegacyDialog | MacroCommand::MkDialog)
-        }
-        _ => false,
-    }
+    Ok(success_outcome(host, invocation))
 }
 
 fn success_outcome<H: HeadlessCommandHost + ?Sized>(
@@ -326,7 +289,6 @@ mod tests {
                 "bookmark:add:url",
             ),
         )
-        .unwrap()
         .unwrap();
         assert_eq!(result.query, QueryPolicy::Set("bm add ".into()));
         assert!(result.search && result.invalidate_results && result.focus);
@@ -349,7 +311,6 @@ mod tests {
                 "tool",
             ),
         )
-        .unwrap()
         .unwrap();
         assert_eq!(result.query, QueryPolicy::Set(String::new()));
         assert!(result.search && result.invalidate_results && result.focus);
@@ -368,7 +329,6 @@ mod tests {
                 "snippet:remove:alias",
             ),
         )
-        .unwrap()
         .unwrap();
         assert_eq!(
             result.toasts,
@@ -395,7 +355,6 @@ mod tests {
                 "tool",
             ),
         )
-        .unwrap()
         .unwrap_err();
         assert_eq!(error.message, "Failed: injected failure");
         assert!(error.toast && error.refocus);
@@ -413,7 +372,6 @@ mod tests {
                 "tab:switch:1",
             ),
         )
-        .unwrap()
         .unwrap();
         assert_eq!(host.spawned, 1);
         assert_eq!(host.executed, 0);

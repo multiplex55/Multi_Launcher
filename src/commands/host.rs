@@ -1,4 +1,4 @@
-use super::{Command, CommandError, CommandInvocation, CommandOutcome};
+use super::Command;
 use crate::actions::Action;
 use crate::clipboard_modify::actions::ClipboardModifySectionPayload;
 use crate::clipboard_modify::coordinator::ImmediateRequestMetadata;
@@ -147,14 +147,6 @@ pub trait HeadlessCommandHost {
     fn launcher_should_refocus(&self) -> bool;
 }
 
-/// Transitional bridge removed after all command families have typed handlers.
-pub trait LegacyCommandHost {
-    fn execute_legacy_command(
-        &mut self,
-        invocation: &CommandInvocation,
-    ) -> Result<CommandOutcome, CommandError>;
-}
-
 pub trait CommandHost:
     LauncherCommandHost
     + DialogCommandHost
@@ -169,7 +161,6 @@ pub trait CommandHost:
     + ScreenshotCommandHost
     + ClipboardModifyCommandHost
     + HeadlessCommandHost
-    + LegacyCommandHost
 {
 }
 
@@ -187,6 +178,5 @@ impl<T> CommandHost for T where
         + ScreenshotCommandHost
         + ClipboardModifyCommandHost
         + HeadlessCommandHost
-        + LegacyCommandHost
 {
 }

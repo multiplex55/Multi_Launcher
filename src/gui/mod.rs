@@ -113,7 +113,7 @@ use crate::file_search::coordinator::SearchCoordinator;
 use crate::help_window::HelpWindow;
 use crate::history::{self, HISTORY_PINS_FILE, HistoryEntry, HistoryPin};
 use crate::indexer;
-use crate::launcher::launch_action;
+
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
@@ -293,16 +293,6 @@ pub fn set_activation_hook(hook: Option<ActivationHook>) {
     }
 }
 
-/// Dispatch an already-resolved launcher action without performing another plugin search.
-/// Raw macro queries use the launcher query broker; this API never performs plugin search.
-pub(crate) fn execute_action(action: &Action) -> anyhow::Result<()> {
-    if let Ok(guard) = EXECUTE_ACTION_HOOK.lock()
-        && let Some(ref hook) = *guard
-    {
-        return hook(action);
-    }
-    launch_action(action)
-}
 pub(crate) fn execute_parsed_action(
     command: &crate::commands::Command,
     action: &Action,
