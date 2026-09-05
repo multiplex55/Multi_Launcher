@@ -1772,6 +1772,12 @@ mod tests {
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:launcher] Failed: injected failure"));
         assert!(log.contains("Failed: injected failure"));
+        assert!(!app.usage.contains_key("exec:broken"));
+        assert!(
+            history::get_history()
+                .iter()
+                .all(|entry| entry.action.action != "exec:broken")
+        );
 
         set_execute_action_hook(None);
         std::env::set_current_dir(original_dir).unwrap();
@@ -1801,7 +1807,7 @@ mod tests {
         let history_entries = history::get_history();
         assert!(history_entries.len() > before_len);
         let latest = history_entries.front().expect("latest history entry");
-        assert_eq!(latest.action.action, action.action);
+        assert_eq!(latest.action, action);
         assert_eq!(latest.query, "track me");
         assert_eq!(latest.source.as_deref(), Some("gesture"));
 
@@ -1858,6 +1864,134 @@ mod tests {
         );
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn query_activation_applies_args_searches_and_restores_input_focus() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.selected = Some(3);
+
+        app.activate_action(
+            Action {
+                label: "Query".into(),
+                desc: "Test".into(),
+                action: "query:note search ".into(),
+                args: Some(r#"{"query":"needle"}"#.into()),
+            },
+            None,
+            ActivationSource::Click,
+        );
+
+        assert_eq!(app.query, "note search needle");
+        assert_eq!(app.last_search_query, "note search needle");
+        assert_eq!(app.selected, None);
+        assert!(app.focus_query && app.move_cursor_end);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn queryexec_searches_and_recursively_activates_first_result_with_original_source() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.command_cache = vec![Action {
+            label: "Help".into(),
+            desc: "Test".into(),
+            action: "help:show".into(),
+            args: Some("retained".into()),
+        }];
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+
+        app.activate_action(
+            Action {
+                label: "Run first result".into(),
+                desc: "Test".into(),
+                action: "queryexec:".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert_eq!(app.query, "");
+        assert_eq!(app.results[0].action, "help:show");
+        assert!(app.help_window.open);
+        assert_eq!(
+            app.test_activation_trace
+                .iter()
+                .map(|(action, source)| (action.action.as_str(), *source))
+                .collect::<Vec<_>>(),
+            [
+                ("queryexec:", ActivationSource::Dashboard),
+                ("help:show", ActivationSource::Dashboard),
+            ]
+        );
+        assert!(app.focus_query && app.move_cursor_end);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn specialized_actions_ignore_query_override_before_dispatch() {
+        let ctx = egui::Context::default();
+
+        let mut file_search = new_app(&ctx);
+        file_search.query = "file search query".into();
+        file_search.activate_action(
+            Action {
+                label: "File Search".into(),
+                desc: "Test".into(),
+                action: crate::file_search::actions::OPEN_ACTION.into(),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(file_search.query, "file search query");
+        assert!(file_search.file_search_dialog.open);
+
+        let payload = crate::diff::query::DiffOpenPayload {
+            left: None,
+            right: None,
+        };
+        let encoded = crate::diff::query::encode_payload(&payload).unwrap();
+        let mut diff = new_app(&ctx);
+        diff.query = "diff query".into();
+        diff.activate_action(
+            Action {
+                label: "Diff".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::diff::query::OPEN_PREFIX),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(diff.query, "diff query");
+        assert!(diff.diff_dialog.open);
+
+        let mut clipboard_modify = new_app(&ctx);
+        clipboard_modify.query = "clipboard query".into();
+        clipboard_modify.activate_action(
+            Action {
+                label: "Clipboard Modify".into(),
+                desc: "Test".into(),
+                action: "clipboard_modify:open:help".into(),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(clipboard_modify.query, "clipboard query");
+        assert!(clipboard_modify.clipboard_modify_dialog.open);
+        assert_eq!(
+            clipboard_modify.clipboard_modify_dialog.section,
+            ClipboardModifyDialogSection::Help
+        );
     }
 
     #[test]

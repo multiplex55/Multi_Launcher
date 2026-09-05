@@ -1,6 +1,6 @@
 use eframe::egui;
 use multi_launcher::actions::Action;
-use multi_launcher::gui::LauncherApp;
+use multi_launcher::gui::{ActivationSource, LauncherApp, set_execute_action_hook};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
@@ -8,31 +8,34 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::sync::{Mutex, MutexGuard};
 
-static CWD_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static EXECUTION_HOOK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-struct CurrentDirGuard {
+struct ActivationTestGuard {
+    original_dir: PathBuf,
+    _temp_dir: tempfile::TempDir,
     _lock: MutexGuard<'static, ()>,
-    original: PathBuf,
-    _tmp: tempfile::TempDir,
 }
 
-impl CurrentDirGuard {
+impl ActivationTestGuard {
     fn new() -> Self {
-        let lock = CWD_TEST_LOCK.lock().expect("cwd test lock poisoned");
-        let original = std::env::current_dir().expect("resolve current dir");
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        std::env::set_current_dir(tmp.path()).expect("switch to temp dir");
+        let lock = EXECUTION_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original_dir = std::env::current_dir().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
         Self {
+            original_dir,
+            _temp_dir: temp_dir,
             _lock: lock,
-            original,
-            _tmp: tmp,
         }
     }
 }
 
-impl Drop for CurrentDirGuard {
+impl Drop for ActivationTestGuard {
     fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
+        set_execute_action_hook(None);
+        let _ = std::env::set_current_dir(&self.original_dir);
     }
 }
 
@@ -60,6 +63,13 @@ fn new_app(ctx: &egui::Context, actions: Vec<Action>, preserve: bool) -> Launche
     )
 }
 
+fn activate_successfully(app: &mut LauncherApp) {
+    let _guard = ActivationTestGuard::new();
+    let action = app.results[0].clone();
+    set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+    app.activate_action(action, None, ActivationSource::Enter);
+}
+
 #[test]
 fn bookmark_add_preserves_prefix() {
     let ctx = egui::Context::default();
@@ -72,11 +82,7 @@ fn bookmark_add_preserves_prefix() {
     }];
     let mut app = new_app(&ctx, actions, true);
     app.query = format!("bm add {url}");
-    if app.preserve_command {
-        app.query = "bm add ".into();
-    } else {
-        app.query.clear();
-    }
+    activate_successfully(&mut app);
     assert_eq!(app.query, "bm add ");
 }
 
@@ -92,11 +98,7 @@ fn bookmark_add_clears_without_setting() {
     }];
     let mut app = new_app(&ctx, actions, false);
     app.query = format!("bm add {url}");
-    if app.preserve_command {
-        app.query = "bm add ".into();
-    } else {
-        app.query.clear();
-    }
+    activate_successfully(&mut app);
     assert_eq!(app.query, "");
 }
 
@@ -111,20 +113,7 @@ fn timer_add_preserves_prefix() {
     }];
     let mut app = new_app(&ctx, actions, true);
     app.query = "timer add 1s".into();
-    let a = app.results[0].clone();
-    if multi_launcher::launcher::launch_action(&a).is_ok() {
-        if app.preserve_command {
-            app.query = "timer add ".into();
-        } else {
-            app.query.clear();
-        }
-    }
-    if let Some((id, _, _, _)) = multi_launcher::plugins::timer::active_timers()
-        .into_iter()
-        .next()
-    {
-        multi_launcher::plugins::timer::cancel_timer(id);
-    }
+    activate_successfully(&mut app);
     assert_eq!(app.query, "timer add ");
 }
 
@@ -138,16 +127,8 @@ fn todo_add_preserves_prefix() {
         args: None,
     }];
     let mut app = new_app(&ctx, actions, true);
-    let _cwd_guard = CurrentDirGuard::new();
     app.query = "todo add test".into();
-    let a = app.results[0].clone();
-    if multi_launcher::launcher::launch_action(&a).is_ok() {
-        if app.preserve_command {
-            app.query = "todo add ".into();
-        } else {
-            app.query.clear();
-        }
-    }
+    activate_successfully(&mut app);
     assert_eq!(app.query, "todo add ");
 }
 
@@ -161,12 +142,7 @@ fn tmp_new_preserves_prefix() {
         args: None,
     }];
     let mut app = new_app(&ctx, actions, true);
-    let _cwd_guard = CurrentDirGuard::new();
     app.query = "tmp new".into();
-    if app.preserve_command {
-        app.query = "tmp new ".into();
-    } else {
-        app.query.clear();
-    }
+    activate_successfully(&mut app);
     assert_eq!(app.query, "tmp new ");
 }
