@@ -60,13 +60,17 @@ pub(super) fn show(
     payload: &mut MkImagePayload,
     state: &mut ImageSearchEditorState,
     store: &crate::mkmacro::MkMacroStore,
-    _macro_id: u64,
+    editor_id: (u64, u64),
     authoring_busy: bool,
     test_busy: bool,
     find_action: bool,
     valid_asset: bool,
 ) -> Option<ImageEditorRequest> {
     let mut out = None;
+    let library_id = ui.make_persistent_id(("find-image-library", editor_id));
+    let mut library_open = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(library_id).unwrap_or(false));
     ui.heading("Reference Image");
     ui.horizontal_wrapped(|ui| {
         disabled_request(
@@ -76,6 +80,20 @@ pub(super) fn show(
             ImageEditorRequest::ImportPng,
             &mut out,
         );
+        if find_action
+            && ui
+                .add_enabled(
+                    super::image_search_controls::reference_authoring_buttons_enabled(
+                        authoring_busy,
+                    ),
+                    egui::Button::new("Browse Library…"),
+                )
+                .clicked()
+        {
+            library_open = !library_open;
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(library_id, library_open));
+        }
         disabled_request(
             ui,
             "Capture…",
@@ -104,6 +122,16 @@ pub(super) fn show(
             );
         }
     });
+    if find_action && library_open {
+        ui.separator();
+        ui.heading("Image Library");
+        super::image_asset_picker::show_browser(
+            ui,
+            ("find-image-library-browser", editor_id),
+            super::image_asset_picker::ImageAssetUiContext { store },
+            &mut payload.image,
+        );
+    }
     if authoring_busy {
         ui.label("Importing reference image...");
     }
@@ -139,41 +167,7 @@ pub(super) fn show(
                 );
             });
         ui.separator();
-        ui.heading("Outputs");
-        ui.small("Optional named outputs; compatibility variables such as last_image_found remain available.");
-        for (label, value) in [
-            ("Found", &mut payload.outputs.found),
-            ("Point", &mut payload.outputs.point),
-            ("X", &mut payload.outputs.x),
-            ("Y", &mut payload.outputs.y),
-        ] {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                ui.text_edit_singleline(value.get_or_insert_with(String::new));
-            });
-            if let Some(name) = value.as_deref() {
-                if let Err(error) = crate::mkmacro::variables::validate_variable_name(name) {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("{label}: {error}"));
-                }
-            }
-        }
-        let configured: Vec<_> = [
-            &payload.outputs.found,
-            &payload.outputs.point,
-            &payload.outputs.x,
-            &payload.outputs.y,
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|n| !n.is_empty())
-        .collect();
-        if configured
-            .iter()
-            .enumerate()
-            .any(|(i, n)| configured[..i].contains(n))
-        {
-            ui.colored_label(ui.visuals().error_fg_color, "Output names must be unique");
-        }
+        super::image_search_controls::show_image_outputs_editor(ui, &mut payload.outputs);
     } else {
         // Click requires a point; do not expose an unsupported continuation contract.
         payload.not_found_policy = MkImageNotFoundPolicy::Fail;

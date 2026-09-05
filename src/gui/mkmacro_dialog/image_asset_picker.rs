@@ -62,6 +62,12 @@ pub fn selected_asset<'a>(assets: &'a [MkImageRef], image: &MkImageRef) -> Optio
     assets.iter().find(|asset| *asset == image)
 }
 
+fn select_browser_entry(image: &mut MkImageRef, filename: &str) -> ImageAssetSelection {
+    let selected = MkImageRef::from_filename(filename);
+    *image = selected.clone();
+    ImageAssetSelection { image: selected }
+}
+
 /// Render a picker whose persistent state is isolated by `editor_id`.
 pub fn show(
     ui: &mut egui::Ui,
@@ -69,8 +75,18 @@ pub fn show(
     context: ImageAssetUiContext<'_>,
     image: &mut MkImageRef,
 ) -> Option<ImageAssetSelection> {
-    let id = ui.make_persistent_id(("image-asset-picker", editor_id));
     ui.label("Reference Image");
+    show_browser(ui, editor_id, context, image)
+}
+
+/// Embedded picker variant for callers that already render their own section label.
+pub fn show_browser(
+    ui: &mut egui::Ui,
+    editor_id: impl std::hash::Hash,
+    context: ImageAssetUiContext<'_>,
+    image: &mut MkImageRef,
+) -> Option<ImageAssetSelection> {
+    let id = ui.make_persistent_id(("image-asset-picker", editor_id));
     let mut query = ui
         .ctx()
         .data_mut(|data| data.get_temp::<String>(id).unwrap_or_default());
@@ -141,10 +157,7 @@ pub fn show(
                     )
                 });
                 if response.clicked() {
-                    *image = MkImageRef::from_filename(asset.filename);
-                    selection = Some(ImageAssetSelection {
-                        image: MkImageRef::from_filename(asset.filename),
-                    });
+                    selection = Some(select_browser_entry(image, asset.filename));
                 }
             }
         });
@@ -257,5 +270,28 @@ mod tests {
         let matching = browser_entries(&assets, "b.png", &image("b.png"));
         assert_eq!(matching.len(), 1);
         assert_eq!(matching[0].filename, "b.png");
+    }
+
+    #[test]
+    fn missing_current_image_does_not_block_selecting_an_available_row() {
+        let assets = vec![image("b.png"), image("a.png")];
+        let mut current = image("missing.png");
+        let rows = browser_entries(&assets, "A.P", &current);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "a.png");
+        assert!(!rows[0].selected);
+
+        let untouched_sibling_state = 42;
+        let event = select_browser_entry(&mut current, rows[0].filename);
+        assert_eq!(current, image("a.png"));
+        assert_eq!(event.image, image("a.png"));
+        assert_eq!(untouched_sibling_state, 42);
+        assert_eq!(
+            browser_entries(&assets, "", &current)
+                .iter()
+                .map(|row| (row.filename, row.selected))
+                .collect::<Vec<_>>(),
+            vec![("b.png", false), ("a.png", true)]
+        );
     }
 }

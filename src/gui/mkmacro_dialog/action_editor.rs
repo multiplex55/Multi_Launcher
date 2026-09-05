@@ -3368,20 +3368,7 @@ fn action_ui(
                 }
                 SearchRegion::Desktop => {}
             }
-            for (label, output) in [
-                ("Found output", &mut p.outputs.found),
-                ("Point output", &mut p.outputs.point),
-                ("X output", &mut p.outputs.x),
-                ("Y output", &mut p.outputs.y),
-            ] {
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    ui.text_edit_singleline(output.get_or_insert_with(String::new));
-                });
-                if output.as_ref().is_some_and(|x| x.is_empty()) {
-                    *output = None;
-                }
-            }
+            super::image_search_controls::show_image_outputs_editor(ui, &mut p.outputs);
         }
         MkAction::PixelCheck {
             target,
@@ -3721,26 +3708,46 @@ fn image_payload_mut(step: &mut MkStep) -> Option<&mut MkImagePayload> {
         _ => None,
     }
 }
+
+fn image_outputs(action: &MkAction) -> Option<&MkImageOutputs> {
+    match action {
+        MkAction::ImageFind(payload) => Some(&payload.outputs),
+        MkAction::FindPixel(payload) => Some(&payload.outputs),
+        _ => None,
+    }
+}
+
+fn image_outputs_mut(action: &mut MkAction) -> Option<&mut MkImageOutputs> {
+    match action {
+        MkAction::ImageFind(payload) => Some(&mut payload.outputs),
+        MkAction::FindPixel(payload) => Some(&mut payload.outputs),
+        _ => None,
+    }
+}
+
 fn image_output_names_valid(action: &MkAction) -> bool {
-    let MkAction::ImageFind(p) = action else {
+    let Some(outputs) = image_outputs(action) else {
         return true;
     };
-    let names: Vec<_> = [
-        &p.outputs.found,
-        &p.outputs.point,
-        &p.outputs.x,
-        &p.outputs.y,
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    names
-        .iter()
-        .all(|name| crate::mkmacro::variables::validate_variable_name(name).is_ok())
-        && !names
-            .iter()
-            .enumerate()
-            .any(|(i, name)| names[..i].contains(name))
+    super::image_search_controls::image_outputs_valid(outputs)
+}
+
+fn reduce_related_action_request(
+    state: &mut ActionEditorState,
+    request: super::image_search_editor::ImageEditorRequest,
+) -> Option<&'static str> {
+    use super::image_search_editor::ImageEditorRequest;
+    match request {
+        ImageEditorRequest::AddSmoothMouseMove => {
+            state.add_smooth_move = true;
+            Some("Queued: Smooth Mouse Move will be added when this action is applied.")
+        }
+        ImageEditorRequest::AddActivateWindowBefore => {
+            state.add_activate_before = true;
+            Some("Queued: Activate Window will be added when this action is applied.")
+        }
+        _ => None,
+    }
 }
 
 fn apply_capture(
@@ -4038,6 +4045,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut point_pick_request = false;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
+    let mut related_action_notice = None;
+    let mut related_action_request = None;
     let image_refs = d.store.image_refs().unwrap_or_default();
     let live_steps = d
         .selected_macro()
@@ -4121,7 +4130,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     &payload.image,
                     &image_refs,
                 );
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, d.selected_macro_id.unwrap_or(0), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, (d.selected_macro_id.unwrap_or(0), draft_generation), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -4150,8 +4159,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
                         }
                     }
-                    Some(AddSmoothMouseMove) => state.add_smooth_move = true,
-                    Some(AddActivateWindowBefore) => state.add_activate_before = true,
+                    Some(request @ (AddSmoothMouseMove | AddActivateWindowBefore)) => {
+                        related_action_request = Some(request);
+                    }
                     None => {}
                 }
             }
@@ -4249,7 +4259,13 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
             });
           });
+          if let Some(request) = related_action_request.take() {
+              related_action_notice = reduce_related_action_request(&mut d.action_editor, request);
+          }
         });
+    if let Some(notice) = related_action_notice {
+        d.queue_ui_notice(notice);
+    }
     if let Some(request) = condition_image_request.as_ref()
         && matches!(
             request.operation,
@@ -4468,8 +4484,13 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.set_captured_keys(keys);
     }
     if apply {
-        if let Some(payload) = d.action_editor.draft.as_mut().and_then(image_payload_mut) {
-            payload.outputs.normalize();
+        if let Some(outputs) = d
+            .action_editor
+            .draft
+            .as_mut()
+            .and_then(|step| image_outputs_mut(&mut step.action))
+        {
+            outputs.normalize();
         }
         if let Some(MkStep {
             action: MkAction::PixelCheck { color, .. },
@@ -4867,6 +4888,170 @@ mod tests {
             not_found_policy: MkImageNotFoundPolicy::Fail,
             outputs: MkImageOutputs::default(),
         })
+    }
+
+    fn action_with_outputs(pixel: bool, outputs: MkImageOutputs) -> MkAction {
+        if pixel {
+            MkAction::FindPixel(MkPixelSearchPayload {
+                search_id: 9,
+                color: "#112233".into(),
+                tolerance: 3,
+                region: SearchRegion::Desktop,
+                wait: MkWaitOptions::default(),
+                not_found_policy: MkImageNotFoundPolicy::Continue,
+                outputs,
+            })
+        } else {
+            let mut action = image_action();
+            let MkAction::ImageFind(payload) = &mut action else {
+                unreachable!()
+            };
+            payload.outputs = outputs;
+            action
+        }
+    }
+
+    #[test]
+    fn image_and_pixel_output_names_share_apply_validation() {
+        let cases = [
+            (
+                MkImageOutputs {
+                    found: Some("result_found".into()),
+                    point: Some("result_point".into()),
+                    x: Some("result_x".into()),
+                    y: Some("result_y".into()),
+                },
+                true,
+            ),
+            (
+                MkImageOutputs {
+                    found: Some("bad name".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                MkImageOutputs {
+                    found: Some("duplicate".into()),
+                    point: Some("duplicate".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                MkImageOutputs {
+                    found: Some("   ".into()),
+                    point: Some(String::new()),
+                    x: None,
+                    y: Some("result_y".into()),
+                },
+                true,
+            ),
+        ];
+        for pixel in [false, true] {
+            for (outputs, expected) in &cases {
+                assert_eq!(
+                    image_output_names_valid(&action_with_outputs(pixel, outputs.clone())),
+                    *expected,
+                    "pixel={pixel}, outputs={outputs:?}"
+                );
+            }
+        }
+        let MkAction::ImageFind(payload) = image_action() else {
+            unreachable!()
+        };
+        assert!(image_output_names_valid(&MkAction::ImageClick(payload)));
+    }
+
+    #[test]
+    fn related_action_requests_only_queue_flags_and_notices() {
+        use super::super::image_search_editor::ImageEditorRequest;
+        for (request, notice, smooth, activate) in [
+            (
+                ImageEditorRequest::AddSmoothMouseMove,
+                "Queued: Smooth Mouse Move will be added when this action is applied.",
+                true,
+                false,
+            ),
+            (
+                ImageEditorRequest::AddActivateWindowBefore,
+                "Queued: Activate Window will be added when this action is applied.",
+                false,
+                true,
+            ),
+        ] {
+            let (_dir, mut dialog, _fixture) = shared_dialog();
+            let step_count = dialog.selected_macro().unwrap().steps.len();
+            assert_eq!(
+                reduce_related_action_request(&mut dialog.action_editor, request),
+                Some(notice)
+            );
+            assert_eq!(dialog.action_editor.add_smooth_move, smooth);
+            assert_eq!(dialog.action_editor.add_activate_before, activate);
+            assert!(dialog.action_editor.capture_message.is_none());
+            assert_eq!(dialog.selected_macro().unwrap().steps.len(), step_count);
+        }
+    }
+
+    #[test]
+    fn related_actions_are_inserted_only_when_apply_commits_the_draft() {
+        use super::super::image_search_editor::ImageEditorRequest;
+        let (_dir, mut dialog, _fixture) = shared_dialog();
+        let mut action = image_action();
+        let MkAction::ImageFind(payload) = &mut action else {
+            unreachable!()
+        };
+        payload.region = SearchRegion::Window {
+            matcher: MkWindowMatcher {
+                title: Some("Target".into()),
+                ..Default::default()
+            },
+        };
+        dialog.action_editor.begin_new(action);
+        reduce_related_action_request(
+            &mut dialog.action_editor,
+            ImageEditorRequest::AddSmoothMouseMove,
+        );
+        reduce_related_action_request(
+            &mut dialog.action_editor,
+            ImageEditorRequest::AddActivateWindowBefore,
+        );
+        assert!(dialog.selected_macro().unwrap().steps.is_empty());
+
+        let mut state = dialog.take_action_editor();
+        let smooth = state.add_smooth_move;
+        let activate = state.add_activate_before;
+        let shortcut_payload = state
+            .draft
+            .as_ref()
+            .and_then(|step| match &step.action {
+                MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => Some(payload),
+                _ => None,
+            })
+            .cloned()
+            .unwrap();
+        let anchor = state.apply(&mut dialog).unwrap();
+        if activate {
+            assert!(insert_activate_window_before(
+                &mut dialog,
+                anchor,
+                &shortcut_payload
+            ));
+        }
+        if smooth {
+            assert!(insert_smooth_move_after(
+                &mut dialog,
+                anchor,
+                &shortcut_payload
+            ));
+        }
+        dialog.action_editor = state;
+
+        let steps = &dialog.selected_macro().unwrap().steps;
+        assert_eq!(steps.len(), 3);
+        assert!(matches!(steps[0].action, MkAction::WindowActivate(_)));
+        assert!(matches!(steps[1].action, MkAction::ImageFind(_)));
+        assert!(matches!(steps[2].action, MkAction::MouseMove(_)));
     }
 
     #[test]

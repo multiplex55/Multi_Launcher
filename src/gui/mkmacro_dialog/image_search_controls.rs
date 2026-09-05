@@ -1,10 +1,103 @@
 //! Search fields shared by image actions and live image conditions.
 use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::{
-    AlphaPolicy, MkImagePayload, MkImageRef, MkImageSearchCondition, MkWindowMatcher,
-    MonitorDescriptor, ReturnPoint, ScreenRect, SearchRegion,
+    AlphaPolicy, MkImageOutputs, MkImagePayload, MkImageRef, MkImageSearchCondition,
+    MkWindowMatcher, MonitorDescriptor, ReturnPoint, ScreenRect, SearchRegion,
 };
 use eframe::egui;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AutoPopulateOutputsResult {
+    Unavailable,
+    Populated(MkImageOutputs),
+}
+
+/// Derives a complete output set from Found without mutating the current values.
+/// The caller can therefore replace all four fields atomically.
+pub(crate) fn auto_populate_outputs(outputs: &MkImageOutputs) -> AutoPopulateOutputsResult {
+    let Some(found) = outputs
+        .found
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return AutoPopulateOutputsResult::Unavailable;
+    };
+    let base = found.strip_suffix("_found").unwrap_or(found);
+    AutoPopulateOutputsResult::Populated(MkImageOutputs {
+        found: Some(format!("{base}_found")),
+        point: Some(format!("{base}_point")),
+        x: Some(format!("{base}_x")),
+        y: Some(format!("{base}_y")),
+    })
+}
+
+fn configured_output_names(outputs: &MkImageOutputs) -> impl Iterator<Item = &str> {
+    [
+        outputs.found.as_deref(),
+        outputs.point.as_deref(),
+        outputs.x.as_deref(),
+        outputs.y.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|name| !name.trim().is_empty())
+}
+
+pub(crate) fn image_outputs_valid(outputs: &MkImageOutputs) -> bool {
+    let names: Vec<_> = configured_output_names(outputs).collect();
+    names
+        .iter()
+        .all(|name| crate::mkmacro::variables::validate_variable_name(name).is_ok())
+        && !names
+            .iter()
+            .enumerate()
+            .any(|(index, name)| names[..index].contains(name))
+}
+
+/// Shared editor for the named result variables produced by image and pixel searches.
+pub(crate) fn show_image_outputs_editor(ui: &mut egui::Ui, outputs: &mut MkImageOutputs) {
+    ui.horizontal(|ui| {
+        ui.heading("Outputs");
+        let available = outputs
+            .found
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty());
+        if ui
+            .add_enabled(available, egui::Button::new("Auto Populate"))
+            .clicked()
+            && let AutoPopulateOutputsResult::Populated(replacement) =
+                auto_populate_outputs(outputs)
+        {
+            *outputs = replacement;
+        }
+    });
+    ui.small("Optional named outputs; compatibility variables such as last_image_found remain available.");
+    for (label, value) in [
+        ("Found", &mut outputs.found),
+        ("Point", &mut outputs.point),
+        ("X", &mut outputs.x),
+        ("Y", &mut outputs.y),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.text_edit_singleline(value.get_or_insert_with(String::new));
+        });
+        if let Some(name) = value.as_deref().filter(|name| !name.trim().is_empty())
+            && let Err(error) = crate::mkmacro::variables::validate_variable_name(name)
+        {
+            ui.colored_label(ui.visuals().error_fg_color, format!("{label}: {error}"));
+        }
+    }
+    let names: Vec<_> = configured_output_names(outputs).collect();
+    if names
+        .iter()
+        .enumerate()
+        .any(|(index, name)| names[..index].contains(name))
+    {
+        ui.colored_label(ui.visuals().error_fg_color, "Output names must be unique");
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchRegionKind {
@@ -412,5 +505,75 @@ mod tests {
             apply_condition_to_payload(&c, &mut q);
             assert_eq!(payload_to_condition(&q), c);
         }
+    }
+
+    fn outputs(found: Option<&str>) -> MkImageOutputs {
+        MkImageOutputs {
+            found: found.map(str::to_owned),
+            point: Some("custom_point".into()),
+            x: Some("custom_x".into()),
+            y: Some("custom_y".into()),
+        }
+    }
+
+    fn populated(found: Option<&str>) -> MkImageOutputs {
+        match auto_populate_outputs(&outputs(found)) {
+            AutoPopulateOutputsResult::Populated(outputs) => outputs,
+            AutoPopulateOutputsResult::Unavailable => panic!("expected populated outputs"),
+        }
+    }
+
+    #[test]
+    fn auto_populate_derives_and_completely_replaces_outputs() {
+        assert_eq!(
+            populated(Some("button")),
+            MkImageOutputs {
+                found: Some("button_found".into()),
+                point: Some("button_point".into()),
+                x: Some("button_x".into()),
+                y: Some("button_y".into()),
+            }
+        );
+        assert_eq!(populated(Some("button_found")), populated(Some("button")));
+        assert_eq!(
+            populated(Some("  button_found  ")),
+            populated(Some("button"))
+        );
+        assert_eq!(
+            populated(Some("button_found_found")).found.as_deref(),
+            Some("button_found_found")
+        );
+    }
+
+    #[test]
+    fn auto_populate_unavailable_is_a_no_op_for_absent_or_blank_found() {
+        for found in [None, Some(""), Some("   ")] {
+            let original = outputs(found);
+            let unchanged = original.clone();
+            assert_eq!(
+                auto_populate_outputs(&original),
+                AutoPopulateOutputsResult::Unavailable
+            );
+            assert_eq!(original, unchanged);
+        }
+    }
+
+    #[test]
+    fn shared_output_validation_ignores_blank_optionals() {
+        let valid = MkImageOutputs {
+            found: Some("found".into()),
+            point: Some("   ".into()),
+            x: None,
+            y: Some("y".into()),
+        };
+        assert!(image_outputs_valid(&valid));
+        assert!(!image_outputs_valid(&MkImageOutputs {
+            x: Some("not valid".into()),
+            ..valid.clone()
+        }));
+        assert!(!image_outputs_valid(&MkImageOutputs {
+            y: Some("found".into()),
+            ..valid
+        }));
     }
 }
