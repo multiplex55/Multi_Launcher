@@ -125,12 +125,6 @@ impl LauncherApp {
         if self.handle_clipboard_modify_action(&a, source) {
             return;
         }
-        if self.handle_file_search_action(&a.action) {
-            return;
-        }
-        if self.handle_diff_action(&a.action) {
-            return;
-        }
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
@@ -481,93 +475,6 @@ impl LauncherApp {
 
     fn report_clipboard_modify_action_error(&mut self, err: String) {
         let msg = format!("Invalid clipboard modify action: {err}");
-        self.set_inline_error(msg.clone());
-        self.add_error_toast(msg);
-    }
-
-    fn handle_file_search_action(&mut self, action: &str) -> bool {
-        use crate::file_search::actions::{
-            CANCEL_ACTION, FileSearchModePayload, FileSearchStartPayload, MODE_PREFIX, OPEN_ACTION,
-            START_PREFIX, decode_action_payload,
-        };
-
-        if action == OPEN_ACTION {
-            self.file_search_dialog.open();
-            return true;
-        }
-        if action == CANCEL_ACTION {
-            self.file_search_dialog
-                .cancel_search(&mut self.file_search_coordinator);
-            return true;
-        }
-        if let Some(encoded) = action.strip_prefix(MODE_PREFIX) {
-            self.file_search_dialog.open();
-            match decode_action_payload::<FileSearchModePayload>(encoded).and_then(|payload| {
-                payload.validate()?;
-                Ok(payload)
-            }) {
-                Ok(payload) => {
-                    let mode = match payload.search_kind() {
-                        crate::file_search::model::SearchKind::Filename => {
-                            crate::gui::FileSearchMode::Filename
-                        }
-                        crate::file_search::model::SearchKind::Content => {
-                            crate::gui::FileSearchMode::Content
-                        }
-                    };
-                    self.file_search_dialog.open_with_mode(mode);
-                }
-                Err(err) => self.report_file_search_action_error(err),
-            }
-            return true;
-        }
-        if let Some(encoded) = action.strip_prefix(START_PREFIX) {
-            self.file_search_dialog.open();
-            match decode_action_payload::<FileSearchStartPayload>(encoded).and_then(|payload| {
-                payload.validate()?;
-                Ok(payload)
-            }) {
-                Ok(payload) => {
-                    let mode = match payload.search_kind() {
-                        crate::file_search::model::SearchKind::Filename => {
-                            crate::gui::FileSearchMode::Filename
-                        }
-                        crate::file_search::model::SearchKind::Content => {
-                            crate::gui::FileSearchMode::Content
-                        }
-                    };
-                    let root = payload.root_path();
-                    self.file_search_dialog.open_and_start(
-                        mode,
-                        root,
-                        payload.text,
-                        &mut self.file_search_coordinator,
-                    );
-                }
-                Err(err) => self.report_file_search_action_error(err),
-            }
-            return true;
-        }
-        false
-    }
-
-    fn handle_diff_action(&mut self, action: &str) -> bool {
-        let Some(encoded) = action.strip_prefix(crate::diff::query::OPEN_PREFIX) else {
-            return false;
-        };
-        match crate::diff::query::decode_payload(encoded) {
-            Ok(payload) => {
-                if let Err(error) = self.diff_dialog.open_payload(payload) {
-                    self.report_error_message("diff", error);
-                }
-            }
-            Err(error) => self.report_error_message("diff", error),
-        }
-        true
-    }
-
-    fn report_file_search_action_error(&mut self, err: String) {
-        let msg = format!("Invalid file search action: {err}");
         self.set_inline_error(msg.clone());
         self.add_error_toast(msg);
     }
@@ -1489,6 +1396,8 @@ mod tests {
 
         let mut file_search = new_app(&ctx);
         file_search.query = "file search query".into();
+        file_search.clear_query_after_run = true;
+        file_search.hide_after_run = true;
         file_search.activate_action(
             Action {
                 label: "File Search".into(),
@@ -1501,6 +1410,13 @@ mod tests {
         );
         assert_eq!(file_search.query, "file search query");
         assert!(file_search.file_search_dialog.open);
+        assert!(file_search.visible_flag.load(Ordering::SeqCst));
+        assert!(!file_search.focus_query);
+        assert!(
+            !file_search
+                .usage
+                .contains_key(crate::file_search::actions::OPEN_ACTION)
+        );
 
         let payload = crate::diff::query::DiffOpenPayload {
             left: None,
@@ -1509,6 +1425,9 @@ mod tests {
         let encoded = crate::diff::query::encode_payload(&payload).unwrap();
         let mut diff = new_app(&ctx);
         diff.query = "diff query".into();
+        diff.clear_query_after_run = true;
+        diff.hide_after_run = true;
+        diff.visible_flag.store(true, Ordering::SeqCst);
         diff.activate_action(
             Action {
                 label: "Diff".into(),
@@ -1521,6 +1440,13 @@ mod tests {
         );
         assert_eq!(diff.query, "diff query");
         assert!(diff.diff_dialog.open);
+        assert!(diff.visible_flag.load(Ordering::SeqCst));
+        assert!(!diff.focus_query);
+        assert!(
+            !diff
+                .usage
+                .contains_key(&format!("{}{encoded}", crate::diff::query::OPEN_PREFIX))
+        );
 
         let mut clipboard_modify = new_app(&ctx);
         clipboard_modify.query = "clipboard query".into();
@@ -1540,6 +1466,124 @@ mod tests {
             clipboard_modify.clipboard_modify_dialog.section,
             ClipboardModifyDialogSection::Help
         );
+    }
+
+    #[test]
+    fn typed_file_search_start_and_diff_open_preserve_wire_payload_state() {
+        let ctx = egui::Context::default();
+        let dir = tempdir().unwrap();
+
+        let root = dir.path().to_string_lossy().into_owned();
+        let start = crate::file_search::actions::FileSearchStartPayload {
+            kind: crate::file_search::actions::FileSearchKindPayload::Content,
+            root: Some(root.clone()),
+            text: "needle".into(),
+        };
+        let encoded = crate::file_search::actions::encode_action_payload(&start).unwrap();
+        let mut file_search = new_app(&ctx);
+        file_search.activate_action(
+            Action {
+                label: "Search content".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::file_search::actions::START_PREFIX),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert!(file_search.file_search_dialog.open);
+        assert_eq!(
+            file_search.file_search_dialog.selected_mode,
+            crate::gui::FileSearchMode::Content
+        );
+        assert_eq!(file_search.file_search_dialog.custom_roots, [root]);
+        assert_eq!(file_search.file_search_dialog.search_text, "needle");
+
+        let left = dir.path().join("left.txt");
+        let right = dir.path().join("right.txt");
+        std::fs::write(&left, "left").unwrap();
+        std::fs::write(&right, "right").unwrap();
+        let payload = crate::diff::query::DiffOpenPayload {
+            left: Some(left.to_string_lossy().into_owned()),
+            right: Some(right.to_string_lossy().into_owned()),
+        };
+        let encoded = crate::diff::query::encode_payload(&payload).unwrap();
+        let mut diff = new_app(&ctx);
+        diff.activate_action(
+            Action {
+                label: "Compare files".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::diff::query::OPEN_PREFIX),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert!(diff.diff_dialog.open);
+        assert!(matches!(
+            diff.diff_dialog.workspace.current_view.view,
+            crate::diff::model::DiffView::TextCompare(_)
+        ));
+        assert_eq!(
+            diff.diff_dialog.workspace.left_visible.as_str(),
+            payload.left.as_deref().unwrap()
+        );
+        assert_eq!(
+            diff.diff_dialog.workspace.right_visible.as_str(),
+            payload.right.as_deref().unwrap()
+        );
+    }
+
+    #[test]
+    fn typed_file_search_and_diff_malformed_payloads_preserve_reporting_policy() {
+        let ctx = egui::Context::default();
+
+        let invalid_start = crate::file_search::actions::FileSearchStartPayload {
+            kind: crate::file_search::actions::FileSearchKindPayload::Content,
+            root: None,
+            text: "   ".into(),
+        };
+        let encoded = crate::file_search::actions::encode_action_payload(&invalid_start).unwrap();
+        let mut file_search = new_app(&ctx);
+        file_search.show_inline_errors = false;
+        file_search.enable_toasts = true;
+        file_search.show_error_toasts = true;
+        file_search.activate_action(
+            Action {
+                label: "Invalid File Search".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::file_search::actions::START_PREFIX),
+                args: None,
+            },
+            None,
+            ActivationSource::Dashboard,
+        );
+        let expected = "Invalid file search action: File search text cannot be empty";
+        assert!(file_search.file_search_dialog.open);
+        assert_eq!(file_search.error.as_deref(), Some(expected));
+        assert_eq!(file_search.test_toast_messages, [expected]);
+
+        let invalid_diff = Action {
+            label: "Invalid Diff".into(),
+            desc: "Test".into(),
+            action: format!("{}bad", crate::diff::query::OPEN_PREFIX),
+            args: None,
+        };
+        let crate::commands::Command::Diff(crate::commands::DiffCommand::Invalid {
+            error: expected_diff_error,
+            ..
+        }) = crate::commands::parse_action(&invalid_diff).unwrap()
+        else {
+            panic!("expected typed invalid Diff command");
+        };
+        let mut diff = new_app(&ctx);
+        diff.show_inline_errors = true;
+        diff.enable_toasts = true;
+        diff.show_error_toasts = true;
+        diff.activate_action(invalid_diff, None, ActivationSource::Dashboard);
+        assert!(!diff.diff_dialog.open);
+        assert_eq!(diff.error.as_deref(), Some(expected_diff_error.as_str()));
+        assert_eq!(diff.test_toast_messages, [expected_diff_error]);
     }
 
     #[test]

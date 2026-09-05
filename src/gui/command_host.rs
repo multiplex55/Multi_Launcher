@@ -2,9 +2,10 @@ use std::sync::atomic::Ordering;
 
 use crate::commands::{
     CalendarCommandHost, Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost,
-    DialogCommandHost, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    LegacyCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
+    HeadlessCommandHost, HistoryPolicy, LauncherCommandHost, LegacyCommandHost,
+    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
+    QueryPolicy, ResultsPolicy, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -290,6 +291,52 @@ impl CropCommandHost for LauncherApp {
         self.begin_crop_screenshot();
     }
 }
+impl FileSearchCommandHost for LauncherApp {
+    fn open_file_search(&mut self) {
+        self.file_search_dialog.open();
+    }
+
+    fn cancel_file_search(&mut self) {
+        self.file_search_dialog
+            .cancel_search(&mut self.file_search_coordinator);
+    }
+
+    fn set_file_search_mode(
+        &mut self,
+        payload: &crate::file_search::actions::FileSearchModePayload,
+    ) {
+        self.file_search_dialog
+            .open_with_mode(file_search_mode(payload.search_kind()));
+    }
+
+    fn start_file_search(&mut self, payload: &crate::file_search::actions::FileSearchStartPayload) {
+        self.file_search_dialog.open_and_start(
+            file_search_mode(payload.search_kind()),
+            payload.root_path(),
+            payload.text.clone(),
+            &mut self.file_search_coordinator,
+        );
+    }
+
+    fn report_file_search_action_error(&mut self, message: String) {
+        self.set_inline_error(message.clone());
+        self.add_error_toast(message);
+    }
+}
+
+impl DiffCommandHost for LauncherApp {
+    fn open_diff(&mut self, payload: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
+        self.diff_dialog.open_payload(payload.clone())
+    }
+}
+
+fn file_search_mode(kind: crate::file_search::model::SearchKind) -> super::FileSearchMode {
+    match kind {
+        crate::file_search::model::SearchKind::Filename => super::FileSearchMode::Filename,
+        crate::file_search::model::SearchKind::Content => super::FileSearchMode::Content,
+    }
+}
+
 impl HeadlessCommandHost for LauncherApp {
     fn execute_headless_command(
         &mut self,

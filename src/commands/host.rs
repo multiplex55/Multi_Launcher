@@ -1,5 +1,7 @@
 use super::{Command, CommandError, CommandInvocation, CommandOutcome};
 use crate::actions::Action;
+use crate::diff::query::DiffOpenPayload;
+use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use chrono::NaiveDate;
 
@@ -87,6 +89,18 @@ pub trait MultiManagerCommandHost {
     fn multi_manager_launcher_should_refocus(&self) -> bool;
 }
 
+pub trait FileSearchCommandHost {
+    fn open_file_search(&mut self);
+    fn cancel_file_search(&mut self);
+    fn set_file_search_mode(&mut self, payload: &FileSearchModePayload);
+    fn start_file_search(&mut self, payload: &FileSearchStartPayload);
+    fn report_file_search_action_error(&mut self, message: String);
+}
+
+pub trait DiffCommandHost {
+    fn open_diff(&mut self, payload: &DiffOpenPayload) -> Result<(), String>;
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -119,6 +133,8 @@ pub trait CommandHost:
     + TodoCommandHost
     + MouseGestureCommandHost
     + MultiManagerCommandHost
+    + FileSearchCommandHost
+    + DiffCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -133,6 +149,8 @@ impl<T> CommandHost for T where
         + TodoCommandHost
         + MouseGestureCommandHost
         + MultiManagerCommandHost
+        + FileSearchCommandHost
+        + DiffCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

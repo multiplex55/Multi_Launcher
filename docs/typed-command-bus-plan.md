@@ -130,18 +130,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: characterize and migrate the full `mm:*` namespace while retaining operational state/lifecycle in existing domain methods.
 - Acceptance: every variant routes through the typed handler; bus contains no implementation logic; async/error/no-history/focus behavior is preserved.
 - Verification: MultiManager launcher/plugin tests and `cargo check`.
-- Commit: `refactor(commands): migrate multi-manager domain` (hash recorded after commit)
+- Commit: `b3e9a34 refactor(commands): migrate multi-manager domain`
 - Verification record: MultiManager selection 246/246, launcher/plugin 14/14, parser/bus 18/18, GUI activation 26/26, dashboard 9/9, and final focused regressions 4/4 passed; `cargo check`, formatting, diff, and raw-route audits passed. Parent review found no remaining scope issue.
 
 ### 12. Migrate File Search and Diff
 
-- Status: pending
+- Status: complete
 - Dependencies: 2, 4, 6
 - Work: reuse typed wire payloads, decode once, preserve malformed wording/claimed behavior/query-override exemption, and remove raw GUI helpers.
 - Acceptance: `handle_file_search_action` and `handle_diff_action` are gone; GUI receives typed payloads; plugin Action strings remain unchanged.
 - Verification: File Search/Diff suites and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate file search and diff` (hash recorded after commit)
+- Verification record: handler 4/4, bus 1/1, parser 17/17, GUI activation 28/28 plus two final focused state checks, File Search 365/365, Diff 143/143, dedicated integrations 47/47, and plugin routing 13/13 passed; `cargo fmt --all --check`, `cargo check`, `git diff --check`, and stale-route/decode audits passed. Parent review found no remaining scope issue.
 
 ### 13. Migrate Screenshot
 

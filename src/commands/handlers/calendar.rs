@@ -342,6 +342,19 @@ mod tests {
             false
         }
     }
+    impl crate::commands::FileSearchCommandHost for Host {
+        fn open_file_search(&mut self) {}
+        fn cancel_file_search(&mut self) {}
+        fn set_file_search_mode(&mut self, _: &crate::file_search::actions::FileSearchModePayload) {
+        }
+        fn start_file_search(&mut self, _: &crate::file_search::actions::FileSearchStartPayload) {}
+        fn report_file_search_action_error(&mut self, _: String) {}
+    }
+    impl crate::commands::DiffCommandHost for Host {
+        fn open_diff(&mut self, _: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
+            Ok(())
+        }
+    }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(
             &mut self,

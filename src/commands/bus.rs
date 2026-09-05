@@ -1,8 +1,8 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_link,
-    handle_mouse_gesture, handle_multi_manager, handle_note, handle_query, handle_simple_dialog,
-    handle_todo,
+    handle_calendar, handle_crop, handle_diff, handle_file_search, handle_headless_gui,
+    handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager, handle_note,
+    handle_query, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -33,6 +33,8 @@ impl CommandBus {
             Command::Todo(command) => handle_todo(host, command, invocation),
             Command::MouseGesture(command) => handle_mouse_gesture(host, command),
             Command::MultiManager(command) => Ok(handle_multi_manager(host, command)),
+            Command::FileSearch(command) => Ok(handle_file_search(host, command)),
+            Command::Diff(command) => handle_diff(host, command),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -62,6 +64,8 @@ mod tests {
         crop_calls: usize,
         note_calls: usize,
         todo_calls: usize,
+        file_search_calls: usize,
+        diff_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -211,6 +215,29 @@ mod tests {
             false
         }
     }
+    impl crate::commands::FileSearchCommandHost for FakeHost {
+        fn open_file_search(&mut self) {
+            self.file_search_calls += 1;
+        }
+        fn cancel_file_search(&mut self) {
+            self.file_search_calls += 1;
+        }
+        fn set_file_search_mode(&mut self, _: &crate::file_search::actions::FileSearchModePayload) {
+            self.file_search_calls += 1;
+        }
+        fn start_file_search(&mut self, _: &crate::file_search::actions::FileSearchStartPayload) {
+            self.file_search_calls += 1;
+        }
+        fn report_file_search_action_error(&mut self, _: String) {
+            self.file_search_calls += 1;
+        }
+    }
+    impl crate::commands::DiffCommandHost for FakeHost {
+        fn open_diff(&mut self, _: &crate::diff::query::DiffOpenPayload) -> Result<(), String> {
+            self.diff_calls += 1;
+            Ok(())
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -358,6 +385,29 @@ mod tests {
                 &mut host,
             )
             .unwrap();
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::FileSearch(
+                    crate::commands::FileSearchCommand::Open,
+                )),
+                &mut host,
+            )
+            .unwrap();
+        CommandBus
+            .dispatch(
+                &invocation(Command::Diff(crate::commands::DiffCommand::Open(
+                    crate::diff::query::DiffOpenPayload {
+                        left: None,
+                        right: None,
+                    },
+                ))),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.file_search_calls, 1);
+        assert_eq!(host.diff_calls, 1);
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus
