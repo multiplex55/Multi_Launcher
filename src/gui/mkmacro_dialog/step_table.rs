@@ -196,6 +196,55 @@ enum Command {
     DebugFrom(u64),
 }
 
+/// Routes only movement keys. The surrounding UI supplies the modal and input
+/// ownership state so this helper can be tested without synthesizing egui
+/// frames.
+fn table_move_command(
+    pressed_keys: &[eframe::egui::Key],
+    modifiers: eframe::egui::Modifiers,
+    editor_open: bool,
+    wants_keyboard_input: bool,
+    pointer_in_use: bool,
+    popup_open: bool,
+    modal_open: bool,
+) -> Option<Command> {
+    if editor_open || wants_keyboard_input || pointer_in_use || popup_open || modal_open {
+        return None;
+    }
+
+    if modifiers.alt && pressed_keys.contains(&eframe::egui::Key::ArrowUp) {
+        Some(Command::Up)
+    } else if modifiers.alt && pressed_keys.contains(&eframe::egui::Key::ArrowDown) {
+        Some(Command::Down)
+    } else if modifiers == eframe::egui::Modifiers::NONE
+        && pressed_keys.contains(&eframe::egui::Key::ArrowUp)
+    {
+        Some(Command::Up)
+    } else if modifiers == eframe::egui::Modifiers::NONE
+        && pressed_keys.contains(&eframe::egui::Key::ArrowDown)
+    {
+        Some(Command::Down)
+    } else {
+        None
+    }
+}
+
+fn table_modal_open(d: &MkMacroDialog) -> bool {
+    d.pending_folder_rename.is_some()
+        || d.pending_delete_folder.is_some()
+        || d.delete_confirmation.is_open()
+        || d.folder_delete_confirmation.is_open()
+        || d.unwrap_confirmation.is_open()
+        || d.hotkey_capture
+        || d.record_hotkey_capture
+        || d.action_catalog_visible
+        || d.structural_insertion.is_some()
+        || d.uia_editor.editor_hidden()
+        || d.image_crop_editor.is_open()
+        || d.window_picker.open
+        || d.launcher_action_picker.open
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuEntry {
     label: &'static str,
@@ -537,8 +586,20 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         }
         d.mark_dirty();
     }
-    // Only route table shortcuts while no modal/editor or text edit owns input.
-    if d.action_editor.draft.is_none() && !ui.ctx().wants_keyboard_input() {
+    // Only route table shortcuts while no modal/editor, focused control, active
+    // pointer drag, popup, or context menu owns input.
+    let editor_open = d.action_editor.draft.is_some();
+    let wants_keyboard_input = ui.ctx().wants_keyboard_input();
+    let pointer_in_use = ui.ctx().is_using_pointer();
+    let popup_open =
+        ui.ctx().memory(|memory| memory.any_popup_open()) || ui.ctx().is_context_menu_open();
+    let modal_open = table_modal_open(d);
+    if d.action_editor.draft.is_none()
+        && !wants_keyboard_input
+        && !pointer_in_use
+        && !popup_open
+        && !modal_open
+    {
         ui.input(|i| {
             if i.key_pressed(eframe::egui::Key::Enter) {
                 if let Some(id) = d.selection.ids.iter().next() {
@@ -548,10 +609,20 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                 command = Some(Command::Delete)
             } else if i.modifiers.ctrl && i.key_pressed(eframe::egui::Key::D) {
                 command = Some(Command::Duplicate)
-            } else if i.modifiers.alt && i.key_pressed(eframe::egui::Key::ArrowUp) {
-                command = Some(Command::Up)
-            } else if i.modifiers.alt && i.key_pressed(eframe::egui::Key::ArrowDown) {
-                command = Some(Command::Down)
+            } else {
+                let pressed_keys = [eframe::egui::Key::ArrowUp, eframe::egui::Key::ArrowDown]
+                    .into_iter()
+                    .filter(|key| i.key_pressed(*key))
+                    .collect::<Vec<_>>();
+                command = table_move_command(
+                    &pressed_keys,
+                    i.modifiers,
+                    editor_open,
+                    wants_keyboard_input,
+                    pointer_in_use,
+                    popup_open,
+                    modal_open,
+                );
             }
         });
     }
@@ -701,6 +772,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     let ids = d.selection.ids.clone();
     let mut new_selection = None;
     let mut mutation_error = None;
+    let movement_before = matches!(c, Command::Up | Command::Down).then(|| d.draft.clone());
     if let Some(m) = d.selected_macro_mut() {
         match c {
             Command::Duplicate => {
@@ -762,7 +834,12 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
         d.selection.ids = s;
         d.selection.anchor = None;
     }
-    d.mark_dirty();
+    if movement_before
+        .as_ref()
+        .is_none_or(|before| before != &d.draft)
+    {
+        d.mark_dirty();
+    }
 }
 
 fn delete_selection(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
@@ -829,9 +906,47 @@ fn move_selection_structurally(
     down: bool,
 ) -> Result<BTreeSet<u64>, String> {
     let expanded = expanded_move_ids(steps, ids)?;
-    let before = crate::mkmacro::analyze_structure(steps).diagnostics.len();
+    let analysis = crate::mkmacro::analyze_structure(steps);
+    let before = analysis.diagnostics.len();
+    let structural_context: Vec<_> = ids
+        .iter()
+        .filter_map(|id| {
+            let step = steps.iter().find(|step| step.id == *id)?;
+            if !step.action.is_block_marker() {
+                return None;
+            }
+            let block = analysis.block_for_marker(*id)?;
+            Some((
+                *id,
+                block.opener_id,
+                analysis
+                    .containing_block(block.opener_id)
+                    .map(|parent| parent.opener_id),
+            ))
+        })
+        .collect();
     let mut candidate = steps.to_vec();
-    move_steps(&mut candidate, &expanded, down);
+    loop {
+        let previous = candidate.clone();
+        move_steps(&mut candidate, &expanded, down);
+        if candidate == previous {
+            break;
+        }
+        let candidate_analysis = crate::mkmacro::analyze_structure(&candidate);
+        let crossed_neighbor = structural_context.iter().any(|(id, block_id, parent)| {
+            let Some(block) = candidate_analysis.block_for_marker(*id) else {
+                return true;
+            };
+            block.opener_id != *block_id
+                || candidate_analysis
+                    .containing_block(block.opener_id)
+                    .map(|candidate_parent| candidate_parent.opener_id)
+                    != *parent
+        });
+        if !crossed_neighbor {
+            break;
+        }
+    }
     if crate::mkmacro::analyze_structure(&candidate)
         .diagnostics
         .len()
@@ -886,6 +1001,27 @@ mod layout_tests {
                 ..Default::default()
             }),
         )
+    }
+
+    fn row_ids(rows: &[MkStep]) -> Vec<u64> {
+        rows.iter().map(|row| row.id).collect()
+    }
+
+    fn selected_row_ids(rows: &[MkStep], ids: &BTreeSet<u64>) -> Vec<u64> {
+        rows.iter()
+            .filter(|row| ids.contains(&row.id))
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn dialog_with_steps(steps: Vec<MkStep>) -> (tempfile::TempDir, MkMacroDialog) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = MkMacroDialog::new(std::sync::Arc::new(store));
+        dialog.create_macro();
+        dialog.selected_macro_mut().unwrap().steps = steps;
+        dialog.dirty = false;
+        (directory, dialog)
     }
 
     #[test]
@@ -989,6 +1125,254 @@ mod layout_tests {
         );
         let mut malformed = vec![step(1, MkAction::RepeatStart { count: 1 }), delay(2)];
         assert!(move_selection_structurally(&mut malformed, &BTreeSet::from([1]), true).is_err());
+    }
+
+    #[test]
+    fn movement_routes_single_ordinary_selection_both_directions() {
+        let mut rows = vec![delay(1), delay(2), delay(3)];
+        let selected = BTreeSet::from([2]);
+
+        assert_eq!(
+            move_selection_structurally(&mut rows, &selected, false).unwrap(),
+            selected
+        );
+        assert_eq!(row_ids(&rows), vec![2, 1, 3]);
+
+        assert_eq!(
+            move_selection_structurally(&mut rows, &selected, true).unwrap(),
+            selected
+        );
+        assert_eq!(row_ids(&rows), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn movement_preserves_contiguous_and_non_contiguous_selection_order() {
+        let contiguous = BTreeSet::from([2, 3]);
+        let mut rows = vec![delay(1), delay(2), delay(3), delay(4)];
+        assert_eq!(
+            move_selection_structurally(&mut rows, &contiguous, false).unwrap(),
+            contiguous
+        );
+        assert_eq!(row_ids(&rows), vec![2, 3, 1, 4]);
+        assert_eq!(selected_row_ids(&rows, &contiguous), vec![2, 3]);
+
+        let mut rows = vec![delay(1), delay(2), delay(3), delay(4), delay(5)];
+        let non_contiguous = BTreeSet::from([2, 4]);
+        assert_eq!(
+            move_selection_structurally(&mut rows, &non_contiguous, false).unwrap(),
+            non_contiguous
+        );
+        assert_eq!(row_ids(&rows), vec![2, 1, 4, 3, 5]);
+        assert_eq!(selected_row_ids(&rows, &non_contiguous), vec![2, 4]);
+
+        let mut rows = vec![delay(1), delay(2), delay(3), delay(4), delay(5)];
+        assert_eq!(
+            move_selection_structurally(&mut rows, &non_contiguous, true).unwrap(),
+            non_contiguous
+        );
+        assert_eq!(row_ids(&rows), vec![1, 3, 2, 5, 4]);
+        assert_eq!(selected_row_ids(&rows, &non_contiguous), vec![2, 4]);
+    }
+
+    #[test]
+    fn movement_expands_if_else_and_loop_ranges_from_any_marker() {
+        let if_rows = || {
+            vec![
+                delay(9),
+                step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+                delay(2),
+                step(3, MkAction::Else),
+                delay(4),
+                step(5, MkAction::EndIf),
+                delay(10),
+            ]
+        };
+        for selected_marker in [1, 3, 5] {
+            let mut rows = if_rows();
+            let selected =
+                move_selection_structurally(&mut rows, &BTreeSet::from([selected_marker]), false)
+                    .unwrap();
+            assert_eq!(selected, BTreeSet::from([1, 2, 3, 4, 5]));
+            assert_eq!(row_ids(&rows), vec![1, 2, 3, 4, 5, 9, 10]);
+        }
+
+        for (opener, closer) in [
+            (MkAction::RepeatStart { count: 2 }, MkAction::RepeatEnd),
+            (
+                MkAction::WhileStart {
+                    condition: MkCondition::All { conditions: vec![] },
+                },
+                MkAction::WhileEnd,
+            ),
+        ] {
+            for selected_marker in [1, 3] {
+                let mut rows = vec![
+                    delay(9),
+                    step(1, opener.clone()),
+                    delay(2),
+                    step(3, closer.clone()),
+                    delay(10),
+                ];
+                let selected = move_selection_structurally(
+                    &mut rows,
+                    &BTreeSet::from([selected_marker]),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(selected, BTreeSet::from([1, 2, 3]));
+                assert_eq!(row_ids(&rows), vec![1, 2, 3, 9, 10]);
+            }
+        }
+    }
+
+    #[test]
+    fn movement_handles_nested_blocks_and_neighboring_structures() {
+        let mut nested = vec![
+            delay(0),
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            step(2, MkAction::RepeatStart { count: 2 }),
+            delay(3),
+            step(4, MkAction::RepeatEnd),
+            delay(5),
+            step(6, MkAction::EndIf),
+            delay(7),
+        ];
+        let inner = move_selection_structurally(&mut nested, &BTreeSet::from([4]), true).unwrap();
+        assert_eq!(inner, BTreeSet::from([2, 3, 4]));
+        assert_eq!(row_ids(&nested), vec![0, 1, 5, 2, 3, 4, 6, 7]);
+
+        let mut nested = vec![
+            delay(0),
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            step(2, MkAction::RepeatStart { count: 2 }),
+            delay(3),
+            step(4, MkAction::RepeatEnd),
+            delay(5),
+            step(6, MkAction::EndIf),
+            delay(7),
+        ];
+        let outer = move_selection_structurally(&mut nested, &BTreeSet::from([1]), false).unwrap();
+        assert_eq!(outer, BTreeSet::from([1, 2, 3, 4, 5, 6]));
+        assert_eq!(row_ids(&nested), vec![1, 2, 3, 4, 5, 6, 0, 7]);
+
+        let mut neighboring = vec![
+            delay(9),
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            delay(2),
+            step(3, MkAction::EndIf),
+            step(4, MkAction::RepeatStart { count: 2 }),
+            delay(5),
+            step(6, MkAction::RepeatEnd),
+            delay(10),
+        ];
+        move_selection_structurally(&mut neighboring, &BTreeSet::from([3]), true).unwrap();
+        assert_eq!(row_ids(&neighboring), vec![9, 4, 5, 6, 1, 2, 3, 10]);
+    }
+
+    #[test]
+    fn movement_at_legal_boundaries_is_unchanged() {
+        let mut rows = vec![delay(1), delay(2), delay(3)];
+        let before = row_ids(&rows);
+        assert_eq!(
+            move_selection_structurally(&mut rows, &BTreeSet::from([1]), false).unwrap(),
+            BTreeSet::from([1])
+        );
+        assert_eq!(row_ids(&rows), before);
+        assert_eq!(
+            move_selection_structurally(&mut rows, &BTreeSet::from([3]), true).unwrap(),
+            BTreeSet::from([3])
+        );
+        assert_eq!(row_ids(&rows), before);
+    }
+
+    #[test]
+    fn malformed_movement_is_transactional_and_does_not_dirty_the_macro() {
+        let malformed = vec![step(1, MkAction::RepeatStart { count: 1 }), delay(2)];
+        let before = malformed.clone();
+        let mut rows = malformed.clone();
+        assert!(move_selection_structurally(&mut rows, &BTreeSet::from([1]), true).is_err());
+        assert_eq!(rows, before);
+
+        let (_directory, mut dialog) = dialog_with_steps(malformed);
+        dialog.selection.ids = BTreeSet::from([1]);
+        let selection_before = dialog.selection.clone();
+        apply_command(&mut dialog, Command::Down, false);
+        assert_eq!(dialog.selected_macro().unwrap().steps, before);
+        assert_eq!(dialog.selection.ids, selection_before.ids);
+        assert!(!dialog.dirty);
+        assert!(dialog.command_error.is_some());
+    }
+
+    #[test]
+    fn table_move_shortcuts_route_plain_and_legacy_alt_keys_only_when_unowned() {
+        use eframe::egui::{Key, Modifiers};
+
+        for (key, modifiers, expected) in [
+            (Key::ArrowUp, Modifiers::NONE, Command::Up),
+            (Key::ArrowDown, Modifiers::NONE, Command::Down),
+            (Key::ArrowUp, Modifiers::ALT, Command::Up),
+            (Key::ArrowDown, Modifiers::ALT, Command::Down),
+        ] {
+            assert_eq!(
+                table_move_command(&[key], modifiers, false, false, false, false, false,),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            table_move_command(
+                &[Key::F1],
+                Modifiers::NONE,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+        for (editor_open, wants_keyboard_input, pointer_in_use, popup_open, modal_open) in [
+            (true, false, false, false, false),
+            (false, true, false, false, false),
+            (false, false, true, false, false),
+            (false, false, false, true, false),
+            (false, false, false, false, true),
+        ] {
+            assert_eq!(
+                table_move_command(
+                    &[Key::ArrowUp],
+                    Modifiers::NONE,
+                    editor_open,
+                    wants_keyboard_input,
+                    pointer_in_use,
+                    popup_open,
+                    modal_open,
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn plain_and_alt_shortcuts_apply_the_same_up_and_down_commands() {
+        use eframe::egui::{Key, Modifiers};
+
+        let apply_shortcut = |key, modifiers| {
+            let (_directory, mut dialog) = dialog_with_steps(vec![delay(1), delay(2), delay(3)]);
+            dialog.selection.ids = BTreeSet::from([2]);
+            let command = table_move_command(&[key], modifiers, false, false, false, false, false)
+                .expect("shortcut should route to a movement command");
+            apply_command(&mut dialog, command, false);
+            row_ids(&dialog.selected_macro().unwrap().steps)
+        };
+
+        assert_eq!(
+            apply_shortcut(Key::ArrowUp, Modifiers::NONE),
+            apply_shortcut(Key::ArrowUp, Modifiers::ALT)
+        );
+        assert_eq!(
+            apply_shortcut(Key::ArrowDown, Modifiers::NONE),
+            apply_shortcut(Key::ArrowDown, Modifiers::ALT)
+        );
     }
 
     fn labels(rows: &[MkStep], id: u64) -> Vec<(&'static str, bool)> {
