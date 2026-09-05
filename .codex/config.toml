@@ -1,0 +1,11 @@
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+
+# When explicitly operating in plan mode, spend more reasoning.
+plan_mode_reasoning_effort = "high"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+default_subagent_model = "gpt-5.6-sol"
+default_subagent_reasoning_effort = "medium"
