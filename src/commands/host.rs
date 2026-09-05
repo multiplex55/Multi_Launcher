@@ -1,5 +1,6 @@
 use super::{Command, CommandError, CommandInvocation, CommandOutcome};
 use crate::actions::Action;
+use chrono::NaiveDate;
 
 pub trait LauncherCommandHost {
     fn launcher_is_visible(&self) -> bool;
@@ -33,6 +34,13 @@ pub trait CropCommandHost {
     fn crop_screenshot(&mut self);
 }
 
+pub trait CalendarCommandHost {
+    fn calendar_dashboard_enabled(&self) -> bool;
+    fn calendar_preserve_command(&self) -> bool;
+    fn open_calendar_popover(&mut self, date: NaiveDate);
+    fn refresh_calendar_cache(&mut self);
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -57,7 +65,12 @@ pub trait LegacyCommandHost {
 }
 
 pub trait CommandHost:
-    LauncherCommandHost + DialogCommandHost + CropCommandHost + HeadlessCommandHost + LegacyCommandHost
+    LauncherCommandHost
+    + DialogCommandHost
+    + CropCommandHost
+    + CalendarCommandHost
+    + HeadlessCommandHost
+    + LegacyCommandHost
 {
 }
 
@@ -65,6 +78,7 @@ impl<T> CommandHost for T where
     T: LauncherCommandHost
         + DialogCommandHost
         + CropCommandHost
+        + CalendarCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

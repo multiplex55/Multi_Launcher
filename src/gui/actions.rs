@@ -145,228 +145,7 @@ impl LauncherApp {
         let mut refresh = false;
         let mut set_focus = false;
         let mut command_changed_query = false;
-        if a.action == "calendar:open" || a.action.starts_with("calendar:open:") {
-            let view = a.action.strip_prefix("calendar:open:").unwrap_or("default");
-            let now = chrono::Local::now().naive_local();
-            let mut state =
-                crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
-                    .unwrap_or_default();
-            state.last_opened = Some(now);
-            state.last_viewed_day = Some(now.date());
-            if let Err(err) = crate::plugins::calendar::save_state(
-                crate::plugins::calendar::CALENDAR_STATE_FILE,
-                &state,
-            ) {
-                self.add_error_toast(format!("Calendar state error: {err}"));
-            }
-            if self.dashboard_enabled {
-                self.query.clear();
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-            }
-            self.open_calendar_popover(Some(now.date()));
-            if self.enable_toasts {
-                let label = if view == "default" {
-                    "Opened calendar".to_string()
-                } else {
-                    format!("Opened calendar ({view} view)")
-                };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: label.into(),
-                        kind: ToastKind::Success,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
-        } else if let Some(reference) = a.action.strip_prefix("calendar:jump:") {
-            let now = chrono::Local::now().naive_local();
-            match crate::plugins::calendar::parse_date_reference(reference, now.date()) {
-                Some(date) => {
-                    let mut state = crate::plugins::calendar::load_state(
-                        crate::plugins::calendar::CALENDAR_STATE_FILE,
-                    )
-                    .unwrap_or_default();
-                    state.last_opened = Some(now);
-                    state.last_viewed_day = Some(date);
-                    if let Err(err) = crate::plugins::calendar::save_state(
-                        crate::plugins::calendar::CALENDAR_STATE_FILE,
-                        &state,
-                    ) {
-                        self.add_error_toast(format!("Calendar state error: {err}"));
-                    }
-                    if self.dashboard_enabled {
-                        self.query.clear();
-                        command_changed_query = true;
-                        refresh = true;
-                        set_focus = true;
-                    }
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Jumped to {}", date.format("%Y-%m-%d")).into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                None => {
-                    self.add_error_toast(format!("Invalid date reference: {reference}"));
-                }
-            }
-        } else if let Some(input) = a.action.strip_prefix("calendar:add:") {
-            let now = chrono::Local::now().naive_local();
-            match crate::plugins::calendar::parse_calendar_add(input, now) {
-                Ok(request) => match crate::plugins::calendar::add_event(request, now) {
-                    Ok(event) => {
-                        self.dashboard_data_cache.refresh_calendar();
-                        if self.preserve_command {
-                            self.query = "cal add ".into();
-                        } else {
-                            self.query.clear();
-                        }
-                        command_changed_query = true;
-                        refresh = true;
-                        set_focus = true;
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: format!("Added {}", event.title).into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        self.add_error_toast(format!("Calendar add failed: {err}"));
-                    }
-                },
-                Err(err) => {
-                    self.add_error_toast(err);
-                }
-            }
-        } else if let Some(input) = a.action.strip_prefix("calendar:search:") {
-            match crate::plugins::calendar::parse_calendar_search(input) {
-                Ok(request) => {
-                    let results = crate::plugins::calendar::search_events(&request);
-                    let actions: Vec<Action> = results
-                        .into_iter()
-                        .map(|event| Action {
-                            label: crate::plugins::calendar::format_event_label(&event),
-                            desc: "Calendar".into(),
-                            action: format!("calendar:jump:{}", event.start.format("%Y-%m-%d")),
-                            args: None,
-                        })
-                        .collect();
-                    self.query = format!("cal find {input}");
-                    self.results = actions;
-                    self.selected = None;
-                    self.last_search_query = self.query.clone();
-                    self.last_results_valid = true;
-                    self.update_suggestions();
-                    command_changed_query = true;
-                    set_focus = true;
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Found {} events", self.results.len()).into(),
-                                kind: ToastKind::Info,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                Err(err) => {
-                    self.add_error_toast(err);
-                }
-            }
-        } else if a.action == "calendar:upcoming" {
-            let now = chrono::Local::now().naive_local();
-            let events = crate::plugins::calendar::CALENDAR_DATA
-                .read()
-                .map(|d| d.clone())
-                .unwrap_or_default();
-            let until = now + chrono::Duration::days(7);
-            let instances = crate::plugins::calendar::expand_instances(&events, now, until, 50);
-            let titles: std::collections::HashMap<_, _> =
-                events.into_iter().map(|e| (e.id, e.title)).collect();
-            self.query = "cal upcoming".into();
-            self.results = instances
-                .into_iter()
-                .map(|instance| {
-                    let title = titles
-                        .get(&instance.source_event_id)
-                        .cloned()
-                        .unwrap_or_else(|| "Calendar event".to_string());
-                    let label = if instance.all_day {
-                        format!("{} ({} all-day)", title, instance.start.format("%Y-%m-%d"))
-                    } else {
-                        format!(
-                            "{} ({} {})",
-                            title,
-                            instance.start.format("%Y-%m-%d"),
-                            instance.start.format("%H:%M")
-                        )
-                    };
-                    Action {
-                        label,
-                        desc: "Calendar".into(),
-                        action: format!("calendar:jump:{}", instance.start.format("%Y-%m-%d")),
-                        args: None,
-                    }
-                })
-                .collect();
-            self.selected = None;
-            self.last_search_query = self.query.clone();
-            self.last_results_valid = true;
-            self.update_suggestions();
-            command_changed_query = true;
-            set_focus = true;
-        } else if let Some(input) = a.action.strip_prefix("calendar:snooze:") {
-            let mut parts = input.split_whitespace();
-            if let (Some(duration_str), Some(event_id)) = (parts.next(), parts.next()) {
-                if let Some(duration) = crate::plugins::calendar::parse_duration_spec(duration_str)
-                {
-                    match crate::plugins::calendar::snooze_event(event_id, duration) {
-                        Ok(true) => {
-                            self.dashboard_data_cache.refresh_calendar();
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Snoozed event {event_id}").into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        Ok(false) => {
-                            self.add_error_toast(format!("Event not found: {event_id}"));
-                        }
-                        Err(err) => {
-                            self.add_error_toast(format!("Snooze failed: {err}"));
-                        }
-                    }
-                } else {
-                    self.add_error_toast("Invalid snooze duration (use 10m, 1h, 2d)");
-                }
-            } else {
-                self.add_error_toast("Provide a duration and event id to snooze");
-            }
-        } else if a.action == "note:dialog" {
+        if a.action == "note:dialog" {
             self.notes_dialog.open();
         } else if a.action == "note:graph_dialog" {
             self.note_graph_dialog.open_with_args(a.args.as_deref());
@@ -1421,6 +1200,92 @@ mod tests {
             );
             assert!(!app.usage.contains_key(raw), "{raw} recorded history");
         }
+    }
+    #[test]
+    fn typed_calendar_search_preserves_results_metadata_and_no_history() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "before".into();
+        app.selected = Some(3);
+        app.last_results_valid = false;
+
+        let action = dialog_action("calendar:search:definitely-unmatched-calendar-query");
+        app.activate_action(action, None, ActivationSource::Dashboard);
+
+        assert_eq!(app.query, "cal find definitely-unmatched-calendar-query");
+        assert!(app.results.is_empty());
+        assert_eq!(app.selected, None);
+        assert_eq!(app.last_search_query, app.query);
+        assert!(app.last_results_valid);
+        assert!(
+            !app.usage
+                .contains_key("calendar:search:definitely-unmatched-calendar-query")
+        );
+    }
+
+    #[test]
+    fn typed_calendar_open_persists_state_and_ignores_generic_clear_hide_policy() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.dashboard_enabled = false;
+        app.query = "keep calendar query".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        app.activate_action(
+            dialog_action("calendar:open:week"),
+            None,
+            ActivationSource::Click,
+        );
+
+        let state =
+            crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
+                .unwrap();
+        let today = chrono::Local::now().naive_local().date();
+        assert_eq!(state.last_viewed_day, Some(today));
+        assert!(state.last_opened.is_some());
+        assert!(app.calendar_popover_open);
+        assert_eq!(app.calendar_selected_date, Some(today));
+        assert_eq!(app.query, "keep calendar query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.usage.contains_key("calendar:open:week"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn typed_calendar_errors_use_existing_error_toast_gating_without_inline_error() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = false;
+
+        app.activate_action(
+            dialog_action("calendar:jump:not-a-date"),
+            None,
+            ActivationSource::Enter,
+        );
+        assert!(app.test_toast_messages.is_empty());
+        assert!(app.error.is_none());
+
+        app.show_error_toasts = true;
+        app.activate_action(
+            dialog_action("calendar:jump:not-a-date"),
+            None,
+            ActivationSource::Enter,
+        );
+        assert_eq!(
+            app.test_toast_messages.last().map(String::as_str),
+            Some("Invalid date reference: not-a-date")
+        );
+        assert!(app.error.is_none());
+        assert!(!app.usage.contains_key("calendar:jump:not-a-date"));
     }
     fn note(title: &str, slug: &str, content: &str) -> Note {
         Note {

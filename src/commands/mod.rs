@@ -13,8 +13,8 @@ pub mod handlers;
 pub use bus::CommandBus;
 pub use error::CommandError;
 pub use host::{
-    CommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost, LauncherCommandHost,
-    LegacyCommandHost,
+    CalendarCommandHost, CommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
+    LauncherCommandHost, LegacyCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

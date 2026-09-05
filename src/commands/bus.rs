@@ -1,6 +1,7 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_crop, handle_headless_gui, handle_launcher, handle_query, handle_simple_dialog,
+    handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_query,
+    handle_simple_dialog,
 };
 
 #[derive(Debug, Default)]
@@ -25,6 +26,7 @@ impl CommandBus {
             Command::Launcher(command) => Ok(handle_launcher(host, command)),
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
+            Command::Calendar(command) => Ok(handle_calendar(host, command)),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -39,8 +41,9 @@ mod tests {
     use super::*;
     use crate::actions::Action;
     use crate::commands::{
-        ActivationSource, CropCommandHost, DialogCommandHost, HeadlessCommandHost, LauncherCommand,
-        LauncherCommandHost, LegacyCommandHost, QueryCommand, QueryPolicy, VisibilityPolicy,
+        ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
+        HeadlessCommandHost, LauncherCommand, LauncherCommandHost, LegacyCommandHost, QueryCommand,
+        QueryPolicy, VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -129,6 +132,16 @@ mod tests {
             self.crop_calls += 1;
         }
     }
+    impl CalendarCommandHost for FakeHost {
+        fn calendar_dashboard_enabled(&self) -> bool {
+            false
+        }
+        fn calendar_preserve_command(&self) -> bool {
+            false
+        }
+        fn open_calendar_popover(&mut self, _: chrono::NaiveDate) {}
+        fn refresh_calendar_cache(&mut self) {}
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -212,6 +225,22 @@ mod tests {
             .unwrap();
         assert_eq!(host.dialog_calls, 1);
         assert_eq!(host.crop_calls, 1);
+        assert_eq!(host.legacy_calls, 0);
+
+        let calendar = CommandBus
+            .dispatch(
+                &invocation(Command::Calendar(
+                    crate::commands::CalendarCommand::Search {
+                        input: "definitely-unmatched-calendar-query".into(),
+                    },
+                )),
+                &mut host,
+            )
+            .unwrap();
+        assert!(matches!(
+            calendar.results,
+            crate::commands::ResultsPolicy::Replace(_)
+        ));
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus

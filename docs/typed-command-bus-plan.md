@@ -80,18 +80,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: migrate simple dialogs, settings/theme/convert/crop commands through typed host methods.
 - Acceptance: no scoped raw string checks; hidden-launcher panel restoration and history/clear/hide exemptions are preserved.
 - Verification: dialog/settings/theme/crop and migrated-action tests plus `cargo check`.
-- Commit: `refactor(commands): migrate interactive dialogs and crop` (hash recorded after commit)
+- Commit: `cbbb400 refactor(commands): migrate interactive dialogs and crop`
 - Verification record: `cargo check`, formatting, and diff checks passed; handler/bus 5/5, GUI lifecycle 5/5, help/convert/timer/shell/storage 67/67, macro/MkMacro/todo/clipboard/system 53/53, settings/theme 14/14, and crop 16/16. Review corrected generic clear/hide policy and expanded Stage C coverage to all assigned simple dialogs; stale-route audit passed.
 
 ### 7. Migrate Calendar
 
-- Status: pending
+- Status: complete
 - Dependencies: 4, 6
 - Work: characterize then migrate open/jump/add/search/upcoming/snooze together, preserving persistence, relative-time evaluation, results, focus, toast/error, and no-history behavior.
 - Acceptance: one typed Calendar handler owns the family; no Calendar raw parsing remains; schemas remain compatible.
 - Verification: Calendar Nextest tests and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate calendar domain` (hash recorded after commit)
+- Verification record: Calendar handler 3/3, GUI parity 3/3, bus 1/1, activation 21/21, dashboard 37/37, and omni-search 13/13 passed; `cargo check`, formatting, diff, and zero-stale-route audits passed. Parent review confirmed non-fatal persistence errors, result metadata, execution-time relative dates, and error-toast gating.
 
 ### 8. Migrate Notes and linking
 

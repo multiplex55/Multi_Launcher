@@ -30,13 +30,21 @@ pub enum ToastPolicy {
     Copied(String),
     Info(String),
     Success(String),
+    Error(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResultsPolicy {
+    Keep,
+    Replace(Vec<crate::actions::Action>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommandOutcome {
     pub query: QueryPolicy,
     pub search: bool,
     pub invalidate_results: bool,
+    pub results: ResultsPolicy,
     pub visibility: VisibilityPolicy,
     pub restore: bool,
     pub focus: bool,
@@ -53,6 +61,7 @@ impl Default for CommandOutcome {
             query: QueryPolicy::Keep,
             search: false,
             invalidate_results: false,
+            results: ResultsPolicy::Keep,
             visibility: VisibilityPolicy::Keep,
             restore: false,
             focus: false,

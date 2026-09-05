@@ -1,9 +1,9 @@
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost, DialogCommandHost,
-    FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost, LegacyCommandHost,
-    QueryPolicy, ToastPolicy, VisibilityPolicy,
+    CalendarCommandHost, Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost,
+    DialogCommandHost, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
+    LegacyCommandHost, QueryPolicy, ResultsPolicy, ToastPolicy, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -99,6 +99,24 @@ impl DialogCommandHost for LauncherApp {
 
     fn open_cpu_list_dialog(&mut self, count: usize) {
         self.cpu_list_dialog.open(count);
+    }
+}
+
+impl CalendarCommandHost for LauncherApp {
+    fn calendar_dashboard_enabled(&self) -> bool {
+        self.dashboard_enabled
+    }
+
+    fn calendar_preserve_command(&self) -> bool {
+        self.preserve_command
+    }
+
+    fn open_calendar_popover(&mut self, date: chrono::NaiveDate) {
+        LauncherApp::open_calendar_popover(self, Some(date));
+    }
+
+    fn refresh_calendar_cache(&mut self) {
+        self.dashboard_data_cache.refresh_calendar();
     }
 }
 
@@ -216,6 +234,13 @@ impl LauncherApp {
                 query.starts_with("timer list") || query.starts_with("alarm list");
             self.query = query;
         }
+        if let ResultsPolicy::Replace(results) = outcome.results {
+            self.results = results;
+            self.selected = None;
+            self.last_search_query = self.query.clone();
+            self.last_results_valid = true;
+            self.update_suggestions();
+        }
         if outcome.invalidate_results {
             self.last_results_valid = false;
         }
@@ -249,8 +274,12 @@ impl LauncherApp {
         if let FavoriteLogPolicy::Ran { label, command } = outcome.favorite_log {
             tracing::info!(fav = %label, command = %command, "ran favorite");
         }
-        if self.enable_toasts {
-            for toast in outcome.toasts {
+        for toast in outcome.toasts {
+            if let ToastPolicy::Error(message) = toast {
+                self.add_error_toast(message);
+                continue;
+            }
+            if self.enable_toasts {
                 let (text, kind) = match toast {
                     ToastPolicy::Launched(label) => {
                         (format!("Launched {label}"), ToastKind::Success)
@@ -258,6 +287,7 @@ impl LauncherApp {
                     ToastPolicy::Copied(label) => (format!("Copied {label}"), ToastKind::Success),
                     ToastPolicy::Info(message) => (message, ToastKind::Info),
                     ToastPolicy::Success(message) => (message, ToastKind::Success),
+                    ToastPolicy::Error(_) => unreachable!(),
                 };
                 push_toast(
                     &mut self.toasts,
