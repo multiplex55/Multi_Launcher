@@ -223,7 +223,7 @@ fn success_toasts(invocation: &CommandInvocation) -> Vec<ToastPolicy> {
     toasts
 }
 
-fn is_external_favorite(invocation: &CommandInvocation) -> bool {
+pub(super) fn is_external_favorite(invocation: &CommandInvocation) -> bool {
     invocation.original_action.desc == "Fav"
         && !matches!(
             invocation.command,
@@ -235,7 +235,7 @@ fn is_external_favorite(invocation: &CommandInvocation) -> bool {
         )
 }
 
-fn favorite_log(invocation: &CommandInvocation) -> FavoriteLogPolicy {
+pub(super) fn favorite_log(invocation: &CommandInvocation) -> FavoriteLogPolicy {
     if is_external_favorite(invocation) {
         FavoriteLogPolicy::Ran {
             label: invocation.original_action.label.clone(),

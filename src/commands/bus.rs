@@ -1,7 +1,7 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_query,
-    handle_simple_dialog,
+    handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_link, handle_note,
+    handle_query, handle_simple_dialog,
 };
 
 #[derive(Debug, Default)]
@@ -27,6 +27,8 @@ impl CommandBus {
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::Calendar(command) => Ok(handle_calendar(host, command)),
+            Command::Note(command) => handle_note(host, command, invocation),
+            Command::Link(command) => handle_link(host, command),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -42,8 +44,8 @@ mod tests {
     use crate::actions::Action;
     use crate::commands::{
         ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
-        HeadlessCommandHost, LauncherCommand, LauncherCommandHost, LegacyCommandHost, QueryCommand,
-        QueryPolicy, VisibilityPolicy,
+        HeadlessCommandHost, LauncherCommand, LauncherCommandHost, LegacyCommandHost,
+        NoteCommandHost, QueryCommand, QueryPolicy, VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -53,6 +55,7 @@ mod tests {
         headless_calls: usize,
         dialog_calls: usize,
         crop_calls: usize,
+        note_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -141,6 +144,18 @@ mod tests {
         }
         fn open_calendar_popover(&mut self, _: chrono::NaiveDate) {}
         fn refresh_calendar_cache(&mut self) {}
+    }
+    impl NoteCommandHost for FakeHost {
+        fn open_notes_dialog(&mut self) {
+            self.note_calls += 1;
+        }
+        fn open_note_graph_dialog(&mut self, _: Option<&str>) {}
+        fn open_unused_note_assets_dialog(&mut self) {}
+        fn open_note_panel(&mut self, _: &str, _: Option<&str>) {}
+        fn open_note_tags(&mut self) {}
+        fn open_note_link(&mut self, _: &str) {}
+        fn wrap_note_plain_links(&mut self, _: &str) {}
+        fn delete_note(&mut self, _: &str) {}
     }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
@@ -241,6 +256,27 @@ mod tests {
             calendar.results,
             crate::commands::ResultsPolicy::Replace(_)
         ));
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::Note(crate::commands::NoteCommand::Dialog)),
+                &mut host,
+            )
+            .unwrap();
+        let linked_todo = CommandBus
+            .dispatch(
+                &invocation(Command::Link(crate::commands::LinkCommand::Open {
+                    id: "link://todo/7".into(),
+                })),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.note_calls, 1);
+        assert_eq!(
+            linked_todo.query,
+            QueryPolicy::Set("todo links id:7".into())
+        );
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus

@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use crate::commands::{
     CalendarCommandHost, Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost,
     DialogCommandHost, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    LegacyCommandHost, QueryPolicy, ResultsPolicy, ToastPolicy, VisibilityPolicy,
+    LegacyCommandHost, NoteCommandHost, QueryPolicy, ResultsPolicy, ToastPolicy, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -117,6 +117,40 @@ impl CalendarCommandHost for LauncherApp {
 
     fn refresh_calendar_cache(&mut self) {
         self.dashboard_data_cache.refresh_calendar();
+    }
+}
+
+impl NoteCommandHost for LauncherApp {
+    fn open_notes_dialog(&mut self) {
+        self.notes_dialog.open();
+    }
+
+    fn open_note_graph_dialog(&mut self, args: Option<&str>) {
+        self.note_graph_dialog.open_with_args(args);
+    }
+
+    fn open_unused_note_assets_dialog(&mut self) {
+        self.unused_assets_dialog.open();
+    }
+
+    fn open_note_panel(&mut self, slug: &str, template: Option<&str>) {
+        LauncherApp::open_note_panel(self, slug, template);
+    }
+
+    fn open_note_tags(&mut self) {
+        LauncherApp::open_note_tags(self);
+    }
+
+    fn open_note_link(&mut self, link: &str) {
+        LauncherApp::open_note_link(self, link);
+    }
+
+    fn wrap_note_plain_links(&mut self, slug: &str) {
+        LauncherApp::wrap_note_plain_links(self, slug);
+    }
+
+    fn delete_note(&mut self, slug: &str) {
+        LauncherApp::delete_note(self, slug);
     }
 }
 

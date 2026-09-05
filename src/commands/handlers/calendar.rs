@@ -231,7 +231,7 @@ mod tests {
     use super::*;
     use crate::commands::{
         CalendarCommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
-        LauncherCommandHost, LegacyCommandHost,
+        LauncherCommandHost, LegacyCommandHost, NoteCommandHost,
     };
 
     #[derive(Default)]
@@ -261,6 +261,16 @@ mod tests {
         fn refresh_calendar_cache(&mut self) {
             self.refreshes += 1;
         }
+    }
+    impl NoteCommandHost for Host {
+        fn open_notes_dialog(&mut self) {}
+        fn open_note_graph_dialog(&mut self, _: Option<&str>) {}
+        fn open_unused_note_assets_dialog(&mut self) {}
+        fn open_note_panel(&mut self, _: &str, _: Option<&str>) {}
+        fn open_note_tags(&mut self) {}
+        fn open_note_link(&mut self, _: &str) {}
+        fn wrap_note_plain_links(&mut self, _: &str) {}
+        fn delete_note(&mut self, _: &str) {}
     }
     impl CropCommandHost for Host {
         fn crop_image(&mut self) {}

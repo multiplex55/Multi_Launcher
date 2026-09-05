@@ -24,16 +24,6 @@ fn format_wrap_links_toast(result: NoteMutationResult) -> String {
     )
 }
 
-fn validate_note_new_payload(slug: &str, template: Option<&str>) -> Result<(), String> {
-    let slug_has_whitespace = slug.chars().any(char::is_whitespace);
-    let slug_has_delimiter = slug.contains(':');
-    let template_invalid = template.map(|tpl| tpl.trim().is_empty()).unwrap_or(false);
-    if slug.is_empty() || slug_has_whitespace || slug_has_delimiter || template_invalid {
-        return Err("Malformed note action".to_string());
-    }
-    Ok(())
-}
-
 impl LauncherApp {
     pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
         let pending = self.pending_confirm.take();
@@ -145,13 +135,7 @@ impl LauncherApp {
         let mut refresh = false;
         let mut set_focus = false;
         let mut command_changed_query = false;
-        if a.action == "note:dialog" {
-            self.notes_dialog.open();
-        } else if a.action == "note:graph_dialog" {
-            self.note_graph_dialog.open_with_args(a.args.as_deref());
-        } else if a.action == "note:unused_assets" {
-            self.unused_assets_dialog.open();
-        } else if a.action == "mg:dialog" {
+        if a.action == "mg:dialog" {
             self.mouse_gestures_dialog.open();
         } else if a.action == "mg:dialog:add" {
             self.mouse_gestures_dialog.open_add();
@@ -199,86 +183,6 @@ impl LauncherApp {
             if let Ok(i) = idx.parse::<usize>() {
                 self.todo_view_dialog.open_edit(i);
             }
-        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
-            let slug = slug.to_string();
-            self.open_note_panel(&slug, None);
-        } else if let Some(encoded) = a
-            .action
-            .strip_prefix(crate::plugins::note::NOTE_NEW_JSON_PREFIX)
-        {
-            let payload = match crate::plugins::note::decode_note_new_payload(encoded) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    self.report_error_message(
-                        "launcher",
-                        format!("Malformed note action payload: {err}"),
-                    );
-                    return;
-                }
-            };
-            if let Err(err) = validate_note_new_payload(&payload.slug, payload.template.as_deref())
-            {
-                self.report_error_message("launcher", err);
-                return;
-            }
-            self.open_note_panel(&payload.slug, payload.template.as_deref());
-        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
-            let slug = match urlencoding::decode(rest.trim()) {
-                Ok(decoded) => decoded.into_owned(),
-                Err(_) => {
-                    self.report_error_message(
-                        "launcher",
-                        format!("Malformed note action: {}", a.action),
-                    );
-                    return;
-                }
-            };
-            let template = a.args.as_deref().and_then(|args| {
-                serde_json::from_str::<serde_json::Value>(args)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("template")
-                            .and_then(|template| template.as_str())
-                            .map(str::to_string)
-                    })
-            });
-            if let Err(err) = validate_note_new_payload(&slug, template.as_deref()) {
-                self.report_error_message("launcher", err);
-                return;
-            }
-            self.open_note_panel(&slug, template.as_deref());
-        } else if a.action == "note:templates_disabled" {
-            self.report_error_message("launcher", "Note templates are disabled in settings");
-        } else if a.action == "note:tags" {
-            self.open_note_tags();
-            set_focus = true;
-        } else if let Some(link) = a.action.strip_prefix("note:link:") {
-            self.open_note_link(link);
-        } else if let Some(slug) = a.action.strip_prefix("note:meta:wrap-links:") {
-            self.wrap_note_plain_links(slug);
-        } else if let Some(link_id) = a.action.strip_prefix("link:open:") {
-            if let Ok(parsed) = crate::linking::parse_link_id(link_id) {
-                match parsed.target_type {
-                    crate::linking::LinkTarget::Note => {
-                        self.open_note_panel(&parsed.target_id, None);
-                    }
-                    crate::linking::LinkTarget::Todo => {
-                        self.query = format!("todo links id:{}", parsed.target_id);
-                        self.search();
-                    }
-                    _ => {
-                        self.report_error_message(
-                            "launcher",
-                            format!("Unsupported link target: {}", link_id),
-                        );
-                    }
-                }
-            } else {
-                self.report_error_message("launcher", format!("Invalid link id: {}", link_id));
-            }
-        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
-            self.delete_note(slug);
         } else if a.action == "mm:open" {
             self.open_multi_manager();
         } else if a.action == "mm:settings" {
@@ -355,21 +259,7 @@ impl LauncherApp {
                 );
             }
             self.record_history_usage(&a, &current, source);
-            if a.action == "note:reload" {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Reloaded notes".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:add:") {
+            if a.action.starts_with("todo:add:") {
                 if self.preserve_command {
                     self.query = "todo add ".into();
                 } else {

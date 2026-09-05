@@ -90,18 +90,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: characterize then migrate open/jump/add/search/upcoming/snooze together, preserving persistence, relative-time evaluation, results, focus, toast/error, and no-history behavior.
 - Acceptance: one typed Calendar handler owns the family; no Calendar raw parsing remains; schemas remain compatible.
 - Verification: Calendar Nextest tests and `cargo check`.
-- Commit: `refactor(commands): migrate calendar domain` (hash recorded after commit)
+- Commit: `c79e213 refactor(commands): migrate calendar domain`
 - Verification record: Calendar handler 3/3, GUI parity 3/3, bus 1/1, activation 21/21, dashboard 37/37, and omni-search 13/13 passed; `cargo check`, formatting, diff, and zero-stale-route audits passed. Parent review confirmed non-fatal persistence errors, result metadata, execution-time relative dates, and error-toast gating.
 
 ### 8. Migrate Notes and linking
 
-- Status: pending
+- Status: complete
 - Dependencies: 4-7
 - Work: characterize then migrate dialogs/graph/assets/open/new/tags/links/wrap/remove/reload, including legacy payloads, mutation ownership, typed confirmation, errors, query behavior, and external `note:template:*` compatibility.
 - Acceptance: Note/Link routing is typed; confirmation retains invocation; persistence/panel behavior remains compatible.
 - Verification: note, wrap-links, confirmation, and note integration tests plus `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate notes and linking` (hash recorded after commit)
+- Verification record: handler 6/6, Note library 335/335, Note integrations 30/30, parser 17/17, activation 21/21, confirmation 26/26, linking 9/9, GUI note-link 1/1, and bus 1/1 passed; `cargo check`, formatting, diff, and raw-route audits passed. Parent review remediated final-refocus and reload favorite-logging parity.
 
 ### 9. Migrate Todo
 

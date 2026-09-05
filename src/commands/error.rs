@@ -21,6 +21,11 @@ impl CommandError {
         }
     }
 
+    pub fn with_refocus_policy(mut self) -> Self {
+        self.refocus = true;
+        self
+    }
+
     pub fn with_gui_failure_policy(mut self) -> Self {
         self.toast = true;
         self.refocus = true;

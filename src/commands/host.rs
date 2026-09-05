@@ -41,6 +41,17 @@ pub trait CalendarCommandHost {
     fn refresh_calendar_cache(&mut self);
 }
 
+pub trait NoteCommandHost {
+    fn open_notes_dialog(&mut self);
+    fn open_note_graph_dialog(&mut self, args: Option<&str>);
+    fn open_unused_note_assets_dialog(&mut self);
+    fn open_note_panel(&mut self, slug: &str, template: Option<&str>);
+    fn open_note_tags(&mut self);
+    fn open_note_link(&mut self, link: &str);
+    fn wrap_note_plain_links(&mut self, slug: &str);
+    fn delete_note(&mut self, slug: &str);
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -69,6 +80,7 @@ pub trait CommandHost:
     + DialogCommandHost
     + CropCommandHost
     + CalendarCommandHost
+    + NoteCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -79,6 +91,7 @@ impl<T> CommandHost for T where
         + DialogCommandHost
         + CropCommandHost
         + CalendarCommandHost
+        + NoteCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {
