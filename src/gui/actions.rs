@@ -134,49 +134,7 @@ impl LauncherApp {
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
-        if a.action == "mg:dialog" {
-            self.mouse_gestures_dialog.open();
-        } else if a.action == "mg:dialog:add" {
-            self.mouse_gestures_dialog.open_add();
-        } else if a.action == "mg:dialog:binding" {
-            self.mouse_gestures_dialog.open_binding_editor();
-        } else if a.action == "mg:dialog:focus" {
-            if let Some(args) = a
-                .args
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<GestureFocusArgs>(raw).ok())
-            {
-                self.mouse_gestures_dialog
-                    .open_focus(&args.label, &args.tokens, args.dir_mode);
-            } else {
-                self.mouse_gestures_dialog.open();
-            }
-        } else if a.action == "mg:dialog:settings" {
-            self.open_mouse_gesture_settings_dialog();
-        } else if a.action == "mg:toggle" {
-            if let Some(args) = a
-                .args
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<GestureToggleArgs>(raw).ok())
-            {
-                let mut db = load_gestures(GESTURES_FILE).unwrap_or_default();
-                if let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
-                    gesture.label == args.label
-                        && gesture.tokens == args.tokens
-                        && gesture.dir_mode == args.dir_mode
-                }) {
-                    gesture.enabled = args.enabled;
-                    if let Err(err) = save_gestures(GESTURES_FILE, &db) {
-                        self.report_error_message(
-                            "launcher",
-                            format!("Failed to save mouse gestures: {err}"),
-                        );
-                    } else {
-                        self.dashboard_data_cache.refresh_gestures();
-                    }
-                }
-            }
-        } else if a.action == "mm:open" {
+        if a.action == "mm:open" {
             self.open_multi_manager();
         } else if a.action == "mm:settings" {
             self.open_multi_manager_settings();
@@ -1648,6 +1606,109 @@ mod tests {
         assert_eq!(app.test_activation_trace.len(), 1);
         assert_eq!(app.test_activation_trace[0].1, ActivationSource::Macro);
         set_execute_action_hook(None);
+    }
+    fn mouse_gesture_action(action: &str, args: Option<String>) -> Action {
+        Action {
+            label: "Mouse gesture".into(),
+            desc: "Mouse Gestures".into(),
+            action: action.into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn typed_mouse_gesture_dialogs_restore_the_launcher_and_ignore_clear_hide() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep me".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(false, Ordering::SeqCst);
+
+        app.activate_action(
+            mouse_gesture_action("mg:dialog", None),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert!(app.mouse_gestures_dialog.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.query, "keep me");
+        assert!(!app.usage.contains_key("mg:dialog"));
+    }
+
+    #[test]
+    fn malformed_mouse_gesture_payloads_keep_their_claimed_fallbacks() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut focus = new_app(&ctx);
+        focus.activate_action(
+            mouse_gesture_action("mg:dialog:focus", Some("not-json".into())),
+            None,
+            ActivationSource::Gesture,
+        );
+        assert!(focus.mouse_gestures_dialog.open);
+
+        let mut toggle = new_app(&ctx);
+        toggle.query = "unchanged".into();
+        toggle.clear_query_after_run = true;
+        toggle.hide_after_run = true;
+        toggle.visible_flag.store(true, Ordering::SeqCst);
+        toggle.activate_action(
+            mouse_gesture_action("mg:toggle", Some("not-json".into())),
+            None,
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(toggle.query, "unchanged");
+        assert!(toggle.visible_flag.load(Ordering::SeqCst));
+        assert!(toggle.focus_query);
+        assert!(!toggle.usage.contains_key("mg:toggle"));
+    }
+
+    #[test]
+    fn typed_mouse_gesture_toggle_persists_and_refreshes_dashboard_cache() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let db = crate::mouse_gestures::db::GestureDb {
+            schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+            gestures: vec![crate::mouse_gestures::db::GestureEntry {
+                label: "Back".into(),
+                tokens: "L".into(),
+                dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: Vec::new(),
+            }],
+        };
+        crate::mouse_gestures::db::save_gestures(crate::mouse_gestures::db::GESTURES_FILE, &db)
+            .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let args = crate::mouse_gestures::selection::GestureToggleArgs {
+            label: "Back".into(),
+            tokens: "L".into(),
+            dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+            enabled: false,
+        };
+        app.activate_action(
+            mouse_gesture_action("mg:toggle", Some(serde_json::to_string(&args).unwrap())),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        let persisted =
+            crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
+                .unwrap();
+        assert!(!persisted.gestures[0].enabled);
+        let snapshot = app.dashboard_data_cache.snapshot();
+        assert!(!snapshot.gestures.db.gestures[0].enabled);
+        assert!(!app.usage.contains_key("mg:toggle"));
+        std::env::set_current_dir(original_dir).unwrap();
     }
 }
 

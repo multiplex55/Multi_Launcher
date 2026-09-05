@@ -110,18 +110,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: migrate dialog/view/edit/add/priority/tags/remove/done/clear/export with encoded and legacy delimiter compatibility and typed post-policy.
 - Acceptance: GUI/headless share typed operations; no Todo raw post-policy; confirmation, persistence, pending query, toasts, history, preserve and hide rules match existing behavior.
 - Verification: Todo plugin/dialog/hide/preserve tests and `cargo check`.
-- Commit: `refactor(commands): migrate todo domain` (hash recorded after commit)
+- Commit: `f9acb95 refactor(commands): migrate todo domain`
 - Verification record: handler 8/8, Todo plugin/dialog 31/31, parser 17/17, headless 8/8, confirmation 26/26, hide/preserve/history/dashboard/activation 47/47, and bus/GUI lifecycle 2/2 passed; `cargo check`, formatting, diff, raw-route, and stale-cache audits passed. Parent review moved compatibility toast data into the parser and removed a new cache side effect.
 
 ### 10. Migrate Mouse Gestures
 
-- Status: pending
+- Status: complete
 - Dependencies: 4, 6
 - Work: characterize then migrate dialogs/focus/settings/toggle; decode JSON once and preserve malformed/missing claimed no-op behavior, persistence, dashboard refresh, and source behavior.
 - Acceptance: typed payloads reach handler; no raw JSON execution parsing; behavior remains compatible.
 - Verification: mouse gesture suites and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate mouse gestures` (hash recorded after commit)
+- Verification record: focused Mouse Gesture 24/24, parser 17/17, bus 1/1, standalone gesture suites 41/41, and dashboard/hide/preserve 21/21 passed; `cargo check`, formatting, diff, typed-payload, and stale-route audits passed. Parent review made the settings host delegation explicit.
 
 ### 11. Migrate MultiManager
 

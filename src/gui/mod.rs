@@ -114,8 +114,6 @@ use crate::help_window::HelpWindow;
 use crate::history::{self, HISTORY_PINS_FILE, HistoryEntry, HistoryPin};
 use crate::indexer;
 use crate::launcher::launch_action;
-use crate::mouse_gestures::db::{GESTURES_FILE, load_gestures, save_gestures};
-use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};

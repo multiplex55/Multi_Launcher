@@ -1,7 +1,7 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_link, handle_note,
-    handle_query, handle_simple_dialog, handle_todo,
+    handle_calendar, handle_crop, handle_headless_gui, handle_launcher, handle_link,
+    handle_mouse_gesture, handle_note, handle_query, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -30,6 +30,7 @@ impl CommandBus {
             Command::Note(command) => handle_note(host, command, invocation),
             Command::Link(command) => handle_link(host, command),
             Command::Todo(command) => handle_todo(host, command, invocation),
+            Command::MouseGesture(command) => handle_mouse_gesture(host, command),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -167,6 +168,26 @@ mod tests {
             self.todo_calls += 1;
         }
     }
+    impl crate::commands::MouseGestureCommandHost for FakeHost {
+        fn open_mouse_gesture_dialog(&mut self) {}
+        fn open_mouse_gesture_add_dialog(&mut self) {}
+        fn open_mouse_gesture_binding_dialog(&mut self) {}
+        fn open_mouse_gesture_focus(
+            &mut self,
+            _: &crate::mouse_gestures::selection::GestureFocusArgs,
+        ) {
+        }
+        fn open_mouse_gesture_settings_dialog(&mut self) {}
+        fn set_mouse_gesture_enabled(
+            &mut self,
+            _: &crate::mouse_gestures::selection::GestureToggleArgs,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn mouse_gesture_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -294,6 +315,16 @@ mod tests {
             linked_todo.query,
             QueryPolicy::Set("todo links id:7".into())
         );
+        assert_eq!(host.legacy_calls, 0);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::MouseGesture(
+                    crate::commands::MouseGestureCommand::Dialog,
+                )),
+                &mut host,
+            )
+            .unwrap();
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus

@@ -302,6 +302,26 @@ mod tests {
         fn open_todo_view(&mut self) {}
         fn open_todo_editor(&mut self, _: usize) {}
     }
+    impl crate::commands::MouseGestureCommandHost for Host {
+        fn open_mouse_gesture_dialog(&mut self) {}
+        fn open_mouse_gesture_add_dialog(&mut self) {}
+        fn open_mouse_gesture_binding_dialog(&mut self) {}
+        fn open_mouse_gesture_focus(
+            &mut self,
+            _: &crate::mouse_gestures::selection::GestureFocusArgs,
+        ) {
+        }
+        fn open_mouse_gesture_settings_dialog(&mut self) {}
+        fn set_mouse_gesture_enabled(
+            &mut self,
+            _: &crate::mouse_gestures::selection::GestureToggleArgs,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn mouse_gesture_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(
             &mut self,

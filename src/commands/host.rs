@@ -1,5 +1,6 @@
 use super::{Command, CommandError, CommandInvocation, CommandOutcome};
 use crate::actions::Action;
+use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use chrono::NaiveDate;
 
 pub trait LauncherCommandHost {
@@ -57,6 +58,16 @@ pub trait TodoCommandHost {
     fn open_todo_editor(&mut self, index: usize);
 }
 
+pub trait MouseGestureCommandHost {
+    fn open_mouse_gesture_dialog(&mut self);
+    fn open_mouse_gesture_add_dialog(&mut self);
+    fn open_mouse_gesture_binding_dialog(&mut self);
+    fn open_mouse_gesture_focus(&mut self, args: &GestureFocusArgs);
+    fn open_mouse_gesture_settings_dialog(&mut self);
+    fn set_mouse_gesture_enabled(&mut self, args: &GestureToggleArgs) -> Result<(), String>;
+    fn mouse_gesture_launcher_should_refocus(&self) -> bool;
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -87,6 +98,7 @@ pub trait CommandHost:
     + CalendarCommandHost
     + NoteCommandHost
     + TodoCommandHost
+    + MouseGestureCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -99,6 +111,7 @@ impl<T> CommandHost for T where
         + CalendarCommandHost
         + NoteCommandHost
         + TodoCommandHost
+        + MouseGestureCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

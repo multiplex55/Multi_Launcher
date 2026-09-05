@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use crate::commands::{
     CalendarCommandHost, Command, CommandError, CommandInvocation, CommandOutcome, CropCommandHost,
     DialogCommandHost, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    LegacyCommandHost, NoteCommandHost, PendingQueryPolicy, QueryPolicy, ResultsPolicy,
-    ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    LegacyCommandHost, MouseGestureCommandHost, NoteCommandHost, PendingQueryPolicy, QueryPolicy,
+    ResultsPolicy, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -165,6 +165,56 @@ impl TodoCommandHost for LauncherApp {
     }
 }
 
+impl MouseGestureCommandHost for LauncherApp {
+    fn open_mouse_gesture_dialog(&mut self) {
+        self.mouse_gestures_dialog.open();
+    }
+
+    fn open_mouse_gesture_add_dialog(&mut self) {
+        self.mouse_gestures_dialog.open_add();
+    }
+
+    fn open_mouse_gesture_binding_dialog(&mut self) {
+        self.mouse_gestures_dialog.open_binding_editor();
+    }
+
+    fn open_mouse_gesture_focus(
+        &mut self,
+        args: &crate::mouse_gestures::selection::GestureFocusArgs,
+    ) {
+        self.mouse_gestures_dialog
+            .open_focus(&args.label, &args.tokens, args.dir_mode);
+    }
+
+    fn open_mouse_gesture_settings_dialog(&mut self) {
+        LauncherApp::open_mouse_gesture_settings_dialog(self);
+    }
+
+    fn set_mouse_gesture_enabled(
+        &mut self,
+        args: &crate::mouse_gestures::selection::GestureToggleArgs,
+    ) -> Result<(), String> {
+        let mut db =
+            crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
+                .unwrap_or_default();
+        let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
+            gesture.label == args.label
+                && gesture.tokens == args.tokens
+                && gesture.dir_mode == args.dir_mode
+        }) else {
+            return Ok(());
+        };
+        gesture.enabled = args.enabled;
+        crate::mouse_gestures::db::save_gestures(crate::mouse_gestures::db::GESTURES_FILE, &db)
+            .map_err(|error| error.to_string())?;
+        self.dashboard_data_cache.refresh_gestures();
+        Ok(())
+    }
+
+    fn mouse_gesture_launcher_should_refocus(&self) -> bool {
+        self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
+    }
+}
 impl CropCommandHost for LauncherApp {
     fn crop_image(&mut self) {
         self.handle_crop_image_action();
