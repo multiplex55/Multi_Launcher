@@ -36,19 +36,19 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: add owned nested command enums, `CommandInvocation`, stable domain/kind metadata, neutral `ActivationSource`, unified error, and a complete side-effect-free parser with typed structured payloads and compatible precedence/fallback.
 - Acceptance: every produced protocol maps to an owned command or intentional external fallback; Action/Plugin APIs and JSON remain unchanged; comprehensive compatibility/parser tests pass.
 - Verification: command parser/source-label/legacy parse tests and `cargo check`.
-- Commit: `refactor(commands): add owned command model and parser` (hash recorded after commit)
+- Commit: `06e3ce5 refactor(commands): add owned command model and parser`
 - Verification record: parser/model `cargo nextest run --lib commands::parser::tests` passed 17/17; source-label Nextest passed 1/1; `cargo check`, `cargo fmt --all --check`, and `git diff --check` passed. A focused parity audit found and drove fixes for the public headless parse boundary, typed system variants, malformed known-protocol compatibility, explicit `timer:show` fallback, semantic payload naming, and broader protocol coverage.
 
 ### 3. Migrate headless execution and remove old parser/plan
 
-- Status: pending
+- Status: complete
 - Dependencies: 2
 - Likely areas: new `src/commands/headless.rs`, `src/launcher.rs`, `src/launcher/exec.rs`; remove `src/launcher/parse.rs` and `src/launcher/plan.rs`.
 - Work: make `launch_action` a parser-plus-typed-headless compatibility facade; preserve direct-call, no-op, args, fallback, legacy macro, favorite, and Clipboard Modify semantics.
 - Acceptance: one parser remains; no `ActionKind`/`LaunchPlan` references; direct non-GUI callers retain behavior.
 - Verification: launcher and affected plugin Nextest tests, `cargo check`, stale-reference search.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(launcher): execute headless actions through typed commands` (hash recorded after commit)
+- Verification record: typed headless `cargo nextest run --lib commands::headless::tests` passed 8/8; affected Shell/Snippets/Tempfile/Favorites/Recycle Nextest targets passed 39/39; `cargo check`, `cargo fmt --all --check`, `git diff --check`, and legacy-symbol searches passed. A parity audit found no behavior regressions and its execution-boundary test gap was remediated with an injected external-launch seam and facade compatibility tests.
 
 ### 4. Establish bus, host traits, outcomes, and typed activation seam
 
