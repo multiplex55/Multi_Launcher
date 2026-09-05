@@ -128,24 +128,7 @@ impl LauncherApp {
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
-        if let Some(mode) = a.action.strip_prefix("screenshot:") {
-            use crate::actions::screenshot::Mode as ScreenshotMode;
-            let (mode, clip, tool) = match mode {
-                "window" => (ScreenshotMode::Window, false, MarkupTool::Rectangle),
-                "region" => (ScreenshotMode::Region, false, MarkupTool::Rectangle),
-                "region_markup" => (ScreenshotMode::Region, false, MarkupTool::Pen),
-                "desktop" => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
-                "window_clip" => (ScreenshotMode::Window, true, MarkupTool::Rectangle),
-                "region_clip" => (ScreenshotMode::Region, true, MarkupTool::Rectangle),
-                "desktop_clip" => (ScreenshotMode::Desktop, true, MarkupTool::Rectangle),
-                _ => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
-            };
-            let screenshot_result =
-                crate::plugins::screenshot::launch_editor(self, mode, clip, tool);
-            if self.handle_screenshot_launch_result(screenshot_result) {
-                self.record_history_usage(&a, &current, source);
-            }
-        } else if let Err(e) = execute_action(&a) {
+        if let Err(e) = execute_action(&a) {
             if a.desc == "Fav" && !a.action.starts_with("fav:") {
                 tracing::error!(?e, fav=%a.label, "failed to run favorite");
             }
@@ -177,7 +160,7 @@ impl LauncherApp {
                 refresh = true;
                 set_focus = true;
             }
-            if self.hide_after_run && !a.action.starts_with("screenshot:") {
+            if self.hide_after_run {
                 self.visible_flag.store(false, Ordering::SeqCst);
             }
         }

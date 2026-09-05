@@ -2,7 +2,7 @@ use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcom
 use crate::commands::handlers::{
     handle_calendar, handle_crop, handle_diff, handle_file_search, handle_headless_gui,
     handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager, handle_note,
-    handle_query, handle_simple_dialog, handle_todo,
+    handle_query, handle_screenshot, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -35,6 +35,7 @@ impl CommandBus {
             Command::MultiManager(command) => Ok(handle_multi_manager(host, command)),
             Command::FileSearch(command) => Ok(handle_file_search(host, command)),
             Command::Diff(command) => handle_diff(host, command),
+            Command::Screenshot(command) => handle_screenshot(host, command),
             // Temporary bridge: milestones 6-14 migrate the remaining enum families.
             _ => match handle_headless_gui(host, invocation) {
                 Some(result) => result,
@@ -66,6 +67,7 @@ mod tests {
         todo_calls: usize,
         file_search_calls: usize,
         diff_calls: usize,
+        screenshot_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -238,6 +240,20 @@ mod tests {
             Ok(())
         }
     }
+    impl crate::commands::ScreenshotCommandHost for FakeHost {
+        fn capture_screenshot(
+            &mut self,
+            _: crate::commands::ScreenshotMode,
+            _: crate::commands::ScreenshotDestination,
+            _: crate::commands::ScreenshotMarkup,
+        ) -> Result<crate::commands::ScreenshotCommandResult, String> {
+            self.screenshot_calls += 1;
+            Ok(crate::commands::ScreenshotCommandResult::Completed)
+        }
+        fn screenshot_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -408,6 +424,18 @@ mod tests {
             .unwrap();
         assert_eq!(host.file_search_calls, 1);
         assert_eq!(host.diff_calls, 1);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::Screenshot(
+                    crate::commands::ScreenshotCommand::UnknownMode {
+                        raw: "future".into(),
+                    },
+                )),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.screenshot_calls, 1);
         assert_eq!(host.legacy_calls, 0);
 
         CommandBus

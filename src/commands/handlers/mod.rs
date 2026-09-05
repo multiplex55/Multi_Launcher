@@ -6,6 +6,7 @@ mod launcher_query;
 mod mouse_gesture;
 mod multi_manager;
 mod note_link;
+mod screenshot;
 mod todo;
 
 pub(crate) use calendar::handle_calendar;
@@ -16,4 +17,5 @@ pub(crate) use launcher_query::{handle_launcher, handle_query};
 pub(crate) use mouse_gesture::handle_mouse_gesture;
 pub(crate) use multi_manager::handle_multi_manager;
 pub(crate) use note_link::{handle_link, handle_note};
+pub(crate) use screenshot::handle_screenshot;
 pub(crate) use todo::handle_todo;

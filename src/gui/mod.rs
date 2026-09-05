@@ -2196,20 +2196,6 @@ impl LauncherApp {
         }
     }
 
-    fn handle_screenshot_launch_result(
-        &mut self,
-        result: anyhow::Result<crate::plugins::screenshot::ScreenshotLaunchOutcome>,
-    ) -> bool {
-        match result {
-            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed) => true,
-            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled) => false,
-            Err(e) => {
-                self.report_error_message("launcher", format!("Failed: {e}"));
-                false
-            }
-        }
-    }
-
     /// Return the currently configured screenshot directory, if any.
     pub fn get_screenshot_dir(&self) -> Option<&str> {
         self.screenshot_dir.as_deref()
@@ -3577,32 +3563,6 @@ mod tests {
         let log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap();
         assert_eq!(log.matches("[error:test.report_error] second").count(), 1);
         assert_eq!(log.matches("second").count(), 1);
-
-        std::env::set_current_dir(original_dir).unwrap();
-    }
-
-    #[test]
-    fn screenshot_cancel_does_not_report_failure_or_toast() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let temp = tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.enable_toasts = true;
-        app.show_error_toasts = true;
-        app.show_inline_errors = true;
-
-        let before_log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap_or_default();
-        let handled = app.handle_screenshot_launch_result(Ok(
-            crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled,
-        ));
-        let after_log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap_or_default();
-
-        assert!(!handled);
-        assert!(app.error.is_none());
-        assert_eq!(before_log, after_log);
 
         std::env::set_current_dir(original_dir).unwrap();
     }

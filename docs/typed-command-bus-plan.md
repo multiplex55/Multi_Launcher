@@ -140,18 +140,18 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: reuse typed wire payloads, decode once, preserve malformed wording/claimed behavior/query-override exemption, and remove raw GUI helpers.
 - Acceptance: `handle_file_search_action` and `handle_diff_action` are gone; GUI receives typed payloads; plugin Action strings remain unchanged.
 - Verification: File Search/Diff suites and `cargo check`.
-- Commit: `refactor(commands): migrate file search and diff` (hash recorded after commit)
+- Commit: `58d940b refactor(commands): migrate file search and diff`
 - Verification record: handler 4/4, bus 1/1, parser 17/17, GUI activation 28/28 plus two final focused state checks, File Search 365/365, Diff 143/143, dedicated integrations 47/47, and plugin routing 13/13 passed; `cargo fmt --all --check`, `cargo check`, `git diff --check`, and stale-route/decode audits passed. Parent review found no remaining scope issue.
 
 ### 13. Migrate Screenshot
 
-- Status: pending
+- Status: complete
 - Dependencies: 3-5
 - Work: represent mode/destination/markup explicitly; preserve GUI/headless unknown-mode differences, editor/capture outcomes, completed-only history, cancellation, errors, and panel restoration.
 - Acceptance: typed screenshot execution has deterministic host coverage and no generic clear/hide behavior.
 - Verification: Screenshot tests and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): migrate screenshot domain` (hash recorded after commit)
+- Verification record: handler 4/4, screenshot-filtered library 17/17, screenshot cancellation 3/3, screenshot plugin 3/3, parser 17/17, bus 1/1, GUI activation 29/29, and GUI query-override policy 1/1 passed; `cargo check`, `cargo fmt --all --check`, `git diff --check`, and stale-route audits passed. Parent review found no remaining scope issue; native capture prevents a fully injected GUI activation test, so lifecycle policy is covered deterministically at the typed handler boundary.
 
 ### 14. Migrate Clipboard Modify asynchronous dispatch
 

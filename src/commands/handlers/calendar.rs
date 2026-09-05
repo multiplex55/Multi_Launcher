@@ -355,6 +355,19 @@ mod tests {
             Ok(())
         }
     }
+    impl crate::commands::ScreenshotCommandHost for Host {
+        fn capture_screenshot(
+            &mut self,
+            _: crate::commands::ScreenshotMode,
+            _: crate::commands::ScreenshotDestination,
+            _: crate::commands::ScreenshotMarkup,
+        ) -> Result<crate::commands::ScreenshotCommandResult, String> {
+            Ok(crate::commands::ScreenshotCommandResult::Completed)
+        }
+        fn screenshot_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(
             &mut self,

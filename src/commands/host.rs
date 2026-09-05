@@ -5,6 +5,12 @@ use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload}
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use chrono::NaiveDate;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenshotCommandResult {
+    Completed,
+    Cancelled,
+}
+
 pub trait LauncherCommandHost {
     fn launcher_is_visible(&self) -> bool;
 }
@@ -101,6 +107,16 @@ pub trait DiffCommandHost {
     fn open_diff(&mut self, payload: &DiffOpenPayload) -> Result<(), String>;
 }
 
+pub trait ScreenshotCommandHost {
+    fn capture_screenshot(
+        &mut self,
+        mode: super::ScreenshotMode,
+        destination: super::ScreenshotDestination,
+        markup: super::ScreenshotMarkup,
+    ) -> Result<ScreenshotCommandResult, String>;
+    fn screenshot_launcher_should_refocus(&self) -> bool;
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -135,6 +151,7 @@ pub trait CommandHost:
     + MultiManagerCommandHost
     + FileSearchCommandHost
     + DiffCommandHost
+    + ScreenshotCommandHost
     + HeadlessCommandHost
     + LegacyCommandHost
 {
@@ -151,6 +168,7 @@ impl<T> CommandHost for T where
         + MultiManagerCommandHost
         + FileSearchCommandHost
         + DiffCommandHost
+        + ScreenshotCommandHost
         + HeadlessCommandHost
         + LegacyCommandHost
 {

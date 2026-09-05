@@ -5,7 +5,9 @@ use crate::commands::{
     DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
     HeadlessCommandHost, HistoryPolicy, LauncherCommandHost, LegacyCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    QueryPolicy, ResultsPolicy, ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
+    ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
+    VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -330,6 +332,39 @@ impl DiffCommandHost for LauncherApp {
     }
 }
 
+impl ScreenshotCommandHost for LauncherApp {
+    fn capture_screenshot(
+        &mut self,
+        mode: ScreenshotMode,
+        destination: ScreenshotDestination,
+        markup: ScreenshotMarkup,
+    ) -> Result<ScreenshotCommandResult, String> {
+        let mode = match mode {
+            ScreenshotMode::Window => crate::actions::screenshot::Mode::Window,
+            ScreenshotMode::Region => crate::actions::screenshot::Mode::Region,
+            ScreenshotMode::Desktop => crate::actions::screenshot::Mode::Desktop,
+        };
+        let clip = destination == ScreenshotDestination::Clipboard;
+        let tool = match markup {
+            ScreenshotMarkup::Rectangle => super::MarkupTool::Rectangle,
+            ScreenshotMarkup::Pen => super::MarkupTool::Pen,
+        };
+        crate::plugins::screenshot::launch_editor(self, mode, clip, tool)
+            .map(|result| match result {
+                crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed => {
+                    ScreenshotCommandResult::Completed
+                }
+                crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled => {
+                    ScreenshotCommandResult::Cancelled
+                }
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn screenshot_launcher_should_refocus(&self) -> bool {
+        self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
+    }
+}
 fn file_search_mode(kind: crate::file_search::model::SearchKind) -> super::FileSearchMode {
     match kind {
         crate::file_search::model::SearchKind::Filename => super::FileSearchMode::Filename,
@@ -392,13 +427,17 @@ impl LegacyCommandHost for LauncherApp {
     }
 }
 
+fn command_accepts_query_override(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::ClipboardModify(_) | Command::FileSearch(_) | Command::Diff(_)
+    )
+}
+
 impl LauncherApp {
     pub(crate) fn dispatch_command_invocation(&mut self, invocation: CommandInvocation) {
         if let Some(query_override) = invocation.query_override.as_ref()
-            && !matches!(
-                &invocation.command,
-                Command::ClipboardModify(_) | Command::FileSearch(_) | Command::Diff(_)
-            )
+            && command_accepts_query_override(&invocation.command)
         {
             self.apply_command_outcome(
                 CommandOutcome {
@@ -517,6 +556,27 @@ impl LauncherApp {
                 &history_query,
                 invocation.source,
             );
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_commands_keep_query_override_compatibility() {
+        for command in [
+            Command::Screenshot(crate::commands::ScreenshotCommand::Capture {
+                mode: ScreenshotMode::Region,
+                destination: ScreenshotDestination::Editor,
+                markup: ScreenshotMarkup::Pen,
+                compatibility: crate::commands::ScreenshotCompatibility::GuiOnly,
+            }),
+            Command::Screenshot(crate::commands::ScreenshotCommand::UnknownMode {
+                raw: "future".into(),
+            }),
+        ] {
+            assert!(command_accepts_query_override(&command));
         }
     }
 }
