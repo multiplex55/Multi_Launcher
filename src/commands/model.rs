@@ -242,10 +242,22 @@ pub enum TodoCommand {
     Edit {
         index: usize,
     },
+    Compatibility {
+        kind: TodoCompatibilityKind,
+    },
     Clear,
     Export,
 }
-kinds!(TodoCommand, Self::Dialog => "dialog", Self::View => "view", Self::Add { .. } => "add", Self::SetPriority { .. } => "set_priority", Self::SetTags { .. } => "set_tags", Self::Remove { .. } => "remove", Self::Done { .. } => "done", Self::Edit { .. } => "edit", Self::Clear => "clear", Self::Export => "export");
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TodoCompatibilityKind {
+    Add { toast_text: String },
+    SetPriority,
+    SetTags,
+    Remove,
+    Done,
+    Edit,
+}
+kinds!(TodoCommand, Self::Dialog => "dialog", Self::View => "view", Self::Add { .. } => "add", Self::SetPriority { .. } => "set_priority", Self::SetTags { .. } => "set_tags", Self::Remove { .. } => "remove", Self::Done { .. } => "done", Self::Edit { .. } => "edit", Self::Compatibility { .. } => "compatibility", Self::Clear => "clear", Self::Export => "export");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MouseGestureCommand {
     Dialog,
@@ -403,9 +415,10 @@ pub enum StorageCommand {
         path: String,
         alias: String,
     },
+    InvalidTempfileAlias,
     RecycleClean,
 }
-kinds!(StorageCommand, Self::BookmarkDialog => "bookmark_dialog", Self::BookmarkAdd(_) => "bookmark_add", Self::BookmarkRemove(_) => "bookmark_remove", Self::FolderAdd(_) => "folder_add", Self::FolderRemove(_) => "folder_remove", Self::HistoryClear => "history_clear", Self::HistoryLaunch(_) => "history_launch", Self::SnippetAdd { .. } => "snippet_add", Self::SnippetEdit(_) => "snippet_edit", Self::SnippetRemove(_) => "snippet_remove", Self::SnippetDialog => "snippet_dialog", Self::FavoriteAdd { .. } => "favorite_add", Self::FavoriteRemove(_) => "favorite_remove", Self::FavoriteDialog(_) => "favorite_dialog", Self::TempfileNew(_) => "tempfile_new", Self::TempfileDialog => "tempfile_dialog", Self::TempfileOpen => "tempfile_open", Self::TempfileOpenFile(_) => "tempfile_open_file", Self::TempfileClear => "tempfile_clear", Self::TempfileRemove(_) => "tempfile_remove", Self::TempfileAlias { .. } => "tempfile_alias", Self::RecycleClean => "recycle_clean");
+kinds!(StorageCommand, Self::BookmarkDialog => "bookmark_dialog", Self::BookmarkAdd(_) => "bookmark_add", Self::BookmarkRemove(_) => "bookmark_remove", Self::FolderAdd(_) => "folder_add", Self::FolderRemove(_) => "folder_remove", Self::HistoryClear => "history_clear", Self::HistoryLaunch(_) => "history_launch", Self::SnippetAdd { .. } => "snippet_add", Self::SnippetEdit(_) => "snippet_edit", Self::SnippetRemove(_) => "snippet_remove", Self::SnippetDialog => "snippet_dialog", Self::FavoriteAdd { .. } => "favorite_add", Self::FavoriteRemove(_) => "favorite_remove", Self::FavoriteDialog(_) => "favorite_dialog", Self::TempfileNew(_) => "tempfile_new", Self::TempfileDialog => "tempfile_dialog", Self::TempfileOpen => "tempfile_open", Self::TempfileOpenFile(_) => "tempfile_open_file", Self::TempfileClear => "tempfile_clear", Self::TempfileRemove(_) => "tempfile_remove", Self::TempfileAlias { .. } => "tempfile_alias", Self::InvalidTempfileAlias => "invalid_tempfile_alias", Self::RecycleClean => "recycle_clean");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimerCommand {
     TimerDialog,
@@ -413,6 +426,9 @@ pub enum TimerCommand {
     Cancel(u64),
     Pause(u64),
     Resume(u64),
+    InvalidCancel,
+    InvalidPause,
+    InvalidResume,
     Start { duration: String, name: String },
     AlarmSet { time: String, name: String },
     StopwatchPause(u64),
@@ -421,12 +437,13 @@ pub enum TimerCommand {
     StopwatchStart(String),
     StopwatchShow(u64),
 }
-kinds!(TimerCommand, Self::TimerDialog => "timer_dialog", Self::AlarmDialog => "alarm_dialog", Self::Cancel(_) => "cancel", Self::Pause(_) => "pause", Self::Resume(_) => "resume", Self::Start { .. } => "start", Self::AlarmSet { .. } => "alarm_set", Self::StopwatchPause(_) => "stopwatch_pause", Self::StopwatchResume(_) => "stopwatch_resume", Self::StopwatchStop(_) => "stopwatch_stop", Self::StopwatchStart(_) => "stopwatch_start", Self::StopwatchShow(_) => "stopwatch_show");
+kinds!(TimerCommand, Self::TimerDialog => "timer_dialog", Self::AlarmDialog => "alarm_dialog", Self::Cancel(_) => "cancel", Self::Pause(_) => "pause", Self::Resume(_) => "resume", Self::InvalidCancel => "invalid_cancel", Self::InvalidPause => "invalid_pause", Self::InvalidResume => "invalid_resume", Self::Start { .. } => "start", Self::AlarmSet { .. } => "alarm_set", Self::StopwatchPause(_) => "stopwatch_pause", Self::StopwatchResume(_) => "stopwatch_resume", Self::StopwatchStop(_) => "stopwatch_stop", Self::StopwatchStart(_) => "stopwatch_start", Self::StopwatchShow(_) => "stopwatch_show");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemCommand {
     BrightnessDialog,
     VolumeDialog,
     CpuList(usize),
+    InvalidCpuList,
     Shutdown,
     Reboot,
     Lock,
@@ -445,14 +462,15 @@ pub enum SystemCommand {
     PowerPlan(String),
     Keys(String),
 }
-kinds!(SystemCommand, Self::BrightnessDialog => "brightness_dialog", Self::VolumeDialog => "volume_dialog", Self::CpuList(_) => "cpu_list", Self::Shutdown => "shutdown", Self::Reboot => "reboot", Self::Lock => "lock", Self::Logoff => "logoff", Self::Unknown(_) => "unknown", Self::ProcessKill(_) => "process_kill", Self::ProcessSwitch(_) => "process_switch", Self::WindowSwitch(_) => "window_switch", Self::WindowClose(_) => "window_close", Self::Brightness(_) => "brightness", Self::Volume(_) => "volume", Self::ProcessVolume { .. } => "process_volume", Self::ProcessToggleMute(_) => "process_toggle_mute", Self::MuteActive => "mute_active", Self::ToggleMute => "toggle_mute", Self::PowerPlan(_) => "power_plan", Self::Keys(_) => "keys");
+kinds!(SystemCommand, Self::BrightnessDialog => "brightness_dialog", Self::VolumeDialog => "volume_dialog", Self::CpuList(_) => "cpu_list", Self::InvalidCpuList => "invalid_cpu_list", Self::Shutdown => "shutdown", Self::Reboot => "reboot", Self::Lock => "lock", Self::Logoff => "logoff", Self::Unknown(_) => "unknown", Self::ProcessKill(_) => "process_kill", Self::ProcessSwitch(_) => "process_switch", Self::WindowSwitch(_) => "window_switch", Self::WindowClose(_) => "window_close", Self::Brightness(_) => "brightness", Self::Volume(_) => "volume", Self::ProcessVolume { .. } => "process_volume", Self::ProcessToggleMute(_) => "process_toggle_mute", Self::MuteActive => "mute_active", Self::ToggleMute => "toggle_mute", Self::PowerPlan(_) => "power_plan", Self::Keys(_) => "keys");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserTabCommand {
     Switch(Vec<i32>),
+    InvalidSwitch,
     Cache,
     Clear,
 }
-kinds!(BrowserTabCommand, Self::Switch(_) => "switch", Self::Cache => "cache", Self::Clear => "clear");
+kinds!(BrowserTabCommand, Self::Switch(_) => "switch", Self::InvalidSwitch => "invalid_switch", Self::Cache => "cache", Self::Clear => "clear");
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaCommand {
     Play,
@@ -482,8 +500,9 @@ pub enum MacroCommand {
     MkStop,
     MkRecord,
     MkRecordStop,
+    Invalid { raw: String },
 }
-kinds!(MacroCommand, Self::LegacyDialog => "legacy_dialog", Self::MkDialog => "mk_dialog", Self::RunLegacy(_) => "run_legacy", Self::MkRun(_) => "mk_run", Self::MkPause => "mk_pause", Self::MkResume => "mk_resume", Self::MkStop => "mk_stop", Self::MkRecord => "mk_record", Self::MkRecordStop => "mk_record_stop");
+kinds!(MacroCommand, Self::LegacyDialog => "legacy_dialog", Self::MkDialog => "mk_dialog", Self::RunLegacy(_) => "run_legacy", Self::MkRun(_) => "mk_run", Self::MkPause => "mk_pause", Self::MkResume => "mk_resume", Self::MkStop => "mk_stop", Self::MkRecord => "mk_record", Self::MkRecordStop => "mk_record_stop", Self::Invalid { .. } => "invalid");
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CropCommand {
     Image,

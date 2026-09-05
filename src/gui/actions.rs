@@ -109,18 +109,6 @@ impl LauncherApp {
         false
     }
 
-    pub(crate) fn activate_action_confirmed(
-        &mut self,
-        a: Action,
-        query_override: Option<String>,
-        source: ActivationSource,
-    ) {
-        match crate::commands::parse_command(a, query_override, source) {
-            Ok(invocation) => self.dispatch_command_invocation(invocation),
-            Err(error) => self.report_error_message(error.domain, error.message),
-        }
-    }
-
     pub(crate) fn drain_clipboard_modify_immediate(&mut self) {
         let mut typed_events = Vec::new();
         for (meta, ev) in self.clipboard_modify_immediate.drain_completions() {
@@ -680,16 +668,19 @@ mod tests {
     }
 
     fn activate_wrap_links(app: &mut LauncherApp, slug: &str) {
-        app.activate_action_confirmed(
-            Action {
+        app.dispatch_command_invocation(crate::commands::CommandInvocation {
+            command: crate::commands::Command::Note(crate::commands::NoteCommand::WrapLinks {
+                slug: slug.into(),
+            }),
+            original_action: Action {
                 label: "Wrap links".into(),
                 desc: "Notes".into(),
                 action: format!("note:meta:wrap-links:{slug}"),
                 args: None,
             },
-            None,
-            ActivationSource::Enter,
-        );
+            query_override: None,
+            source: ActivationSource::Enter,
+        });
     }
 
     #[test]
@@ -811,6 +802,7 @@ mod tests {
 
     #[test]
     fn destructive_confirmation_supports_queue_confirm_and_cancel_paths() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let notes_dir = dir.path().join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
@@ -851,6 +843,30 @@ mod tests {
     }
 
     #[test]
+    fn malformed_todo_remove_is_claimed_before_destructive_confirmation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+        let action = Action {
+            label: "Remove malformed todo".into(),
+            desc: "Todo".into(),
+            action: "todo:remove:not-an-index".into(),
+            args: None,
+        };
+
+        app.activate_action(action.clone(), None, ActivationSource::Click);
+
+        let pending = app.pending_confirm.as_ref().expect("typed pending command");
+        assert_eq!(pending.invocation.original_action, action);
+        assert!(matches!(
+            pending.invocation.command,
+            crate::commands::Command::Todo(crate::commands::TodoCommand::Compatibility {
+                kind: crate::commands::TodoCompatibilityKind::Remove,
+            })
+        ));
+        assert_eq!(pending.invocation.source, ActivationSource::Click);
+    }
+    #[test]
     fn pending_confirmation_retains_typed_invocation_metadata() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -882,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_errors_flow_through_unified_ui_reporting() {
+    fn malformed_mkmacro_preserves_query_override_failure_toasts_and_refocus() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let original_dir = std::env::current_dir().unwrap();
@@ -892,6 +908,8 @@ mod tests {
         app.enable_toasts = true;
         app.show_error_toasts = true;
         app.show_inline_errors = true;
+        app.focus_query = false;
+        app.visible_flag.store(true, Ordering::SeqCst);
 
         app.activate_action(
             Action {
@@ -900,13 +918,27 @@ mod tests {
                 action: "mkmacro:future".into(),
                 args: None,
             },
-            None,
+            Some("retained override".into()),
             ActivationSource::Enter,
         );
 
-        assert_eq!(app.error.as_deref(), Some("invalid action: mkmacro:future"));
+        let expected = "Failed: invalid mkmacro action: mkmacro:future";
+        assert_eq!(app.query, "retained override");
+        assert_eq!(app.error.as_deref(), Some(expected));
+        assert!(
+            app.focus_query,
+            "legacy failure policy refocuses the launcher"
+        );
+        assert_eq!(
+            app.test_toast_messages
+                .iter()
+                .filter(|message| message.as_str() == expected)
+                .count(),
+            2,
+            "reporting and the explicit legacy failure toast are both retained"
+        );
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
-        assert!(log.contains("[error:mkmacro] invalid action: mkmacro:future"));
+        assert!(log.contains(&format!("[error:launcher] {expected}")));
         std::env::set_current_dir(original_dir).unwrap();
     }
     #[test]

@@ -64,11 +64,12 @@ fn launcher_activation_has_one_parser_and_no_raw_protocol_router() {
 
     assert_eq!(
         production_actions.matches("parse_command(").count(),
-        2,
-        "normal and pre-confirmed activation should each enter the canonical parser once"
+        1,
+        "only normal activation should enter the canonical parser"
     );
     for forbidden in [
         concat!("activate_action", "_legacy"),
+        concat!("activate_action", "_confirmed"),
         concat!("execute_legacy", "_command"),
         ".action.starts_with(",
         ".action.strip_prefix(",

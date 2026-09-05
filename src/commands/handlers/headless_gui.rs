@@ -8,7 +8,10 @@ pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
     host: &mut H,
     invocation: &CommandInvocation,
 ) -> Result<CommandOutcome, CommandError> {
-    if let Command::BrowserTab(BrowserTabCommand::Switch(_)) = &invocation.command {
+    if matches!(
+        &invocation.command,
+        Command::BrowserTab(BrowserTabCommand::Switch(_) | BrowserTabCommand::InvalidSwitch)
+    ) {
         host.spawn_headless_command(
             invocation.command.clone(),
             invocation.original_action.clone(),
@@ -80,7 +83,8 @@ fn success_outcome<H: HeadlessCommandHost + ?Sized>(
             | StorageCommand::FavoriteAdd { .. }
             | StorageCommand::FavoriteRemove(_)
             | StorageCommand::TempfileRemove(_)
-            | StorageCommand::TempfileAlias { .. },
+            | StorageCommand::TempfileAlias { .. }
+            | StorageCommand::InvalidTempfileAlias,
         ) => {
             outcome.search = true;
             outcome.invalidate_results = true;
@@ -95,19 +99,21 @@ fn success_outcome<H: HeadlessCommandHost + ?Sized>(
             outcome.focus = true;
             command_changed_query = true;
         }
-        Command::Timer(TimerCommand::Cancel(_)) if host.current_query().starts_with("timer rm") => {
+        Command::Timer(TimerCommand::Cancel(_) | TimerCommand::InvalidCancel)
+            if host.current_query().starts_with("timer rm") =>
+        {
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
         }
-        Command::Timer(TimerCommand::Pause(_))
+        Command::Timer(TimerCommand::Pause(_) | TimerCommand::InvalidPause)
             if host.current_query().starts_with("timer pause") =>
         {
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
         }
-        Command::Timer(TimerCommand::Resume(_))
+        Command::Timer(TimerCommand::Resume(_) | TimerCommand::InvalidResume)
             if host.current_query().starts_with("timer resume") =>
         {
             outcome.search = true;
@@ -188,14 +194,7 @@ fn success_toasts(invocation: &CommandInvocation) -> Vec<ToastPolicy> {
 
 pub(super) fn is_external_favorite(invocation: &CommandInvocation) -> bool {
     invocation.original_action.desc == "Fav"
-        && !matches!(
-            invocation.command,
-            Command::Storage(
-                StorageCommand::FavoriteAdd { .. }
-                    | StorageCommand::FavoriteRemove(_)
-                    | StorageCommand::FavoriteDialog(_)
-            )
-        )
+        && !invocation.original_action.action.starts_with("fav:")
 }
 
 pub(super) fn favorite_log(invocation: &CommandInvocation) -> FavoriteLogPolicy {
@@ -361,26 +360,82 @@ mod tests {
     }
 
     #[test]
-    fn browser_switch_is_async_without_generic_clear_or_hide() {
-        let mut host = host();
-        host.clear = true;
-        host.hide = true;
-        let result = handle_headless_gui(
-            &mut host,
+    fn malformed_timer_and_storage_apply_post_policy_only_after_success() {
+        let mut timer_host = host();
+        timer_host.query = "timer rm broken".into();
+        timer_host.hide = true;
+        let outcome = handle_headless_gui(
+            &mut timer_host,
             &invocation(
-                Command::BrowserTab(BrowserTabCommand::Switch(vec![1])),
-                "tab:switch:1",
+                Command::Timer(TimerCommand::InvalidCancel),
+                "timer:cancel:bad",
             ),
         )
         .unwrap();
-        assert_eq!(host.spawned, 1);
-        assert_eq!(host.executed, 0);
-        assert_eq!(result.query, QueryPolicy::Keep);
-        assert_eq!(result.visibility, VisibilityPolicy::Keep);
-        assert_eq!(result.history, HistoryPolicy::Record);
-        assert_eq!(
-            result.toasts,
-            vec![ToastPolicy::Info("Switching to Example".into())]
+        assert!(outcome.search && outcome.invalidate_results && outcome.focus);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+
+        let mut storage_host = host();
+        let outcome = handle_headless_gui(
+            &mut storage_host,
+            &invocation(
+                Command::Storage(StorageCommand::InvalidTempfileAlias),
+                "tempfile:alias:bad",
+            ),
+        )
+        .unwrap();
+        assert!(outcome.search && outcome.invalidate_results && outcome.focus);
+
+        timer_host.fail = true;
+        let error = handle_headless_gui(
+            &mut timer_host,
+            &invocation(
+                Command::Timer(TimerCommand::InvalidPause),
+                "timer:pause:bad",
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Failed: injected failure");
+    }
+
+    #[test]
+    fn every_raw_favorite_protocol_is_excluded_from_favorite_logging() {
+        let mut invocation = invocation(
+            Command::External(super::super::super::ExternalCommand {
+                target: "fav:future:payload".into(),
+                args: None,
+            }),
+            "fav:future:payload",
         );
+        invocation.original_action.desc = "Fav".into();
+        assert!(!is_external_favorite(&invocation));
+        assert_eq!(favorite_log(&invocation), FavoriteLogPolicy::None);
+    }
+    #[test]
+    fn browser_switch_is_async_without_generic_clear_or_hide() {
+        for (command, action) in [
+            (
+                Command::BrowserTab(BrowserTabCommand::Switch(vec![1])),
+                "tab:switch:1",
+            ),
+            (
+                Command::BrowserTab(BrowserTabCommand::InvalidSwitch),
+                "tab:switch:bad",
+            ),
+        ] {
+            let mut host = host();
+            host.clear = true;
+            host.hide = true;
+            let result = handle_headless_gui(&mut host, &invocation(command, action)).unwrap();
+            assert_eq!(host.spawned, 1);
+            assert_eq!(host.executed, 0);
+            assert_eq!(result.query, QueryPolicy::Keep);
+            assert_eq!(result.visibility, VisibilityPolicy::Keep);
+            assert_eq!(result.history, HistoryPolicy::Record);
+            assert_eq!(
+                result.toasts,
+                vec![ToastPolicy::Info("Switching to Example".into())]
+            );
+        }
     }
 }

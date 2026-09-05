@@ -1,7 +1,8 @@
 use super::headless_gui::{favorite_log, is_external_favorite};
 use crate::commands::{
     CommandError, CommandInvocation, CommandOutcome, HeadlessCommandHost, HistoryPolicy,
-    PendingQueryPolicy, QueryPolicy, ToastPolicy, TodoCommand, TodoCommandHost, VisibilityPolicy,
+    PendingQueryPolicy, QueryPolicy, ToastPolicy, TodoCommand, TodoCommandHost,
+    TodoCompatibilityKind, VisibilityPolicy,
 };
 
 pub(crate) fn handle_todo<H>(
@@ -30,13 +31,20 @@ where
                 ..CommandOutcome::default()
             })
         }
+        TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Edit,
+        } => Ok(CommandOutcome {
+            focus: host.launcher_should_refocus(),
+            ..CommandOutcome::default()
+        }),
         TodoCommand::Add { .. }
         | TodoCommand::SetPriority { .. }
         | TodoCommand::SetTags { .. }
         | TodoCommand::Remove { .. }
         | TodoCommand::Done { .. }
         | TodoCommand::Clear
-        | TodoCommand::Export => execute(host, command, invocation),
+        | TodoCommand::Export
+        | TodoCommand::Compatibility { .. } => execute(host, command, invocation),
     }
 }
 
@@ -71,7 +79,10 @@ where
     let mut command_changed_query = false;
 
     match command {
-        TodoCommand::Add { toast_text, .. } => {
+        TodoCommand::Add { toast_text, .. }
+        | TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Add { toast_text },
+        } => {
             outcome.query = QueryPolicy::Set(if host.preserve_command() {
                 "todo add ".into()
             } else {
@@ -81,11 +92,15 @@ where
             outcome.invalidate_results = true;
             outcome.focus = true;
             command_changed_query = true;
+
             outcome
                 .toasts
                 .push(ToastPolicy::Success(format!("Added todo {toast_text}")));
         }
-        TodoCommand::Remove { .. } => {
+        TodoCommand::Remove { .. }
+        | TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Remove,
+        } => {
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
@@ -102,7 +117,10 @@ where
                 .toasts
                 .push(ToastPolicy::Success(format!("Removed todo {label}")));
         }
-        TodoCommand::Done { .. } => {
+        TodoCommand::Done { .. }
+        | TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Done,
+        } => {
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
@@ -117,7 +135,10 @@ where
                 .toasts
                 .push(ToastPolicy::Success(format!("Toggled todo {label}")));
         }
-        TodoCommand::SetPriority { .. } => {
+        TodoCommand::SetPriority { .. }
+        | TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::SetPriority,
+        } => {
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
@@ -125,7 +146,10 @@ where
                 .toasts
                 .push(ToastPolicy::Success("Updated todo priority".into()));
         }
-        TodoCommand::SetTags { .. } => {
+        TodoCommand::SetTags { .. }
+        | TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::SetTags,
+        } => {
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
@@ -142,7 +166,12 @@ where
                 .push(ToastPolicy::Success("Cleared completed todos".into()));
         }
         TodoCommand::Export => {}
-        TodoCommand::Dialog | TodoCommand::View | TodoCommand::Edit { .. } => unreachable!(),
+        TodoCommand::Dialog
+        | TodoCommand::View
+        | TodoCommand::Edit { .. }
+        | TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Edit,
+        } => unreachable!(),
     }
 
     if host.clear_query_after_run() && !command_changed_query {
@@ -151,7 +180,15 @@ where
         outcome.invalidate_results = true;
         outcome.focus = true;
     }
-    if host.hide_after_run() && !matches!(command, TodoCommand::Done { .. }) {
+    if host.hide_after_run()
+        && !matches!(
+            command,
+            TodoCommand::Done { .. }
+                | TodoCommand::Compatibility {
+                    kind: TodoCompatibilityKind::Done
+                }
+        )
+    {
         outcome.visibility = VisibilityPolicy::Hide;
     }
     if !outcome.focus
@@ -309,6 +346,88 @@ mod tests {
             Some(&ToastPolicy::Success(format!("Added todo {encoded}")))
         );
         assert_eq!(host.executed, 1);
+    }
+    #[test]
+    fn malformed_todo_compatibility_preserves_claim_and_success_post_policy() {
+        let mut host = Host {
+            query: "note list linked".into(),
+            preserve: true,
+            hide: true,
+            refocus: true,
+            ..Host::default()
+        };
+        let remove = TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Remove,
+        };
+        let outcome = handle_todo(
+            &mut host,
+            &remove,
+            &invocation(remove.clone(), "todo:remove:bad", "Remove todo Broken"),
+        )
+        .unwrap();
+        assert_eq!(host.executed, 1);
+        assert!(outcome.search && outcome.invalidate_results && outcome.focus);
+        assert_eq!(
+            outcome.pending_query,
+            PendingQueryPolicy::Set("note list linked".into())
+        );
+        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert_eq!(
+            outcome.toasts.last(),
+            Some(&ToastPolicy::Success("Removed todo Broken".into()))
+        );
+
+        let add = TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Add {
+                toast_text: "broken".into(),
+            },
+        };
+        let outcome = handle_todo(
+            &mut host,
+            &add,
+            &invocation(add.clone(), "todo:add:broken", "Add broken"),
+        )
+        .unwrap();
+        assert_eq!(outcome.query, QueryPolicy::Set("todo add ".into()));
+        assert_eq!(
+            outcome.toasts.last(),
+            Some(&ToastPolicy::Success("Added todo broken".into()))
+        );
+
+        let edit = TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Edit,
+        };
+        let outcome = handle_todo(
+            &mut host,
+            &edit,
+            &invocation(edit.clone(), "todo:edit:bad", "Edit broken"),
+        )
+        .unwrap();
+        assert_eq!(host.executed, 2, "malformed edit remains a claimed no-op");
+        assert!(outcome.focus);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn malformed_todo_failure_skips_success_post_policy() {
+        let command = TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::SetPriority,
+        };
+        let mut host = Host {
+            query: "todo priority".into(),
+            clear: true,
+            hide: true,
+            fail: true,
+            ..Host::default()
+        };
+        let error = handle_todo(
+            &mut host,
+            &command,
+            &invocation(command.clone(), "todo:pset:bad", "Broken priority"),
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Failed: injected failure");
+        assert!(error.toast && error.refocus);
     }
     #[test]
     fn done_preserves_current_query_as_pending_and_is_hide_exempt() {

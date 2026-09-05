@@ -28,6 +28,7 @@ where
         Command::System(SystemCommand::VolumeDialog) => host.open_volume_dialog(),
         Command::System(SystemCommand::BrightnessDialog) => host.open_brightness_dialog(),
         Command::System(SystemCommand::CpuList(count)) => host.open_cpu_list_dialog(*count),
+        Command::System(SystemCommand::InvalidCpuList) => {}
         Command::Todo(TodoCommand::Dialog) => host.open_todo_dialog(),
         _ => return None,
     }
@@ -211,6 +212,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn malformed_cpu_list_is_claimed_without_opening_or_generic_execution() {
+        let mut host = Host {
+            refocus: true,
+            ..Host::default()
+        };
+        let outcome =
+            handle_simple_dialog(&mut host, &Command::System(SystemCommand::InvalidCpuList))
+                .expect("malformed CPU list remains claimed");
+        assert_eq!(host.opened, None);
+        assert!(outcome.focus);
+        assert_eq!(outcome.history, crate::commands::HistoryPolicy::Skip);
+    }
     #[test]
     fn crop_routes_through_the_typed_host_and_keeps_history_skipped() {
         let mut host = Host::default();

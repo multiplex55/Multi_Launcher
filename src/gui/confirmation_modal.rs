@@ -2,7 +2,7 @@ use eframe::egui;
 
 use crate::commands::{
     ActivationSource, BrowserTabCommand, ClipboardCommand, Command, NoteCommand, StorageCommand,
-    TodoCommand,
+    TodoCommand, TodoCompatibilityKind,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +36,12 @@ impl DestructiveAction {
             Command::Storage(StorageCommand::TempfileClear) => Some(Self::ClearTempfiles),
             Command::BrowserTab(BrowserTabCommand::Clear) => Some(Self::ClearBrowserTabCache),
             Command::Storage(StorageCommand::RecycleClean) => Some(Self::EmptyRecycleBin),
-            Command::Todo(TodoCommand::Remove { .. }) => Some(Self::DeleteTodo),
+            Command::Todo(
+                TodoCommand::Remove { .. }
+                | TodoCommand::Compatibility {
+                    kind: TodoCompatibilityKind::Remove,
+                },
+            ) => Some(Self::DeleteTodo),
             Command::Note(NoteCommand::Remove { .. }) => Some(Self::DeleteNote),
             _ => None,
         }
@@ -98,6 +103,7 @@ mod tests {
             ("tab:clear", DestructiveAction::ClearBrowserTabCache),
             ("recycle:clean", DestructiveAction::EmptyRecycleBin),
             ("todo:remove:2", DestructiveAction::DeleteTodo),
+            ("todo:remove:not-an-index", DestructiveAction::DeleteTodo),
             ("note:remove:alpha", DestructiveAction::DeleteNote),
         ] {
             assert_eq!(

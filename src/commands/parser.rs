@@ -122,11 +122,6 @@ fn parse_prefixed(action: &Action) -> Result<Command, CommandError> {
             s.strip_prefix($prefix).map(str::to_string)
         };
     }
-    macro_rules! number {
-        ($prefix:literal, $ty:ty) => {
-            s.strip_prefix($prefix).and_then(|v| v.parse::<$ty>().ok())
-        };
-    }
 
     if let Some(view) = tail!("calendar:open:") {
         return Ok(Command::Calendar(CalendarCommand::Open { view }));
@@ -208,8 +203,13 @@ fn parse_prefixed(action: &Action) -> Result<Command, CommandError> {
     if let Some(id) = tail!("link:open:") {
         return Ok(Command::Link(LinkCommand::Open { id }));
     }
-    if let Some(index) = number!("todo:edit:", usize) {
-        return Ok(Command::Todo(TodoCommand::Edit { index }));
+    if let Some(raw_index) = s.strip_prefix("todo:edit:") {
+        return Ok(Command::Todo(match raw_index.parse::<usize>() {
+            Ok(index) => TodoCommand::Edit { index },
+            Err(_) => TodoCommand::Compatibility {
+                kind: TodoCompatibilityKind::Edit,
+            },
+        }));
     }
     if let Some(cmd) = parse_todo(s) {
         return Ok(Command::Todo(cmd));
@@ -217,8 +217,11 @@ fn parse_prefixed(action: &Action) -> Result<Command, CommandError> {
     if let Some(label) = tail!("fav:dialog:") {
         return Ok(Command::Storage(StorageCommand::FavoriteDialog(label)));
     }
-    if let Some(count) = number!("sysinfo:cpu_list:", usize) {
-        return Ok(Command::System(SystemCommand::CpuList(count)));
+    if let Some(raw_count) = s.strip_prefix("sysinfo:cpu_list:") {
+        return Ok(Command::System(match raw_count.parse::<usize>() {
+            Ok(count) => SystemCommand::CpuList(count),
+            Err(_) => SystemCommand::InvalidCpuList,
+        }));
     }
     if let Some(v) = parse_multi_manager(s) {
         return Ok(Command::MultiManager(v));
@@ -382,26 +385,48 @@ fn parse_todo(s: &str) -> Option<TodoCommand> {
                 toast_text: text.to_string(),
             });
         }
-    }
-    if let Some(rest) = s.strip_prefix("todo:pset:")
-        && let Some((idx, p)) = rest.split_once('|')
-        && let (Ok(index), Ok(priority)) = (idx.parse(), p.parse())
-    {
-        return Some(TodoCommand::SetPriority { index, priority });
-    }
-    if let Some(rest) = s.strip_prefix("todo:tag:")
-        && let Some(p) = crate::plugins::todo::decode_todo_tag_action_payload(rest)
-    {
-        return Some(TodoCommand::SetTags {
-            index: p.idx,
-            tags: p.tags,
+        return Some(TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::Add {
+                toast_text: rest.split('|').next().unwrap_or_default().to_string(),
+            },
         });
     }
-    if let Some(v) = s.strip_prefix("todo:remove:").and_then(|v| v.parse().ok()) {
-        return Some(TodoCommand::Remove { index: v });
+    if let Some(rest) = s.strip_prefix("todo:pset:") {
+        if let Some((idx, p)) = rest.split_once('|')
+            && let (Ok(index), Ok(priority)) = (idx.parse(), p.parse())
+        {
+            return Some(TodoCommand::SetPriority { index, priority });
+        }
+        return Some(TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::SetPriority,
+        });
     }
-    if let Some(v) = s.strip_prefix("todo:done:").and_then(|v| v.parse().ok()) {
-        return Some(TodoCommand::Done { index: v });
+    if let Some(rest) = s.strip_prefix("todo:tag:") {
+        if let Some(p) = crate::plugins::todo::decode_todo_tag_action_payload(rest) {
+            return Some(TodoCommand::SetTags {
+                index: p.idx,
+                tags: p.tags,
+            });
+        }
+        return Some(TodoCommand::Compatibility {
+            kind: TodoCompatibilityKind::SetTags,
+        });
+    }
+    if let Some(raw) = s.strip_prefix("todo:remove:") {
+        return Some(match raw.parse() {
+            Ok(index) => TodoCommand::Remove { index },
+            Err(_) => TodoCommand::Compatibility {
+                kind: TodoCompatibilityKind::Remove,
+            },
+        });
+    }
+    if let Some(raw) = s.strip_prefix("todo:done:") {
+        return Some(match raw.parse() {
+            Ok(index) => TodoCommand::Done { index },
+            Err(_) => TodoCommand::Compatibility {
+                kind: TodoCompatibilityKind::Done,
+            },
+        });
     }
     match s {
         "todo:clear" => Some(TodoCommand::Clear),
@@ -559,12 +584,13 @@ fn parse_storage(s: &str) -> Option<StorageCommand> {
     if s == "tempfile:clear" {
         return Some(StorageCommand::TempfileClear);
     }
-    if let Some(rest) = s.strip_prefix("tempfile:alias:")
-        && let Some((path, alias)) = rest.split_once('|')
-    {
-        return Some(StorageCommand::TempfileAlias {
-            path: path.into(),
-            alias: alias.into(),
+    if let Some(rest) = s.strip_prefix("tempfile:alias:") {
+        return Some(match rest.split_once('|') {
+            Some((path, alias)) => StorageCommand::TempfileAlias {
+                path: path.into(),
+                alias: alias.into(),
+            },
+            None => StorageCommand::InvalidTempfileAlias,
         });
     }
     (s == "recycle:clean").then_some(StorageCommand::RecycleClean)
@@ -578,9 +604,23 @@ fn parse_timer(s: &str) -> Option<TimerCommand> {
             }
         };
     }
-    id!("timer:cancel:", TimerCommand::Cancel);
-    id!("timer:pause:", TimerCommand::Pause);
-    id!("timer:resume:", TimerCommand::Resume);
+    for (prefix, invalid) in [
+        ("timer:cancel:", TimerCommand::InvalidCancel),
+        ("timer:pause:", TimerCommand::InvalidPause),
+        ("timer:resume:", TimerCommand::InvalidResume),
+    ] {
+        if let Some(raw) = s.strip_prefix(prefix) {
+            return Some(match raw.parse() {
+                Ok(id) => match invalid {
+                    TimerCommand::InvalidCancel => TimerCommand::Cancel(id),
+                    TimerCommand::InvalidPause => TimerCommand::Pause(id),
+                    TimerCommand::InvalidResume => TimerCommand::Resume(id),
+                    _ => unreachable!(),
+                },
+                Err(_) => invalid,
+            });
+        }
+    }
     id!("stopwatch:pause:", TimerCommand::StopwatchPause);
     id!("stopwatch:resume:", TimerCommand::StopwatchResume);
     id!("stopwatch:stop:", TimerCommand::StopwatchStop);
@@ -656,9 +696,11 @@ fn parse_tab(s: &str) -> Option<BrowserTabCommand> {
             .split('_')
             .filter_map(|v| v.parse().ok())
             .collect::<Vec<_>>();
-        if !ids.is_empty() {
-            return Some(BrowserTabCommand::Switch(ids));
-        }
+        return Some(if ids.is_empty() {
+            BrowserTabCommand::InvalidSwitch
+        } else {
+            BrowserTabCommand::Switch(ids)
+        });
     }
     match s {
         "tab:cache" => Some(BrowserTabCommand::Cache),
@@ -721,16 +763,13 @@ fn parse_macro(s: &str) -> Result<Option<MacroCommand>, CommandError> {
         return Ok(v);
     }
     if let Some(raw) = s.strip_prefix("mkmacro:run:") {
-        return raw
-            .parse::<u64>()
-            .ok()
-            .filter(|id| *id != 0)
-            .map(MacroCommand::MkRun)
-            .map(Some)
-            .ok_or_else(|| CommandError::new("mkmacro", format!("invalid action: {s}")));
+        return Ok(Some(match raw.parse::<u64>() {
+            Ok(id) if id != 0 => MacroCommand::MkRun(id),
+            _ => MacroCommand::Invalid { raw: s.into() },
+        }));
     }
     if s.starts_with("mkmacro:") {
-        return Err(CommandError::new("mkmacro", format!("invalid action: {s}")));
+        return Ok(Some(MacroCommand::Invalid { raw: s.into() }));
     }
     Ok(s.strip_prefix("macro:")
         .map(|v| MacroCommand::RunLegacy(v.into())))
@@ -913,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn todo_supports_encoded_and_legacy_payloads_and_malformed_falls_back() {
+    fn todo_supports_encoded_legacy_and_typed_malformed_payloads() {
         let encoded = crate::plugins::todo::encode_todo_add_action_payload(
             &crate::plugins::todo::TodoAddActionPayload {
                 text: "a|b".into(),
@@ -929,10 +968,14 @@ mod tests {
         assert!(
             matches!(parse("todo:add:legacy|3| a, b ,, ").command,Command::Todo(TodoCommand::Add{text,priority,tags,toast_text,..}) if text=="legacy"&&priority==3&&tags==["a","b"]&&toast_text=="legacy")
         );
-        assert!(matches!(
+        assert_eq!(
             parse("todo:add:broken").command,
-            Command::External(_)
-        ));
+            Command::Todo(TodoCommand::Compatibility {
+                kind: TodoCompatibilityKind::Add {
+                    toast_text: "broken".into(),
+                },
+            })
+        );
         let tag = crate::plugins::todo::encode_todo_tag_action_payload(
             &crate::plugins::todo::TodoTagActionPayload {
                 idx: 7,
@@ -1063,19 +1106,60 @@ mod tests {
     }
 
     #[test]
-    fn invalid_mkmacro_is_an_error_but_other_unknown_protocols_fall_back() {
+    fn malformed_legacy_protocols_keep_typed_compatibility_provenance() {
         assert!(matches!(
             parse("mkmacro:run:9").command,
             Command::Macro(MacroCommand::MkRun(9))
         ));
         for raw in ["mkmacro:run:0", "mkmacro:run:nope", "mkmacro:future"] {
-            let error = parse_command(action(raw), None, ActivationSource::Macro).unwrap_err();
-            assert_eq!(error.domain, "mkmacro");
+            assert_eq!(
+                parse(raw).command,
+                Command::Macro(MacroCommand::Invalid { raw: raw.into() })
+            );
         }
-        assert!(matches!(
+        for (raw, kind) in [
+            (
+                "todo:add:bad",
+                TodoCompatibilityKind::Add {
+                    toast_text: "bad".into(),
+                },
+            ),
+            ("todo:pset:bad", TodoCompatibilityKind::SetPriority),
+            ("todo:tag:bad", TodoCompatibilityKind::SetTags),
+            ("todo:remove:bad", TodoCompatibilityKind::Remove),
+            ("todo:done:bad", TodoCompatibilityKind::Done),
+            ("todo:edit:bad", TodoCompatibilityKind::Edit),
+        ] {
+            assert_eq!(
+                parse(raw).command,
+                Command::Todo(TodoCommand::Compatibility { kind }),
+                "{raw}"
+            );
+        }
+        assert_eq!(
             parse("timer:cancel:nope").command,
-            Command::External(_)
-        ));
+            Command::Timer(TimerCommand::InvalidCancel)
+        );
+        assert_eq!(
+            parse("timer:pause:nope").command,
+            Command::Timer(TimerCommand::InvalidPause)
+        );
+        assert_eq!(
+            parse("timer:resume:nope").command,
+            Command::Timer(TimerCommand::InvalidResume)
+        );
+        assert_eq!(
+            parse("tab:switch:nope").command,
+            Command::BrowserTab(BrowserTabCommand::InvalidSwitch)
+        );
+        assert_eq!(
+            parse("sysinfo:cpu_list:nope").command,
+            Command::System(SystemCommand::InvalidCpuList)
+        );
+        assert_eq!(
+            parse("tempfile:alias:missing-delimiter").command,
+            Command::Storage(StorageCommand::InvalidTempfileAlias)
+        );
     }
 
     #[test]

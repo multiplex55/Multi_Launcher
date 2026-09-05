@@ -23,13 +23,22 @@ fn execute_with_external(
     external: &mut dyn FnMut(&str, Option<&str>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     match command {
+        Command::Todo(TodoCommand::Compatibility { .. })
+        | Command::Timer(
+            TimerCommand::InvalidCancel | TimerCommand::InvalidPause | TimerCommand::InvalidResume,
+        )
+        | Command::System(SystemCommand::InvalidCpuList)
+        | Command::BrowserTab(BrowserTabCommand::InvalidSwitch)
+        | Command::Storage(StorageCommand::InvalidTempfileAlias) => {
+            external(&original_action.action, original_action.args.as_deref())
+        }
         Command::Shell(command) => execute_shell(command),
         Command::Clipboard(command) => execute_clipboard(command),
         Command::Calculator(command) => execute_calculator(command),
         Command::Storage(command) => execute_storage(command, original_action),
         Command::Timer(command) => execute_timer(command, original_action),
         Command::System(command) => execute_system(command, original_action),
-        Command::BrowserTab(command) => execute_browser_tab(command),
+        Command::BrowserTab(command) => execute_browser_tab(command, original_action),
         Command::Media(command) => execute_media(command),
         Command::Layout(command) => execute_layout(command),
         Command::Macro(command) => execute_macro(command),
@@ -120,6 +129,7 @@ fn execute_storage(command: StorageCommand, original: &Action) -> anyhow::Result
         StorageCommand::TempfileClear => tempfiles::clear(),
         StorageCommand::TempfileRemove(path) => tempfiles::remove(&path),
         StorageCommand::TempfileAlias { path, alias } => tempfiles::set_alias(&path, &alias),
+        StorageCommand::InvalidTempfileAlias => execute_external(original),
         StorageCommand::RecycleClean => {
             crate::actions::system::recycle_clean();
             Ok(())
@@ -134,7 +144,11 @@ fn execute_storage(command: StorageCommand, original: &Action) -> anyhow::Result
 fn execute_timer(command: TimerCommand, original: &Action) -> anyhow::Result<()> {
     use crate::actions::{stopwatch, timer};
     match command {
-        TimerCommand::TimerDialog | TimerCommand::AlarmDialog => execute_external(original),
+        TimerCommand::TimerDialog
+        | TimerCommand::AlarmDialog
+        | TimerCommand::InvalidCancel
+        | TimerCommand::InvalidPause
+        | TimerCommand::InvalidResume => execute_external(original),
         TimerCommand::Cancel(id) => effect(|| timer::cancel(id)),
         TimerCommand::Pause(id) => effect(|| timer::pause(id)),
         TimerCommand::Resume(id) => effect(|| timer::resume(id)),
@@ -172,19 +186,27 @@ fn execute_system(command: SystemCommand, original: &Action) -> anyhow::Result<(
         SystemCommand::Keys(spec) => crate::actions::keys::send(&spec),
         SystemCommand::BrightnessDialog
         | SystemCommand::VolumeDialog
-        | SystemCommand::CpuList(_) => execute_external(original),
+        | SystemCommand::CpuList(_)
+        | SystemCommand::InvalidCpuList => execute_external(original),
     }
 }
 
-fn execute_browser_tab(command: BrowserTabCommand) -> anyhow::Result<()> {
+fn execute_browser_tab(command: BrowserTabCommand, original: &Action) -> anyhow::Result<()> {
     match command {
         BrowserTabCommand::Switch(ids) => {
             crate::actions::system::browser_tab_switch(&ids);
+            Ok(())
         }
-        BrowserTabCommand::Cache => crate::plugins::browser_tabs::rebuild_cache(),
-        BrowserTabCommand::Clear => crate::plugins::browser_tabs::clear_cache(),
+        BrowserTabCommand::InvalidSwitch => execute_external(original),
+        BrowserTabCommand::Cache => {
+            crate::plugins::browser_tabs::rebuild_cache();
+            Ok(())
+        }
+        BrowserTabCommand::Clear => {
+            crate::plugins::browser_tabs::clear_cache();
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn execute_media(command: MediaCommand) -> anyhow::Result<()> {
@@ -219,6 +241,7 @@ fn execute_macro(command: MacroCommand) -> anyhow::Result<()> {
         MacroCommand::MkStop => crate::mkmacro::runtime::stop(),
         MacroCommand::MkRecord => anyhow::bail!("recording requires a target macro"),
         MacroCommand::MkRecordStop => crate::mkmacro::runtime::record_stop().map(|_| ()),
+        MacroCommand::Invalid { raw } => anyhow::bail!("invalid mkmacro action: {raw}"),
     }
 }
 
@@ -238,9 +261,10 @@ fn execute_todo(command: TodoCommand, original: &Action) -> anyhow::Result<()> {
         TodoCommand::Done { index } => todo::mark_done(index),
         TodoCommand::Clear => todo::clear_done(),
         TodoCommand::Export => todo::export().map(|_| ()),
-        TodoCommand::Dialog | TodoCommand::View | TodoCommand::Edit { .. } => {
-            execute_external(original)
-        }
+        TodoCommand::Dialog
+        | TodoCommand::View
+        | TodoCommand::Edit { .. }
+        | TodoCommand::Compatibility { .. } => execute_external(original),
     }
 }
 
@@ -459,6 +483,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_compatibility_commands_keep_headless_external_fallback() {
+        for raw in [
+            "todo:add:bad",
+            "todo:remove:bad",
+            "todo:edit:bad",
+            "timer:cancel:bad",
+            "tab:switch:bad",
+            "sysinfo:cpu_list:bad",
+            "tempfile:alias:bad",
+        ] {
+            let original = action(raw);
+            let command = crate::commands::parse_action(&original).unwrap();
+            let mut calls = Vec::new();
+            execute_with_external(command, &original, &mut |target, args| {
+                calls.push((target.to_string(), args.map(str::to_string)));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(calls, [(raw.into(), None)], "{raw}");
+        }
+    }
     #[test]
     fn invalid_mkmacro_facade_error_keeps_legacy_wording() {
         let raw = "mkmacro:future";
