@@ -38,10 +38,9 @@ impl LauncherApp {
     pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
         let pending = self.pending_confirm.take();
         if confirmed && let Some(pending) = pending {
-            self.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+            self.dispatch_command_invocation(pending.invocation);
         }
     }
-
     pub(crate) fn launcher_interaction_snapshot(&self) -> LauncherInteractionSnapshot {
         let panel_instances = Self::TRACKED_PANELS
             .iter()
@@ -91,27 +90,30 @@ impl LauncherApp {
             self.test_activation_trace.push((a.clone(), source));
         }
         let before = self.launcher_interaction_snapshot();
-        if !self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
-            self.activate_action_confirmed(a, query_override, source);
+        match crate::commands::parse_command(a, query_override, source) {
+            Ok(invocation) => {
+                if !self.maybe_confirm_destructive_action(&invocation) {
+                    self.dispatch_command_invocation(invocation);
+                }
+            }
+            Err(error) => self.report_error_message(error.domain, error.message),
         }
         self.restore_for_new_launcher_interaction(&before);
     }
+
     fn maybe_confirm_destructive_action(
         &mut self,
-        a: &Action,
-        query_override: Option<String>,
-        source: ActivationSource,
+        invocation: &crate::commands::CommandInvocation,
     ) -> bool {
         if !self.require_confirm_destructive {
             return false;
         }
-        if let Some(kind) = DestructiveAction::from_action(a) {
-            self.pending_confirm = Some(PendingConfirmAction {
-                action: a.clone(),
-                query_override,
-                source,
+        if let Some(kind) = DestructiveAction::from_command(&invocation.command) {
+            self.pending_confirm = Some(PendingConfirmCommand {
+                invocation: invocation.clone(),
             });
-            self.confirm_modal.open_for_source(kind, Some(source));
+            self.confirm_modal
+                .open_for_source(kind, Some(invocation.source));
             return true;
         }
         false
@@ -123,6 +125,13 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        match crate::commands::parse_command(a, query_override, source) {
+            Ok(invocation) => self.dispatch_command_invocation(invocation),
+            Err(error) => self.report_error_message(error.domain, error.message),
+        }
+    }
+
+    pub(crate) fn activate_action_legacy(&mut self, a: Action, source: ActivationSource) {
         if self.handle_clipboard_modify_action(&a, source) {
             return;
         }
@@ -132,75 +141,11 @@ impl LauncherApp {
         if self.handle_diff_action(&a.action) {
             return;
         }
-        if let Some(new_query) = query_override {
-            self.query = new_query;
-            self.last_timer_query =
-                self.query.starts_with("timer list") || self.query.starts_with("alarm list");
-            self.search();
-        }
-        let mut focus_after_launcher = false;
-        if a.action == "launcher:show"
-            && let Some(query) = a.args.as_ref()
-        {
-            self.query = query.to_string();
-            self.last_timer_query =
-                query.starts_with("timer list") || query.starts_with("alarm list");
-            self.search();
-            self.move_cursor_end = true;
-            focus_after_launcher = true;
-        }
-        if self.handle_launcher_action(&a.action) {
-            if focus_after_launcher {
-                self.focus_input();
-            }
-            return;
-        }
         let current = self.query.clone();
         let mut refresh = false;
         let mut set_focus = false;
         let mut command_changed_query = false;
-        if let Some(new_q) = a.action.strip_prefix("queryexec:") {
-            tracing::debug!("queryexec action via activation: {new_q}");
-            self.query = new_q.to_string();
-            self.last_timer_query =
-                new_q.starts_with("timer list") || new_q.starts_with("alarm list");
-            self.search();
-            self.move_cursor_end = true;
-            if let Some(action) = self.results.first().cloned() {
-                self.activate_action(action, None, source);
-            }
-            // Query dispatch remains interactive even when its first result
-            // happens to perform work outside the Launcher.
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
-            self.move_cursor_end = true;
-            self.focus_input();
-            return;
-        } else if let Some(new_q) = a.action.strip_prefix("query:") {
-            tracing::debug!("query action via activation: {new_q}");
-            self.query = if let Some(query_arg) = a
-                .args
-                .as_deref()
-                .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
-                .and_then(|value| {
-                    value
-                        .get("query")
-                        .and_then(|query| query.as_str())
-                        .map(str::to_string)
-                }) {
-                format!("{} {}", new_q.trim_end(), query_arg)
-            } else {
-                new_q.to_string()
-            };
-            self.last_timer_query =
-                new_q.starts_with("timer list") || new_q.starts_with("alarm list");
-            self.search();
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
-            self.move_cursor_end = true;
-            self.focus_input();
-            return;
-        } else if a.action == "help:show" {
+        if a.action == "help:show" {
             self.help_window.open = true;
         } else if a.action == "timer:dialog:timer" {
             self.timer_dialog.open_timer();
@@ -1308,7 +1253,12 @@ impl LauncherApp {
         self.add_error_toast(msg);
     }
 
-    fn record_history_usage(&mut self, action: &Action, query: &str, source: ActivationSource) {
+    pub(crate) fn record_history_usage(
+        &mut self,
+        action: &Action,
+        query: &str,
+        source: ActivationSource,
+    ) {
         let _ = history::append_history(
             HistoryEntry {
                 query: query.to_string(),
@@ -1354,34 +1304,6 @@ impl LauncherApp {
                         .duration_in_seconds(self.toast_duration as f64),
                 },
             );
-        }
-    }
-
-    fn handle_launcher_action(&mut self, action: &str) -> bool {
-        match action {
-            "launcher:toggle" => {
-                let next = !self.visible_flag.load(Ordering::SeqCst);
-                self.visible_flag.store(next, Ordering::SeqCst);
-                if next {
-                    self.restore_flag.store(true, Ordering::SeqCst);
-                }
-                true
-            }
-            "launcher:show" => {
-                self.visible_flag.store(true, Ordering::SeqCst);
-                self.restore_flag.store(true, Ordering::SeqCst);
-                true
-            }
-            "launcher:hide" => {
-                self.visible_flag.store(false, Ordering::SeqCst);
-                true
-            }
-            "launcher:focus" | "launcher:restore" => {
-                self.visible_flag.store(true, Ordering::SeqCst);
-                self.restore_flag.store(true, Ordering::SeqCst);
-                true
-            }
-            _ => false,
         }
     }
 
@@ -1733,13 +1655,72 @@ mod tests {
             .pending_confirm
             .take()
             .expect("queued destructive action");
-        assert_eq!(pending.source, ActivationSource::Dashboard);
-        app.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        assert_eq!(pending.invocation.source, ActivationSource::Dashboard);
+        app.dispatch_command_invocation(pending.invocation);
         assert!(load_notes().unwrap().is_empty());
 
         std::env::set_current_dir(original_dir).unwrap();
     }
 
+    #[test]
+    fn pending_confirmation_retains_typed_invocation_metadata() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+        let action = Action {
+            label: "Remove todo".into(),
+            desc: "Todo".into(),
+            action: "todo:remove:7".into(),
+            args: None,
+        };
+
+        app.activate_action(
+            action.clone(),
+            Some("retained query".into()),
+            ActivationSource::Gesture,
+        );
+
+        let pending = app.pending_confirm.as_ref().expect("typed pending command");
+        assert!(matches!(
+            pending.invocation.command,
+            crate::commands::Command::Todo(crate::commands::TodoCommand::Remove { index: 7 })
+        ));
+        assert_eq!(pending.invocation.original_action, action);
+        assert_eq!(
+            pending.invocation.query_override.as_deref(),
+            Some("retained query")
+        );
+        assert_eq!(pending.invocation.source, ActivationSource::Gesture);
+    }
+
+    #[test]
+    fn parser_errors_flow_through_unified_ui_reporting() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        app.show_inline_errors = true;
+
+        app.activate_action(
+            Action {
+                label: "Invalid macro".into(),
+                desc: "Test".into(),
+                action: "mkmacro:future".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+
+        assert_eq!(app.error.as_deref(), Some("invalid action: mkmacro:future"));
+        let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
+        assert!(log.contains("[error:mkmacro] invalid action: mkmacro:future"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
     #[test]
     fn action_execution_errors_flow_through_unified_ui_reporting() {
         let dir = tempfile::tempdir().unwrap();

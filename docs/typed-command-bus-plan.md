@@ -47,19 +47,19 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: make `launch_action` a parser-plus-typed-headless compatibility facade; preserve direct-call, no-op, args, fallback, legacy macro, favorite, and Clipboard Modify semantics.
 - Acceptance: one parser remains; no `ActionKind`/`LaunchPlan` references; direct non-GUI callers retain behavior.
 - Verification: launcher and affected plugin Nextest tests, `cargo check`, stale-reference search.
-- Commit: `refactor(launcher): execute headless actions through typed commands` (hash recorded after commit)
+- Commit: `478bdb1 refactor(launcher): execute headless actions through typed commands`
 - Verification record: typed headless `cargo nextest run --lib commands::headless::tests` passed 8/8; affected Shell/Snippets/Tempfile/Favorites/Recycle Nextest targets passed 39/39; `cargo check`, `cargo fmt --all --check`, `git diff --check`, and legacy-symbol searches passed. A parity audit found no behavior regressions and its execution-boundary test gap was remediated with an injected external-launch seam and facade compatibility tests.
 
 ### 4. Establish bus, host traits, outcomes, and typed activation seam
 
-- Status: pending
+- Status: complete
 - Dependencies: 1-3
 - Likely areas: new `src/commands/{outcome,host,bus}.rs`, launcher/query handler, `src/gui/command_host.rs`, GUI state/actions/confirmation.
 - Work: add stateless bus, coherent host traits, `Arc<CommandBus>`, typed Launcher/Query handling, parsed pending confirmation, centralized outcome/error application, and structured tracing. A temporary typed-to-legacy bridge may exist only for not-yet-migrated domains.
 - Acceptance: Launcher/Query bypass raw routing; destructive classification is typed; confirmation never reparses; hooks remain compatible; bus contains typed routing only.
 - Verification: bus, destructive, query, macro-launcher tests and `cargo check`.
-- Commit: pending
-- Verification record: pending
+- Commit: `refactor(commands): establish typed activation bus` (hash recorded after commit)
+- Verification record: `cargo check`, `cargo fmt --all --check`, and `git diff --check` passed; focused bus, destructive, query, pending-confirmation, parser-error, and macro-launcher Nextest filters passed; affected history/hide/preserve/dashboard/visibility/MultiManager integrations passed 34/34; stale-route audit found no production Launcher/Query raw routing.
 
 ### 5. Migrate headless-backed GUI execution and generic post-policy
 

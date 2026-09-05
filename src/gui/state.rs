@@ -73,10 +73,8 @@ pub(crate) enum ResultContextMenuKind {
 }
 
 #[derive(Clone)]
-pub(crate) struct PendingConfirmAction {
-    pub(crate) action: Action,
-    pub(crate) query_override: Option<String>,
-    pub(crate) source: ActivationSource,
+pub(crate) struct PendingConfirmCommand {
+    pub(crate) invocation: crate::commands::CommandInvocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -9,6 +9,7 @@ mod calendar_event_editor;
 mod calendar_popover;
 mod clipboard_dialog;
 mod clipboard_modify_dialog;
+mod command_host;
 mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
@@ -155,7 +156,7 @@ use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
 pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
-pub(crate) use state::{PendingConfirmAction, ResultContextMenuKind, UiErrorEvent};
+pub(crate) use state::{PendingConfirmCommand, ResultContextMenuKind, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -419,6 +420,7 @@ pub struct LauncherApp {
     /// duplicates the pointer, keeping the action data itself shared. When
     /// actions are edited the entire `Arc` is replaced with a new one.
     pub actions: Arc<Vec<Action>>,
+    command_bus: Arc<crate::commands::CommandBus>,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
     actions_by_id: HashMap<String, Action>,
@@ -622,7 +624,7 @@ pub struct LauncherApp {
     last_note_search_change: Option<Instant>,
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
-    pending_confirm: Option<PendingConfirmAction>,
+    pending_confirm: Option<PendingConfirmCommand>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
     pub file_search_selected_kind: crate::file_search::model::SearchKind,
@@ -1406,6 +1408,7 @@ impl LauncherApp {
         install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
         let mut app = Self {
             actions: Arc::clone(&actions),
+            command_bus: Arc::new(crate::commands::CommandBus),
             query: String::new(),
             results: (*actions).clone(),
             matcher: SkimMatcherV2::default(),
@@ -4491,7 +4494,7 @@ mod tests {
 
         assert_eq!(load_notes().unwrap().len(), 1);
         let pending = app.pending_confirm.take().expect("pending confirm action");
-        app.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        app.dispatch_command_invocation(pending.invocation);
         assert!(load_notes().unwrap().is_empty());
 
         std::env::set_current_dir(orig_dir).unwrap();
