@@ -7,6 +7,7 @@ pub enum MatcherDestination {
     Action {
         macro_id: u64,
         draft_generation: u64,
+        step_id: Option<u64>,
         path: MatcherPath,
     },
     MacroHotkey {
@@ -795,6 +796,7 @@ mod tests {
             destination: MatcherDestination::Action {
                 macro_id: 1,
                 draft_generation: 2,
+                step_id: None,
                 path: MatcherPath::Action,
             },
             original: original.clone(),

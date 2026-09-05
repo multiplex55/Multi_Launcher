@@ -85,6 +85,7 @@ pub type OperationId = u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualPointDestination {
     SetVariablePoint,
+    FindPixelColor,
 }
 
 /// Complete editor identity travels to the native worker and back unchanged.
@@ -1431,6 +1432,9 @@ impl VisualOverlayController {
                 {
                     self.confirm_point();
                 }
+                OverlayInputKind::Enter if matches!(phase, PointInteractionPhase::Armed) => {
+                    self.confirm_point();
+                }
                 _ => {}
             }
             return;
@@ -1916,6 +1920,53 @@ mod tests {
                 point: point(-320, 650),
             }]
         );
+    }
+
+    #[test]
+    fn point_picker_enter_requires_arming_and_confirms_exactly_once() {
+        let (mut c, data, _) = controller();
+        let id = c.begin_point_pick(point_request());
+        data.lock().unwrap().inputs.push(OverlayInput {
+            operation_id: id,
+            kind: OverlayInputKind::Enter,
+        });
+        assert!(advance_and_drain(&mut c).is_empty());
+        assert!(matches!(
+            c.state(),
+            VisualOverlayState::PickingPoint {
+                phase: PointInteractionPhase::AwaitingInitialRelease,
+                ..
+            }
+        ));
+
+        data.lock().unwrap().cursor = point(-320, 650);
+        data.lock().unwrap().inputs.extend([
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::LeftReleased(point(10, 20)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::PointerMoved(point(-320, 650)),
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Enter,
+            },
+            OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Enter,
+            },
+        ]);
+        assert_eq!(
+            advance_and_drain(&mut c),
+            vec![VisualOverlayEvent::PointConfirmed {
+                operation_id: id,
+                request: point_request(),
+                point: point(-320, 650),
+            }]
+        );
+        assert_eq!(c.state(), &VisualOverlayState::Idle);
     }
 
     #[test]

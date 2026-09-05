@@ -20,7 +20,7 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON},
+            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RETURN},
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
@@ -81,6 +81,7 @@ pub(super) struct NativeOverlayRenderer {
     visual: Option<OverlayVisual>,
     left_down: bool,
     escape_down: bool,
+    return_down: bool,
 }
 unsafe impl Send for NativeOverlayRenderer {}
 impl Default for NativeOverlayRenderer {
@@ -95,6 +96,7 @@ impl Default for NativeOverlayRenderer {
             visual: None,
             left_down: false,
             escape_down: false,
+            return_down: false,
         }
     }
 }
@@ -104,6 +106,10 @@ fn platform(message: impl Into<String>) -> VisualOverlayError {
         kind: OverlayErrorKind::Platform,
         message: message.into(),
     }
+}
+
+fn key_pressed(current_down: bool, previous_down: bool) -> bool {
+    current_down && !previous_down
 }
 
 fn win32_dimensions(
@@ -611,12 +617,14 @@ impl OverlayRenderer for NativeOverlayRenderer {
         if matches!(visual, OverlayVisual::RectanglePicker { .. }) {
             self.left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
             self.escape_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
+            self.return_down = unsafe { GetAsyncKeyState(VK_RETURN.0 as i32) } < 0;
         } else if matches!(visual, OverlayVisual::PointPicker { .. }) {
             // Treat the launch click as held until polling observes an actual
             // up state. This also synthesizes the arming release when command
             // dispatch happens just after the GUI button was released.
             self.left_down = true;
             self.escape_down = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
+            self.return_down = unsafe { GetAsyncKeyState(VK_RETURN.0 as i32) } < 0;
         }
         let module = unsafe { GetModuleHandleW(None) }
             .map_err(|e| platform(format!("overlay module lookup failed: {e}")))?;
@@ -932,6 +940,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
         let mut out = vec![];
         let left = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         let esc = unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0;
+        let enter = unsafe { GetAsyncKeyState(VK_RETURN.0 as i32) } < 0;
         let mut p = POINT::default();
         unsafe { GetCursorPos(&mut p) }
             .map_err(|e| platform(format!("cursor query failed: {e}")))?;
@@ -957,8 +966,15 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 kind: OverlayInputKind::Escape,
             });
         }
+        if key_pressed(enter, self.return_down) {
+            out.push(OverlayInput {
+                operation_id: id,
+                kind: OverlayInputKind::Enter,
+            });
+        }
         self.left_down = left;
         self.escape_down = esc;
+        self.return_down = enter;
         Ok(out)
     }
 
@@ -1006,6 +1022,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
         self.visual = None;
         self.left_down = false;
         self.escape_down = false;
+        self.return_down = false;
     }
 }
 fn destroy_overlay_window(window: OverlayWindow) {
@@ -1023,6 +1040,28 @@ fn destroy_overlay_window(window: OverlayWindow) {
 impl Drop for NativeOverlayRenderer {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_pressed;
+
+    #[test]
+    fn return_key_held_down_emits_only_one_pressed_transition() {
+        let states = [false, true, true, true, false, true];
+        let mut previous = false;
+        let transitions = states
+            .into_iter()
+            .filter(|&current| {
+                let pressed = key_pressed(current, previous);
+                previous = current;
+                pressed
+            })
+            .count();
+        assert_eq!(transitions, 2);
+        assert!(key_pressed(true, false));
+        assert!(!key_pressed(true, true));
     }
 }
 

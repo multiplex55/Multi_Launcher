@@ -145,6 +145,7 @@ pub enum InsertionIntent {
 pub enum VisualRegionDestination {
     CaptureScreenshotRegion,
     ClickWithinRegion,
+    FindPixelSearchRegion,
     ImageActionSearchRegion,
     ImageActionReferenceAsset,
     ConditionSearchRegion(ConditionOperationDestination),
@@ -155,6 +156,7 @@ pub enum VisualRegionDestination {
 enum ExpectedVisualAction {
     CaptureScreenshot,
     ClickWithinRegion,
+    FindPixel,
     ImageFind,
     ImageClick,
     Condition,
@@ -737,6 +739,7 @@ impl ActionEditorState {
         let expected_action = match self.draft.as_ref().map(|step| &step.action) {
             Some(MkAction::ImageFind(_)) => ExpectedVisualAction::ImageFind,
             Some(MkAction::ImageClick(_)) => ExpectedVisualAction::ImageClick,
+            Some(MkAction::FindPixel(_)) => ExpectedVisualAction::FindPixel,
             Some(MkAction::If(_))
             | Some(MkAction::WhileStart { .. })
             | Some(MkAction::WaitUntil { .. }) => ExpectedVisualAction::Condition,
@@ -748,6 +751,10 @@ impl ActionEditorState {
         let compatible = matches!(
             (&destination, expected_action, purpose),
             (
+                VisualRegionDestination::FindPixelSearchRegion,
+                ExpectedVisualAction::FindPixel,
+                super::visual_overlay::RectanglePurpose::SearchRegion
+            ) | (
                 VisualRegionDestination::ImageActionSearchRegion,
                 ExpectedVisualAction::ImageFind | ExpectedVisualAction::ImageClick,
                 super::visual_overlay::RectanglePurpose::SearchRegion
@@ -808,12 +815,16 @@ impl ActionEditorState {
         let super::window_picker::MatcherDestination::Action {
             macro_id,
             draft_generation,
+            step_id,
             path,
         } = &request.destination
         else {
             return false;
         };
-        if Some(*macro_id) != current_macro_id || *draft_generation != self.draft_generation {
+        if Some(*macro_id) != current_macro_id
+            || *draft_generation != self.draft_generation
+            || *step_id != self.editing_id
+        {
             return false;
         }
         let Some(step) = self.draft.as_mut() else {
@@ -824,6 +835,7 @@ impl ActionEditorState {
                 step.action,
                 MkAction::ImageFind(_)
                     | MkAction::ImageClick(_)
+                    | MkAction::FindPixel(_)
                     | MkAction::WaitForVisualChange(_)
                     | MkAction::CaptureScreenshot(_)
             ) {
@@ -833,9 +845,15 @@ impl ActionEditorState {
                 return false;
             };
             if image.kind == super::image_search_editor::SearchRegionKind::ClientArea {
-                image.client_matcher = matcher;
+                if image.client_matcher != matcher {
+                    image.client_matcher = matcher;
+                    self.draft_changed = true;
+                }
             } else if image.kind == super::image_search_editor::SearchRegionKind::Window {
-                image.window_matcher = matcher;
+                if image.window_matcher != matcher {
+                    image.window_matcher = matcher;
+                    self.draft_changed = true;
+                }
             } else {
                 return false;
             }
@@ -884,6 +902,9 @@ impl ActionEditorState {
             MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
+            MkAction::FindPixel(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
             MkAction::WaitForVisualChange(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
@@ -920,6 +941,9 @@ impl ActionEditorState {
         self.draft = Some(step.clone());
         self.image_search = match &step.action {
             MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
+            MkAction::FindPixel(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             MkAction::WaitForVisualChange(p) => {
@@ -1131,6 +1155,9 @@ impl ActionEditorState {
                             ExpectedVisualAction::ImageClick => {
                                 matches!(step.action, MkAction::ImageClick(_))
                             }
+                            ExpectedVisualAction::FindPixel => {
+                                matches!(step.action, MkAction::FindPixel(_))
+                            }
                             ExpectedVisualAction::Condition => matches!(
                                 step.action,
                                 MkAction::If(_)
@@ -1151,6 +1178,20 @@ impl ActionEditorState {
                     return;
                 }
                 let applied = match pending.destination {
+                    VisualRegionDestination::FindPixelSearchRegion => {
+                        if let (Some(step), Some(region_editor)) =
+                            (&mut self.draft, &mut self.image_search)
+                            && let MkAction::FindPixel(payload) = &mut step.action
+                        {
+                            payload.region = SearchRegion::Rectangle { rect };
+                            region_editor.rectangle = rect;
+                            region_editor.kind =
+                                super::image_search_editor::SearchRegionKind::Rectangle;
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     VisualRegionDestination::ImageActionSearchRegion => {
                         if let Some(image) = self.image_search.as_mut() {
                             image.rectangle = rect;
@@ -1250,11 +1291,14 @@ impl ActionEditorState {
             }
         }
     }
-    fn sync_image_region_to_draft(&mut self) {
+    /// Copies the shared visual-region editor state into whichever supported
+    /// action owns the current draft before it is committed.
+    fn sync_search_region_to_draft(&mut self) {
         if let (Some(step), Some(image)) = (&mut self.draft, &self.image_search) {
             let region = image.selected_region();
             match &mut step.action {
                 MkAction::ImageFind(p) | MkAction::ImageClick(p) => p.region = region,
+                MkAction::FindPixel(p) => p.region = region,
                 MkAction::WaitForVisualChange(p) => p.region = region,
                 MkAction::CaptureScreenshot(p) => p.region = region,
                 _ => {}
@@ -1262,6 +1306,13 @@ impl ActionEditorState {
         }
     }
     fn poll_visual_overlay(&mut self, current_macro_id: Option<u64>) {
+        self.poll_visual_overlay_with(current_macro_id, read_live_desktop_pixel);
+    }
+    fn poll_visual_overlay_with(
+        &mut self,
+        current_macro_id: Option<u64>,
+        read_pixel: impl Fn(MkPoint) -> Result<[u8; 3], String>,
+    ) {
         for event in self.visual_overlay.poll() {
             match event {
                 super::visual_overlay::VisualOverlayEvent::PointConfirmed {
@@ -1271,7 +1322,12 @@ impl ActionEditorState {
                 } => {
                     if self.active_point_pick == Some(operation_id) {
                         self.active_point_pick = None;
-                        self.apply_point_confirmation(&request, point, current_macro_id);
+                        self.apply_point_confirmation_with(
+                            &request,
+                            point,
+                            current_macro_id,
+                            &read_pixel,
+                        );
                     }
                 }
                 super::visual_overlay::VisualOverlayEvent::Cancelled { operation_id }
@@ -1300,42 +1356,112 @@ impl ActionEditorState {
         point: MkPoint,
         current_macro_id: Option<u64>,
     ) -> bool {
+        self.apply_point_confirmation_with(
+            request,
+            point,
+            current_macro_id,
+            read_live_desktop_pixel,
+        )
+    }
+    fn apply_point_confirmation_with(
+        &mut self,
+        request: &super::visual_overlay::VisualPointRequest,
+        point: MkPoint,
+        current_macro_id: Option<u64>,
+        read_pixel: impl FnOnce(MkPoint) -> Result<[u8; 3], String>,
+    ) -> bool {
         if current_macro_id != Some(request.macro_id)
             || self.draft_generation != request.draft_generation
             || self.editing_id != request.step_id
-            || !matches!(
-                request.destination,
-                super::visual_overlay::VisualPointDestination::SetVariablePoint
-            )
         {
             return false;
         }
-        let Some(MkStep {
-            action:
-                MkAction::SetVariable {
-                    value: MkValue::Point(target),
+        match request.destination {
+            super::visual_overlay::VisualPointDestination::SetVariablePoint => {
+                let Some(MkStep {
+                    action:
+                        MkAction::SetVariable {
+                            value: MkValue::Point(target),
+                            ..
+                        },
                     ..
-                },
-            ..
-        }) = self.draft.as_mut()
-        else {
-            return false;
-        };
-        *target = point;
-        self.draft_changed = true;
-        true
+                }) = self.draft.as_mut()
+                else {
+                    return false;
+                };
+                *target = point;
+                self.draft_changed = true;
+                true
+            }
+            super::visual_overlay::VisualPointDestination::FindPixelColor => {
+                if !matches!(
+                    self.draft.as_ref().map(|step| &step.action),
+                    Some(MkAction::FindPixel(_))
+                ) {
+                    return false;
+                }
+                let rgb = match read_pixel(point) {
+                    Ok(rgb) => rgb,
+                    Err(error) => {
+                        self.capture_message =
+                            Some(format!("Unable to sample pixel color: {error}"));
+                        return false;
+                    }
+                };
+                let Some(MkStep {
+                    action: MkAction::FindPixel(payload),
+                    ..
+                }) = self.draft.as_mut()
+                else {
+                    return false;
+                };
+                payload.color = crate::mkmacro::screen::format_rgb(rgb);
+                self.draft_changed = true;
+                true
+            }
+        }
     }
-    fn request_point_pick(&mut self, macro_id: u64) {
+    fn identify_search_monitors(&mut self) {
+        let Some(region) = self.image_search.as_mut() else {
+            return;
+        };
+        region.refresh_monitors();
+        match &region.monitors {
+            Ok(monitors) if !monitors.is_empty() => {
+                let id = self.visual_overlay.identify_monitors(monitors.clone());
+                self.overlay_diagnostic = Some((id, "Unable to identify monitors".into()));
+                if self.visual_overlay.operation_id() == Some(id) {
+                    self.capture_message = None;
+                }
+            }
+            Ok(_) => self.capture_message = Some("No monitors are currently available".into()),
+            Err(error) => {
+                self.capture_message = Some(format!("Monitor information unavailable: {error}"))
+            }
+        }
+    }
+    fn request_point_pick(
+        &mut self,
+        macro_id: u64,
+        destination: super::visual_overlay::VisualPointDestination,
+    ) {
         if self.active_point_pick.is_some() {
             return;
         }
-        if !matches!(
-            self.draft.as_ref().map(|s| &s.action),
-            Some(MkAction::SetVariable {
-                value: MkValue::Point(_),
-                ..
-            })
-        ) {
+        let supported = matches!(
+            (destination, self.draft.as_ref().map(|s| &s.action)),
+            (
+                super::visual_overlay::VisualPointDestination::SetVariablePoint,
+                Some(MkAction::SetVariable {
+                    value: MkValue::Point(_),
+                    ..
+                })
+            ) | (
+                super::visual_overlay::VisualPointDestination::FindPixelColor,
+                Some(MkAction::FindPixel(_))
+            )
+        );
+        if !supported {
             return;
         }
         let id = self
@@ -1344,7 +1470,7 @@ impl ActionEditorState {
                 macro_id,
                 draft_generation: self.draft_generation,
                 step_id: self.editing_id,
-                destination: super::visual_overlay::VisualPointDestination::SetVariablePoint,
+                destination,
             });
         self.active_point_pick = Some(id);
         self.capture_message = None;
@@ -1371,7 +1497,7 @@ impl ActionEditorState {
         }
         self.cancel_owned_passive_overlay();
         self.stop_position_capture();
-        self.sync_image_region_to_draft();
+        self.sync_search_region_to_draft();
         let mut step = self.draft.take()?;
         normalize_optional_outputs(&mut step.action);
         let edit = self.editing_id.take();
@@ -2535,7 +2661,7 @@ fn action_ui(
     Option<ImageAuthoringRequest>,
     Option<super::condition_editor::ConditionImageRequest>,
     Option<PreviewRequest>,
-    bool,
+    Option<super::visual_overlay::VisualPointDestination>,
 ) {
     let target_context = TargetEditorContext {
         store: image_context.store,
@@ -2546,7 +2672,7 @@ fn action_ui(
     let mut image_request = None;
     let mut condition_image_request = None;
     let mut preview_request = None;
-    let mut point_pick = false;
+    let mut point_pick = None;
     let draft_id = step.id;
     match &mut step.action {
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
@@ -3049,9 +3175,13 @@ fn action_ui(
             });
             value_ui(ui, value);
             if matches!(value, MkValue::Point(_)) {
-                point_pick = ui
+                if ui
                     .add_enabled(!point_pick_active, egui::Button::new("Pick Position"))
-                    .clicked();
+                    .clicked()
+                {
+                    point_pick =
+                        Some(super::visual_overlay::VisualPointDestination::SetVariablePoint);
+                }
             }
         }
         MkAction::UnsetVariable { name } => {
@@ -3259,7 +3389,12 @@ fn action_ui(
             ui.heading("Find Pixel Color");
             ui.horizontal(|ui| {
                 ui.label("Color");
-                ui.text_edit_singleline(&mut p.color);
+                let response = ui.text_edit_singleline(&mut p.color);
+                if response.lost_focus()
+                    && let Ok(rgb) = crate::mkmacro::screen::parse_rgb(&p.color)
+                {
+                    p.color = crate::mkmacro::screen::format_rgb(rgb);
+                }
                 if let Ok(rgb) = crate::mkmacro::screen::parse_rgb(&p.color) {
                     let mut picked = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
                     if ui.color_edit_button_srgba(&mut picked).changed() {
@@ -3269,6 +3404,16 @@ fn action_ui(
                             picked.b(),
                         ]);
                     }
+                }
+                if ui
+                    .add_enabled(
+                        !point_pick_active && !authoring_busy,
+                        egui::Button::new("Pick Color..."),
+                    )
+                    .clicked()
+                {
+                    point_pick =
+                        Some(super::visual_overlay::VisualPointDestination::FindPixelColor);
                 }
                 ui.label("Tolerance");
                 ui.add(egui::DragValue::new(&mut p.tolerance));
@@ -3303,71 +3448,6 @@ fn action_ui(
                         "Fail action",
                     );
                 });
-            let mut region_kind = match p.region {
-                SearchRegion::Desktop => 0,
-                SearchRegion::Monitor { .. } => 1,
-                SearchRegion::Rectangle { .. } => 2,
-                SearchRegion::Window { .. } => 3,
-                SearchRegion::ClientArea { .. } => 4,
-            };
-            egui::ComboBox::from_label("Region")
-                .selected_text(
-                    ["Desktop", "Monitor", "Rectangle", "Window", "Client Area"][region_kind],
-                )
-                .show_ui(ui, |ui| {
-                    for (i, label) in ["Desktop", "Monitor", "Rectangle", "Window", "Client Area"]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        ui.selectable_value(&mut region_kind, i, label);
-                    }
-                });
-            let current_kind = match p.region {
-                SearchRegion::Desktop => 0,
-                SearchRegion::Monitor { .. } => 1,
-                SearchRegion::Rectangle { .. } => 2,
-                SearchRegion::Window { .. } => 3,
-                SearchRegion::ClientArea { .. } => 4,
-            };
-            if region_kind != current_kind {
-                p.region = match region_kind {
-                    0 => SearchRegion::Desktop,
-                    1 => SearchRegion::Monitor { index: 0 },
-                    2 => SearchRegion::Rectangle {
-                        rect: ScreenRect::new(0, 0, 800, 500),
-                    },
-                    3 => SearchRegion::Window {
-                        matcher: MkWindowMatcher::default(),
-                    },
-                    _ => SearchRegion::ClientArea {
-                        matcher: MkWindowMatcher::default(),
-                    },
-                };
-            }
-            match &mut p.region {
-                SearchRegion::Monitor { index } => {
-                    ui.horizontal(|ui| {
-                        ui.label("Monitor index");
-                        ui.add(egui::DragValue::new(index));
-                    });
-                }
-                SearchRegion::Rectangle { rect } => {
-                    ui.horizontal(|ui| {
-                        ui.label("X");
-                        ui.add(egui::DragValue::new(&mut rect.x));
-                        ui.label("Y");
-                        ui.add(egui::DragValue::new(&mut rect.y));
-                        ui.label("Width");
-                        ui.add(egui::DragValue::new(&mut rect.width));
-                        ui.label("Height");
-                        ui.add(egui::DragValue::new(&mut rect.height));
-                    });
-                }
-                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
-                    let _ = matcher_ui(ui, matcher);
-                }
-                SearchRegion::Desktop => {}
-            }
             super::image_search_controls::show_image_outputs_editor(ui, &mut p.outputs);
         }
         MkAction::PixelCheck {
@@ -3826,6 +3906,12 @@ fn matcher_at_path<'a>(
                 }
                 _ => None,
             },
+            MkAction::FindPixel(p) => match &mut p.region {
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    Some(matcher)
+                }
+                _ => None,
+            },
             _ => None,
         },
         MatcherPath::Coordinate(path) => {
@@ -4038,13 +4124,15 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut image_request = None;
     let mut wait_visual_region_request = false;
     let mut screenshot_region_request = false;
+    let mut find_pixel_region_request = false;
     let mut condition_image_request = None;
     let mut image_test_request: Option<Option<super::image_authoring_destination::ConditionPath>> =
         None;
     let mut preview_request = None;
-    let mut point_pick_request = false;
+    let mut point_pick_request = None;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
+    let mut identify_monitors_request = false;
     let mut related_action_notice = None;
     let mut related_action_request = None;
     let image_refs = d.store.image_refs().unwrap_or_default();
@@ -4062,7 +4150,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
           egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let state = &mut d.action_editor;
             let draft_generation = state.draft_generation;
-            let point_pick_active = state.active_point_pick.is_some();
+            let point_pick_active = state.active_point_pick.is_some()
+                || state.visual_overlay.operation_id().is_some();
             let step = state.draft.as_mut().unwrap();
             let editor = state.editor.expect("action editor draft has no editor strategy");
             assert!(super::action_catalog::editor_route_recognizes(&step.action, editor), "action editor strategy does not match draft action");
@@ -4089,10 +4178,13 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             point_pick_request = pick_point;
             if matches!(
                 step.action,
-                MkAction::WaitForVisualChange(_) | MkAction::CaptureScreenshot(_)
+                MkAction::FindPixel(_)
+                    | MkAction::WaitForVisualChange(_)
+                    | MkAction::CaptureScreenshot(_)
             ) {
                 ui.separator(); ui.heading("Region");
                 let is_screenshot = matches!(step.action, MkAction::CaptureScreenshot(_));
+                let is_find_pixel = matches!(step.action, MkAction::FindPixel(_));
                 let region_state = state.image_search.as_mut().expect("visual region requires editor state");
                 let before = region_state.selected_region();
                 if let Some(request) = super::image_search_controls::show_search_region_fields(ui, region_state) {
@@ -4102,13 +4194,15 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             image_request = Some(ImageAuthoringRequest::PickRectangle);
                             if is_screenshot {
                                 screenshot_region_request = true;
+                            } else if is_find_pixel {
+                                find_pixel_region_request = true;
                             } else {
                                 wait_visual_region_request = true;
                             }
                         }
                         R::PickWindow => window = Some(super::window_picker::MatcherPath::VisualRegion),
                         R::RefreshMonitors => region_state.refresh_monitors(),
-                        R::IdentifyMonitors => {},
+                        R::IdentifyMonitors => identify_monitors_request = true,
                         R::PreviewRegion => {
                             region_preview_request = Some(region_state.selected_region());
                         }
@@ -4119,6 +4213,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     match &mut step.action {
                         MkAction::WaitForVisualChange(payload) => payload.region = selected,
                         MkAction::CaptureScreenshot(payload) => payload.region = selected,
+                        MkAction::FindPixel(payload) => payload.region = selected,
                         _ => unreachable!(),
                     }
                     state.draft_changed = true;
@@ -4144,20 +4239,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             Some(state.image_search.as_ref().unwrap().selected_region());
                     }
                     Some(IdentifyMonitors) => {
-                        let image = state.image_search.as_mut().unwrap();
-                        image.refresh_monitors();
-                        match &image.monitors {
-                            Ok(monitors) if !monitors.is_empty() => {
-                                let id = state.visual_overlay.identify_monitors(monitors.clone());
-                                state.overlay_diagnostic =
-                                    Some((id, "Unable to identify monitors".into()));
-                                if state.visual_overlay.operation_id() == Some(id) {
-                                    state.capture_message = None;
-                                }
-                            }
-                            Ok(_) => state.capture_message = Some("No monitors are currently available".into()),
-                            Err(error) => state.capture_message = Some(format!("Monitor information unavailable: {error}")),
-                        }
+                        identify_monitors_request = true;
                     }
                     Some(request @ (AddSmoothMouseMove | AddActivateWindowBefore)) => {
                         related_action_request = Some(request);
@@ -4171,7 +4253,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     if image.kind == super::image_search_editor::SearchRegionKind::ClientArea { image.client_matcher.clone() } else { image.window_matcher.clone() }
                 } else { matcher_at_path(&mut step.action, &path).expect("picker path must resolve").clone() };
                 let macro_id=d.selected_macro_id.unwrap_or(0);
-                d.window_picker.open(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, path }, original });
+                d.window_picker.open(super::window_picker::MatcherEditRequest { destination: super::window_picker::MatcherDestination::Action { macro_id, draft_generation: state.draft_generation, step_id: state.editing_id, path }, original });
             }
             if let Some(purpose) = launcher {
                 let request = super::launcher_action_picker::LauncherActionRequest {
@@ -4263,6 +4345,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
               related_action_notice = reduce_related_action_request(&mut d.action_editor, request);
           }
         });
+    if identify_monitors_request {
+        d.action_editor.identify_search_monitors();
+    }
     if let Some(notice) = related_action_notice {
         d.queue_ui_notice(notice);
     }
@@ -4277,9 +4362,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if let Some(request) = preview_request {
         dispatch_preview(&mut d.action_editor, request);
     }
-    if point_pick_request {
+    if let Some(destination) = point_pick_request {
         d.action_editor
-            .request_point_pick(d.selected_macro_id.unwrap_or(0));
+            .request_point_pick(d.selected_macro_id.unwrap_or(0), destination);
     }
     if let Some(region) = region_preview_request {
         d.action_editor.preview_region(region);
@@ -4329,6 +4414,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     VisualRegionDestination::WaitForVisualChangeRegion
                 } else if screenshot_region_request {
                     VisualRegionDestination::CaptureScreenshotRegion
+                } else if find_pixel_region_request {
+                    VisualRegionDestination::FindPixelSearchRegion
                 } else if matches!(request, ImageAuthoringRequest::PickClickWithinRegion) {
                     VisualRegionDestination::ClickWithinRegion
                 } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
@@ -4888,6 +4975,87 @@ mod tests {
             not_found_policy: MkImageNotFoundPolicy::Fail,
             outputs: MkImageOutputs::default(),
         })
+    }
+
+    fn find_pixel_action(region: SearchRegion) -> MkAction {
+        MkAction::FindPixel(MkPixelSearchPayload {
+            search_id: 91,
+            color: "#123456".into(),
+            tolerance: 17,
+            region,
+            wait: MkWaitOptions {
+                timeout_ms: 4321,
+                poll_interval_ms: 87,
+            },
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs {
+                found: Some("pixel_found".into()),
+                point: Some("pixel_point".into()),
+                x: Some("pixel_x".into()),
+                y: Some("pixel_y".into()),
+            },
+        })
+    }
+
+    fn find_pixel_payload(editor: &ActionEditorState) -> &MkPixelSearchPayload {
+        match &editor.draft.as_ref().unwrap().action {
+            MkAction::FindPixel(payload) => payload,
+            _ => panic!("expected Find Pixel action"),
+        }
+    }
+
+    #[test]
+    fn new_and_edited_find_pixel_initialize_all_shared_region_kinds() {
+        let matcher = MkWindowMatcher {
+            title: Some("target".into()),
+            ..Default::default()
+        };
+        for region in [
+            SearchRegion::Desktop,
+            SearchRegion::Monitor { index: 3 },
+            SearchRegion::Rectangle {
+                rect: ScreenRect::new(-400, -200, 640, 480),
+            },
+            SearchRegion::Window {
+                matcher: matcher.clone(),
+            },
+            SearchRegion::ClientArea {
+                matcher: matcher.clone(),
+            },
+        ] {
+            let action = find_pixel_action(region.clone());
+            let mut new_editor = test_editor();
+            new_editor.begin_new_with_editor(
+                action.clone(),
+                super::super::action_catalog::editor_for_action(&action),
+            );
+            assert_eq!(
+                new_editor.image_search.as_ref().unwrap().selected_region(),
+                region
+            );
+
+            let mut edit_editor = test_editor();
+            edit_editor.begin_edit(&step(action));
+            assert_eq!(
+                edit_editor.image_search.as_ref().unwrap().selected_region(),
+                region
+            );
+        }
+    }
+
+    #[test]
+    fn find_pixel_manual_region_state_synchronizes_to_the_draft() {
+        let mut editor = test_editor();
+        editor.begin_edit(&step(find_pixel_action(SearchRegion::Desktop)));
+        let rect = ScreenRect::new(-77, 31, 222, 111);
+        let state = editor.image_search.as_mut().unwrap();
+        state.kind = super::super::image_search_controls::SearchRegionKind::Rectangle;
+        state.rectangle = rect;
+        editor.sync_search_region_to_draft();
+        assert_eq!(
+            find_pixel_payload(&editor).region,
+            SearchRegion::Rectangle { rect }
+        );
     }
 
     fn action_with_outputs(pixel: bool, outputs: MkImageOutputs) -> MkAction {
@@ -7357,11 +7525,216 @@ mod tests {
         );
         assert_eq!(draft_image_payload(&editor).region, original_region);
 
-        editor.sync_image_region_to_draft();
+        editor.sync_search_region_to_draft();
         assert_eq!(
             draft_image_payload(&editor).region,
             SearchRegion::Rectangle { rect: picked }
         );
+    }
+
+    #[test]
+    fn find_pixel_rectangle_capture_updates_only_the_shared_region() {
+        use super::super::image_search_editor::SearchRegionKind;
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+
+        let mut editor = test_editor();
+        editor.begin_edit(&step(find_pixel_action(SearchRegion::Monitor { index: 4 })));
+        let before = find_pixel_payload(&editor).clone();
+        let generation = editor.draft_generation;
+        editor.pending_visual_region = Some(PendingVisualRegionOperation {
+            destination: VisualRegionDestination::FindPixelSearchRegion,
+            macro_id: 11,
+            step_id: editor.editing_id,
+            draft_generation: generation,
+            expected_action: ExpectedVisualAction::FindPixel,
+        });
+        let rect = ScreenRect::new(-900, -125, 777, 333);
+        editor.apply_visual_capture_outcome(
+            Some(11),
+            WorkflowOutcome::Region {
+                token: DraftToken {
+                    macro_id: 11,
+                    draft_generation: generation,
+                },
+                rect,
+            },
+        );
+
+        let region_editor = editor.image_search.as_ref().unwrap();
+        assert_eq!(region_editor.kind, SearchRegionKind::Rectangle);
+        assert_eq!(region_editor.rectangle, rect);
+        let after = find_pixel_payload(&editor);
+        assert_eq!(after.region, SearchRegion::Rectangle { rect });
+        let mut expected = before;
+        expected.region = SearchRegion::Rectangle { rect };
+        assert_eq!(after, &expected);
+        assert!(editor.draft_changed);
+    }
+
+    #[test]
+    fn stale_find_pixel_rectangle_captures_do_not_mutate_region_state() {
+        use super::super::visual_capture_workflow::{DraftToken, WorkflowOutcome};
+
+        for stale in ["macro", "generation", "step", "action"] {
+            let mut editor = test_editor();
+            editor.begin_edit(&step(find_pixel_action(SearchRegion::Monitor { index: 4 })));
+            let generation = editor.draft_generation;
+            let original_state = editor.image_search.as_ref().unwrap().selected_region();
+            let original_payload = find_pixel_payload(&editor).clone();
+            editor.pending_visual_region = Some(PendingVisualRegionOperation {
+                destination: VisualRegionDestination::FindPixelSearchRegion,
+                macro_id: 11,
+                step_id: editor.editing_id,
+                draft_generation: generation,
+                expected_action: ExpectedVisualAction::FindPixel,
+            });
+            let current_macro = match stale {
+                "macro" => Some(12),
+                "generation" => {
+                    editor.draft_generation += 1;
+                    Some(11)
+                }
+                "step" => {
+                    editor.editing_id = Some(999);
+                    Some(11)
+                }
+                "action" => {
+                    editor.draft.as_mut().unwrap().action = MkAction::UnsetVariable {
+                        name: "changed".into(),
+                    };
+                    Some(11)
+                }
+                _ => unreachable!(),
+            };
+            editor.apply_visual_capture_outcome(
+                current_macro,
+                WorkflowOutcome::Region {
+                    token: DraftToken {
+                        macro_id: 11,
+                        draft_generation: generation,
+                    },
+                    rect: ScreenRect::new(-900, -125, 777, 333),
+                },
+            );
+            assert_eq!(
+                editor.image_search.as_ref().unwrap().selected_region(),
+                original_state
+            );
+            if stale != "action" {
+                assert_eq!(find_pixel_payload(&editor), &original_payload);
+            }
+            assert!(!editor.draft_changed);
+        }
+    }
+
+    #[test]
+    fn find_pixel_visual_region_picker_updates_both_matcher_kinds_and_rejects_stale_results() {
+        use super::super::{
+            image_search_controls::SearchRegionKind,
+            window_picker::{MatcherDestination, MatcherEditRequest, MatcherPath},
+        };
+
+        for kind in [SearchRegionKind::Window, SearchRegionKind::ClientArea] {
+            let initial = MkWindowMatcher {
+                title: Some("initial".into()),
+                ..Default::default()
+            };
+            let region = if kind == SearchRegionKind::Window {
+                SearchRegion::Window { matcher: initial }
+            } else {
+                SearchRegion::ClientArea { matcher: initial }
+            };
+            let mut editor = test_editor();
+            editor.begin_edit(&step(find_pixel_action(region)));
+            let request = MatcherEditRequest {
+                destination: MatcherDestination::Action {
+                    macro_id: 7,
+                    draft_generation: editor.draft_generation,
+                    step_id: editor.editing_id,
+                    path: MatcherPath::VisualRegion,
+                },
+                original: MkWindowMatcher::default(),
+            };
+            let replacement = MkWindowMatcher {
+                title: Some("picked".into()),
+                ..Default::default()
+            };
+            assert!(editor.apply_window_matcher(&request, replacement.clone(), Some(7)));
+            let state = editor.image_search.as_ref().unwrap();
+            assert_eq!(
+                if kind == SearchRegionKind::Window {
+                    &state.window_matcher
+                } else {
+                    &state.client_matcher
+                },
+                &replacement
+            );
+
+            for stale in ["macro", "generation", "step", "kind", "action"] {
+                let mut stale_editor = test_editor();
+                stale_editor.begin_edit(&step(find_pixel_action(SearchRegion::Window {
+                    matcher: MkWindowMatcher::default(),
+                })));
+                let mut stale_request = MatcherEditRequest {
+                    destination: MatcherDestination::Action {
+                        macro_id: 7,
+                        draft_generation: stale_editor.draft_generation,
+                        step_id: stale_editor.editing_id,
+                        path: MatcherPath::VisualRegion,
+                    },
+                    original: MkWindowMatcher::default(),
+                };
+                let current_macro = match stale {
+                    "macro" => Some(8),
+                    "generation" => {
+                        let MatcherDestination::Action {
+                            draft_generation, ..
+                        } = &mut stale_request.destination
+                        else {
+                            unreachable!()
+                        };
+                        *draft_generation += 1;
+                        Some(7)
+                    }
+                    "step" => {
+                        let MatcherDestination::Action { step_id, .. } =
+                            &mut stale_request.destination
+                        else {
+                            unreachable!()
+                        };
+                        *step_id = Some(999);
+                        Some(7)
+                    }
+                    "kind" => {
+                        stale_editor.image_search.as_mut().unwrap().kind =
+                            SearchRegionKind::Rectangle;
+                        Some(7)
+                    }
+                    "action" => {
+                        stale_editor.draft.as_mut().unwrap().action = MkAction::UnsetVariable {
+                            name: "changed".into(),
+                        };
+                        Some(7)
+                    }
+                    _ => unreachable!(),
+                };
+                let before = stale_editor
+                    .image_search
+                    .as_ref()
+                    .unwrap()
+                    .window_matcher
+                    .clone();
+                assert!(!stale_editor.apply_window_matcher(
+                    &stale_request,
+                    replacement.clone(),
+                    current_macro
+                ));
+                assert_eq!(
+                    stale_editor.image_search.as_ref().unwrap().window_matcher,
+                    before
+                );
+            }
+        }
     }
 
     #[test]
@@ -7467,6 +7840,7 @@ mod tests {
                 destination: super::super::window_picker::MatcherDestination::Action {
                     macro_id: 5,
                     draft_generation: editor.draft_generation,
+                    step_id: editor.editing_id,
                     path: path.clone(),
                 },
                 original: MkWindowMatcher::default(),
@@ -7617,6 +7991,7 @@ mod tests {
                     destination: super::super::window_picker::MatcherDestination::Action {
                         macro_id: 9,
                         draft_generation: editor.draft_generation,
+                        step_id: editor.editing_id,
                         path: path.clone(),
                     },
                     original: matcher("original"),
@@ -8052,7 +8427,7 @@ mod tests {
                 &unrelated,
                 "Pick Region must not mutate unrelated payload fields before normal synchronization"
             );
-            f.editor.sync_image_region_to_draft();
+            f.editor.sync_search_region_to_draft();
             let mut synchronized = unrelated;
             synchronized.region = SearchRegion::Rectangle { rect: selected };
             assert_eq!(
@@ -8287,6 +8662,7 @@ mod tests {
                 destination: MatcherDestination::Action {
                     macro_id: 7,
                     draft_generation: generation,
+                    step_id: editor.editing_id,
                     path: MatcherPath::VisualRegion,
                 },
                 original: MkWindowMatcher::default(),
@@ -8354,6 +8730,22 @@ mod tests {
                 _ => None,
             }
         }
+        fn pixel_setup() -> (ActionEditorState, VisualPointRequest) {
+            let mut editor = test_editor();
+            editor.begin_edit(&step(find_pixel_action(SearchRegion::ClientArea {
+                matcher: MkWindowMatcher {
+                    title: Some("distinctive region".into()),
+                    ..Default::default()
+                },
+            })));
+            let request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: editor.editing_id,
+                destination: VisualPointDestination::FindPixelColor,
+            };
+            (editor, request)
+        }
 
         #[test]
         fn matching_confirmation_updates_both_axes_atomically() {
@@ -8396,6 +8788,85 @@ mod tests {
             assert_eq!(value(&editor), Some(MkPoint { x: 1, y: 2 }));
         }
 
+        #[test]
+        fn find_pixel_sampling_preserves_every_payload_field_except_color() {
+            let (mut editor, request) = pixel_setup();
+            let before = find_pixel_payload(&editor).clone();
+            assert!(editor.apply_point_confirmation_with(
+                &request,
+                MkPoint { x: -320, y: 650 },
+                Some(7),
+                |point| {
+                    assert_eq!(point, MkPoint { x: -320, y: 650 });
+                    Ok([0xAB, 0x00, 0xFF])
+                },
+            ));
+            let after = find_pixel_payload(&editor);
+            let mut expected = before;
+            expected.color = "#AB00FF".into();
+            assert_eq!(after, &expected);
+        }
+
+        #[test]
+        fn find_pixel_sampling_failure_and_stale_requests_preserve_color() {
+            let (mut failed, request) = pixel_setup();
+            let original = find_pixel_payload(&failed).color.clone();
+            assert!(!failed.apply_point_confirmation_with(
+                &request,
+                MkPoint { x: -320, y: 650 },
+                Some(7),
+                |_| Err("desktop read failed".into()),
+            ));
+            assert_eq!(find_pixel_payload(&failed).color, original);
+            assert!(
+                failed
+                    .capture_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("desktop read failed"))
+            );
+
+            for stale in ["macro", "generation", "step", "destination", "action"] {
+                let (mut editor, mut request) = pixel_setup();
+                let original = find_pixel_payload(&editor).color.clone();
+                let current_macro = match stale {
+                    "macro" => Some(8),
+                    "generation" => {
+                        request.draft_generation += 1;
+                        Some(7)
+                    }
+                    "step" => {
+                        request.step_id = Some(999);
+                        Some(7)
+                    }
+                    "destination" => {
+                        request.destination = VisualPointDestination::SetVariablePoint;
+                        Some(7)
+                    }
+                    "action" => {
+                        editor.draft.as_mut().unwrap().action = MkAction::UnsetVariable {
+                            name: "changed".into(),
+                        };
+                        Some(7)
+                    }
+                    _ => unreachable!(),
+                };
+                let called = std::cell::Cell::new(false);
+                assert!(!editor.apply_point_confirmation_with(
+                    &request,
+                    MkPoint { x: -1, y: 2 },
+                    current_macro,
+                    |_| {
+                        called.set(true);
+                        Ok([1, 2, 3])
+                    },
+                ));
+                assert!(!called.get());
+                if stale != "action" {
+                    assert_eq!(find_pixel_payload(&editor).color, original);
+                }
+            }
+        }
+
         fn fixture_editor() -> (
             ActionEditorState,
             crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
@@ -8426,7 +8897,7 @@ mod tests {
                 MkValue::Point(MkPoint { x: 4, y: 5 }),
             ));
             fixture.observer.set_left_button_down(true);
-            editor.request_point_pick(7);
+            editor.request_point_pick(7, VisualPointDestination::SetVariablePoint);
             let id = editor.active_point_pick.unwrap();
             fixture.observer.wait_for_commands(1);
             for _ in 0..3 {
@@ -8472,7 +8943,7 @@ mod tests {
                     "p",
                     MkValue::Point(MkPoint { x: 81, y: -19 }),
                 ));
-                editor.request_point_pick(7);
+                editor.request_point_pick(7, VisualPointDestination::SetVariablePoint);
                 let id = editor.active_point_pick.unwrap();
                 if armed {
                     fixture.observer.emit(
@@ -8501,7 +8972,7 @@ mod tests {
                 "a",
                 MkValue::Point(MkPoint { x: 1, y: 2 }),
             ));
-            editor.request_point_pick(7);
+            editor.request_point_pick(7, VisualPointDestination::SetVariablePoint);
             let old_id = editor.active_point_pick.unwrap();
             let old_request = VisualPointRequest {
                 macro_id: 7,
@@ -8523,7 +8994,7 @@ mod tests {
             editor.poll_visual_overlay(Some(7));
             assert_eq!(value(&editor), Some(MkPoint { x: 3, y: 4 }));
 
-            editor.request_point_pick(7);
+            editor.request_point_pick(7, VisualPointDestination::SetVariablePoint);
             let new_id = editor.active_point_pick.unwrap();
             let new_request = VisualPointRequest {
                 macro_id: 7,
@@ -8552,6 +9023,61 @@ mod tests {
         }
 
         #[test]
+        fn find_pixel_escape_superseded_and_duplicate_completions_preserve_ownership() {
+            let (mut editor, fixture) = fixture_editor();
+            editor.begin_edit(&step(find_pixel_action(SearchRegion::Desktop)));
+            editor.request_point_pick(7, VisualPointDestination::FindPixelColor);
+            let cancelled_id = editor.active_point_pick.unwrap();
+            fixture
+                .controller
+                .inject_editor_event_for_test(VisualOverlayEvent::Cancelled {
+                    operation_id: cancelled_id,
+                });
+            editor.poll_visual_overlay_with(Some(7), |_| Ok([1, 2, 3]));
+            assert_eq!(find_pixel_payload(&editor).color, "#123456");
+            assert_eq!(editor.active_point_pick, None);
+
+            editor.request_point_pick(7, VisualPointDestination::FindPixelColor);
+            let old_id = editor.active_point_pick.unwrap();
+            let old_request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: editor.editing_id,
+                destination: VisualPointDestination::FindPixelColor,
+            };
+            editor.begin_edit(&step(find_pixel_action(SearchRegion::Monitor { index: 2 })));
+            editor.request_point_pick(7, VisualPointDestination::FindPixelColor);
+            let current_id = editor.active_point_pick.unwrap();
+            let current_request = VisualPointRequest {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: editor.editing_id,
+                destination: VisualPointDestination::FindPixelColor,
+            };
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                old_id,
+                old_request,
+                MkPoint { x: 1, y: 2 },
+            ));
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                current_id,
+                current_request.clone(),
+                MkPoint { x: -320, y: 650 },
+            ));
+            fixture.controller.inject_editor_event_for_test(confirmed(
+                current_id,
+                current_request,
+                MkPoint { x: 9, y: 9 },
+            ));
+            editor.poll_visual_overlay_with(Some(7), |point| {
+                assert_eq!(point, MkPoint { x: -320, y: 650 });
+                Ok([0xAB, 0x00, 0xFF])
+            });
+            assert_eq!(find_pixel_payload(&editor).color, "#AB00FF");
+            assert_eq!(editor.active_point_pick, None);
+        }
+
+        #[test]
         fn result_after_editor_closure_is_safely_discarded() {
             let (mut editor, fixture) = fixture_editor();
             editor.begin_edit(&variable_step(
@@ -8559,7 +9085,7 @@ mod tests {
                 "p",
                 MkValue::Point(MkPoint { x: 1, y: 2 }),
             ));
-            editor.request_point_pick(7);
+            editor.request_point_pick(7, VisualPointDestination::SetVariablePoint);
             let id = editor.active_point_pick.unwrap();
             let request = VisualPointRequest {
                 macro_id: 7,
