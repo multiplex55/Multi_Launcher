@@ -261,6 +261,17 @@ struct ProductionDashboardBackend {
     last_network_time: Option<Instant>,
 }
 
+fn publish_loaded_or_retain<T>(
+    current: &mut Arc<Vec<T>>,
+    loaded: anyhow::Result<Vec<T>>,
+    store: &'static str,
+) {
+    match loaded {
+        Ok(entries) => *current = Arc::new(entries),
+        Err(error) => tracing::error!(%error, store, "dashboard retained last-good snapshot"),
+    }
+}
+
 impl ProductionDashboardBackend {
     fn system_status(&mut self, system: &mut System) -> SystemStatusSnapshot {
         system.refresh_cpu_usage();
@@ -333,7 +344,7 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             );
         }
         if batch.contains(DashboardRefreshRequest::Snippets) {
-            next.snippets = Arc::new(load_snippets(SNIPPETS_FILE).unwrap_or_default());
+            publish_loaded_or_retain(&mut next.snippets, load_snippets(SNIPPETS_FILE), "snippets");
         }
         if batch.contains(DashboardRefreshRequest::Notes) {
             next.notes = Arc::new(load_notes().unwrap_or_default());
@@ -362,7 +373,7 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             next.process_error = None;
         }
         if batch.contains(DashboardRefreshRequest::Favorites) {
-            next.favorites = Arc::new(load_favs(FAV_FILE).unwrap_or_default());
+            publish_loaded_or_retain(&mut next.favorites, load_favs(FAV_FILE), "favorites");
         }
         if batch.contains(DashboardRefreshRequest::Gestures) {
             next.gestures = Arc::new(GestureSnapshot {
@@ -521,6 +532,28 @@ mod tests {
                 ..RefreshBatch::default()
             }
         );
+    }
+
+    #[test]
+    fn invalid_store_refresh_retains_last_good_then_valid_refresh_recovers() {
+        let initial = Arc::new(vec![SnippetEntry {
+            alias: "saved".into(),
+            text: "value".into(),
+        }]);
+        let mut current = Arc::clone(&initial);
+        publish_loaded_or_retain(
+            &mut current,
+            Err(anyhow::anyhow!("malformed snippets")),
+            "snippets",
+        );
+        assert!(Arc::ptr_eq(&current, &initial));
+
+        let recovered = vec![SnippetEntry {
+            alias: "recovered".into(),
+            text: "value".into(),
+        }];
+        publish_loaded_or_retain(&mut current, Ok(recovered.clone()), "snippets");
+        assert_eq!(current.as_ref(), &recovered);
     }
 
     #[test]

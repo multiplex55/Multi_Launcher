@@ -1,6 +1,6 @@
 use crate::gui::LauncherApp;
 use crate::plugins::fav::{
-    FAV_FILE, FavEntry, join_command_args, load_favs, resolve_with_plugin, save_favs,
+    FAV_FILE, FavEntry, join_command_args, load_favs, replace_favs, resolve_with_plugin,
 };
 use eframe::egui;
 
@@ -14,11 +14,12 @@ pub struct FavDialog {
     args: String,
     add_plugin: String,
     add_filter: String,
+    load_error: Option<String>,
 }
 
 impl FavDialog {
     pub fn open(&mut self) {
-        self.entries = load_favs(FAV_FILE).unwrap_or_default();
+        let _ = self.load_from(FAV_FILE);
         self.open = true;
         self.edit_idx = None;
         self.label.clear();
@@ -29,7 +30,11 @@ impl FavDialog {
     }
 
     pub fn open_edit(&mut self, label: &str) {
-        self.entries = load_favs(FAV_FILE).unwrap_or_default();
+        if self.load_from(FAV_FILE).is_err() {
+            self.edit_idx = None;
+            self.open = true;
+            return;
+        }
         if let Some(pos) = self.entries.iter().position(|e| e.label == label) {
             self.edit_idx = Some(pos);
             let entry = &self.entries[pos];
@@ -45,12 +50,42 @@ impl FavDialog {
         self.open = true;
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_favs(FAV_FILE, &self.entries) {
+    fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
+        match load_favs(path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_entries(&mut self, path: &str, candidate: Vec<FavEntry>) -> anyhow::Result<()> {
+        match replace_favs(path, candidate) {
+            Ok(committed) => {
+                self.entries = committed;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<FavEntry>) -> bool {
+        if let Err(e) = self.commit_entries(FAV_FILE, candidate) {
             app.report_error_message("ui operation", format!("Failed to save favorites: {e}"));
+            false
         } else {
             app.search();
             app.focus_input();
+            true
         }
     }
 
@@ -59,10 +94,20 @@ impl FavDialog {
             return;
         }
         let mut close = false;
-        let mut save_now = false;
+        let mut save_candidate = None;
         egui::Window::new("Favorites")
             .open(&mut self.open)
             .show(ctx, |ui| {
+                if let Some(error) = &self.load_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Favorites are read-only because loading failed: {error}"),
+                    );
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    return;
+                }
                 if let Some(idx) = self.edit_idx {
                     ui.horizontal(|ui| {
                         ui.label("Label");
@@ -172,24 +217,19 @@ impl FavDialog {
                                     cmd = c;
                                     args_opt = a;
                                 }
-                                if idx == self.entries.len() {
-                                    self.entries.push(FavEntry {
+                                let mut candidate = self.entries.clone();
+                                if idx == candidate.len() {
+                                    candidate.push(FavEntry {
                                         label: self.label.clone(),
                                         action: cmd.clone(),
                                         args: args_opt.clone(),
                                     });
-                                } else if let Some(e) = self.entries.get_mut(idx) {
+                                } else if let Some(e) = candidate.get_mut(idx) {
                                     e.label = self.label.clone();
                                     e.action = cmd.clone();
                                     e.args = args_opt.clone();
                                 }
-                                self.edit_idx = None;
-                                self.label.clear();
-                                self.command.clear();
-                                self.args.clear();
-                                self.add_plugin.clear();
-                                self.add_filter.clear();
-                                save_now = true;
+                                save_candidate = Some(candidate);
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -233,16 +273,62 @@ impl FavDialog {
                             }
                         });
                     if let Some(idx) = remove {
-                        self.entries.remove(idx);
-                        save_now = true;
+                        let mut candidate = self.entries.clone();
+                        candidate.remove(idx);
+                        save_candidate = Some(candidate);
                     }
                 }
             });
-        if save_now {
-            self.save(app);
+        if let Some(candidate) = save_candidate
+            && self.save(app, candidate)
+        {
+            self.edit_idx = None;
+            self.label.clear();
+            self.command.clear();
+            self.args.clear();
+            self.add_plugin.clear();
+            self.add_filter.clear();
         }
         if close {
             self.open = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FavDialog;
+    use crate::plugins::fav::{FavEntry, save_favs};
+
+    fn fav(label: &str) -> FavEntry {
+        FavEntry {
+            label: label.into(),
+            action: format!("noop:{label}"),
+            args: Some("--arg".into()),
+        }
+    }
+
+    #[test]
+    fn invalid_reload_and_commit_keep_dialog_last_good_and_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let initial = vec![fav("saved")];
+        save_favs(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = FavDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        let invalid = b"invalid favorites";
+        std::fs::write(&path, invalid).unwrap();
+
+        assert!(dialog.load_from(path.to_str().unwrap()).is_err());
+        assert_eq!(dialog.entries, initial);
+        assert!(dialog.load_error.is_some());
+        assert!(
+            dialog
+                .commit_entries(path.to_str().unwrap(), vec![fav("lost")])
+                .is_err()
+        );
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+        assert!(dialog.load_error.is_some());
     }
 }
