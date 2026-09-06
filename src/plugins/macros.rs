@@ -97,7 +97,13 @@ pub fn take_error_messages() -> Vec<String> {
 /// the steady-state performance of this function.
 pub fn search_first_action(query: &str) -> Option<Action> {
     let settings = Settings::load("settings.json").unwrap_or_default();
-    let actions = load_actions("actions.json").unwrap_or_default();
+    let actions = match load_actions("actions.json") {
+        Ok(actions) => actions,
+        Err(error) => {
+            tracing::error!(%error, "macro action lookup retained invalid actions file");
+            return None;
+        }
+    };
     let dirs = settings.plugin_dirs.clone().unwrap_or_default();
     let actions_arc = Arc::new(actions);
 

@@ -33,37 +33,47 @@ impl LauncherApp {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 WatchEvent::Actions => {
-                    if let Ok(mut acts) = load_actions(&self.actions_path) {
-                        let custom_len = acts.len();
-                        self.custom_len = custom_len;
-                        if let Some(paths) = &self.index_paths {
-                            let options =
-                                indexer::IndexOptions::with_max_items(self.max_indexed_items);
-                            for batch in indexer::index_paths_batched(paths, options) {
-                                match batch {
-                                    Ok(idx) => {
-                                        acts.extend(idx);
-                                        self.actions = Arc::new(acts.clone());
-                                        self.update_action_cache();
-                                        self.search();
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(error = %e, "failed to index paths");
-                                        self.report_error_message(
-                                            "launcher",
-                                            format!("Failed to index paths: {e}"),
-                                        );
-                                        break;
-                                    }
+                    let custom = match load_actions_typed(&self.actions_path) {
+                        Ok(crate::common::persistence::LoadState::Missing)
+                        | Ok(crate::common::persistence::LoadState::Empty) => Vec::new(),
+                        Ok(crate::common::persistence::LoadState::Loaded(actions)) => actions,
+                        Err(error) => {
+                            self.report_error_message(
+                                "actions.reload",
+                                format!("Failed to reload actions: {error}"),
+                            );
+                            self.actions_persistence_diagnostic = Some(error);
+                            continue;
+                        }
+                    };
+                    let current_custom_len = self.custom_len.min(self.actions.len());
+                    if self.actions[..current_custom_len] == custom {
+                        self.actions_persistence_diagnostic = None;
+                        tracing::debug!("ignored unchanged actions reload notification");
+                        continue;
+                    }
+
+                    let mut indexed = Vec::new();
+                    if let Some(paths) = &self.index_paths {
+                        let options = indexer::IndexOptions::with_max_items(self.max_indexed_items);
+                        for batch in indexer::index_paths_batched(paths, options) {
+                            match batch {
+                                Ok(actions) => indexed.extend(actions),
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to index paths");
+                                    self.report_error_message(
+                                        "launcher",
+                                        format!("Failed to index paths: {e}"),
+                                    );
+                                    break;
                                 }
                             }
                         }
-                        self.actions = Arc::new(acts);
-                        self.update_action_cache();
-                        self.search();
-                        crate::actions::bump_actions_version();
-                        tracing::info!("actions reloaded");
                     }
+                    self.publish_actions(custom, indexed);
+                    self.actions_persistence_diagnostic = None;
+                    crate::actions::bump_actions_version();
+                    tracing::info!("actions reloaded");
                 }
                 WatchEvent::Folders => {
                     let (aliases, aliases_lc) = Self::folder_alias_maps();

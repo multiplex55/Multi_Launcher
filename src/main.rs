@@ -1,7 +1,8 @@
 #![windows_subsystem = "windows"]
 #![allow(clippy::type_complexity)]
 
-use multi_launcher::actions::{Action, load_actions};
+use multi_launcher::actions::{Action, load_startup_actions};
+use multi_launcher::common::persistence::PersistenceError;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::{HotkeyTrigger, parse_hotkey};
 use multi_launcher::platform::{
@@ -108,6 +109,7 @@ fn spawn_gui(
     settings: Settings,
     settings_path: String,
     startup_settings_diagnostic: Option<SettingsStartupDiagnostic>,
+    startup_actions_diagnostic: Option<PersistenceError>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     event_tx: Sender<()>,
 ) -> (
@@ -211,6 +213,7 @@ fn spawn_gui(
                     help_clone,
                 );
                 app.startup_settings_diagnostic = startup_settings_diagnostic;
+                app.actions_persistence_diagnostic = startup_actions_diagnostic;
                 launcher_timer.finish("startup.launcher_app");
                 Box::new(app)
             }),
@@ -255,9 +258,17 @@ fn main() -> anyhow::Result<()> {
         multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
     }
     let actions_timer = multi_launcher::performance::Timer::start();
-    let mut actions_vec = load_actions("actions.json").unwrap_or_default();
+    let startup_actions = load_startup_actions("actions.json");
+    let mut actions_vec = startup_actions.actions;
+    let startup_actions_diagnostic = startup_actions.diagnostic;
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
+    if let Some(diagnostic) = startup_actions_diagnostic.as_ref() {
+        tracing::error!(
+            error = %diagnostic,
+            "actions startup used a temporary empty list without replacing the persisted file"
+        );
+    }
     actions_timer.finish("startup.action_load");
 
     let (restart_tx, restart_rx) = channel::<Settings>();
@@ -310,6 +321,7 @@ fn main() -> anyhow::Result<()> {
         settings.clone(),
         "settings.json".to_string(),
         startup_settings_diagnostic,
+        startup_actions_diagnostic,
         settings.enabled_capabilities.clone(),
         event_tx.clone(),
     );

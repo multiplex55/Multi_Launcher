@@ -1,8 +1,7 @@
-use crate::actions::{Action, save_actions};
+use crate::actions::Action;
 use crate::gui::LauncherApp;
 use eframe::egui;
 use rfd::FileDialog;
-use std::sync::Arc;
 
 /// Dialog state used when adding a new user defined command.
 ///
@@ -133,57 +132,44 @@ impl AddActionDialog {
                             if self.path.is_empty() || !Path::new(&self.path).exists() {
                                 app.report_error_message("ui operation", "Path does not exist");
                             } else {
-                                match self.mode {
-                                    DialogMode::Add => {
-                                        let mut new_actions = (*app.actions).clone();
-                                        new_actions.push(Action {
-                                            label: self.label.clone(),
-                                            desc: self.desc.clone(),
-                                            action: self.path.clone(),
-                                            args: if self.show_args && !self.args.trim().is_empty()
-                                            {
-                                                Some(self.args.clone())
-                                            } else {
-                                                None
-                                            },
-                                        });
-                                        app.custom_len += 1;
-                                        app.actions = Arc::new(new_actions);
-                                        app.update_action_cache();
-                                        crate::actions::bump_actions_version();
-                                    }
+                                let candidate = Action {
+                                    label: self.label.clone(),
+                                    desc: self.desc.clone(),
+                                    action: self.path.clone(),
+                                    args: if self.show_args && !self.args.trim().is_empty() {
+                                        Some(self.args.clone())
+                                    } else {
+                                        None
+                                    },
+                                };
+                                let result = match self.mode {
+                                    DialogMode::Add => app.update_custom_actions(move |actions| {
+                                        actions.push(candidate);
+                                        Ok(())
+                                    }),
                                     DialogMode::Edit(idx) => {
-                                        let mut new_actions = (*app.actions).clone();
-                                        if let Some(act) = new_actions.get_mut(idx) {
-                                            act.label = self.label.clone();
-                                            act.desc = self.desc.clone();
-                                            act.action = self.path.clone();
-                                            act.args =
-                                                if self.show_args && !self.args.trim().is_empty() {
-                                                    Some(self.args.clone())
-                                                } else {
-                                                    None
-                                                };
-                                            app.actions = Arc::new(new_actions);
-                                            app.update_action_cache();
-                                            crate::actions::bump_actions_version();
-                                        }
+                                        app.update_custom_actions(move |actions| {
+                                            let action = actions.get_mut(idx).ok_or_else(|| {
+                                                anyhow::anyhow!("custom action no longer exists")
+                                            })?;
+                                            *action = candidate;
+                                            Ok(())
+                                        })
                                     }
-                                }
-                                self.label.clear();
-                                self.desc.clear();
-                                self.path.clear();
-                                self.args.clear();
-                                self.show_args = false;
-                                should_close = true;
-                                app.search();
-                                if let Err(e) =
-                                    save_actions(&app.actions_path, &app.actions[..app.custom_len])
-                                {
-                                    app.report_error_message(
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        self.label.clear();
+                                        self.desc.clear();
+                                        self.path.clear();
+                                        self.args.clear();
+                                        self.show_args = false;
+                                        should_close = true;
+                                    }
+                                    Err(e) => app.report_error_message(
                                         "ui operation",
                                         format!("Failed to save: {e}"),
-                                    );
+                                    ),
                                 }
                             }
                         }
