@@ -1,3 +1,4 @@
+use crate::dashboard::DashboardRefreshRequest;
 use crate::gui::LauncherApp;
 use crate::plugins::note::{load_notes, save_note};
 use anyhow::{Context, anyhow};
@@ -124,7 +125,8 @@ impl LauncherApp {
         {
             self.note_mutation_cache_refresh_count += 1;
         }
-        self.dashboard_data_cache.refresh_notes();
+        self.dashboard_data_cache
+            .request_refresh(DashboardRefreshRequest::Notes);
         if self.notes_dialog.open {
             #[cfg(test)]
             {

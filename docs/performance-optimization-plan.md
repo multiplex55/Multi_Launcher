@@ -20,8 +20,8 @@ Planned commit: `perf: establish runtime and build performance baselines`
 
 ## Milestone 2 - Startup and dashboard worker boundary
 
-**Status:** `pending`  
-**Dependency:** Milestone 1.
+**Status:** `complete`
+**Dependency:** Milestone 1 (`424bc23`, complete).
 
 Preserve immutable `Arc<DashboardDataSnapshot>` reads. Add one owned coalescing worker behind
 typed refresh requests; atomically install snapshots, repaint, and shut down; remove synchronous
@@ -29,6 +29,10 @@ startup/UI refresh work; reuse process enumeration. Default/loading dashboard st
 while the launcher becomes usable earlier.
 
 Planned commit: `perf(dashboard): move refresh work off the UI thread`
+
+Verification: `cargo fmt --all --check`, `cargo check`, dashboard runtime unit tests, the
+164-test affected Nextest selection, migrated gesture refresh test, release startup/frame measurement,
+stale-reference searches, and `git diff --check`.
 
 ## Milestone 3 - Search and dynamic-plugin optimization
 
@@ -125,6 +129,20 @@ Nextest build compiled/linked 127 binaries.
 | Visible/focused dashboard idle cadence | about 4 frames/s and 4 dashboard repaint requests/s | 12 one-second windows after startup, each with 4 frames and 4 measured 250 ms requests. |
 | Hidden/unfocused/non-dashboard idle CPU | not credibly measured | The automated run did not manipulate native visibility/focus or provide a stable external CPU sampler. Diagnostics expose those states for Milestone 4. |
 
+## Milestone 2 startup/dashboard results
+
+Measured with a warm release build in a fresh isolated working directory using the same opt-in
+instrumentation as the baseline. The measurement log was placed outside the watched data directory
+to avoid making the log itself a filesystem-watch input. Values are one representative warm run;
+a second run was used to observe frame cadence through refresh completion.
+
+| Metric | Before | After | Change / evidence |
+|---|---:|---:|---|
+| `LauncherApp` construction | 661.777 ms | 60.130 ms | 601.647 ms faster (90.9%); dashboard I/O is no longer construction work. |
+| Startup to first usable frame | 989.136 ms | 355.445 ms | 633.691 ms faster (64.1%). |
+| Initial dashboard refresh | 595.584 ms synchronous | 617.225 ms asynchronous | The work itself remains comparable but now starts after the first usable update and publishes one atomic snapshot. |
+| Dashboard frame-stall evidence | Refresh blocked startup for 595.584 ms before any usable frame | No refresh-attributed frame stall observed | The cadence window spanning a 628.048 ms async refresh rendered 12 frames in 1,152 ms, then returned to 4 frames/s. M1 instrumentation reports aggregate cadence, so it cannot identify an exact maximum inter-frame gap. |
+
 The removed `search_10k` result is intentionally not reported as real-search baseline: after its
 first invocation it measured the cached early return, so its historical number would be misleading.
 
@@ -160,7 +178,7 @@ reclassified as a pass.
 
 | Milestone | Commit | Subject |
 |---|---|---|
-| 1 | pending parent commit | `perf: establish runtime and build performance baselines` |
+| 1 | `424bc23` | `perf: establish runtime and build performance baselines` |
 | 2 | pending | `perf(dashboard): move refresh work off the UI thread` |
 | 3 | pending | `perf(search): remove blocking dynamic work from query handling` |
 | 4 | pending | `perf(runtime): reduce unnecessary idle and repaint work` |

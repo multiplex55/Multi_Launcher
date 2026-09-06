@@ -1,4 +1,4 @@
-use crate::dashboard::DashboardDataCache;
+use crate::dashboard::DashboardDataSnapshot;
 use crate::graph::note_graph::{
     DrawNode, LayoutConfig, NoteGraphEngine, NoteGraphFilter, RenderSurface, build_draw_primitives,
     project_world_to_screen,
@@ -11,6 +11,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 4.0;
@@ -155,7 +156,7 @@ impl NoteGraphDialog {
         &mut self,
         ctx: &egui::Context,
         app: &mut LauncherApp,
-        data_cache: &DashboardDataCache,
+        data_snapshot: Arc<DashboardDataSnapshot>,
         notes_version: u64,
     ) {
         if !self.open {
@@ -168,7 +169,7 @@ impl NoteGraphDialog {
 
         self.hydrate_from_settings_if_needed(app);
 
-        let mut notes: Vec<Note> = data_cache.snapshot().notes.iter().cloned().collect();
+        let mut notes: Vec<Note> = data_snapshot.notes.iter().cloned().collect();
         notes.retain(|n| self.note_passes_ui_filters(n));
         self.refresh_search(&notes);
 

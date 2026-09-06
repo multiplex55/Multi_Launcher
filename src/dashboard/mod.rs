@@ -6,6 +6,8 @@ pub mod layout;
 pub mod widgets;
 
 pub use dashboard::{Dashboard, DashboardContext, DashboardEvent, WidgetActivation};
-pub use data_cache::{DashboardDataCache, DashboardDataSnapshot};
+pub use data_cache::{
+    DashboardDataCache, DashboardDataSnapshot, DashboardRefreshRequest, DashboardRuntime,
+};
 pub use diagnostics::{DIAGNOSTICS_REFRESH_INTERVAL, DashboardDiagnosticsSnapshot};
 pub use widgets::{WidgetAction, WidgetFactory, WidgetRegistry};

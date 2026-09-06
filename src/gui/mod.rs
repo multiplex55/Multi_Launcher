@@ -107,7 +107,8 @@ use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_a
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::dashboard::{
-    Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, WidgetActivation,
+    Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, DashboardRefreshRequest,
+    DashboardRuntime, WidgetActivation,
 };
 use crate::file_search::coordinator::SearchCoordinator;
 use crate::help_window::HelpWindow;
@@ -465,7 +466,9 @@ pub struct LauncherApp {
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
     pub dashboard: Dashboard,
+    dashboard_runtime: DashboardRuntime,
     dashboard_data_cache: DashboardDataCache,
+    dashboard_initial_refresh_queued: bool,
     pub dashboard_enabled: bool,
     pub dashboard_show_when_empty: bool,
     pub dashboard_path: String,
@@ -1394,10 +1397,11 @@ impl LauncherApp {
             .iter()
             .map(|a| (a.action.clone(), a.clone()))
             .collect::<HashMap<_, _>>();
-        let dashboard_data_cache = DashboardDataCache::new();
-        let dashboard_refresh_timer = crate::performance::Timer::start();
-        dashboard_data_cache.refresh_all(&plugins);
-        dashboard_refresh_timer.finish("startup.dashboard_initial_refresh_complete");
+        let dashboard_runtime = DashboardRuntime::start({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
+        let dashboard_data_cache = dashboard_runtime.cache();
         let mkmacro_timer = crate::performance::Timer::start();
         let mut mkmacro_dialog = MkMacroDialog::new_with_authoring_context(
             Arc::clone(&plugins.internal_services().mkmacro_store),
@@ -1442,7 +1446,9 @@ impl LauncherApp {
             multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
             watchers,
             dashboard,
+            dashboard_runtime,
             dashboard_data_cache,
+            dashboard_initial_refresh_queued: false,
             dashboard_enabled: settings.dashboard.enabled,
             dashboard_show_when_empty: settings.dashboard.show_when_query_empty,
             dashboard_path: dashboard_path.to_string_lossy().to_string(),

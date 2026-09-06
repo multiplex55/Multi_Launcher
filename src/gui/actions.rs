@@ -1529,6 +1529,7 @@ mod tests {
             crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
                 .unwrap();
         assert!(!persisted.gestures[0].enabled);
+        app.dashboard_data_cache.wait_for_refresh();
         let snapshot = app.dashboard_data_cache.snapshot();
         assert!(!snapshot.gestures.db.gestures[0].enabled);
         assert!(!app.usage.contains_key("mg:toggle"));

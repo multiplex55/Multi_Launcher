@@ -2,6 +2,7 @@ use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
 use crate::actions::Action;
+use crate::dashboard::DashboardRefreshRequest;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -34,14 +35,23 @@ impl Default for ClipboardSnippetsConfig {
     }
 }
 
-#[derive(Default)]
 pub struct ClipboardSnippetsWidget {
     cfg: ClipboardSnippetsConfig,
+    system_refresh_requested: bool,
+}
+
+impl Default for ClipboardSnippetsWidget {
+    fn default() -> Self {
+        Self::new(ClipboardSnippetsConfig::default())
+    }
 }
 
 impl ClipboardSnippetsWidget {
     pub fn new(cfg: ClipboardSnippetsConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            system_refresh_requested: false,
+        }
     }
 
     pub fn settings_ui(
@@ -85,7 +95,6 @@ impl ClipboardSnippetsWidget {
     }
 
     fn render_system_snapshot(ui: &mut egui::Ui, ctx: &DashboardContext<'_>) {
-        ctx.data_cache.request_refresh_system_status();
         let snapshot = ctx.data_cache.snapshot();
         let Some(status) = snapshot.system_status.as_ref() else {
             ui.label("System data unavailable.");
@@ -166,6 +175,11 @@ impl Widget for ClipboardSnippetsWidget {
         }
 
         if self.cfg.show_system {
+            if !self.system_refresh_requested {
+                ctx.data_cache
+                    .request_refresh(DashboardRefreshRequest::SystemStatus);
+                self.system_refresh_requested = true;
+            }
             ui.separator();
             ui.label("System snapshot");
             Self::render_system_snapshot(ui, ctx);

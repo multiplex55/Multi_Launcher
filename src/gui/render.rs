@@ -1251,8 +1251,6 @@ impl eframe::App for LauncherApp {
             });
 
             if use_dashboard {
-                self.dashboard_data_cache
-                    .flush_refresh_requests(&self.plugins);
                 if !self.suggestions.is_empty() {
                     self.autocomplete_index = 0;
                     self.suggestions.clear();
@@ -1549,12 +1547,13 @@ impl eframe::App for LauncherApp {
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
-        let data_cache: *const DashboardDataCache = &self.dashboard_data_cache;
-        // SAFETY: `data_cache` points to a stable field on `self` for this call. The dialog
-        // only reads through `&DashboardDataCache` while `self` is mutably borrowed for app
-        // actions; no mutation of `dashboard_data_cache` occurs here.
-        let data_cache = unsafe { &*data_cache };
-        graph_dlg.ui(ctx, self, data_cache, crate::plugins::note::note_version());
+        let dashboard_snapshot = self.dashboard_data_cache.snapshot();
+        graph_dlg.ui(
+            ctx,
+            self,
+            dashboard_snapshot,
+            crate::plugins::note::note_version(),
+        );
         self.note_graph_dialog = graph_dlg;
         let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
         assets_dlg.ui(ctx, self);
@@ -1638,6 +1637,11 @@ impl eframe::App for LauncherApp {
         }
         self.enforce_pinned();
         self.update_panel_stack();
+        if !self.dashboard_initial_refresh_queued {
+            self.dashboard_initial_refresh_queued = true;
+            self.dashboard_data_cache
+                .request_refresh(DashboardRefreshRequest::All);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

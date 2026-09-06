@@ -4,6 +4,7 @@ use super::{
     run_refresh_schedule,
 };
 use crate::actions::Action;
+use crate::dashboard::DashboardRefreshRequest;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -137,7 +138,8 @@ impl Widget for ProcessesWidget {
             &mut self.refresh_pending,
             &mut self.last_refresh,
         ) {
-            ctx.data_cache.request_refresh_processes();
+            ctx.data_cache
+                .request_refresh(DashboardRefreshRequest::Processes);
             self.last_refresh = std::time::Instant::now();
         }
         let snapshot = ctx.data_cache.snapshot();

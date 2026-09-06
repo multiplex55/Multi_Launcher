@@ -78,22 +78,28 @@ impl LauncherApp {
                     self.search();
                 }
                 WatchEvent::Clipboard => {
-                    self.dashboard_data_cache.refresh_clipboard();
+                    self.dashboard_data_cache
+                        .request_refresh(DashboardRefreshRequest::Clipboard);
                 }
                 WatchEvent::Snippets => {
-                    self.dashboard_data_cache.refresh_snippets();
+                    self.dashboard_data_cache
+                        .request_refresh(DashboardRefreshRequest::Snippets);
                 }
                 WatchEvent::Notes => {
-                    self.dashboard_data_cache.refresh_notes();
+                    self.dashboard_data_cache
+                        .request_refresh(DashboardRefreshRequest::Notes);
                 }
                 WatchEvent::Todos => {
-                    self.dashboard_data_cache.refresh_todos();
+                    self.dashboard_data_cache
+                        .request_refresh(DashboardRefreshRequest::Todos);
                 }
                 WatchEvent::Favorites => {
-                    self.dashboard_data_cache.refresh_favorites();
+                    self.dashboard_data_cache
+                        .request_refresh(DashboardRefreshRequest::Favorites);
                 }
                 WatchEvent::Gestures => {
-                    self.dashboard_data_cache.refresh_gestures();
+                    self.dashboard_data_cache
+                        .request_refresh(DashboardRefreshRequest::Gestures);
                 }
                 WatchEvent::Dashboard(_) => {
                     self.dashboard.reload();

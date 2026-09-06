@@ -1,3 +1,4 @@
+use crate::dashboard::DashboardRefreshRequest;
 use crate::gui::LauncherApp;
 use crate::plugins::calendar::{
     CALENDAR_DATA, CALENDAR_EVENTS_FILE, CalendarEvent, EventInstance, RecurrenceEnd,
@@ -182,7 +183,8 @@ impl CalendarEventDetails {
                                 format!("Failed to duplicate event: {err}"),
                             );
                         } else {
-                            app.dashboard_data_cache.refresh_calendar();
+                            app.dashboard_data_cache
+                                .request_refresh(DashboardRefreshRequest::Calendar);
                         }
                     }
                 });
@@ -219,7 +221,8 @@ impl CalendarEventDetails {
                                 format!("Failed to delete event: {err}"),
                             );
                         } else {
-                            app.dashboard_data_cache.refresh_calendar();
+                            app.dashboard_data_cache
+                                .request_refresh(DashboardRefreshRequest::Calendar);
                             close_requested = true;
                             app.calendar_selected_event = None;
                         }
@@ -236,7 +239,8 @@ impl CalendarEventDetails {
                                 format!("Failed to snooze event: {err}"),
                             );
                         } else {
-                            app.dashboard_data_cache.refresh_calendar();
+                            app.dashboard_data_cache
+                                .request_refresh(DashboardRefreshRequest::Calendar);
                         }
                     }
                 });
