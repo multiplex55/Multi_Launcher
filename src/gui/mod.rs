@@ -619,6 +619,7 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_plugin_search_generation: u64,
     last_timer_query: bool,
     last_stopwatch_query: bool,
     last_note_search_change: Option<Instant>,
@@ -1609,6 +1610,7 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_plugin_search_generation: 0,
             last_timer_query: false,
             last_stopwatch_query: false,
             last_note_search_change: None,
@@ -1675,7 +1677,12 @@ impl LauncherApp {
         app.search();
         let repaint_context = ctx.clone();
         app.clipboard_modify_immediate
-            .set_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
+            .set_repaint_callback(Arc::new({
+                let repaint_context = repaint_context.clone();
+                move || repaint_context.request_repaint()
+            }));
+        app.plugins
+            .set_search_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app.recompute_query_results_layout();
         app

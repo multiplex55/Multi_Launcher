@@ -7,7 +7,9 @@ use multi_launcher::{
     plugin::{Plugin, PluginManager},
     settings::Settings,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const REPRESENTATIVE_ACTIONS: usize = 500;
 const STRESS_ACTIONS: usize = 10_000;
@@ -173,6 +175,51 @@ fn bench_command_cache(c: &mut Criterion) {
     group.finish();
 }
 
+fn loaded_plugins() -> PluginManager {
+    let mut plugins = PluginManager::new();
+    let generation = plugins.search_generation();
+    plugins.reload_from_dirs(
+        &[],
+        10,
+        multi_launcher::settings::NetUnit::Auto,
+        false,
+        &HashMap::new(),
+        Arc::new(Vec::new()),
+    );
+    let sysinfo = HashSet::from(["sysinfo".to_owned()]);
+    plugins.search_filtered("info cpu", Some(&sysinfo), None);
+    let started = Instant::now();
+    while plugins.search_generation() == generation {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "system-data cache did not warm"
+        );
+        std::thread::yield_now();
+    }
+    plugins
+}
+
+fn bench_dynamic_plugins(c: &mut Criterion) {
+    let mut group = c.benchmark_group("search_dynamic_cached");
+    for (plugin_name, query) in [
+        ("processes", "ps multi_launcher"),
+        ("sysinfo", "info cpu"),
+        ("network", "net"),
+        ("volume", "vol name definitely_not_real.exe 20"),
+        ("browser_tabs", "tab clear"),
+        ("shell", "sh"),
+        ("layout", "layout"),
+        ("mouse_gestures", "mg"),
+        ("missing", "check missing"),
+    ] {
+        let plugins = loaded_plugins();
+        let enabled = HashSet::from([plugin_name.to_owned()]);
+        group.bench_function(plugin_name, |b| {
+            b.iter(|| black_box(plugins.search_filtered(black_box(query), Some(&enabled), None)))
+        });
+    }
+    group.finish();
+}
 fn bench_completion(c: &mut Criterion) {
     let commands = actions(COMMANDS);
     let representative = actions(REPRESENTATIVE_ACTIONS);
@@ -216,6 +263,7 @@ criterion_group!(
     benches,
     bench_static_search,
     bench_command_cache,
+    bench_dynamic_plugins,
     bench_completion
 );
 criterion_main!(benches);

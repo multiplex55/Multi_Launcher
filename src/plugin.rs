@@ -46,6 +46,7 @@ use crate::plugins::snippets::SnippetsPlugin;
 use crate::plugins::stopwatch::StopwatchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
+use crate::plugins::system_data::SystemDataRuntime;
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::text_case::TextCasePlugin;
@@ -64,7 +65,8 @@ use eframe::egui;
 use libloading::Library;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const CAP_GRID_RESULTS_COMPATIBLE: &str = "grid_results_compatible";
 pub const CAP_FORCE_LIST_RESULTS: &str = "force_list_results";
@@ -110,10 +112,41 @@ pub trait Plugin: Send + Sync {
 }
 
 /// A manager that holds plugins
-#[derive(Clone)]
+#[derive(Default)]
+pub(crate) struct PluginSearchUpdates {
+    generation: AtomicU64,
+    repaint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl PluginSearchUpdates {
+    pub(crate) fn notify(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        let callback = self
+            .repaint
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().map(Arc::clone));
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.repaint.lock() {
+            *slot = Some(callback);
+        }
+    }
+}
+
 pub struct PluginInternalServices {
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
     pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
+    search_updates: Arc<PluginSearchUpdates>,
+    system_data_runtime: Option<SystemDataRuntime>,
 }
 
 pub struct PluginManager {
@@ -142,6 +175,8 @@ impl PluginManager {
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
+                search_updates: Arc::new(PluginSearchUpdates::default()),
+                system_data_runtime: None,
             },
             libs: Vec::new(),
         }
@@ -160,6 +195,8 @@ impl PluginManager {
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
+                search_updates: Arc::new(PluginSearchUpdates::default()),
+                system_data_runtime: None,
             },
             libs: Vec::new(),
         }
@@ -167,6 +204,14 @@ impl PluginManager {
 
     pub fn internal_services(&self) -> &PluginInternalServices {
         &self.services
+    }
+
+    pub fn search_generation(&self) -> u64 {
+        self.services.search_updates.generation()
+    }
+
+    pub fn set_search_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.services.search_updates.set_repaint_callback(callback);
     }
 
     pub fn clipboard_modifier_catalog(&self) -> SharedClipboardModifierCatalog {
@@ -192,6 +237,8 @@ impl PluginManager {
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
+                search_updates: Arc::new(PluginSearchUpdates::default()),
+                system_data_runtime: None,
             },
             libs: Vec::new(),
         }
@@ -243,8 +290,19 @@ impl PluginManager {
         self.register_with_settings(DiffPlugin::default(), plugin_settings);
         self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
         self.register_with_settings(SystemPlugin, plugin_settings);
-        self.register_with_settings(ProcessesPlugin, plugin_settings);
-        self.register_with_settings(SysInfoPlugin, plugin_settings);
+        if self.services.system_data_runtime.is_none() {
+            self.services.system_data_runtime = Some(SystemDataRuntime::start(Arc::clone(
+                &self.services.search_updates,
+            )));
+        }
+        let system_data = self
+            .services
+            .system_data_runtime
+            .as_ref()
+            .expect("system data runtime initialized")
+            .cache();
+        self.register_with_settings(ProcessesPlugin::new(system_data.clone()), plugin_settings);
+        self.register_with_settings(SysInfoPlugin::new(system_data.clone()), plugin_settings);
         self.register_with_settings(NetworkPlugin::new(net_unit), plugin_settings);
         self.register_with_settings(ShellPlugin, plugin_settings);
         self.register_with_settings(HistoryPlugin, plugin_settings);
@@ -271,12 +329,15 @@ impl PluginManager {
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         self.register_with_settings(CropPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
-        self.register_with_settings(IpPlugin, plugin_settings);
+        self.register_with_settings(
+            IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            plugin_settings,
+        );
         self.register_with_settings(RandomPlugin::default(), plugin_settings);
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
-        self.register_with_settings(VolumePlugin, plugin_settings);
+        self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
         self.register_with_settings(BrightnessPlugin, plugin_settings);
         self.register_with_settings(TaskManagerPlugin, plugin_settings);
         self.register_with_settings(WindowsPlugin, plugin_settings);
@@ -462,6 +523,16 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn built_in_search_updates_increment_generation_and_repaint() {
+        let manager = PluginManager::new();
+        let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
+        manager.set_search_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let before = manager.search_generation();
+        manager.services.search_updates.notify();
+        repaint_rx.recv().unwrap();
+        assert_eq!(manager.search_generation(), before + 1);
+    }
     #[test]
     fn shared_catalog_handle_preserved_across_reload() {
         let mut manager = PluginManager::new();

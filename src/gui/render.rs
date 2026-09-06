@@ -869,6 +869,13 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
+        let plugin_search_generation = self.plugins.search_generation();
+        if plugin_search_generation != self.last_plugin_search_generation {
+            self.last_plugin_search_generation = plugin_search_generation;
+            self.last_results_valid = false;
+            self.search();
+        }
+
         crate::performance::record_frame(
             self.visible_flag.load(Ordering::Relaxed),
             ctx.input(|input| input.viewport().focused).unwrap_or(true),
