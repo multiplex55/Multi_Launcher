@@ -510,8 +510,14 @@ pub enum CropCommand {
 }
 kinds!(CropCommand, Self::Image => "image", Self::Screenshot => "screenshot");
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalNamespace {
+    Favorite,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalCommand {
     pub target: String,
     pub args: Option<String>,
+    pub namespace: Option<ExternalNamespace>,
 }
 kinds!(ExternalCommand, Self { .. } => "launch");

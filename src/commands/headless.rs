@@ -422,6 +422,7 @@ mod tests {
             Command::External(ExternalCommand {
                 target: "notepad.exe".into(),
                 args: Some("foo.txt".into()),
+                namespace: None,
             })
         );
         assert_eq!(

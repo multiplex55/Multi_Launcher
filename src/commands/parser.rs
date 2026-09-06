@@ -262,6 +262,7 @@ fn parse_prefixed(action: &Action) -> Result<Command, CommandError> {
     Ok(Command::External(ExternalCommand {
         target: s.to_string(),
         args: action.args.clone(),
+        namespace: s.starts_with("fav:").then_some(ExternalNamespace::Favorite),
     }))
 }
 
@@ -933,8 +934,30 @@ mod tests {
             matches!(parse_with_args("calc:42","1+41").command,Command::Calculator(CalculatorCommand::CopyResult{result,expression}) if result=="42"&&expression.as_deref()==Some("1+41"))
         );
         assert!(
-            matches!(parse_with_args("C:\\app.exe","--flag").command,Command::External(ExternalCommand{target,args}) if target=="C:\\app.exe"&&args.as_deref()==Some("--flag"))
+            matches!(parse_with_args("C:\\app.exe","--flag").command,Command::External(ExternalCommand{target,args,namespace: None}) if target=="C:\\app.exe"&&args.as_deref()==Some("--flag"))
         );
+    }
+
+    #[test]
+    fn external_fallback_retains_parser_classified_favorite_namespace() {
+        assert!(matches!(
+            parse("fav:future:payload").command,
+            Command::External(ExternalCommand {
+                namespace: Some(ExternalNamespace::Favorite),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse("plain-tool").command,
+            Command::External(ExternalCommand {
+                namespace: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse("fav:remove:7").command,
+            Command::Storage(StorageCommand::FavoriteRemove(_))
+        ));
     }
 
     #[test]

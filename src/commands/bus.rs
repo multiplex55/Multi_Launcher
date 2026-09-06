@@ -475,6 +475,7 @@ mod tests {
                 &invocation(Command::External(crate::commands::ExternalCommand {
                     target: "tool".into(),
                     args: None,
+                    namespace: None,
                 })),
                 &mut host,
             )

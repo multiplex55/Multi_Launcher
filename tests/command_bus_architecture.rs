@@ -99,3 +99,39 @@ fn launcher_activation_has_one_parser_and_no_raw_protocol_router() {
     assert!(!root.join("src/launcher/parse.rs").exists());
     assert!(!root.join("src/launcher/plan.rs").exists());
 }
+
+#[test]
+fn command_handlers_do_not_inspect_original_action_protocols() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let handlers = root.join("src/commands/handlers");
+
+    for entry in fs::read_dir(&handlers).expect("read command handlers") {
+        let path = entry.expect("read command handler entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let compact: String = source
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        for forbidden in [
+            "original_action.action.starts_with(",
+            "original_action.action.ends_with(",
+            "original_action.action.contains(",
+            "original_action.action.strip_prefix(",
+            "original_action.action.split(",
+            "original_action.action.split_once(",
+            "original_action.action.as_str(",
+            "original_action.action==",
+            "original_action.action!=",
+        ] {
+            assert!(
+                !compact.contains(forbidden),
+                "{} inspects the original raw action protocol via {forbidden}",
+                path.display()
+            );
+        }
+    }
+}

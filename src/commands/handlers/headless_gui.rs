@@ -1,7 +1,7 @@
 use super::super::{
-    BrowserTabCommand, Command, CommandError, CommandInvocation, CommandOutcome, FavoriteLogPolicy,
-    HeadlessCommandHost, HistoryPolicy, QueryPolicy, StorageCommand, TimerCommand, ToastPolicy,
-    VisibilityPolicy,
+    BrowserTabCommand, Command, CommandError, CommandInvocation, CommandOutcome, ExternalCommand,
+    ExternalNamespace, FavoriteLogPolicy, HeadlessCommandHost, HistoryPolicy, QueryPolicy,
+    StorageCommand, TimerCommand, ToastPolicy, VisibilityPolicy,
 };
 
 pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
@@ -194,7 +194,15 @@ fn success_toasts(invocation: &CommandInvocation) -> Vec<ToastPolicy> {
 
 pub(super) fn is_external_favorite(invocation: &CommandInvocation) -> bool {
     invocation.original_action.desc == "Fav"
-        && !invocation.original_action.action.starts_with("fav:")
+        && !matches!(
+            &invocation.command,
+            Command::Storage(
+                StorageCommand::FavoriteAdd { .. } | StorageCommand::FavoriteRemove(_)
+            ) | Command::External(ExternalCommand {
+                namespace: Some(ExternalNamespace::Favorite),
+                ..
+            })
+        )
 }
 
 pub(super) fn favorite_log(invocation: &CommandInvocation) -> FavoriteLogPolicy {
@@ -306,6 +314,7 @@ mod tests {
                 Command::External(super::super::super::ExternalCommand {
                     target: "tool".into(),
                     args: None,
+                    namespace: None,
                 }),
                 "tool",
             ),
@@ -350,6 +359,7 @@ mod tests {
                 Command::External(super::super::super::ExternalCommand {
                     target: "tool".into(),
                     args: None,
+                    namespace: None,
                 }),
                 "tool",
             ),
@@ -404,6 +414,7 @@ mod tests {
             Command::External(super::super::super::ExternalCommand {
                 target: "fav:future:payload".into(),
                 args: None,
+                namespace: Some(ExternalNamespace::Favorite),
             }),
             "fav:future:payload",
         );
@@ -411,6 +422,27 @@ mod tests {
         assert!(!is_external_favorite(&invocation));
         assert_eq!(favorite_log(&invocation), FavoriteLogPolicy::None);
     }
+    #[test]
+    fn ordinary_external_favorite_is_logged_from_typed_external_semantics() {
+        let mut invocation = invocation(
+            Command::External(ExternalCommand {
+                target: "tool".into(),
+                args: None,
+                namespace: None,
+            }),
+            "tool",
+        );
+        invocation.original_action.desc = "Fav".into();
+        assert!(is_external_favorite(&invocation));
+        assert_eq!(
+            favorite_log(&invocation),
+            FavoriteLogPolicy::Ran {
+                label: "Example".into(),
+                command: "tool".into(),
+            }
+        );
+    }
+
     #[test]
     fn browser_switch_is_async_without_generic_clear_or_hide() {
         for (command, action) in [
