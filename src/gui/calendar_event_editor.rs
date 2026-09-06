@@ -2,8 +2,8 @@ use crate::dashboard::DashboardRefreshRequest;
 use crate::gui::LauncherApp;
 use crate::gui::calendar_event_details::RecurrenceScope;
 use crate::plugins::calendar::{
-    CALENDAR_DATA, CALENDAR_EVENTS_FILE, CalendarEvent, CustomRecurrenceUnit, RecurrenceEnd,
-    RecurrenceFrequency, RecurrenceRule, Reminder, new_event_id, save_events,
+    CALENDAR_EVENTS_FILE, CalendarEvent, CustomRecurrenceUnit, RecurrenceEnd, RecurrenceFrequency,
+    RecurrenceRule, Reminder, new_event_id, update_events,
 };
 use chrono::{Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use eframe::egui;
@@ -514,12 +514,7 @@ impl CalendarEventEditor {
             return Err("Fix validation errors".into());
         }
 
-        let mut events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
         let now = Local::now().naive_local();
-        let existing = self
-            .current_event_id
-            .as_ref()
-            .and_then(|id| events.iter().find(|e| &e.id == id).cloned());
         let id = self.current_event_id.clone().unwrap_or_else(new_event_id);
         let event = CalendarEvent {
             id: id.clone(),
@@ -537,26 +532,41 @@ impl CalendarEventEditor {
             reminders,
             tags: parse_tags(&self.tags),
             category: None,
-            created_at: existing.as_ref().map(|e| e.created_at).unwrap_or(now),
+            created_at: now,
             updated_at: Some(now),
-            entity_refs: existing.map(|e| e.entity_refs).unwrap_or_default(),
+            entity_refs: Vec::new(),
         };
 
-        if let Some(scope) = self.split_from.take() {
-            apply_split_scope(&mut events, &scope).map_err(|err| err.to_string())?;
-            events.push(event);
-        } else if let Some(pos) = events.iter().position(|e| e.id == id) {
-            events[pos] = event;
-        } else {
-            events.push(event);
-        }
-
-        save_events(CALENDAR_EVENTS_FILE, &events).map_err(|e| e.to_string())?;
+        persist_editor_event(CALENDAR_EVENTS_FILE, event, self.split_from.clone())
+            .map_err(|e| e.to_string())?;
+        self.split_from = None;
         app.dashboard_data_cache
             .request_refresh(DashboardRefreshRequest::Calendar);
         app.calendar_selected_event = Some(id);
         Ok(())
     }
+}
+
+fn persist_editor_event(
+    path: &str,
+    mut event: CalendarEvent,
+    split_from: Option<SplitScope>,
+) -> anyhow::Result<()> {
+    let event_id = event.id.clone();
+    update_events(path, move |events| {
+        if let Some(scope) = split_from {
+            apply_split_scope(events, &scope)?;
+            events.push(event);
+        } else if let Some(pos) = events.iter().position(|existing| existing.id == event_id) {
+            event.created_at = events[pos].created_at;
+            event.entity_refs = events[pos].entity_refs.clone();
+            events[pos] = event;
+        } else {
+            events.push(event);
+        }
+        Ok(true)
+    })?;
+    Ok(())
 }
 
 fn parse_date(input: &str) -> Result<NaiveDate, String> {
@@ -665,5 +675,75 @@ fn event_duration(event: &CalendarEvent) -> Duration {
         Duration::days(1)
     } else {
         event.resolved_end() - event.start
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::common::entity_ref::{EntityKind, EntityRef};
+    use crate::common::persistence::save_json_atomic;
+    use crate::plugins::calendar::{
+        CALENDAR_DATA, calendar_test_guard, load_events, restore_calendar_test_data,
+    };
+
+    fn event(id: &str, title: &str) -> CalendarEvent {
+        CalendarEvent {
+            id: id.into(),
+            title: title.into(),
+            start: NaiveDate::from_ymd_opt(2026, 9, 6)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+            end: None,
+            duration_minutes: Some(30),
+            all_day: false,
+            notes: None,
+            recurrence: None,
+            reminders: Vec::new(),
+            tags: Vec::new(),
+            category: None,
+            created_at: NaiveDate::from_ymd_opt(2020, 1, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            updated_at: None,
+            entity_refs: vec![EntityRef::new(EntityKind::Note, "source", None)],
+        }
+    }
+
+    #[test]
+    fn editor_commit_uses_latest_valid_event_and_rejects_corruption() {
+        let _test = calendar_test_guard();
+        let original = CALENDAR_DATA.read().unwrap().clone();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.json");
+        let stored = event("existing", "Stored");
+        save_json_atomic(&path, &vec![stored.clone()]).unwrap();
+        persist_editor_event(path.to_str().unwrap(), event("existing", "Edited"), None).unwrap();
+        let loaded = load_events(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded[0].title, "Edited");
+        assert_eq!(loaded[0].created_at, stored.created_at);
+        assert_eq!(loaded[0].entity_refs, stored.entity_refs);
+
+        let invalid = b"invalid calendar events";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(
+            persist_editor_event(path.to_str().unwrap(), event("existing", "Lost"), None).is_err()
+        );
+        assert!(
+            persist_editor_event(
+                path.to_str().unwrap(),
+                event("split", "Lost split"),
+                Some(SplitScope {
+                    event_id: "existing".into(),
+                    occurrence_start: stored.start,
+                    scope: RecurrenceScope::ThisAndFollowing,
+                }),
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+        restore_calendar_test_data(original);
     }
 }

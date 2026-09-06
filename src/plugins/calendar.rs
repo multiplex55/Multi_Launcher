@@ -2,6 +2,7 @@
 use crate::actions::Action;
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::json_watch::{JsonWatcher, watch_json};
+use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::common::query::parse_query_filters;
 use crate::common::strip_prefix_ci;
 use crate::plugin::Plugin;
@@ -11,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, MutexGuard, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -20,6 +21,26 @@ pub const CALENDAR_STATE_FILE: &str = "calendar/state.json";
 
 static CALENDAR_VERSION: AtomicU64 = AtomicU64::new(0);
 static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+static CALENDAR_EVENT_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+#[cfg(test)]
+static CALENDAR_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) fn calendar_test_guard() -> MutexGuard<'static, ()> {
+    CALENDAR_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+pub(crate) fn restore_calendar_test_data(events: Vec<CalendarEvent>) {
+    *CALENDAR_DATA
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = events;
+    *CALENDAR_INDEX
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = CalendarIndexState::default();
+}
 
 pub fn calendar_version() -> u64 {
     CALENDAR_VERSION.load(Ordering::SeqCst)
@@ -213,41 +234,86 @@ struct CalendarIndexState {
 }
 
 pub static CALENDAR_DATA: Lazy<Arc<RwLock<Vec<CalendarEvent>>>> = Lazy::new(|| {
-    Arc::new(RwLock::new(
-        load_events(CALENDAR_EVENTS_FILE).unwrap_or_default(),
-    ))
+    let events = load_events(CALENDAR_EVENTS_FILE).unwrap_or_else(|error| {
+        tracing::error!(%error, "calendar startup retained invalid event store");
+        Vec::new()
+    });
+    Arc::new(RwLock::new(events))
 });
 
 static CALENDAR_INDEX: Lazy<Arc<RwLock<CalendarIndexState>>> =
     Lazy::new(|| Arc::new(RwLock::new(CalendarIndexState::default())));
 
 pub fn load_events(path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let list: Vec<CalendarEvent> = serde_json::from_str(&content)?;
-    Ok(list)
+    let _transaction = calendar_event_transaction_guard();
+    load_events_unlocked(path).map_err(Into::into)
+}
+
+pub fn load_events_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<CalendarEvent>>, PersistenceError> {
+    load_json(path)
+}
+
+fn load_events_unlocked(path: &str) -> Result<Vec<CalendarEvent>, PersistenceError> {
+    Ok(match load_events_typed(path)? {
+        LoadState::Missing | LoadState::Empty => Vec::new(),
+        LoadState::Loaded(events) => events,
+    })
 }
 
 pub fn save_events(path: &str, events: &[CalendarEvent]) -> anyhow::Result<()> {
-    ensure_parent_dir(path)?;
-    let json = serde_json::to_string_pretty(events)?;
-    std::fs::write(path, json)?;
-    update_cache(events.to_vec());
-    Ok(())
+    replace_events(path, events.to_vec()).map(|_| ())
+}
+
+pub fn replace_events(
+    path: &str,
+    replacement: Vec<CalendarEvent>,
+) -> anyhow::Result<Vec<CalendarEvent>> {
+    update_events(path, move |events| {
+        *events = replacement;
+        Ok(true)
+    })
+}
+
+pub fn update_events(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<CalendarEvent>) -> anyhow::Result<bool>,
+) -> anyhow::Result<Vec<CalendarEvent>> {
+    update_events_with_save(path, mutate, |path, events| {
+        save_json_atomic(path, events).map_err(Into::into)
+    })
+}
+
+fn update_events_with_save(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<CalendarEvent>) -> anyhow::Result<bool>,
+    save: impl FnOnce(&str, &[CalendarEvent]) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<CalendarEvent>> {
+    // Publication touches the lazy process cache. Initialize it before the
+    // transaction lock so startup loading cannot recursively acquire it.
+    Lazy::force(&CALENDAR_DATA);
+    let _transaction = calendar_event_transaction_guard();
+    let mut events = load_events_unlocked(path)?;
+    if mutate(&mut events)? {
+        save(path, &events)?;
+        publish_calendar_snapshot(events.clone());
+    }
+    Ok(events)
 }
 
 pub fn refresh_events_from_disk(path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
-    let list = load_events(path)?;
-    let mut should_update = true;
-    if let Ok(guard) = CALENDAR_DATA.read() {
-        should_update = *guard != list;
+    Lazy::force(&CALENDAR_DATA);
+    let _transaction = calendar_event_transaction_guard();
+    let events = load_events_unlocked(path)?;
+    let should_publish = CALENDAR_DATA
+        .read()
+        .map(|current| *current != events)
+        .unwrap_or(true);
+    if should_publish {
+        publish_calendar_snapshot(events.clone());
     }
-    if should_update {
-        update_cache(list.clone());
-    }
-    Ok(list)
+    Ok(events)
 }
 
 pub fn load_state(path: &str) -> anyhow::Result<CalendarState> {
@@ -275,22 +341,24 @@ fn ensure_parent_dir(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn update_cache(list: Vec<CalendarEvent>) {
-    if let Ok(mut lock) = CALENDAR_DATA.write() {
-        *lock = list;
-    }
-    bump_calendar_version();
-    refresh_index();
+fn calendar_event_transaction_guard() -> MutexGuard<'static, ()> {
+    CALENDAR_EVENT_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn refresh_index() {
-    let events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
-    let index = build_index(&events);
+fn publish_calendar_snapshot(list: Vec<CalendarEvent>) {
+    let index = build_index(&list);
+    *CALENDAR_DATA
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = list;
+    bump_calendar_version();
     let version = calendar_version();
-    if let Ok(mut guard) = CALENDAR_INDEX.write() {
-        guard.version = version;
-        guard.index = index;
-    }
+    let mut guard = CALENDAR_INDEX
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.version = version;
+    guard.index = index;
 }
 
 fn build_index(events: &[CalendarEvent]) -> CalendarIndex {
@@ -344,8 +412,8 @@ pub fn search_by_tag(tag: &str) -> Vec<CalendarEvent> {
 pub fn watch_calendar_events(path: &str) -> Option<JsonWatcher> {
     let watch_path = path.to_string();
     watch_json(path, move || {
-        if let Ok(list) = load_events(&watch_path) {
-            update_cache(list);
+        if let Err(error) = refresh_events_from_disk(&watch_path) {
+            tracing::error!(%error, "invalid calendar reload retained last-good events");
         }
     })
     .ok()
@@ -929,6 +997,14 @@ pub fn parse_calendar_search(input: &str) -> Result<CalendarSearchRequest, Strin
 }
 
 pub fn add_event(request: CalendarAddRequest, now: NaiveDateTime) -> anyhow::Result<CalendarEvent> {
+    add_event_at(CALENDAR_EVENTS_FILE, request, now)
+}
+
+fn add_event_at(
+    path: &str,
+    request: CalendarAddRequest,
+    now: NaiveDateTime,
+) -> anyhow::Result<CalendarEvent> {
     let start_time = request
         .time
         .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
@@ -949,30 +1025,36 @@ pub fn add_event(request: CalendarAddRequest, now: NaiveDateTime) -> anyhow::Res
         updated_at: None,
         entity_refs: request.refs,
     };
-    let mut events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
-    events.push(event.clone());
-    save_events(CALENDAR_EVENTS_FILE, &events)?;
+    let event_to_add = event.clone();
+    update_events(path, move |events| {
+        events.push(event_to_add);
+        Ok(true)
+    })?;
     Ok(event)
 }
 
 pub fn snooze_event(event_id: &str, duration: Duration) -> anyhow::Result<bool> {
-    let mut events = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    snooze_event_at(CALENDAR_EVENTS_FILE, event_id, duration)
+}
+
+fn snooze_event_at(path: &str, event_id: &str, duration: Duration) -> anyhow::Result<bool> {
     let mut updated = false;
     let now = chrono::Local::now().naive_local();
-    for event in &mut events {
-        if event.id == event_id {
-            event.start += duration;
-            if let Some(end) = event.end {
-                event.end = Some(end + duration);
+    let event_id = event_id.to_owned();
+    update_events(path, move |events| {
+        for event in events {
+            if event.id == event_id {
+                event.start += duration;
+                if let Some(end) = event.end {
+                    event.end = Some(end + duration);
+                }
+                event.updated_at = Some(now);
+                updated = true;
+                break;
             }
-            event.updated_at = Some(now);
-            updated = true;
-            break;
         }
-    }
-    if updated {
-        save_events(CALENDAR_EVENTS_FILE, &events)?;
-    }
+        Ok(updated)
+    })?;
     Ok(updated)
 }
 
@@ -1330,5 +1412,241 @@ impl Plugin for CalendarPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::common::persistence::PersistenceError;
+    use std::sync::{Arc, Barrier};
+
+    fn event(id: &str, title: &str) -> CalendarEvent {
+        CalendarEvent {
+            id: id.into(),
+            title: title.into(),
+            start: NaiveDate::from_ymd_opt(2026, 9, 6)
+                .unwrap()
+                .and_hms_opt(9, 30, 0)
+                .unwrap(),
+            end: Some(
+                NaiveDate::from_ymd_opt(2026, 9, 6)
+                    .unwrap()
+                    .and_hms_opt(10, 0, 0)
+                    .unwrap(),
+            ),
+            duration_minutes: None,
+            all_day: false,
+            notes: Some("notes".into()),
+            recurrence: Some(RecurrenceRule {
+                frequency: RecurrenceFrequency::Weekly,
+                interval: 2,
+                weekly_days: vec![Weekday::Sun],
+                nth_weekday: None,
+                end: RecurrenceEnd::AfterCount { count: 3 },
+                custom_unit: None,
+            }),
+            reminders: vec![Reminder { minutes_before: 15 }],
+            tags: vec!["work".into()],
+            category: Some("focus".into()),
+            created_at: NaiveDate::from_ymd_opt(2026, 9, 1)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+            updated_at: None,
+            entity_refs: vec![EntityRef::new(EntityKind::Note, "daily", None)],
+        }
+    }
+
+    fn set_calendar_data(events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
+        let mut current = CALENDAR_DATA
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *current, events)
+    }
+
+    #[test]
+    fn event_persistence_states_parent_creation_and_schema_are_compatible() {
+        let _test = calendar_test_guard();
+        let original = set_calendar_data(Vec::new());
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert_eq!(load_events_typed(&missing).unwrap(), LoadState::Missing);
+
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, " \r\n").unwrap();
+        assert_eq!(load_events_typed(&empty).unwrap(), LoadState::Empty);
+
+        let nested = directory.path().join("calendar").join("events.json");
+        let expected = vec![event("evt-compatible", "Compatible")];
+        save_events(nested.to_str().unwrap(), &expected).unwrap();
+        assert_eq!(
+            load_events_typed(&nested).unwrap(),
+            LoadState::Loaded(expected.clone())
+        );
+        assert_eq!(load_events(nested.to_str().unwrap()).unwrap(), expected);
+        let persisted = std::fs::read_to_string(nested).unwrap();
+        assert_eq!(persisted, serde_json::to_string_pretty(&expected).unwrap());
+        assert!(persisted.contains("\"Weekly\""));
+        assert!(persisted.contains("2026-09-06T09:30:00"));
+
+        restore_calendar_test_data(original);
+    }
+
+    #[test]
+    fn malformed_and_unreadable_events_reject_all_mutation_families_unchanged() {
+        let _test = calendar_test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.json");
+        let invalid = b"invalid calendar events";
+        std::fs::write(&path, invalid).unwrap();
+        let path = path.to_str().unwrap();
+        assert!(save_events(path, &[event("replacement", "Replacement")]).is_err());
+        assert!(
+            add_event_at(
+                path,
+                CalendarAddRequest {
+                    date: NaiveDate::from_ymd_opt(2026, 9, 6).unwrap(),
+                    time: NaiveTime::from_hms_opt(9, 0, 0),
+                    all_day: false,
+                    title: "Add".into(),
+                    notes: None,
+                    refs: Vec::new(),
+                },
+                NaiveDate::from_ymd_opt(2026, 9, 1)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+            )
+            .is_err()
+        );
+        assert!(snooze_event_at(path, "event", Duration::minutes(5)).is_err());
+        for _family in ["edit", "delete", "duplicate", "split"] {
+            assert!(
+                update_events(path, |events| {
+                    events.clear();
+                    Ok(true)
+                })
+                .is_err()
+            );
+        }
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+        assert!(matches!(
+            load_events_typed(directory.path()).unwrap_err(),
+            PersistenceError::Read { .. }
+        ));
+        assert!(save_events(directory.path().to_str().unwrap(), &[]).is_err());
+    }
+
+    #[test]
+    fn failed_event_save_retains_disk_data_index_and_version() {
+        let _test = calendar_test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.json");
+        let disk = vec![event("disk", "Disk")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
+        let memory = vec![event("memory", "Memory")];
+        let original = set_calendar_data(memory.clone());
+        *CALENDAR_INDEX.write().unwrap() = CalendarIndexState {
+            version: 777,
+            index: CalendarIndex {
+                titles: vec![("sentinel".into(), "sentinel".into())],
+                tags: HashMap::new(),
+            },
+        };
+        let version = calendar_version();
+        let result = update_events_with_save(
+            path.to_str().unwrap(),
+            |events| {
+                events.push(event("lost", "Lost"));
+                Ok(true)
+            },
+            |_path, _events| anyhow::bail!("deterministic calendar save failure"),
+        );
+        assert!(result.is_err());
+        assert_eq!(load_events(path.to_str().unwrap()).unwrap(), disk);
+        assert_eq!(*CALENDAR_DATA.read().unwrap(), memory);
+        assert_eq!(calendar_version(), version);
+        let index = CALENDAR_INDEX.read().unwrap();
+        assert_eq!(index.version, 777);
+        assert_eq!(index.index.titles[0].0, "sentinel");
+        drop(index);
+        restore_calendar_test_data(original);
+    }
+
+    #[test]
+    fn missing_first_event_and_concurrent_additions_are_retained() {
+        let _test = calendar_test_guard();
+        let original = set_calendar_data(Vec::new());
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(
+            directory
+                .path()
+                .join("nested")
+                .join("events.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = ["First", "Second"].map(|title| {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                add_event_at(
+                    &path,
+                    CalendarAddRequest {
+                        date: NaiveDate::from_ymd_opt(2026, 9, 6).unwrap(),
+                        time: NaiveTime::from_hms_opt(9, 0, 0),
+                        all_day: false,
+                        title: title.into(),
+                        notes: None,
+                        refs: Vec::new(),
+                    },
+                    NaiveDate::from_ymd_opt(2026, 9, 1)
+                        .unwrap()
+                        .and_hms_opt(8, 0, 0)
+                        .unwrap(),
+                )
+                .unwrap();
+            })
+        });
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let events = load_events(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| event.title == "First"));
+        assert!(events.iter().any(|event| event.title == "Second"));
+        restore_calendar_test_data(original);
+    }
+
+    #[test]
+    fn watcher_reload_retains_invalid_recovers_and_deduplicates_self_write() {
+        let _test = calendar_test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.json");
+        let original = set_calendar_data(Vec::new());
+        let local = vec![event("local", "Local")];
+        save_events(path.to_str().unwrap(), &local).unwrap();
+        let version = calendar_version();
+        refresh_events_from_disk(path.to_str().unwrap()).unwrap();
+        assert_eq!(calendar_version(), version);
+
+        let invalid = b"invalid events";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(refresh_events_from_disk(path.to_str().unwrap()).is_err());
+        assert_eq!(*CALENDAR_DATA.read().unwrap(), local);
+        assert_eq!(calendar_version(), version);
+        assert_eq!(std::fs::read(&path).unwrap(), invalid);
+
+        let external = vec![event("external", "External")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        refresh_events_from_disk(path.to_str().unwrap()).unwrap();
+        assert_eq!(*CALENDAR_DATA.read().unwrap(), external);
+        assert_eq!(calendar_version(), version + 1);
+        assert_eq!(search_by_title("external"), external);
+        restore_calendar_test_data(original);
     }
 }
