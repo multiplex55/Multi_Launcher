@@ -228,7 +228,7 @@ fn main() -> anyhow::Result<()> {
     if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings) {
         let _ = settings.save("settings.json");
     }
-    logging::init(settings.debug_logging, settings.log_file_path());
+    let _logging_guard = logging::init(settings.debug_logging, settings.log_file_path());
     settings_timer.finish("startup.settings_load");
     tracing::debug!(?settings, "settings loaded");
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(

@@ -3,6 +3,7 @@ name = "multi_launcher"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+autotests = false
 
 [dependencies]
 eframe = "0.27"               # egui-based GUI
@@ -108,3 +109,271 @@ harness = false
 [[bench]]
 name = "todo_widget_filtering"
 harness = false
+
+# Explicit integration-test topology: keep process-global tests isolated.
+[[test]]
+name = "plugin_queries"
+path = "tests/suites/plugin_queries.rs"
+
+[[test]]
+name = "domain"
+path = "tests/suites/domain.rs"
+
+[[test]]
+name = "bookmarks_plugin"
+path = "tests/bookmarks_plugin.rs"
+
+[[test]]
+name = "clipboard_persistence"
+path = "tests/clipboard_persistence.rs"
+
+[[test]]
+name = "dashboard_config"
+path = "tests/dashboard_config.rs"
+
+[[test]]
+name = "fav_plugin"
+path = "tests/fav_plugin.rs"
+
+[[test]]
+name = "file_drop"
+path = "tests/file_drop.rs"
+
+[[test]]
+name = "focus_visibility"
+path = "tests/focus_visibility.rs"
+
+[[test]]
+name = "folders_plugin"
+path = "tests/folders_plugin.rs"
+
+[[test]]
+name = "follow_mouse"
+path = "tests/follow_mouse.rs"
+
+[[test]]
+name = "gui_visibility"
+path = "tests/gui_visibility.rs"
+
+[[test]]
+name = "hide_after_run"
+path = "tests/hide_after_run.rs"
+
+[[test]]
+name = "history"
+path = "tests/history.rs"
+
+[[test]]
+name = "hotkey_events"
+path = "tests/hotkey_events.rs"
+
+[[test]]
+name = "logging"
+path = "tests/logging.rs"
+
+[[test]]
+name = "macros_plugin"
+path = "tests/macros_plugin.rs"
+
+[[test]]
+name = "missing_plugin"
+path = "tests/missing_plugin.rs"
+
+[[test]]
+name = "mkmacro_compiler"
+path = "tests/mkmacro_compiler.rs"
+
+[[test]]
+name = "mkmacro_recorder"
+path = "tests/mkmacro_recorder.rs"
+
+[[test]]
+name = "mkmacro_runtime"
+path = "tests/mkmacro_runtime.rs"
+[[test]]
+name = "mkmacro_authoring"
+path = "tests/mkmacro_authoring.rs"
+
+[[test]]
+name = "mkmacro_launcher_integration"
+path = "tests/mkmacro_launcher_integration.rs"
+
+[[test]]
+name = "mkmacro_plugin"
+path = "tests/mkmacro_plugin.rs"
+
+[[test]]
+name = "mkmacro_store"
+path = "tests/mkmacro_store.rs"
+
+[[test]]
+name = "mkmacro_visual"
+path = "tests/mkmacro_visual.rs"
+
+[[test]]
+name = "mouse_gestures_db"
+path = "tests/mouse_gestures_db.rs"
+
+[[test]]
+name = "mouse_gestures_service"
+path = "tests/mouse_gestures_service.rs"
+
+[[test]]
+name = "mouse_gestures_ui"
+path = "tests/mouse_gestures_ui.rs"
+
+[[test]]
+name = "multi_manager_launcher_actions"
+path = "tests/multi_manager_launcher_actions.rs"
+
+[[test]]
+name = "multi_manager_plugin"
+path = "tests/multi_manager_plugin.rs"
+
+[[test]]
+name = "note_panel_auto_save"
+path = "tests/note_panel_auto_save.rs"
+
+[[test]]
+name = "note_panel_scroll"
+path = "tests/note_panel_scroll.rs"
+
+[[test]]
+name = "note_panel_shell"
+path = "tests/note_panel_shell.rs"
+
+[[test]]
+name = "notes_plugin"
+path = "tests/notes_plugin.rs"
+
+[[test]]
+name = "omni_search_plugin"
+path = "tests/omni_search_plugin.rs"
+
+[[test]]
+name = "plugin_commands"
+path = "tests/plugin_commands.rs"
+
+[[test]]
+name = "plugin_exact_match"
+path = "tests/plugin_exact_match.rs"
+
+[[test]]
+name = "plugin_routing"
+path = "tests/plugin_routing.rs"
+
+[[test]]
+name = "preserve_command"
+path = "tests/preserve_command.rs"
+
+[[test]]
+name = "processes_plugin"
+path = "tests/processes_plugin.rs"
+
+[[test]]
+name = "query_autocomplete"
+path = "tests/query_autocomplete.rs"
+
+[[test]]
+name = "quit_finished"
+path = "tests/quit_finished.rs"
+
+[[test]]
+name = "quit_hotkey"
+path = "tests/quit_hotkey.rs"
+
+[[test]]
+name = "recycle_plugin"
+path = "tests/recycle_plugin.rs"
+
+[[test]]
+name = "resilience"
+path = "tests/resilience.rs"
+
+[[test]]
+name = "screenshot_cancel"
+path = "tests/screenshot_cancel.rs"
+
+[[test]]
+name = "screenshot_plugin"
+path = "tests/screenshot_plugin.rs"
+
+[[test]]
+name = "settings_editor"
+path = "tests/settings_editor.rs"
+
+[[test]]
+name = "settings_plugin"
+path = "tests/settings_plugin.rs"
+
+[[test]]
+name = "shell_plugin"
+path = "tests/shell_plugin.rs"
+
+[[test]]
+name = "shell_wezterm"
+path = "tests/shell_wezterm.rs"
+
+[[test]]
+name = "snippets_plugin"
+path = "tests/snippets_plugin.rs"
+
+[[test]]
+name = "sound"
+path = "tests/sound.rs"
+
+[[test]]
+name = "stopwatch_plugin"
+path = "tests/stopwatch_plugin.rs"
+
+[[test]]
+name = "stopwatch_refresh"
+path = "tests/stopwatch_refresh.rs"
+
+[[test]]
+name = "tempfile_plugin"
+path = "tests/tempfile_plugin.rs"
+
+[[test]]
+name = "timer_plugin"
+path = "tests/timer_plugin.rs"
+
+[[test]]
+name = "timer_refresh"
+path = "tests/timer_refresh.rs"
+
+[[test]]
+name = "tmp_rm_refresh"
+path = "tests/tmp_rm_refresh.rs"
+
+[[test]]
+name = "toast_log"
+path = "tests/toast_log.rs"
+
+[[test]]
+name = "todo_plugin"
+path = "tests/todo_plugin.rs"
+
+[[test]]
+name = "trigger_visibility"
+path = "tests/trigger_visibility.rs"
+
+[[test]]
+name = "watcher_failures"
+path = "tests/watcher_failures.rs"
+
+[[test]]
+name = "watchers"
+path = "tests/watchers.rs"
+
+[[test]]
+name = "web_search_prefix"
+path = "tests/web_search_prefix.rs"
+
+[[test]]
+name = "window_manager"
+path = "tests/window_manager.rs"
+
+[[test]]
+name = "windows_plugin"
+path = "tests/windows_plugin.rs"

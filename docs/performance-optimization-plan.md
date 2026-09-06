@@ -52,6 +52,7 @@ Planned commit: `perf(search): remove blocking dynamic work from query handling`
 
 **Status:** `complete`
 **Dependency:** Milestones 1-3 final runtime state.
+**Commit:** `9885f20`
 
 Add a small pure state-aware repaint policy while preserving timer, animation, toast, file-search,
 MkMacro, overlay and diagnostic schedules. Inventory workers and fix only measured lifecycle or
@@ -61,7 +62,7 @@ Planned commit: `perf(runtime): reduce unnecessary idle and repaint work`
 
 ## Milestone 5 - Cargo and Nextest turnaround
 
-**Status:** `pending`  
+**Status:** `complete`
 **Dependency:** Milestones 1-4 final state.
 
 Measure compile, codegen/link, integration-target link, scheduling and execution separately, plus
@@ -342,6 +343,114 @@ contain `test`). It reproduced alone. Milestone 1 does not modify logging initia
 test, so this is recorded as an existing/environmental verification issue rather than hidden or
 reclassified as a pass.
 
+## Milestone 5 Cargo/Nextest results
+
+### Method and measured split
+
+Measurements used the final M4 runtime state on the baseline host. Source-invalidated before and
+after `cargo test --no-run --timings` runs used the shared warm dependency cache; Cargo timing HTML
+was parsed only for supported unit/section data. Integration-unit durations overlap under parallel
+Cargo scheduling and therefore are reported as aggregate linker-work evidence, not wall time. A clean
+run used a new `target/m5-isolated-clean` directory rather than deleting the shared cache. The clean
+run compiled dependencies and reached application/test linking, but after roughly ten minutes it
+filled the disk and failed with MSVC `LNK1318 Unexpected PDB error; FILE_SYSTEM`. The isolated output
+was then validated and removed, restoring disk space. No successful clean-build duration is claimed.
+
+Representative edits changed only file timestamps. GUI, MkMacro, and command-handler measurements
+ran three `cargo check` iterations each; unit and integration measurements ran three targeted
+`cargo test --no-run` iterations each. Cached Nextest inventory was measured three times. Execution timing uses three comparable passing
+candidate runs plus one authoritative final-topology run. All medians are the middle of three runs.
+
+| Metric | Before | Final | Evidence / interpretation |
+|---|---:|---:|---|
+| All Rust test binaries | 127 | 70 | 124 top-level integration targets became 67 explicit targets; package lib/main/auxiliary binaries account for the other three. |
+| Integration targets represented in Cargo timing units | 121 | 64 in the measured candidate | `mock_ctx.rs` no longer links as an empty executable. The final topology has 67 integration targets after three MkMacro suites were re-isolated from ordinary-harness contention. |
+| Source-invalidated `cargo test --no-run --timings` | 11m52s | 9m03s measured 64-target candidate | Same warm-cache host, 23.7% candidate wall-time reduction; final 67-target Cargo timing was not rerun after the disk/PDB failure. The earlier M1 baseline was 11m59s. |
+| Aggregate integration timing-unit work | 5,310.06 s | 3,767.68 s | 29.0% less aggregate work; units overlap in wall time. |
+| Median integration timing unit | 46.58 s | 55.69 s | Expected per-umbrella cost increase; total fan-out still falls materially. |
+| Nextest build for inventory after topology invalidation | 12m31s | 8m39s | Authoritative final 70-binary topology, 31.0% wall-time reduction. |
+| Cached Nextest inventory/scheduling | not comparably repeated | 2.779 s median | 3.155/2.731/2.779 s total command times; Cargo itself reported 1.34/1.00/0.99 s. |
+| Full Nextest execution | 86.812 s, 2,960 executed | 42.730 s final, 2,976 executed | Comparable 67-binary candidate runs were 37.616/42.181/44.246 s (42.181 s median); the authoritative 70-binary run was 42.730 s. Test count and host load changed since M1, so this is regression evidence rather than a topology-only attribution. |
+| GUI timestamp-only `cargo check` | 6.50 s M1 single run | 11.440 s median | 11.440/11.341/13.504 s; host variance prevents an optimization claim. |
+| MkMacro timestamp-only `cargo check` | 6.44 s M1 single run | 17.811 s median | 14.097/17.811/25.569 s; the M1 file differed, so this is final-state characterization only. |
+| Command-handler timestamp-only `cargo check` | not measured | 13.717 s median | 17.242/9.149/13.717 s. |
+| Unit-test-only rebuild/link | not measured | 32.186 s median | 50.441/32.186/23.858 s after touching `src/file_search/test_fixtures.rs`. |
+| Umbrella integration-test rebuild/link | not measured | 39.958 s median | 48.043/26.884/39.958 s after touching one source in `plugin_queries`. |
+| Incremental release build | 2m05s M1 | 2m40s | Final source-invalidated `cargo build --release`; no release-profile change was made. |
+
+The measured 64-target candidate exposed a 22.90 s normal-library unit with 13.44 s frontend and 9.46 s codegen in the successful
+after timing report. Test units did not expose finer sections on this stable toolchain; its 64
+reported integration durations include frontend/codegen/link. The longest was the `domain` umbrella at 125.44 s,
+followed by existing isolated plugin/platform tests at roughly 78-94 s. This is why the integration
+aggregate is not mislabeled as pure linker CPU time.
+
+### Test topology and isolation
+
+`autotests = false` makes every intended top-level test explicit. `plugin_queries` groups simple,
+side-effect-free plugin parsing/search tests; `domain` groups pure configuration, parsing,
+diff/search algorithms, model, and fake-backend tests. Normal Nextest parallelism remains enabled.
+The original files remain the source modules, so no assertions or meaningful tests were removed.
+Nextest listed exactly 2,983 tests before and after; the final 70-binary suite runs 2,976 with 7 skipped.
+
+Sixty-five stateful files stay as independent integration binaries. The isolation audit retained
+separate processes for current-directory and environment mutation; shared stores and files; global
+execution/event/window hooks and static overrides; Windows hotkey, mouse, UI Automation, screenshot,
+and window state; spawned commands and external processes; watcher timing; audio threads; and
+launcher/GUI lifecycles. Representative protected groups include bookmarks/favorites/folders,
+clipboard/history/notes/snippets/todo/tempfile/timer stores, visibility/hotkey/window-manager tests,
+MkMacro authoring/store/launcher integration, mouse-gesture service/database/UI, shell/recycle/sound,
+and watcher/screenshot tests. Combining these under the standard Rust harness would allow parallel
+tests to share process globals, so a larger umbrella or one giant target was rejected.
+
+`mock_ctx.rs` is retained solely through `#[path]` by visibility tests and no longer builds as an empty
+standalone executable. A separate mock-context crate was rejected: three consumers are already
+isolated and the tiny helper has no independent dependencies or measured compilation bottleneck.
+
+### Slow tests, logging defect, and feature/profile audit
+
+A full 67-binary candidate `--status-level slow --final-status-level slow` run reported no tests above Nextest's slow
+threshold and completed in 44.795 s. Existing watcher/process/timeout tests were left realistic;
+there was no deterministic seam that justified replacing their waits, and execution was dominated
+by process startup/concurrency rather than a small set of slow bodies.
+
+The earlier `logging::writes_log_file` failure was legitimate. The host's `RUST_LOG=warn` suppressed
+its `info!` event, the test slept for 100 ms instead of owning a flush boundary, and both tests tried
+to install a process-global subscriber when run by the ordinary Rust harness. Logging initialization
+now returns its `WorkerGuard`; `main` retains it for application lifetime and tests drop it to flush.
+Each logging case executes its initialization in a fresh child test process and removes only the
+ambient `RUST_LOG`, preserving the two original test identities and behavior. Focused logging tests
+and the final full suite pass.
+
+`cargo tree` and `cargo tree -e features --depth 2` were audited against source usage. Reqwest already
+uses only blocking Rustls; Syntect already disables defaults and selects syntax/theme/parsing/fancy
+regex; image already selects PNG/JPEG/BMP; Rodio already selects only WAV. Eframe/Winit, screenshots,
+RFD, Rdev, Sysinfo, and the requested Windows API features all have direct GUI/platform/runtime
+consumers. RFD/Eframe/Sysinfo defaults include cross-platform or broader flags, but target gating and
+lack of an isolated measured win did not justify compatibility risk. No dependency or feature was
+changed. Test-profile debug information was retained; machine-specific linker/job configuration and
+a global incremental/profile workaround were rejected to preserve full diagnostics and portability.
+
+### Milestone 5 verification
+
+Successful commands: `cargo fmt --all --check`; `cargo check` (11.29 s); focused logging Nextest
+(2 passed); `cargo nextest list` (2,983 tests, 70 binaries); an authoritative final full Nextest run (2,976
+passed, 7 skipped), plus three comparable 67-binary candidate runs and a slow-status pass; `cargo build --release` (2m40s); `cargo tree --depth 1`; and `cargo tree -e features --depth 2`. `git diff --check` is recorded after the final
+ledger edit. Both umbrellas also passed under ordinary `cargo test` (100 domain and 111 plugin-query tests). The required clean isolated attempt and two subsequent no-run attempts are explicitly
+recorded as failed due to the temporary disk-exhaustion/PDB condition rather than claimed as passes.
+
+### Rejected milestone 5 optimizations
+
+- One giant integration target or consolidation of stateful tests: rejected because ordinary
+  `cargo test` runs tests from one binary in a shared process and may run them concurrently.
+- Standalone `mock_ctx` crate: rejected because removing its accidental empty binary captures the
+  benefit without another crate boundary.
+- Dependency/feature churn: rejected where direct consumers exist and no isolated measured win beat
+  compatibility and maintenance risk.
+- Reduced test debug info, machine-specific linker selection, or committed job limits: rejected to
+  preserve diagnostic/backtrace capability and repository portability.
+- Replacing sleeps in watcher/process/timeout coverage: rejected because the slow-status run found no
+  slow-body concentration and no deterministic seam justified weakening integration realism.
+
 ## Rejected optimizations
 
 - Treating the prior `search_10k` result as real search: rejected because it measures the valid
@@ -358,5 +467,5 @@ reclassified as a pass.
 | 1 | `424bc23` | `perf: establish runtime and build performance baselines` |
 | 2 | `a2a1f8d` | `perf(dashboard): move refresh work off the UI thread` |
 | 3 | `544c4c6` | `perf(search): remove blocking dynamic work from query handling` |
-| 4 | pending | `perf(runtime): reduce unnecessary idle and repaint work` |
+| 4 | `9885f20` | `perf(runtime): reduce unnecessary idle and repaint work` |
 | 5 | pending | `perf(dev): improve cargo and nextest iteration time` |
