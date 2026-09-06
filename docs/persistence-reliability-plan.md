@@ -22,7 +22,7 @@ Status values: `pending`, `in_progress`, `complete`, `blocked`.
 - **Objective:** establish exact persistence ownership, failure semantics, test coverage, and baseline results before source changes.
 - **Files changed:** `docs/persistence-reliability-plan.md`
 - **Results:** inventory and baseline recorded; documentation diff inspected; `git diff --check` passed.
-- **Commit:** _pending (orchestrator-owned)_
+- **Commit:** `4fc7edd docs(storage): inventory persistence ownership and failure semantics`
 
 ### Repository and path baseline
 
@@ -119,14 +119,14 @@ Unless a milestone states otherwise, verification means: focused unit/integratio
 
 ### 1. AppDataRoot identity and Windows single instance
 
-- **Status:** `pending`; **depends on:** 0.
+- **Status:** `complete`; **depends on:** 0.
 - **Objective:** introduce a canonical data-root identity without relocating files and acquire a Windows named mutex before persistence/startup initialization.
 - **Repository finding:** startup currently has no data-root type or single-instance guard and begins loading `settings.json` immediately from CWD.
 - **Likely files:** `src/platform/single_instance.rs`, `src/platform/mod.rs`, `src/main.rs`, path/config helpers, focused tests.
 - **Design/invariants:** stable mutex name derived from normalized root identity; guard lives through shutdown; duplicate exits cleanly with concise feedback; unique test names; no lock file/cross-process file locking. Preserve CWD/settings-relative paths.
 - **Acceptance/tests:** first acquisition succeeds, duplicate reports already running, independent roots/names do not conflict, guard release permits reacquisition; test names isolated under Nextest; startup acquires before settings/recovery. Run targeted tests, format check, `cargo check`, Nextest subset, diff check.
 - **Risks:** path normalization identity collisions, abandoned mutex semantics, test interference, changing startup path behavior.
-- **Files/results/commit:** _pending / pending / pending_.
+- **Files/results/commit:** `Cargo.toml`, `src/main.rs`, `src/platform/mod.rs`, `src/platform/app_data.rs`, `src/platform/single_instance.rs`, this ledger / `cargo test platform::single_instance --lib` 6 passed; `cargo test platform::app_data --lib` 2 passed; `cargo nextest run -E 'test(/platform::(single_instance|app_data)/)'` 8 passed; `cargo fmt --all -- --check` passed; `cargo check` passed; `git diff --check` passed; startup diff and path/API compatibility inspected / _pending orchestrator commit_.
 
 ### 2. Typed atomic JSON foundation
 

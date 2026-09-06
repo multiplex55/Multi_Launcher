@@ -4,6 +4,10 @@
 use multi_launcher::actions::{Action, load_actions};
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::{HotkeyTrigger, parse_hotkey};
+use multi_launcher::platform::{
+    app_data::AppDataRoot,
+    single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
+};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
 use multi_launcher::visibility::handle_visibility_trigger;
@@ -222,6 +226,13 @@ fn spawn_gui(
 
 fn main() -> anyhow::Result<()> {
     multi_launcher::performance::init_process_timer();
+    // This ownership boundary must stay ahead of every persistent read,
+    // migration, watcher, worker, plugin, and GUI initialization.
+    let app_data_root = AppDataRoot::from_settings_path("settings.json")?;
+    let _single_instance_guard = match SingleInstanceGuard::acquire(&app_data_root)? {
+        SingleInstanceAcquire::Acquired(guard) => guard,
+        SingleInstanceAcquire::AlreadyRunning => return Ok(()),
+    };
     let settings_timer = multi_launcher::performance::Timer::start();
     let mut settings = Settings::load("settings.json").unwrap_or_default();
     multi_launcher::settings::set_settings_path("settings.json");
