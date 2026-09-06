@@ -33,6 +33,7 @@ pub struct BrowserTabsPlugin {
 mod imp {
     use super::*;
     use once_cell::sync::Lazy;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
     use std::sync::{Mutex, Weak};
@@ -128,7 +129,13 @@ mod imp {
             let worker_shared = Arc::clone(&shared);
             let worker = thread::Builder::new()
                 .name("browser-tabs-refresh".into())
-                .spawn(move || run_worker(receiver, worker_shared, provider))
+                .spawn(move || {
+                    let cleanup = Arc::clone(&worker_shared);
+                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                        run_worker(receiver, worker_shared, provider)
+                    }));
+                    terminate_worker(&cleanup);
+                })
                 .expect("start Browser Tabs refresh worker");
             if let Ok(mut current) = CURRENT.lock() {
                 *current = Arc::downgrade(&shared);
@@ -167,6 +174,7 @@ mod imp {
             if self.shared.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                state.refresh_disabled = true;
                 self.shared.updates.cancel_ticket("browser_tabs", ticket.id);
             }
             Some(ticket.id)
@@ -240,7 +248,8 @@ mod imp {
             {
                 break;
             }
-            let tabs = provider.enumerate();
+            let result = catch_unwind(AssertUnwindSafe(|| provider.enumerate()));
+            let panicked = result.is_err();
             let Ok(_publication) = shared.publication.lock() else {
                 break;
             };
@@ -248,20 +257,53 @@ mod imp {
                 if state.shutting_down {
                     break;
                 }
-                state.tabs = Arc::new(tabs);
-                state.last_refresh = Instant::now();
                 state.in_flight = false;
-                state.messages.push("Tab cache refreshed".into());
+                if let Ok(tabs) = result {
+                    state.tabs = Arc::new(tabs);
+                    state.last_refresh = Instant::now();
+                    state.messages.push("Tab cache refreshed".into());
+                } else {
+                    state.refresh_disabled = true;
+                    state
+                        .messages
+                        .push("Tab cache refresh stopped unexpectedly".into());
+                    error!("browser tab provider panicked");
+                }
                 state.in_flight_ticket.take()
             } else {
                 None
             };
             if let Some(ticket) = ticket {
-                shared.updates.publish_ticket("browser_tabs", ticket);
+                if panicked {
+                    shared.updates.cancel_ticket("browser_tabs", ticket);
+                } else {
+                    shared.updates.publish_ticket("browser_tabs", ticket);
+                }
+            }
+            if panicked {
+                break;
             }
         }
     }
 
+    fn terminate_worker(shared: &Shared) {
+        let _publication = shared
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket = {
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.in_flight = false;
+            state.refresh_disabled = true;
+            state.in_flight_ticket.take()
+        };
+        if let Some(ticket) = ticket {
+            shared.updates.cancel_ticket("browser_tabs", ticket);
+        }
+    }
     fn materialize_actions(tabs: &[TabInfo], filter: &str) -> Vec<Action> {
         tabs.iter()
             .filter(|tab| {
@@ -608,6 +650,71 @@ mod imp {
             assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
         }
 
+        struct PanicProvider;
+
+        impl TabProvider for PanicProvider {
+            fn enumerate(&mut self) -> Vec<TabInfo> {
+                panic!("controlled browser tab provider panic")
+            }
+        }
+
+        #[test]
+        fn provider_panic_resolves_ticket_and_disables_rearming() {
+            let (repaint_tx, repaint_rx) = channel();
+            let updates = Arc::new(PluginSearchUpdates::default());
+            updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+            let cache = BrowserTabsCache::start_with_provider(PanicProvider, Arc::clone(&updates));
+
+            cache.cached_actions("", false);
+            repaint_rx.recv().unwrap();
+            let state = cache.shared.state.lock().unwrap();
+            assert!(state.refresh_disabled);
+            assert!(!state.in_flight);
+            drop(state);
+            assert_eq!(updates.active_ticket("browser_tabs"), None);
+            let generation = updates.generation();
+            for _ in 0..4 {
+                cache.cached_actions("", false);
+            }
+            assert_eq!(updates.generation(), generation);
+            assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+
+        #[test]
+        fn disconnected_request_channel_cancels_once_and_stays_terminal() {
+            let (wake, receiver) = sync_channel(1);
+            drop(receiver);
+            let (repaint_tx, repaint_rx) = channel();
+            let updates = Arc::new(PluginSearchUpdates::default());
+            updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+            let cache = BrowserTabsCache {
+                shared: Arc::new(Shared {
+                    state: Mutex::new(CacheState {
+                        tabs: Arc::new(Vec::new()),
+                        last_refresh: Instant::now() - Duration::from_secs(60),
+                        in_flight: false,
+                        in_flight_ticket: None,
+                        refresh_disabled: false,
+                        messages: Vec::new(),
+                        shutting_down: false,
+                    }),
+                    publication: Mutex::new(()),
+                    wake,
+                    updates: Arc::clone(&updates),
+                }),
+                worker: Mutex::new(None),
+            };
+
+            cache.cached_actions("", false);
+            repaint_rx.recv().unwrap();
+            let generation = updates.generation();
+            for _ in 0..4 {
+                cache.cached_actions("", false);
+            }
+            assert!(cache.shared.state.lock().unwrap().refresh_disabled);
+            assert_eq!(updates.generation(), generation);
+            assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
         #[test]
         fn recalc_each_query_coalesces_many_consumer_filters_per_cache_epoch() {
             let (started_tx, started_rx) = channel();

@@ -1465,11 +1465,13 @@ impl eframe::App for LauncherApp {
             let mut dlg = std::mem::take(&mut self.dashboard_editor);
             let plugin_infos = self.plugins.plugin_infos();
             let plugin_commands = self.plugins.commands();
+            let dashboard_snapshot = self.dashboard_data_cache.snapshot();
             let settings_ctx = WidgetSettingsContext {
                 plugins: Some(&self.plugins),
                 plugin_infos: Some(&plugin_infos),
                 plugin_commands: Some(&plugin_commands),
                 actions: Some(self.actions.as_slice()),
+                favorites: Some(dashboard_snapshot.favorites.as_ref()),
                 usage: Some(&self.usage),
                 default_location: self.dashboard_default_location.as_deref(),
                 enabled_plugins: self.enabled_plugins.as_ref(),

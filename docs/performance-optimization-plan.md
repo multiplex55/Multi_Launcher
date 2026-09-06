@@ -674,6 +674,33 @@ Criterion; stale-path audits; and `git diff --check`. Criterion measured the pop
 cached filter path at 203.43–213.80 us and the separate clear command at 1.1250–1.1763 us, with no
 statistically detected regression.
 
+### Seventh independent-review remediation
+
+**Status:** `complete`
+
+Browser Tabs, Windows, Public IP, and shared system-data workers now wrap their complete worker
+lifetime with serialized terminal cleanup. Provider panics are contained, the exact active ticket is
+cancelled, local in-flight state is cleared, and stale publication remains excluded by the existing
+publication lock. A disconnected request channel marks that provider runtime terminal, so repeated
+search frames neither allocate new tickets nor repeatedly notify repaint. Public IP shutdown now
+uses the same bounded owned-reaper pattern as the other UI-facing providers, allowing plugin drop to
+return before an active bounded HTTP lookup completes.
+
+`BackgroundLoader` now distinguishes an empty result queue from permanent worker disconnection,
+clears `in_flight`, and exposes a one-shot failure. Plugin Home reports the failure, replaces a
+failed active executor, retires failed old executors, and preserves the one-active/one-retiring
+ownership bound while allowing a reloaded plugin instance to proceed.
+
+Pinned Commands settings no longer calls `load_favs` from an egui settings frame. The settings
+context carries the already-owned dashboard favorites snapshot, and action-choice materialization is
+pure over that snapshot.
+
+Verification passed: 12 focused deterministic panic, disconnected-channel, nonblocking-drop,
+Plugin Home recovery, and settings-snapshot tests; `cargo fmt --all -- --check`; `cargo check`;
+`cargo nextest run --no-fail-fast` (3,021 passed, 7 skipped, 3,028 total across 70 binaries in
+44.006 s after compilation); `cargo build --release` (2m19s); render-I/O and stale-state audits; and
+`git diff --check`.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -710,3 +737,4 @@ statistically detected regression.
 | Review remediation 3 | `bb10a3e` | `fix(perf): stabilize async cache invalidation` |
 | Review remediation 4 | `7c0daf3` | `fix(perf): harden async cache ownership` |
 | Review remediation 5 | `6b63ea7` | `fix(perf): make async completion request-specific` |
+| Review remediation 6 | `5116bbc` | `fix(perf): close async ticket and reload races` |

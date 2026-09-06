@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::{Plugin, PluginSearchUpdates};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -68,6 +69,7 @@ struct CacheState {
     in_flight: bool,
     in_flight_ticket: Option<u64>,
     shutting_down: bool,
+    terminal: bool,
 }
 
 struct PublicIpCache {
@@ -96,14 +98,20 @@ impl PublicIpCache {
                 let publication = Arc::clone(&publication);
                 let worker_updates = Arc::clone(&updates);
                 move || {
-                    run_worker(
-                        receiver,
-                        worker_state,
-                        publication,
-                        provider,
-                        worker_clock,
-                        worker_updates,
-                    )
+                    let cleanup_state = Arc::clone(&worker_state);
+                    let cleanup_publication = Arc::clone(&publication);
+                    let cleanup_updates = Arc::clone(&worker_updates);
+                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                        run_worker(
+                            receiver,
+                            worker_state,
+                            publication,
+                            provider,
+                            worker_clock,
+                            worker_updates,
+                        )
+                    }));
+                    terminate_worker(&cleanup_state, &cleanup_publication, &cleanup_updates);
                 }
             })
             .expect("start public IP refresh worker");
@@ -122,7 +130,7 @@ impl PublicIpCache {
         let mut state = self.state.lock().ok()?;
         let fresh = state.fresh_until.is_some_and(|deadline| now < deadline);
         let backing_off = state.retry_after.is_some_and(|deadline| now < deadline);
-        if !fresh && !backing_off {
+        if !state.terminal && !fresh && !backing_off {
             let ticket = self.updates.schedule_or_join("ip");
             crate::plugin::record_search_refresh_ticket("ip", ticket.id);
             if ticket.start {
@@ -132,6 +140,7 @@ impl PublicIpCache {
             if ticket.start && self.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                state.terminal = true;
                 self.updates.cancel_ticket("ip", ticket.id);
             }
         }
@@ -152,7 +161,15 @@ impl Drop for PublicIpCache {
         }
         let _ = self.wake.try_send(());
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                let _ = thread::Builder::new()
+                    .name("public-ip-reaper".into())
+                    .spawn(move || {
+                        let _ = worker.join();
+                    });
+            }
         }
     }
 }
@@ -173,7 +190,8 @@ fn run_worker(
         {
             break;
         }
-        let result = provider.lookup();
+        let result = catch_unwind(AssertUnwindSafe(|| provider.lookup()));
+        let panicked = result.is_err();
         let now = clock.now();
         let Ok(_publication) = publication.lock() else {
             break;
@@ -184,14 +202,18 @@ fn run_worker(
             }
             state.in_flight = false;
             match result {
-                Ok(value) => {
+                Ok(Ok(value)) => {
                     state.last_good = Some(value);
                     state.fresh_until = Some(now + SUCCESS_TTL);
                     state.retry_after = None;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::debug!(?error, "public IP refresh failed");
                     state.retry_after = Some(now + FAILURE_BACKOFF);
+                }
+                Err(_) => {
+                    state.terminal = true;
+                    tracing::error!("public IP refresh provider panicked");
                 }
             }
             state.in_flight_ticket.take()
@@ -199,11 +221,38 @@ fn run_worker(
             None
         };
         if let Some(ticket) = ticket {
-            updates.publish_ticket("ip", ticket);
+            if panicked {
+                updates.cancel_ticket("ip", ticket);
+            } else {
+                updates.publish_ticket("ip", ticket);
+            }
+        }
+        if panicked {
+            break;
         }
     }
 }
 
+fn terminate_worker(
+    state: &Mutex<CacheState>,
+    publication: &Mutex<()>,
+    updates: &PluginSearchUpdates,
+) {
+    let _publication = publication
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ticket = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight = false;
+        state.terminal = true;
+        state.in_flight_ticket.take()
+    };
+    if let Some(ticket) = ticket {
+        updates.cancel_ticket("ip", ticket);
+    }
+}
 pub struct IpPlugin {
     public_ip: PublicIpCache,
 }
@@ -436,10 +485,70 @@ mod tests {
         while !state.lock().unwrap().shutting_down {
             std::thread::yield_now();
         }
-        release_tx.send(()).unwrap();
         dropped_rx.recv().unwrap();
         repaint_rx.recv().unwrap();
+        release_tx.send(()).unwrap();
         assert_eq!(updates.generation(), 1);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    struct PanicProvider;
+
+    impl PublicIpProvider for PanicProvider {
+        fn lookup(&self) -> Result<String, String> {
+            panic!("controlled public IP panic")
+        }
+    }
+
+    #[test]
+    fn provider_panic_resolves_ticket_and_disables_rearming() {
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let cache = PublicIpCache::start(
+            Arc::new(PanicProvider),
+            Arc::new(ManualClock::new()),
+            Arc::clone(&updates),
+        );
+
+        cache.snapshot_and_refresh();
+        repaint_rx.recv().unwrap();
+        assert!(cache.state.lock().unwrap().terminal);
+        assert!(!cache.state.lock().unwrap().in_flight);
+        assert_eq!(updates.active_ticket("ip"), None);
+        let generation = updates.generation();
+
+        for _ in 0..4 {
+            cache.snapshot_and_refresh();
+        }
+        assert_eq!(updates.generation(), generation);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn disconnected_request_channel_cancels_once_and_stays_terminal() {
+        let (wake, receiver) = sync_channel(1);
+        drop(receiver);
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let cache = PublicIpCache {
+            state: Arc::new(Mutex::new(CacheState::default())),
+            publication: Arc::new(Mutex::new(())),
+            wake,
+            worker: None,
+            clock: Arc::new(ManualClock::new()),
+            updates: Arc::clone(&updates),
+        };
+
+        cache.snapshot_and_refresh();
+        repaint_rx.recv().unwrap();
+        let generation = updates.generation();
+        for _ in 0..4 {
+            cache.snapshot_and_refresh();
+        }
+        assert!(cache.state.lock().unwrap().terminal);
+        assert_eq!(updates.generation(), generation);
         assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

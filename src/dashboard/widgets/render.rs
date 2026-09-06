@@ -16,6 +16,7 @@ pub(crate) struct BackgroundLoader<R: Send + 'static, T: Send + 'static> {
     results: Receiver<T>,
     worker: Option<JoinHandle<()>>,
     in_flight: bool,
+    failure: Option<&'static str>,
 }
 
 impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
@@ -39,6 +40,7 @@ impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
             results: result_rx,
             worker: Some(worker),
             in_flight: false,
+            failure: None,
         }
     }
 
@@ -46,17 +48,21 @@ impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
         if self.in_flight {
             return false;
         }
-        match self
-            .requests
-            .as_ref()
-            .expect("loader request channel missing")
-            .try_send((request, repaint.clone()))
-        {
+        let Some(requests) = self.requests.as_ref() else {
+            return false;
+        };
+        match requests.try_send((request, repaint.clone())) {
             Ok(()) => {
                 self.in_flight = true;
                 true
             }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.in_flight = false;
+                self.requests.take();
+                self.failure = Some("background loader stopped unexpectedly");
+                false
+            }
         }
     }
 
@@ -70,8 +76,19 @@ impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
                 self.in_flight = false;
                 Some(result)
             }
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.in_flight = false;
+                if self.requests.take().is_some() {
+                    self.failure = Some("background loader stopped unexpectedly");
+                }
+                None
+            }
         }
+    }
+
+    pub(crate) fn take_failure(&mut self) -> Option<&'static str> {
+        self.failure.take()
     }
 }
 
@@ -524,6 +541,21 @@ mod tests {
         finished_rx.recv().unwrap();
     }
 
+    #[test]
+    fn panicking_loader_clears_in_flight_and_reports_disconnection_once() {
+        let mut loader = BackgroundLoader::new(|(): ()| -> () { panic!("controlled panic") });
+        assert!(loader.request((), &eframe::egui::Context::default()));
+        while loader.is_in_flight() {
+            let _ = loader.poll();
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            loader.take_failure(),
+            Some("background loader stopped unexpectedly")
+        );
+        assert_eq!(loader.take_failure(), None);
+        assert!(!loader.request((), &eframe::egui::Context::default()));
+    }
     #[test]
     fn successful_submission_advances_schedule_and_inflight_request_queues_followup() {
         let (started_tx, started_rx) = channel();

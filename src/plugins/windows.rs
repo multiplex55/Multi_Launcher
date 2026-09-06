@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::plugin::{Plugin, PluginSearchUpdates};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,7 @@ struct CacheState {
     in_flight: bool,
     in_flight_ticket: Option<u64>,
     shutting_down: bool,
+    terminal: bool,
 }
 
 struct WindowCache {
@@ -66,6 +68,7 @@ impl WindowCache {
             in_flight: false,
             in_flight_ticket: None,
             shutting_down: false,
+            terminal: false,
         }));
         let (wake, receiver) = sync_channel(1);
         let publication = Arc::new(Mutex::new(()));
@@ -76,13 +79,19 @@ impl WindowCache {
                 let publication = Arc::clone(&publication);
                 let worker_updates = Arc::clone(&updates);
                 move || {
-                    run_worker(
-                        receiver,
-                        worker_state,
-                        publication,
-                        provider,
-                        worker_updates,
-                    )
+                    let cleanup_state = Arc::clone(&worker_state);
+                    let cleanup_publication = Arc::clone(&publication);
+                    let cleanup_updates = Arc::clone(&worker_updates);
+                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                        run_worker(
+                            receiver,
+                            worker_state,
+                            publication,
+                            provider,
+                            worker_updates,
+                        )
+                    }));
+                    terminate_worker(&cleanup_state, &cleanup_publication, &cleanup_updates);
                 }
             })
             .expect("start window enumeration worker");
@@ -99,9 +108,10 @@ impl WindowCache {
         let Ok(mut state) = self.state.lock() else {
             return Arc::new(Vec::new());
         };
-        if !state
-            .fresh_until
-            .is_some_and(|deadline| Instant::now() < deadline)
+        if !state.terminal
+            && !state
+                .fresh_until
+                .is_some_and(|deadline| Instant::now() < deadline)
         {
             let ticket = self.updates.schedule_or_join("windows");
             crate::plugin::record_search_refresh_ticket("windows", ticket.id);
@@ -112,6 +122,7 @@ impl WindowCache {
             if ticket.start && self.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                state.terminal = true;
                 self.updates.cancel_ticket("windows", ticket.id);
             }
         }
@@ -164,7 +175,8 @@ fn run_worker(
         {
             break;
         }
-        let windows = provider.enumerate();
+        let result = catch_unwind(AssertUnwindSafe(|| provider.enumerate()));
+        let panicked = result.is_err();
         let Ok(_publication) = publication.lock() else {
             break;
         };
@@ -172,19 +184,51 @@ fn run_worker(
             if state.shutting_down {
                 break;
             }
-            state.windows = Arc::new(windows);
-            state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
+            if let Ok(windows) = result {
+                state.windows = Arc::new(windows);
+                state.fresh_until = Some(Instant::now() + REFRESH_TTL);
+            } else {
+                state.terminal = true;
+                tracing::error!("window enumeration provider panicked");
+            }
             state.in_flight_ticket.take()
         } else {
             None
         };
         if let Some(ticket) = ticket {
-            updates.publish_ticket("windows", ticket);
+            if panicked {
+                updates.cancel_ticket("windows", ticket);
+            } else {
+                updates.publish_ticket("windows", ticket);
+            }
+        }
+        if panicked {
+            break;
         }
     }
 }
 
+fn terminate_worker(
+    state: &Mutex<CacheState>,
+    publication: &Mutex<()>,
+    updates: &PluginSearchUpdates,
+) {
+    let _publication = publication
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ticket = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight = false;
+        state.terminal = true;
+        state.in_flight_ticket.take()
+    };
+    if let Some(ticket) = ticket {
+        updates.cancel_ticket("windows", ticket);
+    }
+}
 fn actions_from_windows(windows: &[WindowInfo], filter: &str) -> Vec<Action> {
     windows
         .iter()
@@ -388,6 +432,67 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(updates.generation(), 1);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    struct PanicProvider;
+
+    impl WindowProvider for PanicProvider {
+        fn enumerate(&mut self) -> Vec<WindowInfo> {
+            panic!("controlled window provider panic")
+        }
+    }
+
+    #[test]
+    fn provider_panic_resolves_ticket_and_disables_rearming() {
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let cache = WindowCache::start(PanicProvider, Arc::clone(&updates));
+
+        cache.snapshot_and_refresh();
+        repaint_rx.recv().unwrap();
+        assert!(cache.state.lock().unwrap().terminal);
+        assert!(!cache.state.lock().unwrap().in_flight);
+        assert_eq!(updates.active_ticket("windows"), None);
+        let generation = updates.generation();
+        for _ in 0..4 {
+            cache.snapshot_and_refresh();
+        }
+        assert_eq!(updates.generation(), generation);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn disconnected_request_channel_cancels_once_and_stays_terminal() {
+        let (wake, receiver) = sync_channel(1);
+        drop(receiver);
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let cache = WindowCache {
+            state: Arc::new(Mutex::new(CacheState {
+                windows: Arc::new(Vec::new()),
+                fresh_until: None,
+                in_flight: false,
+                in_flight_ticket: None,
+                shutting_down: false,
+                terminal: false,
+            })),
+            wake,
+            worker: Mutex::new(None),
+            publication: Arc::new(Mutex::new(())),
+            updates: Arc::clone(&updates),
+        };
+
+        cache.snapshot_and_refresh();
+        repaint_rx.recv().unwrap();
+        let generation = updates.generation();
+        for _ in 0..4 {
+            cache.snapshot_and_refresh();
+        }
+        assert!(cache.state.lock().unwrap().terminal);
+        assert_eq!(updates.generation(), generation);
         assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }
