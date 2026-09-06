@@ -1172,8 +1172,16 @@ impl LauncherApp {
         dashboard_timer.finish("startup.dashboard_construction");
         let watcher_timer = crate::performance::Timer::start();
 
-        let (folder_aliases, folder_aliases_lc) = Self::folder_alias_maps();
-        let (bookmark_aliases, bookmark_aliases_lc) = Self::bookmark_alias_maps();
+        let (folder_aliases, folder_aliases_lc) =
+            Self::try_folder_alias_maps().unwrap_or_else(|error| {
+                tracing::error!(%error, "folder aliases startup retained invalid persisted file");
+                Default::default()
+            });
+        let (bookmark_aliases, bookmark_aliases_lc) = Self::try_bookmark_alias_maps()
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "bookmark aliases startup retained invalid persisted file");
+                Default::default()
+            });
         let clipboard_modify_catalog = plugins.clipboard_modifier_catalog();
         let (clipboard_modify_runtime, loaded_clipboard_modify) =
             ClipboardModifyRuntime::new(Path::new(&settings_path), clipboard_modify_catalog);
@@ -4147,6 +4155,34 @@ mod tests {
         assert_eq!(
             app.bookmark_aliases_lc.get("https://example.com"),
             Some(&Some("mixedbookmark".into()))
+        );
+
+        std::fs::write(crate::plugins::folders::FOLDERS_FILE, "invalid folders").unwrap();
+        send_event(WatchEvent::Folders);
+        app.process_watch_events();
+        assert_eq!(
+            app.folder_aliases.get("/tmp/folder-one"),
+            Some(&Some("MiXeDFolder".into()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(crate::plugins::folders::FOLDERS_FILE).unwrap(),
+            "invalid folders"
+        );
+
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            "invalid bookmarks",
+        )
+        .unwrap();
+        send_event(WatchEvent::Bookmarks);
+        app.process_watch_events();
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("MiXeDBookmark".into()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(crate::plugins::bookmarks::BOOKMARKS_FILE).unwrap(),
+            "invalid bookmarks"
         );
 
         let updated_folders_json = serde_json::json!([{

@@ -75,18 +75,28 @@ impl LauncherApp {
                     crate::actions::bump_actions_version();
                     tracing::info!("actions reloaded");
                 }
-                WatchEvent::Folders => {
-                    let (aliases, aliases_lc) = Self::folder_alias_maps();
-                    self.folder_aliases = aliases;
-                    self.folder_aliases_lc = aliases_lc;
-                    self.search();
-                }
-                WatchEvent::Bookmarks => {
-                    let (aliases, aliases_lc) = Self::bookmark_alias_maps();
-                    self.bookmark_aliases = aliases;
-                    self.bookmark_aliases_lc = aliases_lc;
-                    self.search();
-                }
+                WatchEvent::Folders => match Self::try_folder_alias_maps() {
+                    Ok((aliases, aliases_lc)) => {
+                        self.folder_aliases = aliases;
+                        self.folder_aliases_lc = aliases_lc;
+                        self.search();
+                    }
+                    Err(error) => self.report_error_message(
+                        "folders.reload",
+                        format!("Failed to reload folder aliases: {error}"),
+                    ),
+                },
+                WatchEvent::Bookmarks => match Self::try_bookmark_alias_maps() {
+                    Ok((aliases, aliases_lc)) => {
+                        self.bookmark_aliases = aliases;
+                        self.bookmark_aliases_lc = aliases_lc;
+                        self.search();
+                    }
+                    Err(error) => self.report_error_message(
+                        "bookmarks.reload",
+                        format!("Failed to reload bookmark aliases: {error}"),
+                    ),
+                },
                 WatchEvent::Clipboard => {
                     self.dashboard_data_cache
                         .request_refresh(DashboardRefreshRequest::Clipboard);

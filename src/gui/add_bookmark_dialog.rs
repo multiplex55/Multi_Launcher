@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::bookmarks::{BOOKMARKS_FILE, append_bookmark, set_alias};
+use crate::plugins::bookmarks::{BOOKMARKS_FILE, append_bookmark_with_alias};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
@@ -37,15 +37,12 @@ impl AddBookmarkDialog {
                     if ui.button("Save").clicked() {
                         if self.url.trim().is_empty() {
                             app.report_error_message("ui operation", "URL required");
-                        } else if let Err(e) = append_bookmark(BOOKMARKS_FILE, &self.url) {
+                        } else if let Err(e) =
+                            append_bookmark_with_alias(BOOKMARKS_FILE, &self.url, Some(&self.alias))
+                        {
                             app.report_error_message(
                                 "ui operation",
                                 format!("Failed to save: {e}"),
-                            );
-                        } else if let Err(e) = set_alias(BOOKMARKS_FILE, &self.url, &self.alias) {
-                            app.report_error_message(
-                                "ui operation",
-                                format!("Failed to save alias: {e}"),
                             );
                         } else {
                             close = true;
