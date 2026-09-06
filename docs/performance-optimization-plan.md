@@ -701,6 +701,26 @@ Plugin Home recovery, and settings-snapshot tests; `cargo fmt --all -- --check`;
 44.006 s after compilation); `cargo build --release` (2m19s); render-I/O and stale-state audits; and
 `git diff --check`.
 
+### Eighth independent-review remediation
+
+**Status:** `complete`
+
+`BackgroundLoader` now catches workload panics inside its owned worker and sends an explicit
+failure result before terminating the request channel. Both success and panic completion request an
+egui repaint, so event-driven widgets observe failure without needing an unrelated frame. Permanent
+channel disconnection remains a distinct fallback failure.
+
+Plugin Home retains the complete source identity that failed. Repeated frames for that exact source
+serve the existing cache/error state without automatically resubmitting work. The visible Retry
+action clears the latch for one explicit retry, while plugin epoch, configuration epoch, query,
+mode, or source-generation changes clear the obsolete failure and allow the new identity to run.
+
+Verification passed: deterministic panic-triggered repaint, eight-frame same-source no-retry,
+explicit same-source retry, identity-change recovery, and bounded-retirement tests;
+`cargo fmt --all -- --check`; `cargo check`; `cargo nextest run --no-fail-fast` (3,022 passed,
+7 skipped, 3,029 total across 70 binaries in 41.141 s after compilation);
+`cargo build --release` (2m05s); and `git diff --check`.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -738,3 +758,4 @@ Plugin Home recovery, and settings-snapshot tests; `cargo fmt --all -- --check`;
 | Review remediation 4 | `7c0daf3` | `fix(perf): harden async cache ownership` |
 | Review remediation 5 | `6b63ea7` | `fix(perf): make async completion request-specific` |
 | Review remediation 6 | `5116bbc` | `fix(perf): close async ticket and reload races` |
+| Review remediation 7 | `1835b14` | `fix(perf): contain background worker failures` |

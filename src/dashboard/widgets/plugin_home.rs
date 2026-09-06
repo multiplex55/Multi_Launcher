@@ -64,6 +64,7 @@ pub struct PluginHomeWidget {
     config_epoch: u64,
     reload_pending: bool,
     loader_error: Option<String>,
+    failed_source: Option<PluginHomeSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +121,7 @@ impl PluginHomeWidget {
             config_epoch: 0,
             reload_pending: false,
             loader_error: None,
+            failed_source: None,
         }
     }
 
@@ -139,6 +141,8 @@ impl PluginHomeWidget {
         self.cached_actions.clear();
         self.cached_at = None;
         self.reload_pending = false;
+        self.failed_source = None;
+        self.loader_error = None;
         true
     }
 
@@ -200,10 +204,18 @@ impl PluginHomeWidget {
             }
         }
         if let Some(failure) = self.loader.take_failure() {
-            self.requested_source = None;
+            self.failed_source = self.requested_source.take();
             self.loader_error = Some(format!("Plugin executor failed: {failure}"));
             self.loader = Self::loader();
             active_failed = true;
+        }
+        if self
+            .failed_source
+            .as_ref()
+            .is_some_and(|failed| failed != &source)
+        {
+            self.failed_source = None;
+            self.loader_error = None;
         }
         let old_identity = self
             .requested_source
@@ -220,7 +232,11 @@ impl PluginHomeWidget {
             || self
                 .cached_at
                 .is_none_or(|cached_at| cached_at.elapsed() >= Duration::from_secs(2));
-        if !active_failed && stale && self.requested_source.as_ref() != Some(&source) {
+        if !active_failed
+            && stale
+            && self.requested_source.as_ref() != Some(&source)
+            && self.failed_source.as_ref() != Some(&source)
+        {
             if self.loader.request(
                 PluginHomeRequest {
                     source: source.clone(),
@@ -232,6 +248,15 @@ impl PluginHomeWidget {
             }
         }
         &self.cached_actions
+    }
+
+    fn retry_failed_source(&mut self) -> bool {
+        if self.failed_source.take().is_none() {
+            return false;
+        }
+        self.loader_error = None;
+        self.requested_source = None;
+        true
     }
 
     pub fn settings_ui(
@@ -348,8 +373,14 @@ impl Widget for PluginHomeWidget {
                 "Plugin refresh is busy; the latest configuration is pending.",
             );
         }
-        if let Some(error) = &self.loader_error {
-            ui.colored_label(egui::Color32::YELLOW, error);
+        if let Some(error) = self.loader_error.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::YELLOW, error);
+                if self.failed_source.is_some() && ui.small_button("Retry").clicked() {
+                    self.retry_failed_source();
+                    ui.ctx().request_repaint();
+                }
+            });
         }
 
         if actions.is_empty() {
@@ -631,10 +662,11 @@ mod tests {
         release_tx.send(()).unwrap();
     }
 
-    struct PanicPlugin;
+    struct PanicPlugin(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
     impl crate::plugin::Plugin for PanicPlugin {
         fn search(&self, _query: &str) -> Vec<Action> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             panic!("controlled dynamic plugin panic")
         }
         fn name(&self) -> &str {
@@ -648,10 +680,24 @@ mod tests {
         }
     }
 
+    fn failed_source() -> PluginHomeSource {
+        PluginHomeSource {
+            plugin: "blocked".into(),
+            mode: PluginHomeMode::Search,
+            query: "query".into(),
+            generation: 0,
+            plugin_epoch: 30,
+            config_epoch: 0,
+        }
+    }
+
     #[test]
-    fn panicking_plugin_executor_is_reported_replaced_and_recovers_on_reload() {
-        let panic_plugin =
-            crate::plugin::OwnedPluginHandle::for_test_epoch(Box::new(PanicPlugin), 30);
+    fn panicking_plugin_latches_same_source_and_identity_change_recovers() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panic_plugin = crate::plugin::OwnedPluginHandle::for_test_epoch(
+            Box::new(PanicPlugin(std::sync::Arc::clone(&calls))),
+            30,
+        );
         let replacement =
             crate::plugin::OwnedPluginHandle::for_test_epoch(Box::new(ResultPlugin), 31);
         let mut widget = PluginHomeWidget::new(PluginHomeConfig {
@@ -660,29 +706,30 @@ mod tests {
             query_seed: Some("query".into()),
             limit: 5,
         });
-        let failed_source = PluginHomeSource {
-            plugin: "blocked".into(),
-            mode: PluginHomeMode::Search,
-            query: "query".into(),
-            generation: 0,
-            plugin_epoch: 30,
-            config_epoch: 0,
-        };
+        let failed_source = failed_source();
         widget.update_actions(
             failed_source.clone(),
-            panic_plugin,
+            panic_plugin.clone(),
             &egui::Context::default(),
         );
         while widget.loader_error.is_none() {
             widget.update_actions(
                 failed_source.clone(),
-                crate::plugin::OwnedPluginHandle::for_test_epoch(Box::new(PanicPlugin), 30),
+                panic_plugin.clone(),
                 &egui::Context::default(),
             );
             std::thread::yield_now();
         }
+        for _ in 0..8 {
+            widget.update_actions(
+                failed_source.clone(),
+                panic_plugin.clone(),
+                &egui::Context::default(),
+            );
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(widget.failed_source.as_ref(), Some(&failed_source));
         assert!(!widget.loader.is_in_flight());
-        assert!(widget.retiring_loader.is_none());
 
         let recovered_source = PluginHomeSource {
             plugin_epoch: 31,
@@ -697,6 +744,50 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(widget.cached_actions[0].label, "new instance");
-        assert!(widget.retiring_loader.is_none());
+        assert!(widget.failed_source.is_none());
+    }
+
+    #[test]
+    fn explicit_retry_allows_same_source_to_run_again() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panic_plugin = crate::plugin::OwnedPluginHandle::for_test_epoch(
+            Box::new(PanicPlugin(std::sync::Arc::clone(&calls))),
+            30,
+        );
+        let replacement =
+            crate::plugin::OwnedPluginHandle::for_test_epoch(Box::new(ResultPlugin), 30);
+        let mut widget = PluginHomeWidget::new(PluginHomeConfig {
+            plugin: Some("blocked".into()),
+            mode: PluginHomeMode::Search,
+            query_seed: Some("query".into()),
+            limit: 5,
+        });
+        let source = failed_source();
+        widget.update_actions(
+            source.clone(),
+            panic_plugin.clone(),
+            &egui::Context::default(),
+        );
+        while widget.failed_source.as_ref() != Some(&source) {
+            widget.update_actions(
+                source.clone(),
+                panic_plugin.clone(),
+                &egui::Context::default(),
+            );
+            std::thread::yield_now();
+        }
+
+        assert!(widget.retry_failed_source());
+        while widget.cached_source.as_ref() != Some(&source) {
+            widget.update_actions(
+                source.clone(),
+                replacement.clone(),
+                &egui::Context::default(),
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(widget.cached_actions[0].label, "new instance");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(widget.loader_error.is_none());
     }
 }

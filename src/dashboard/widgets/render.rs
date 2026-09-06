@@ -6,6 +6,7 @@ use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use eframe::egui;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 /// Widget-owned capacity-one loader for work that must not run on egui's render thread.
 pub(crate) struct BackgroundLoader<R: Send + 'static, T: Send + 'static> {
     requests: Option<SyncSender<(R, egui::Context)>>,
-    results: Receiver<T>,
+    results: Receiver<Result<T, &'static str>>,
     worker: Option<JoinHandle<()>>,
     in_flight: bool,
     failure: Option<&'static str>,
@@ -27,11 +28,17 @@ impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
             .name("dashboard-widget-loader".into())
             .spawn(move || {
                 while let Ok((request, repaint)) = request_rx.recv() {
-                    let result = load(request);
+                    let result = catch_unwind(AssertUnwindSafe(|| load(request)));
+                    let panicked = result.is_err();
+                    let result =
+                        result.map_err(|_| "background loader workload panicked unexpectedly");
                     if result_tx.send(result).is_err() {
                         break;
                     }
                     repaint.request_repaint();
+                    if panicked {
+                        break;
+                    }
                 }
             })
             .expect("failed to start dashboard widget loader");
@@ -72,9 +79,15 @@ impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
 
     pub(crate) fn poll(&mut self) -> Option<T> {
         match self.results.try_recv() {
-            Ok(result) => {
+            Ok(Ok(result)) => {
                 self.in_flight = false;
                 Some(result)
+            }
+            Ok(Err(failure)) => {
+                self.in_flight = false;
+                self.requests.take();
+                self.failure = Some(failure);
+                None
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
@@ -542,19 +555,29 @@ mod tests {
     }
 
     #[test]
-    fn panicking_loader_clears_in_flight_and_reports_disconnection_once() {
+    fn panicking_loader_reports_explicit_failure_and_requests_repaint() {
+        let repaint = eframe::egui::Context::default();
+        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_wakes = std::sync::Arc::clone(&wakes);
+        repaint.set_request_repaint_callback(move |_| {
+            callback_wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
         let mut loader = BackgroundLoader::new(|(): ()| -> () { panic!("controlled panic") });
-        assert!(loader.request((), &eframe::egui::Context::default()));
+        assert!(loader.request((), &repaint));
         while loader.is_in_flight() {
             let _ = loader.poll();
             std::thread::yield_now();
         }
+        while wakes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
         assert_eq!(
             loader.take_failure(),
-            Some("background loader stopped unexpectedly")
+            Some("background loader workload panicked unexpectedly")
         );
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(loader.take_failure(), None);
-        assert!(!loader.request((), &eframe::egui::Context::default()));
+        assert!(!loader.request((), &repaint));
     }
     #[test]
     fn successful_submission_advances_schedule_and_inflight_request_queues_followup() {
