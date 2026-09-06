@@ -1,7 +1,7 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, observe_search_generation,
+    refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -58,6 +58,7 @@ pub struct QueryListWidget {
     cache: TimedCache<Vec<Action>>,
     last_query: String,
     refresh_pending: bool,
+    last_search_generation: u64,
 }
 
 impl QueryListWidget {
@@ -69,6 +70,7 @@ impl QueryListWidget {
             cache: TimedCache::new(Vec::new(), interval),
             last_query,
             refresh_pending: false,
+            last_search_generation: 0,
         }
     }
 
@@ -123,6 +125,11 @@ impl QueryListWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.cache.set_interval(self.refresh_interval());
+        observe_search_generation(
+            ctx.plugins.search_generation(),
+            &mut self.last_search_generation,
+            &mut self.refresh_pending,
+        );
         if self.last_query != self.cfg.query {
             self.last_query = self.cfg.query.clone();
             self.refresh_pending = true;

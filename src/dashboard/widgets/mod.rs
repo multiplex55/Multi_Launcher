@@ -24,7 +24,7 @@ mod notes_tags;
 mod now_playing;
 mod pinned_commands;
 mod pinned_query_results;
-mod plugin_home;
+pub(crate) mod plugin_home;
 mod process_list;
 mod query_list;
 mod query_suggestions;
@@ -152,6 +152,7 @@ pub trait Widget: Send {
 pub(crate) use query_suggestions::query_suggestions;
 pub(crate) use render::{
     BackgroundLoader, default_refresh_throttle_secs, edit_typed_settings, find_plugin,
-    gesture_focus_action, gesture_toggle_action, merge_json, plugin_names, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule,
+    gesture_focus_action, gesture_toggle_action, merge_json, observe_search_generation,
+    plugin_names, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    submit_background_refresh,
 };

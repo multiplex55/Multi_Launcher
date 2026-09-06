@@ -21,10 +21,12 @@ use crate::plugin::{Plugin, PluginSearchUpdates};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 pub struct BrowserTabsPlugin {
     recalc_each_query: bool,
     cache: imp::BrowserTabsCache,
+    last_forced_filter: Mutex<Option<String>>,
 }
 
 mod imp {
@@ -173,9 +175,18 @@ mod imp {
                 && let Some(worker) = worker.take()
             {
                 // UI Automation FindAll has no cancellation or timeout API. Shutdown is owned and
-                // deterministic once an in-progress provider call returns, but cannot preempt a
-                // Windows UIA call that is itself hung.
-                let _ = worker.join();
+                // deterministic once an in-progress provider call returns. Reap away from egui so
+                // plugin removal cannot block the UI, while acknowledging that Windows cannot
+                // preempt a UIA call that is itself hung.
+                if worker.is_finished() {
+                    let _ = worker.join();
+                } else {
+                    let _ = thread::Builder::new()
+                        .name("browser-tabs-reaper".into())
+                        .spawn(move || {
+                            let _ = worker.join();
+                        });
+                }
             }
         }
     }
@@ -455,6 +466,51 @@ mod imp {
             assert_eq!(cache.cached_actions("release", false).len(), 1);
             drop(cache);
         }
+
+        #[test]
+        fn recalc_each_query_forces_once_per_distinct_filter_across_requery() {
+            let (started_tx, started_rx) = channel();
+            let (release_tx, release_rx) = channel();
+            let updates = Arc::new(PluginSearchUpdates::default());
+            let plugin = super::super::BrowserTabsPlugin {
+                recalc_each_query: true,
+                cache: BrowserTabsCache::start_with_provider(
+                    ControlledProvider {
+                        started: started_tx,
+                        release: release_rx,
+                    },
+                    Arc::clone(&updates),
+                ),
+                last_forced_filter: Mutex::new(None),
+            };
+
+            assert!(plugin.search("tab docs").is_empty());
+            started_rx.recv().unwrap();
+            release_tx
+                .send(vec![TabInfo {
+                    title: "Docs".into(),
+                    url: "https://example.test/docs".into(),
+                    runtime_id: vec![1],
+                }])
+                .unwrap();
+            while updates.generation() == 0 {
+                std::thread::yield_now();
+            }
+
+            // Launcher notifier requery repeats the exact query.
+            assert_eq!(plugin.search("tab docs").len(), 1);
+            // PluginHome uses this exact helper to materialize its pinned search preview.
+            assert_eq!(
+                crate::dashboard::widgets::plugin_home::search_plugin_actions(&plugin, "tab docs")
+                    .len(),
+                1
+            );
+            assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+
+            assert!(plugin.search("tab other").is_empty());
+            started_rx.recv().unwrap();
+            release_tx.send(Vec::new()).unwrap();
+        }
     }
 }
 
@@ -463,6 +519,7 @@ impl BrowserTabsPlugin {
         Self {
             recalc_each_query: false,
             cache: imp::BrowserTabsCache::start(updates),
+            last_forced_filter: Mutex::new(None),
         }
     }
 
@@ -518,7 +575,20 @@ impl Plugin for BrowserTabsPlugin {
 
         let filter = rest.to_lowercase();
 
-        self.cache.cached_actions(&filter, self.recalc_each_query)
+        let force = self.recalc_each_query
+            && self
+                .last_forced_filter
+                .lock()
+                .map(|mut previous| {
+                    if previous.as_deref() == Some(&filter) {
+                        false
+                    } else {
+                        *previous = Some(filter.clone());
+                        true
+                    }
+                })
+                .unwrap_or(false);
+        self.cache.cached_actions(&filter, force)
     }
 
     fn name(&self) -> &str {
@@ -566,6 +636,9 @@ impl Plugin for BrowserTabsPlugin {
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<BrowserTabsPluginSettings>(value.clone()) {
             self.recalc_each_query = cfg.recalc_each_query;
+            if let Ok(previous) = self.last_forced_filter.get_mut() {
+                *previous = None;
+            }
         }
     }
 

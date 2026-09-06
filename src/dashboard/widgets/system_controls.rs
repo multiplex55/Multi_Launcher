@@ -1,7 +1,7 @@
 use super::{
     BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
 };
 use crate::actions::Action;
 use crate::actions::system::{
@@ -163,9 +163,13 @@ impl SystemControlsWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            if !self.loader.request((), repaint) {
-                self.refresh_pending = true;
-            }
+            submit_background_refresh(
+                &mut self.loader,
+                (),
+                repaint,
+                &mut self.refresh_pending,
+                &mut self.cache.last_refresh,
+            );
         }
     }
 

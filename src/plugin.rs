@@ -340,7 +340,10 @@ impl PluginManager {
         self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
         self.register_with_settings(BrightnessPlugin, plugin_settings);
         self.register_with_settings(TaskManagerPlugin, plugin_settings);
-        self.register_with_settings(WindowsPlugin, plugin_settings);
+        self.register_with_settings(
+            WindowsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            plugin_settings,
+        );
         self.register_with_settings(
             BrowserTabsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
             plugin_settings,

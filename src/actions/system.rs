@@ -196,16 +196,43 @@ pub fn get_main_display_brightness() -> Option<u8> {
 pub fn get_power_plans() -> Result<Vec<PowerPlan>, String> {
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
 
-        let output = Command::new("powercfg")
+        let mut child = Command::new("powercfg")
             .arg("/L")
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|err| format!("Failed to query power plans: {err}"))?;
-        if !output.status.success() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("Timed out querying power plans.".into());
+                }
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("Failed waiting for power plans: {err}"));
+                }
+            }
+        };
+        if !status.success() {
             return Err("Failed to query power plans.".into());
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut stdout = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_string(&mut stdout)
+                .map_err(|err| format!("Failed reading power plans: {err}"))?;
+        }
         let plans = parse_powercfg_list(&stdout);
         if plans.is_empty() {
             Err("No power plans detected.".into())

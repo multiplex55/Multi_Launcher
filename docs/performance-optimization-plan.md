@@ -492,6 +492,50 @@ after a 7m39s rebuild); corrected Browser Tabs Criterion workloads; `cargo build
 test compilation on a moved test-only `Arc`; the ownership was corrected and the authoritative
 rerun passed completely.
 
+### Second independent-review remediation
+
+**Status:** `complete`
+
+The follow-up review identified six remaining boundary and race issues. Browser Tabs now records
+the last filter for which `recalc_each_query` forced discovery, so launcher notification requery and
+Plugin Home rendering of the same actual query consume the published snapshot without starting a
+discovery loop. A channel-controlled enumeration-count test covers repeated same-filter queries and
+the next distinct filter.
+
+Dashboard Volume collection and Windows enumeration now run outside widget rendering. Volume uses
+the shared capacity-one widget loader; the Windows plugin owns a capacity-one enumeration worker,
+publishes immutable snapshots, and signals `PluginSearchUpdates`. Browser Tabs, Query List, Pinned
+Query Results, Window List, and Windows Overview observe that shared generation and immediately
+invalidate their local materialized-result caches after asynchronous publication. The remaining
+widget plugin-search calls are static command materialization or read caches/off-thread providers.
+
+Scratchpad load/save results carry their storage path and stale results are ignored after a settings
+path change; a controlled path-change/edit race proves an old load cannot overwrite current text.
+Background refresh submission now advances scheduling state immediately, while an explicit request
+that arrives in flight remains pending for one follow-up. Deterministic tests cover both combined
+scheduler/loader behavior and generation invalidation.
+
+Dropping an active widget loader, Browser Tabs cache, or Windows cache no longer joins provider work
+on the egui thread; a small reaper owns the join. Production widget providers are bounded, including
+the power-plan query, which kills `powercfg /L` after three seconds. Windows UI Automation remains
+the sole hard limitation: `FindAll` exposes no cancellation/timeout handle, so a hung OS call cannot
+be preempted, but plugin removal itself remains nonblocking and only one owned call can be active.
+Channel-controlled coverage proves an active generic loader can be dropped without waiting and that
+blocked Windows enumeration is nonblocking, single-flight, and notifier-driven.
+
+Final-HEAD verification passed: `cargo fmt --all --check`; `cargo check`; focused Browser Tabs,
+Windows, scratchpad, loader/scheduler and generation-invalidation tests; `cargo nextest list`
+(2,990 inventoried tests across 70 binaries); `cargo nextest run --no-fail-fast` (2,983 passed,
+7 skipped in 46.790 s after a 5m36s rebuild); `cargo build --release` (2m04s); render-path and
+stale-reference searches; and `git diff --check`. The corrected Criterion workloads measured the
+1,000-tab populated cached filter/materialization path at 214.47 us and the separately static clear
+command at 1.164 us (100 samples, default warmup).
+
+The final isolated warm release sample measured plugin manager construction at 58.016 ms, plugin
+registration at 17.111 ms, `LauncherApp` construction at 36.685 ms, first usable frame at
+352.856 ms, and dashboard initial publication at 517.348 ms. This single warm-host sample supersedes
+the earlier remediation sample for final-HEAD regression evidence; it is not a cold-start claim.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary

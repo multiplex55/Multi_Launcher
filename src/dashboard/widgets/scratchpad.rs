@@ -52,14 +52,29 @@ struct ScratchpadStorage {
     content: String,
 }
 
+#[derive(Debug, Clone)]
 enum ScratchpadRequest {
-    Load(PathBuf),
-    Save { path: PathBuf, content: String },
+    Load {
+        path: PathBuf,
+        generation: u64,
+    },
+    Save {
+        path: PathBuf,
+        generation: u64,
+        content: String,
+    },
 }
 
 enum ScratchpadResult {
-    Loaded(String, Option<String>),
+    Loaded {
+        path: PathBuf,
+        generation: u64,
+        content: String,
+        error: Option<String>,
+    },
     Saved {
+        path: PathBuf,
+        generation: u64,
         content: String,
         error: Option<String>,
     },
@@ -73,11 +88,45 @@ pub struct ScratchpadWidget {
     refresh_pending: bool,
     last_refresh: Instant,
     error: Option<String>,
+    storage_generation: u64,
     loader: BackgroundLoader<ScratchpadRequest, ScratchpadResult>,
 }
 
 impl ScratchpadWidget {
     pub fn new(cfg: ScratchpadConfig) -> Self {
+        Self::with_loader(
+            cfg,
+            BackgroundLoader::new(|request| match request {
+                ScratchpadRequest::Load { path, generation } => {
+                    let (content, error) = load_storage(&path);
+                    ScratchpadResult::Loaded {
+                        path,
+                        generation,
+                        content,
+                        error,
+                    }
+                }
+                ScratchpadRequest::Save {
+                    path,
+                    generation,
+                    content,
+                } => {
+                    let error = save_storage(&path, &content).err();
+                    ScratchpadResult::Saved {
+                        path,
+                        generation,
+                        content,
+                        error,
+                    }
+                }
+            }),
+        )
+    }
+
+    fn with_loader(
+        cfg: ScratchpadConfig,
+        loader: BackgroundLoader<ScratchpadRequest, ScratchpadResult>,
+    ) -> Self {
         let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
         Self {
             cfg,
@@ -87,16 +136,49 @@ impl ScratchpadWidget {
             refresh_pending: true,
             last_refresh: Instant::now() - interval,
             error: None,
-            loader: BackgroundLoader::new(|request| match request {
-                ScratchpadRequest::Load(path) => {
-                    let (content, error) = load_storage(&path);
-                    ScratchpadResult::Loaded(content, error)
+            storage_generation: 0,
+            loader,
+        }
+    }
+
+    fn apply_result(&mut self, result: ScratchpadResult) {
+        let current_path = storage_path_for(&self.cfg);
+        match result {
+            ScratchpadResult::Loaded {
+                path,
+                generation,
+                content,
+                error,
+            } => {
+                if path != current_path || generation != self.storage_generation {
+                    self.refresh_pending = true;
+                    return;
                 }
-                ScratchpadRequest::Save { path, content } => {
-                    let error = save_storage(&path, &content).err();
-                    ScratchpadResult::Saved { content, error }
+                if !self.dirty && error.is_none() {
+                    self.content = content;
+                    self.last_edit = None;
                 }
-            }),
+                self.error = error;
+            }
+            ScratchpadResult::Saved {
+                path,
+                generation,
+                content,
+                error,
+            } => {
+                if path != current_path || generation != self.storage_generation {
+                    if self.dirty && self.last_edit.is_none() {
+                        self.last_edit = Some(Instant::now());
+                    }
+                    return;
+                }
+                if error.is_none() && self.content == content {
+                    self.dirty = false;
+                } else if error.is_some() && self.dirty && self.last_edit.is_none() {
+                    self.last_edit = Some(Instant::now());
+                }
+                self.error = error;
+            }
         }
     }
 
@@ -151,7 +233,13 @@ impl ScratchpadWidget {
 
     fn reload_from_storage(&mut self, repaint: &egui::Context) -> bool {
         let path = storage_path_for(&self.cfg);
-        self.loader.request(ScratchpadRequest::Load(path), repaint)
+        self.loader.request(
+            ScratchpadRequest::Load {
+                path,
+                generation: self.storage_generation,
+            },
+            repaint,
+        )
     }
 
     fn schedule_save(&mut self) {
@@ -174,6 +262,7 @@ impl ScratchpadWidget {
         if self.loader.request(
             ScratchpadRequest::Save {
                 path,
+                generation: self.storage_generation,
                 content: self.content.clone(),
             },
             repaint,
@@ -217,23 +306,7 @@ impl Widget for ScratchpadWidget {
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         if let Some(result) = self.loader.poll() {
-            match result {
-                ScratchpadResult::Loaded(content, error) => {
-                    if !self.dirty && error.is_none() {
-                        self.content = content;
-                        self.last_edit = None;
-                    }
-                    self.error = error;
-                }
-                ScratchpadResult::Saved { content, error } => {
-                    if error.is_none() && self.content == content {
-                        self.dirty = false;
-                    } else if error.is_some() && self.dirty && self.last_edit.is_none() {
-                        self.last_edit = Some(Instant::now());
-                    }
-                    self.error = error;
-                }
-            }
+            self.apply_result(result);
         }
         let schedule = refresh_schedule(
             self.refresh_interval(),
@@ -292,6 +365,9 @@ impl Widget for ScratchpadWidget {
 
     fn on_config_updated(&mut self, settings: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<ScratchpadConfig>(settings.clone()) {
+            if storage_path_for(&cfg) != storage_path_for(&self.cfg) {
+                self.storage_generation = self.storage_generation.wrapping_add(1);
+            }
             self.cfg = cfg;
             self.refresh_pending = true;
         }
@@ -382,6 +458,7 @@ fn insert_at_char_index(text: &mut String, insert: &str, char_index: usize) -> u
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use std::sync::mpsc::channel;
 
     #[test]
     fn format_timestamp_uses_expected_pattern() {
@@ -408,5 +485,71 @@ mod tests {
         let (content, error) = load_storage(&path);
         assert!(error.is_none());
         assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn stale_load_from_previous_path_cannot_overwrite_current_edit() {
+        let (request_tx, request_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let loader = BackgroundLoader::new(move |request: ScratchpadRequest| {
+            request_tx.send(request.clone()).unwrap();
+            release_rx.recv().unwrap();
+            match request {
+                ScratchpadRequest::Load { path, generation } => ScratchpadResult::Loaded {
+                    path,
+                    generation,
+                    content: "old file contents".into(),
+                    error: None,
+                },
+                ScratchpadRequest::Save {
+                    path,
+                    generation,
+                    content,
+                } => ScratchpadResult::Saved {
+                    path,
+                    generation,
+                    content,
+                    error: None,
+                },
+            }
+        });
+        let mut widget = ScratchpadWidget::with_loader(
+            ScratchpadConfig {
+                storage_path: Some("old.json".into()),
+                ..ScratchpadConfig::default()
+            },
+            loader,
+        );
+        let repaint = egui::Context::default();
+
+        assert!(widget.reload_from_storage(&repaint));
+        assert!(matches!(
+            request_rx.recv().unwrap(),
+            ScratchpadRequest::Load { path, generation: 0 } if path == PathBuf::from("old.json")
+        ));
+        widget.on_config_updated(
+            &serde_json::to_value(ScratchpadConfig {
+                storage_path: Some("new.json".into()),
+                ..ScratchpadConfig::default()
+            })
+            .unwrap(),
+        );
+        widget.content = "unsaved edit".into();
+        widget.dirty = true;
+        widget.refresh_pending = false;
+        release_tx.send(()).unwrap();
+
+        let result = loop {
+            if let Some(result) = widget.loader.poll() {
+                break result;
+            }
+            std::thread::yield_now();
+        };
+        widget.apply_result(result);
+
+        assert_eq!(widget.content, "unsaved edit");
+        assert!(widget.dirty);
+        assert!(widget.refresh_pending);
+        assert_eq!(storage_path_for(&widget.cfg), PathBuf::from("new.json"));
     }
 }

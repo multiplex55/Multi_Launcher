@@ -1,7 +1,7 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, find_plugin, observe_search_generation,
+    refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -48,6 +48,7 @@ pub struct WindowsWidget {
     cache: TimedCache<Vec<Action>>,
     error: Option<String>,
     refresh_pending: bool,
+    last_search_generation: u64,
 }
 
 impl WindowsWidget {
@@ -58,6 +59,7 @@ impl WindowsWidget {
             cache: TimedCache::new(Vec::new(), interval),
             error: None,
             refresh_pending: false,
+            last_search_generation: 0,
         }
     }
 
@@ -104,6 +106,11 @@ impl WindowsWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
+        observe_search_generation(
+            ctx.plugins.search_generation(),
+            &mut self.last_search_generation,
+            &mut self.refresh_pending,
+        );
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,

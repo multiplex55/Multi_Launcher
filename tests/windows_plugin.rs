@@ -3,7 +3,7 @@ use multi_launcher::plugins::windows::WindowsPlugin;
 
 #[test]
 fn search_lists_windows() {
-    let plugin = WindowsPlugin;
+    let plugin = WindowsPlugin::default();
     let results = plugin.search("win");
     if results.is_empty() {
         assert_eq!(plugin.commands()[0].action, "query:win ");

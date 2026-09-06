@@ -1,7 +1,7 @@
 use super::{
     BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -322,9 +322,13 @@ impl LayoutsWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            if !self.loader.request(self.cfg.clone(), repaint) {
-                self.refresh_pending = true;
-            }
+            submit_background_refresh(
+                &mut self.loader,
+                self.cfg.clone(),
+                repaint,
+                &mut self.refresh_pending,
+                &mut self.cache.last_refresh,
+            );
         }
     }
 

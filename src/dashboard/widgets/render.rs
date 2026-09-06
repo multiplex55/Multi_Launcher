@@ -75,9 +75,51 @@ impl<R: Send + 'static, T: Send + 'static> Drop for BackgroundLoader<R, T> {
     fn drop(&mut self) {
         self.requests.take();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                // Providers used by production widgets are bounded. Reap an active worker away
+                // from egui so removing a widget never blocks the render thread.
+                let _ = thread::Builder::new()
+                    .name("dashboard-widget-reaper".into())
+                    .spawn(move || {
+                        let _ = worker.join();
+                    });
+            }
         }
     }
+}
+
+pub(crate) fn submit_background_refresh<R: Send + 'static, T: Send + 'static>(
+    loader: &mut BackgroundLoader<R, T>,
+    request: R,
+    repaint: &egui::Context,
+    refresh_pending: &mut bool,
+    last_refresh: &mut Instant,
+) -> bool {
+    if loader.request(request, repaint) {
+        // Submission, rather than publication, advances the schedule so a slow provider does not
+        // cause the automatic scheduler to immediately enqueue duplicate work after publication.
+        *last_refresh = Instant::now();
+        true
+    } else {
+        // An explicit request arriving in flight is retained for exactly one follow-up attempt.
+        *refresh_pending = true;
+        false
+    }
+}
+
+pub(crate) fn observe_search_generation(
+    generation: u64,
+    last_generation: &mut u64,
+    refresh_pending: &mut bool,
+) -> bool {
+    if generation == *last_generation {
+        return false;
+    }
+    *last_generation = generation;
+    *refresh_pending = true;
+    true
 }
 
 pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {
@@ -397,7 +439,10 @@ pub(crate) fn refresh_settings_ui(
 
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundLoader, merge_json};
+    use super::{
+        BackgroundLoader, TimedCache, merge_json, observe_search_generation,
+        submit_background_refresh,
+    };
     use serde_json::json;
     use std::sync::mpsc::{TryRecvError, channel};
 
@@ -433,5 +478,84 @@ mod tests {
         };
         assert_eq!(result, 42);
         drop(loader);
+    }
+
+    #[test]
+    fn dropping_active_loader_returns_before_provider_finishes() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (finished_tx, finished_rx) = channel();
+        let mut loader = BackgroundLoader::new(move |()| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            finished_tx.send(()).unwrap();
+        });
+        assert!(loader.request((), &eframe::egui::Context::default()));
+        started_rx.recv().unwrap();
+        drop(loader);
+        assert!(matches!(finished_rx.try_recv(), Err(TryRecvError::Empty)));
+        release_tx.send(()).unwrap();
+        finished_rx.recv().unwrap();
+    }
+
+    #[test]
+    fn successful_submission_advances_schedule_and_inflight_request_queues_followup() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let mut loader = BackgroundLoader::new(move |value: usize| {
+            started_tx.send(value).unwrap();
+            release_rx.recv().unwrap();
+            value
+        });
+        let repaint = eframe::egui::Context::default();
+        let mut cache = TimedCache::new((), std::time::Duration::from_secs(60));
+        let mut pending = false;
+
+        assert!(submit_background_refresh(
+            &mut loader,
+            1,
+            &repaint,
+            &mut pending,
+            &mut cache.last_refresh,
+        ));
+        assert!(!cache.should_refresh());
+        started_rx.recv().unwrap();
+
+        pending = false;
+        assert!(!submit_background_refresh(
+            &mut loader,
+            2,
+            &repaint,
+            &mut pending,
+            &mut cache.last_refresh,
+        ));
+        assert!(pending);
+        release_tx.send(()).unwrap();
+        while loader.poll().is_none() {
+            std::thread::yield_now();
+        }
+
+        pending = false;
+        assert!(submit_background_refresh(
+            &mut loader,
+            2,
+            &repaint,
+            &mut pending,
+            &mut cache.last_refresh,
+        ));
+        assert_eq!(started_rx.recv().unwrap(), 2);
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn plugin_publication_generation_invalidates_cached_query_once() {
+        let mut observed = 4;
+        let mut pending = false;
+        assert!(observe_search_generation(5, &mut observed, &mut pending));
+        assert_eq!(observed, 5);
+        assert!(pending);
+        pending = false;
+        assert!(!observe_search_generation(5, &mut observed, &mut pending));
+        assert!(!pending);
     }
 }

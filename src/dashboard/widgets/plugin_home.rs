@@ -42,6 +42,15 @@ fn default_limit() -> usize {
     5
 }
 
+pub(crate) fn search_plugin_actions(
+    plugin: &dyn crate::plugin::Plugin,
+    query: &str,
+) -> Vec<Action> {
+    let (filtered_query, filters) = split_action_filters(query);
+    let actions = plugin.search(filtered_query.trim());
+    apply_action_filters(actions, &filters)
+}
+
 #[derive(Default)]
 pub struct PluginHomeWidget {
     cfg: PluginHomeConfig,
@@ -169,9 +178,7 @@ impl Widget for PluginHomeWidget {
                     ui.label("Set a query to preview search results.");
                     Vec::new()
                 } else {
-                    let (filtered_query, filters) = split_action_filters(&query);
-                    let actions = plugin.search(filtered_query.trim());
-                    apply_action_filters(actions, &filters)
+                    search_plugin_actions(plugin, &query)
                 }
             }
         };
