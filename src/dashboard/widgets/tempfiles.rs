@@ -1,7 +1,7 @@
 use super::{
-    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -56,6 +56,7 @@ pub struct TempfilesWidget {
     cfg: TempfilesConfig,
     cache: TimedCache<Vec<TempfileEntry>>,
     error: Option<String>,
+    loader: BackgroundLoader<usize, (Vec<TempfileEntry>, Option<String>)>,
     refresh_pending: bool,
 }
 
@@ -66,6 +67,7 @@ impl TempfilesWidget {
             cfg,
             cache: TimedCache::new(Vec::new(), interval),
             error: None,
+            loader: BackgroundLoader::new(Self::load_files),
             refresh_pending: false,
         }
     }
@@ -104,15 +106,12 @@ impl TempfilesWidget {
         self.cache.set_interval(self.refresh_interval());
     }
 
-    fn refresh(&mut self) {
+    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>, repaint: &egui::Context) {
         self.update_interval();
-        let (entries, error) = Self::load_files(self.cfg.limit.max(1));
-        self.error = error;
-        self.cache.refresh(|data| *data = entries);
-    }
-
-    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
-        self.update_interval();
+        if let Some((entries, error)) = self.loader.poll() {
+            self.error = error;
+            self.cache.refresh(|data| *data = entries);
+        }
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -125,7 +124,13 @@ impl TempfilesWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            self.refresh();
+            submit_background_refresh(
+                &mut self.loader,
+                self.cfg.limit.max(1),
+                repaint,
+                &mut self.refresh_pending,
+                &mut self.cache.last_refresh,
+            );
         }
     }
 
@@ -240,7 +245,7 @@ impl Widget for TempfilesWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.maybe_refresh(ctx);
+        self.maybe_refresh(ctx, ui.ctx());
 
         if let Some(err) = &self.error {
             ui.colored_label(egui::Color32::YELLOW, err);

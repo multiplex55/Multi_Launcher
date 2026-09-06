@@ -46,6 +46,7 @@ use crate::plugins::snippets::SnippetsPlugin;
 use crate::plugins::stopwatch::StopwatchPlugin;
 use crate::plugins::sysinfo::SysInfoPlugin;
 use crate::plugins::system::SystemPlugin;
+use crate::plugins::system_data::SystemDataRuntime;
 use crate::plugins::task_manager::TaskManagerPlugin;
 use crate::plugins::tempfile::TempfilePlugin;
 use crate::plugins::text_case::TextCasePlugin;
@@ -63,8 +64,11 @@ use crate::settings::NetUnit;
 use eframe::egui;
 use libloading::Library;
 use serde_json::Value;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 pub const CAP_GRID_RESULTS_COMPATIBLE: &str = "grid_results_compatible";
 pub const CAP_FORCE_LIST_RESULTS: &str = "force_list_results";
@@ -110,17 +114,211 @@ pub trait Plugin: Send + Sync {
 }
 
 /// A manager that holds plugins
-#[derive(Clone)]
+#[derive(Default)]
+pub(crate) struct PluginSearchUpdates {
+    generation: AtomicU64,
+    tickets: Mutex<RefreshTicketBook>,
+    source_generations: Mutex<HashMap<&'static str, u64>>,
+    repaint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+#[derive(Default)]
+struct RefreshTicketBook {
+    next: u64,
+    sources: HashMap<&'static str, RefreshTicketSource>,
+}
+
+#[derive(Default)]
+struct RefreshTicketSource {
+    active: Option<u64>,
+    resolved_through: u64,
+    published: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefreshTicket {
+    pub(crate) id: u64,
+    pub(crate) start: bool,
+}
+
+thread_local! {
+    static SEARCH_REFRESH_TICKETS: RefCell<Vec<(&'static str, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn record_search_refresh_ticket(source: &'static str, ticket: u64) {
+    SEARCH_REFRESH_TICKETS.with(|tickets| tickets.borrow_mut().push((source, ticket)));
+}
+
+pub(crate) fn capture_search_refresh_tickets<T>(
+    work: impl FnOnce() -> T,
+) -> (T, Vec<(&'static str, u64)>) {
+    SEARCH_REFRESH_TICKETS.with(|tickets| tickets.borrow_mut().clear());
+    let value = work();
+    let tickets = SEARCH_REFRESH_TICKETS.with(|tickets| std::mem::take(&mut *tickets.borrow_mut()));
+    (value, tickets)
+}
+
+impl PluginSearchUpdates {
+    pub(crate) fn schedule_or_join(&self, source: &'static str) -> RefreshTicket {
+        let mut book = self
+            .tickets
+            .lock()
+            .expect("refresh ticket registry poisoned");
+        if let Some(id) = book.sources.get(source).and_then(|state| state.active) {
+            return RefreshTicket { id, start: false };
+        }
+        book.next = book.next.wrapping_add(1).max(1);
+        let id = book.next;
+        book.sources.entry(source).or_default().active = Some(id);
+        RefreshTicket { id, start: true }
+    }
+
+    pub(crate) fn active_ticket(&self, source: &str) -> Option<u64> {
+        let source = Self::canonical_source(source);
+        self.tickets.lock().ok()?.sources.get(source)?.active
+    }
+
+    pub(crate) fn published_ticket(&self, source: &str) -> Option<u64> {
+        let source = Self::canonical_source(source);
+        self.tickets.lock().ok()?.sources.get(source)?.published
+    }
+
+    pub(crate) fn ticket_resolved(&self, source: &str, ticket: u64) -> bool {
+        let source = Self::canonical_source(source);
+        self.tickets
+            .lock()
+            .ok()
+            .and_then(|book| {
+                book.sources
+                    .get(source)
+                    .map(|state| state.resolved_through >= ticket)
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn publish_ticket(&self, source: &'static str, ticket: u64) {
+        let committed = self.tickets.lock().ok().is_some_and(|mut book| {
+            let state = book.sources.entry(source).or_default();
+            if state.active != Some(ticket) {
+                return false;
+            }
+            state.active = None;
+            state.resolved_through = state.resolved_through.max(ticket);
+            state.published = Some(ticket);
+            true
+        });
+        if !committed {
+            return;
+        }
+        self.notify(source);
+    }
+
+    pub(crate) fn cancel_ticket(&self, source: &'static str, ticket: u64) {
+        let cancelled = self.tickets.lock().ok().is_some_and(|mut book| {
+            let state = book.sources.entry(source).or_default();
+            if state.active != Some(ticket) {
+                return false;
+            }
+            state.active = None;
+            state.resolved_through = state.resolved_through.max(ticket);
+            true
+        });
+        if cancelled {
+            self.notify(source);
+        }
+    }
+
+    fn canonical_source(source: &str) -> &str {
+        match source {
+            "processes" | "sysinfo" | "volume" => "system_data",
+            source => source,
+        }
+    }
+
+    pub(crate) fn notify(&self, source: &'static str) {
+        self.generation.fetch_add(1, Ordering::Release);
+        if let Ok(mut generations) = self.source_generations.lock() {
+            *generations.entry(source).or_default() += 1;
+        }
+        let callback = self
+            .repaint
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().map(Arc::clone));
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn source_generation(&self, source: &str) -> u64 {
+        let source = Self::canonical_source(source);
+        self.source_generations
+            .lock()
+            .ok()
+            .and_then(|generations| generations.get(source).copied())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn set_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.repaint.lock() {
+            *slot = Some(callback);
+        }
+    }
+}
+
 pub struct PluginInternalServices {
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
     pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
+    search_updates: Arc<PluginSearchUpdates>,
+    system_data_runtime: Option<SystemDataRuntime>,
 }
 
 pub struct PluginManager {
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<Arc<PluginSlot>>,
     services: PluginInternalServices,
-    #[allow(dead_code)]
-    libs: Vec<libloading::Library>,
+    next_plugin_epoch: u64,
+    deferred_dynamic_reloads: Vec<(PathBuf, Weak<PluginSlot>)>,
+}
+
+struct PluginSlot {
+    name: String,
+    plugin: RwLock<Box<dyn Plugin>>,
+    _library: Option<Arc<libloading::Library>>,
+    library_path: Option<PathBuf>,
+    epoch: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct OwnedPluginHandle {
+    pub(crate) epoch: u64,
+    slot: Arc<PluginSlot>,
+}
+
+impl OwnedPluginHandle {
+    #[cfg(test)]
+    pub(crate) fn for_test(plugin: Box<dyn Plugin>) -> Self {
+        Self::for_test_epoch(plugin, 1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_epoch(plugin: Box<dyn Plugin>, epoch: u64) -> Self {
+        let slot = Arc::new(PluginSlot {
+            name: plugin.name().to_string(),
+            plugin: RwLock::new(plugin),
+            _library: None,
+            library_path: None,
+            epoch,
+        });
+        Self { epoch, slot }
+    }
+
+    pub(crate) fn read(&self) -> std::sync::LockResult<RwLockReadGuard<'_, Box<dyn Plugin>>> {
+        self.slot.plugin.read()
+    }
 }
 
 impl Default for PluginManager {
@@ -142,8 +340,11 @@ impl PluginManager {
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
+                search_updates: Arc::new(PluginSearchUpdates::default()),
+                system_data_runtime: None,
             },
-            libs: Vec::new(),
+            next_plugin_epoch: 0,
+            deferred_dynamic_reloads: Vec::new(),
         }
     }
 
@@ -160,13 +361,67 @@ impl PluginManager {
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
+                search_updates: Arc::new(PluginSearchUpdates::default()),
+                system_data_runtime: None,
             },
-            libs: Vec::new(),
+            next_plugin_epoch: 0,
+            deferred_dynamic_reloads: Vec::new(),
         }
     }
 
     pub fn internal_services(&self) -> &PluginInternalServices {
         &self.services
+    }
+
+    pub fn search_generation(&self) -> u64 {
+        self.services.search_updates.generation()
+    }
+
+    pub fn search_generation_for(&self, source: &str) -> u64 {
+        self.services.search_updates.source_generation(source)
+    }
+
+    pub(crate) fn active_search_ticket_for(&self, source: &str) -> Option<u64> {
+        self.services.search_updates.active_ticket(source)
+    }
+
+    pub(crate) fn search_ticket_resolved(&self, source: &str, ticket: u64) -> bool {
+        self.services.search_updates.ticket_resolved(source, ticket)
+    }
+
+    pub(crate) fn search_plugin_with_ticket(
+        &self,
+        name: &str,
+        query: &str,
+    ) -> Result<(Vec<Action>, Option<u64>), &'static str> {
+        let slot = self
+            .plugins
+            .iter()
+            .find(|slot| slot.name == name)
+            .ok_or("plugin unavailable")?;
+        let plugin = slot.plugin.try_read().map_err(|_| "plugin busy")?;
+        let (actions, tickets) = capture_search_refresh_tickets(|| plugin.search(query));
+        Ok((
+            actions,
+            tickets.into_iter().find_map(|(source, ticket)| {
+                (PluginSearchUpdates::canonical_source(name) == source).then_some(ticket)
+            }),
+        ))
+    }
+
+    pub(crate) fn search_filtered_with_tickets(
+        &self,
+        query: &str,
+        enabled_plugins: Option<&HashSet<String>>,
+        enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> (Vec<Action>, Vec<(&'static str, u64)>) {
+        capture_search_refresh_tickets(|| {
+            self.search_filtered(query, enabled_plugins, enabled_caps)
+        })
+    }
+
+    pub fn set_search_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.services.search_updates.set_repaint_callback(callback);
     }
 
     pub fn clipboard_modifier_catalog(&self) -> SharedClipboardModifierCatalog {
@@ -192,17 +447,33 @@ impl PluginManager {
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
+                search_updates: Arc::new(PluginSearchUpdates::default()),
+                system_data_runtime: None,
             },
-            libs: Vec::new(),
+            next_plugin_epoch: 0,
+            deferred_dynamic_reloads: Vec::new(),
         }
     }
 
-    /// Remove all registered plugins without unloading libraries.
+    /// Remove all registered plugins, deferring reload of a dynamic library while an owned plugin
+    /// handle still pins its originating slot.
     pub fn clear_plugins(&mut self) {
+        for slot in &self.plugins {
+            if Arc::strong_count(slot) > 1
+                && let Some(path) = slot.library_path.clone()
+                && !self
+                    .deferred_dynamic_reloads
+                    .iter()
+                    .any(|(existing, weak)| existing == &path && weak.strong_count() > 0)
+            {
+                self.deferred_dynamic_reloads
+                    .push((path, Arc::downgrade(slot)));
+            }
+        }
         self.plugins.clear();
     }
 
-    /// Rebuild the plugin list, keeping previously loaded libraries alive.
+    /// Rebuild the plugin list, deferring dynamic paths whose prior plugin slot is still pinned.
     ///
     /// `actions` is the shared list of launcher actions. An [`Arc`] is used so
     /// plugins such as [`OmniSearchPlugin`](crate::plugins::omni_search::OmniSearchPlugin)
@@ -221,7 +492,6 @@ impl PluginManager {
         self.clear_plugins();
         // Drop previously loaded dynamic libraries to avoid accumulating
         // duplicate handles when reloading plugins.
-        self.libs.clear();
         self.register_with_settings(WebSearchPlugin, plugin_settings);
         self.register_with_settings(CalculatorPlugin::default(), plugin_settings);
         self.register_with_settings(UnitConvertPlugin, plugin_settings);
@@ -243,8 +513,19 @@ impl PluginManager {
         self.register_with_settings(DiffPlugin::default(), plugin_settings);
         self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
         self.register_with_settings(SystemPlugin, plugin_settings);
-        self.register_with_settings(ProcessesPlugin, plugin_settings);
-        self.register_with_settings(SysInfoPlugin, plugin_settings);
+        if self.services.system_data_runtime.is_none() {
+            self.services.system_data_runtime = Some(SystemDataRuntime::start(Arc::clone(
+                &self.services.search_updates,
+            )));
+        }
+        let system_data = self
+            .services
+            .system_data_runtime
+            .as_ref()
+            .expect("system data runtime initialized")
+            .cache();
+        self.register_with_settings(ProcessesPlugin::new(system_data.clone()), plugin_settings);
+        self.register_with_settings(SysInfoPlugin::new(system_data.clone()), plugin_settings);
         self.register_with_settings(NetworkPlugin::new(net_unit), plugin_settings);
         self.register_with_settings(ShellPlugin, plugin_settings);
         self.register_with_settings(HistoryPlugin, plugin_settings);
@@ -271,16 +552,25 @@ impl PluginManager {
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         self.register_with_settings(CropPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
-        self.register_with_settings(IpPlugin, plugin_settings);
+        self.register_with_settings(
+            IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            plugin_settings,
+        );
         self.register_with_settings(RandomPlugin::default(), plugin_settings);
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
-        self.register_with_settings(VolumePlugin, plugin_settings);
+        self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
         self.register_with_settings(BrightnessPlugin, plugin_settings);
         self.register_with_settings(TaskManagerPlugin, plugin_settings);
-        self.register_with_settings(WindowsPlugin, plugin_settings);
-        self.register_with_settings(BrowserTabsPlugin::default(), plugin_settings);
+        self.register_with_settings(
+            WindowsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            plugin_settings,
+        );
+        self.register_with_settings(
+            BrowserTabsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            plugin_settings,
+        );
         self.register_with_settings(SettingsPlugin, plugin_settings);
         self.register_with_settings(HelpPlugin, plugin_settings);
         self.register_with_settings(LayoutPlugin, plugin_settings);
@@ -301,7 +591,24 @@ impl PluginManager {
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
         tracing::debug!("registered plugin {}", plugin.name());
-        self.plugins.push(plugin);
+        self.register_slot(plugin, None, None);
+    }
+
+    fn register_slot(
+        &mut self,
+        plugin: Box<dyn Plugin>,
+        library: Option<Arc<libloading::Library>>,
+        library_path: Option<PathBuf>,
+    ) {
+        self.next_plugin_epoch = self.next_plugin_epoch.wrapping_add(1).max(1);
+        let name = plugin.name().to_string();
+        self.plugins.push(Arc::new(PluginSlot {
+            name,
+            plugin: RwLock::new(plugin),
+            _library: library,
+            library_path,
+            epoch: self.next_plugin_epoch,
+        }));
     }
 
     fn register_with_settings<P: Plugin + 'static>(
@@ -317,13 +624,20 @@ impl PluginManager {
 
     /// Return a list of registered plugin names.
     pub fn plugin_names(&self) -> Vec<String> {
-        self.plugins.iter().map(|p| p.name().to_string()).collect()
+        self.plugins.iter().map(|slot| slot.name.clone()).collect()
+    }
+
+    pub fn deferred_plugin_reload_paths(&self) -> Vec<PathBuf> {
+        self.deferred_dynamic_reloads
+            .iter()
+            .filter(|(_, slot)| slot.strong_count() > 0)
+            .map(|(path, _)| path.clone())
+            .collect()
     }
 
     /// Return names, descriptions and capabilities for all plugins.
     pub fn plugin_infos(&self) -> Vec<(String, String, Vec<String>)> {
-        self.plugins
-            .iter()
+        self.iter()
             .map(|p| {
                 (
                     p.name().to_string(),
@@ -337,7 +651,7 @@ impl PluginManager {
     /// Collect command shortcuts from plugins filtered by `enabled_plugins`.
     pub fn commands_filtered(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
         let mut out = Vec::new();
-        for p in &self.plugins {
+        for p in self.iter() {
             if let Some(set) = enabled_plugins
                 && !set.contains(p.name())
             {
@@ -353,12 +667,38 @@ impl PluginManager {
         self.commands_filtered(None)
     }
 
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Box<dyn Plugin>> {
-        self.plugins.iter_mut()
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = RwLockWriteGuard<'_, Box<dyn Plugin>>> {
+        self.plugins
+            .iter()
+            .filter_map(|slot| slot.plugin.write().ok())
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn Plugin>> {
-        self.plugins.iter()
+    pub fn iter(&self) -> impl Iterator<Item = RwLockReadGuard<'_, Box<dyn Plugin>>> {
+        self.plugins
+            .iter()
+            .filter_map(|slot| slot.plugin.read().ok())
+    }
+
+    pub(crate) fn owned_plugin(&self, name: &str) -> Option<OwnedPluginHandle> {
+        self.plugins.iter().find_map(|slot| {
+            let matches = slot.name == name;
+            matches.then(|| OwnedPluginHandle {
+                epoch: slot.epoch,
+                slot: Arc::clone(slot),
+            })
+        })
+    }
+
+    pub(crate) fn try_write_plugin(
+        &self,
+        name: &str,
+    ) -> Result<RwLockWriteGuard<'_, Box<dyn Plugin>>, &'static str> {
+        let slot = self
+            .plugins
+            .iter()
+            .find(|slot| slot.name == name)
+            .ok_or("plugin unavailable")?;
+        slot.plugin.try_write().map_err(|_| "plugin busy")
     }
 
     pub fn load_dir(
@@ -379,9 +719,23 @@ impl PluginManager {
             if entry.path().extension() != Some(OsStr::new(ext)) {
                 continue;
             }
+            let library_path = entry.path();
+            self.deferred_dynamic_reloads
+                .retain(|(_, slot)| slot.strong_count() > 0);
+            if self
+                .deferred_dynamic_reloads
+                .iter()
+                .any(|(deferred, _)| deferred == &library_path)
+            {
+                tracing::warn!(
+                    path = %library_path.display(),
+                    "plugin reload deferred while its previous instance is still active"
+                );
+                continue;
+            }
 
             unsafe {
-                let lib = Library::new(entry.path())?;
+                let lib = Arc::new(Library::new(&library_path)?);
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
                     lib.get(b"create_plugin")?;
                 let mut plugin = constructor();
@@ -389,8 +743,7 @@ impl PluginManager {
                     plugin.apply_settings(val);
                 }
                 let name = plugin.name().to_string();
-                self.plugins.push(plugin);
-                self.libs.push(lib);
+                self.register_slot(plugin, Some(lib), Some(library_path));
                 tracing::debug!("loaded plugin {name}");
             }
         }
@@ -410,7 +763,8 @@ impl PluginManager {
             .next()
             .map(str::to_ascii_lowercase);
         let mut actions = Vec::new();
-        for p in &self.plugins {
+        let perf_enabled = crate::performance::enabled();
+        for p in self.iter() {
             let name = p.name();
             if let Some(list) = enabled_plugins
                 && !list.contains(name)
@@ -439,7 +793,10 @@ impl PluginManager {
                 }
             }
 
-            actions.extend(p.search(&filtered_query));
+            let timer = crate::performance::Timer::start_if(perf_enabled);
+            let plugin_actions = p.search(&filtered_query);
+            timer.finish_plugin(name);
+            actions.extend(plugin_actions);
         }
         if filters.include_kinds.is_empty()
             && filters.exclude_kinds.is_empty()
@@ -458,6 +815,179 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    struct BlockingPlugin {
+        started: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    struct NamedPlugin(&'static str);
+
+    impl Plugin for NamedPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            self.0
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    struct CompletingTicketPlugin {
+        updates: Arc<PluginSearchUpdates>,
+    }
+
+    impl Plugin for CompletingTicketPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            let ticket = self.updates.schedule_or_join("completing");
+            record_search_refresh_ticket("completing", ticket.id);
+            self.updates.publish_ticket("completing", ticket.id);
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "completing"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    impl Plugin for BlockingPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "blocking"
+        }
+        fn description(&self) -> &str {
+            "blocking"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    #[test]
+    fn built_in_search_updates_increment_generation_and_repaint() {
+        let manager = PluginManager::new();
+        let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
+        manager.set_search_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let before = manager.search_generation();
+        let source_before = manager.search_generation_for("test");
+        manager.services.search_updates.notify("test");
+        repaint_rx.recv().unwrap();
+        assert_eq!(manager.search_generation(), before + 1);
+        assert_eq!(manager.search_generation_for("test"), source_before + 1);
+        assert_eq!(manager.search_generation_for("unrelated"), 0);
+    }
+
+    #[test]
+    fn refresh_tickets_distinguish_joined_fresh_and_unrelated_publications() {
+        let updates = PluginSearchUpdates::default();
+        let ticket = updates.schedule_or_join("windows");
+        assert!(ticket.start);
+        assert_eq!(updates.active_ticket("windows"), Some(ticket.id));
+        assert_eq!(updates.published_ticket("windows"), None);
+        updates.notify("browser_tabs");
+        assert_eq!(updates.active_ticket("windows"), Some(ticket.id));
+        assert_eq!(updates.published_ticket("windows"), None);
+        updates.publish_ticket("windows", ticket.id);
+        assert_eq!(updates.active_ticket("windows"), None);
+        assert_eq!(updates.published_ticket("windows"), Some(ticket.id));
+    }
+
+    #[test]
+    fn superseded_ticket_cannot_publish_or_notify() {
+        let updates = PluginSearchUpdates::default();
+        let stale = updates.schedule_or_join("windows");
+        updates.cancel_ticket("windows", stale.id);
+        let current = updates.schedule_or_join("windows");
+        updates.publish_ticket("windows", stale.id);
+        assert_eq!(updates.generation(), 1);
+        assert_eq!(updates.active_ticket("windows"), Some(current.id));
+        assert_eq!(updates.published_ticket("windows"), None);
+        updates.publish_ticket("windows", current.id);
+        assert_eq!(updates.generation(), 2);
+        assert_eq!(updates.published_ticket("windows"), Some(current.id));
+    }
+
+    #[test]
+    fn completed_before_search_returns_still_returns_exact_resolved_ticket() {
+        let updates = Arc::new(PluginSearchUpdates::default());
+        let mut manager = PluginManager::new();
+        manager.services.search_updates = Arc::clone(&updates);
+        manager.register(Box::new(CompletingTicketPlugin {
+            updates: Arc::clone(&updates),
+        }));
+        let (_, ticket) = manager
+            .search_plugin_with_ticket("completing", "query")
+            .unwrap();
+        let ticket = ticket.expect("search transaction ticket");
+        assert!(manager.search_ticket_resolved("completing", ticket));
+        assert_eq!(updates.published_ticket("completing"), Some(ticket));
+    }
+
+    #[test]
+    fn cancellation_resolves_joined_waiters_and_allows_next_ticket() {
+        let updates = PluginSearchUpdates::default();
+        let first = updates.schedule_or_join("windows");
+        let joined = updates.schedule_or_join("windows");
+        assert_eq!(joined.id, first.id);
+        assert!(!joined.start);
+        updates.cancel_ticket("windows", first.id);
+        assert!(updates.ticket_resolved("windows", joined.id));
+        let next = updates.schedule_or_join("windows");
+        assert!(next.start);
+        assert_ne!(next.id, first.id);
+    }
+
+    #[test]
+    fn plugin_instance_epoch_advances_across_reload() {
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(NamedPlugin("epoch")));
+        let first = manager.owned_plugin("epoch").unwrap().epoch;
+        manager.clear_plugins();
+        manager.register(Box::new(NamedPlugin("epoch")));
+        assert!(manager.owned_plugin("epoch").unwrap().epoch > first);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_handle_pins_only_its_originating_library() {
+        let first_library = Arc::new(unsafe { Library::new("kernel32.dll").unwrap() });
+        let unrelated_library = Arc::new(unsafe { Library::new("kernel32.dll").unwrap() });
+        let mut manager = PluginManager::new();
+        manager.register_slot(
+            Box::new(NamedPlugin("first")),
+            Some(Arc::clone(&first_library)),
+            Some(PathBuf::from("first.dll")),
+        );
+        manager.register_slot(
+            Box::new(NamedPlugin("unrelated")),
+            Some(Arc::clone(&unrelated_library)),
+            Some(PathBuf::from("unrelated.dll")),
+        );
+        let first_handle = manager.owned_plugin("first").unwrap();
+        manager.clear_plugins();
+        assert_eq!(
+            manager.deferred_plugin_reload_paths(),
+            vec![PathBuf::from("first.dll")]
+        );
+        assert_eq!(Arc::strong_count(&first_library), 2);
+        assert_eq!(Arc::strong_count(&unrelated_library), 1);
+        drop(first_handle);
+        assert_eq!(Arc::strong_count(&first_library), 1);
+        assert!(manager.deferred_plugin_reload_paths().is_empty());
+    }
     #[test]
     fn shared_catalog_handle_preserved_across_reload() {
         let mut manager = PluginManager::new();
@@ -474,5 +1004,36 @@ mod tests {
             &handle,
             &manager.internal_services().clipboard_modifier_catalog
         ));
+    }
+
+    #[test]
+    fn blocked_search_settings_frame_reports_busy_without_waiting() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(BlockingPlugin {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let handle = manager.owned_plugin("blocking").unwrap();
+        let worker = std::thread::spawn(move || {
+            let plugin = handle.read().unwrap();
+            plugin.search("query");
+        });
+        started_rx.recv().unwrap();
+        let mut rendered_busy = false;
+        let context = egui::Context::default();
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if matches!(manager.try_write_plugin("blocking"), Err("plugin busy")) {
+                    ui.label("blocking settings are temporarily busy; retry next frame.");
+                    rendered_busy = true;
+                }
+            });
+        });
+        assert!(rendered_busy);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(manager.try_write_plugin("blocking").is_ok());
     }
 }

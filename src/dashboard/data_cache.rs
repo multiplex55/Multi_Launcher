@@ -1,7 +1,6 @@
 use crate::actions::Action;
 use crate::mouse_gestures::db::{GESTURES_FILE, GestureDb, load_gestures};
 use crate::mouse_gestures::usage::{GESTURES_USAGE_FILE, GestureUsageEntry, load_usage};
-use crate::plugin::PluginManager;
 use crate::plugins::calendar::{
     CALENDAR_EVENTS_FILE, CalendarSnapshot, build_snapshot, refresh_events_from_disk,
 };
@@ -12,7 +11,10 @@ use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets};
 use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos};
 use crate::{launcher, launcher::RecycleBinInfo};
 use chrono::Local;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
 
@@ -81,452 +83,499 @@ impl Default for DashboardDataSnapshot {
     }
 }
 
-impl DashboardDataSnapshot {
-    fn with_clipboard_history(&self, history: Vec<String>) -> Self {
-        Self {
-            clipboard_history: Arc::new(history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_snippets(&self, snippets: Vec<SnippetEntry>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::new(snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_notes(&self, notes: Vec<Note>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::new(notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_todos(&self, todos: Vec<TodoEntry>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::new(todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_favorites(&self, favorites: Vec<FavEntry>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::new(favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_processes(&self, processes: Vec<Action>, process_error: Option<String>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::new(processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error,
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_system_status(&self, system_status: Option<SystemStatusSnapshot>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status,
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_recycle_bin(&self, recycle_bin: Option<RecycleBinSnapshot>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin,
-        }
-    }
-
-    fn with_calendar(&self, calendar: CalendarSnapshot) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::new(calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::clone(&self.gestures),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
-
-    fn with_gestures(&self, db: GestureDb, usage: Vec<GestureUsageEntry>) -> Self {
-        Self {
-            clipboard_history: Arc::clone(&self.clipboard_history),
-            snippets: Arc::clone(&self.snippets),
-            notes: Arc::clone(&self.notes),
-            todos: Arc::clone(&self.todos),
-            calendar: Arc::clone(&self.calendar),
-            processes: Arc::clone(&self.processes),
-            favorites: Arc::clone(&self.favorites),
-            gestures: Arc::new(GestureSnapshot {
-                db: Arc::new(db),
-                usage: Arc::new(usage),
-            }),
-            process_error: self.process_error.clone(),
-            system_status: self.system_status.clone(),
-            recycle_bin: self.recycle_bin.clone(),
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DashboardRefreshRequest {
+    All,
+    Clipboard,
+    Snippets,
+    Notes,
+    Todos,
+    Calendar,
+    Processes,
+    Favorites,
+    Gestures,
+    SystemStatus,
+    RecycleBin,
 }
 
-struct DashboardDataState {
-    snapshot: Arc<DashboardDataSnapshot>,
-    last_process_refresh: Instant,
-    last_system_refresh: Instant,
-    last_recycle_refresh: Instant,
-    last_network_totals: (u64, u64),
-    last_network_time: Instant,
-    refresh_requests: RefreshRequests,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct RefreshRequests {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RefreshBatch {
+    all: bool,
+    clipboard: bool,
+    snippets: bool,
+    notes: bool,
     todos: bool,
+    calendar: bool,
     processes: bool,
+    favorites: bool,
+    gestures: bool,
     system_status: bool,
     recycle_bin: bool,
 }
 
+impl RefreshBatch {
+    fn insert(&mut self, request: DashboardRefreshRequest) {
+        if request == DashboardRefreshRequest::All {
+            *self = Self {
+                all: true,
+                ..Self::default()
+            };
+            return;
+        }
+        if self.all {
+            return;
+        }
+        match request {
+            DashboardRefreshRequest::All => unreachable!(),
+            DashboardRefreshRequest::Clipboard => self.clipboard = true,
+            DashboardRefreshRequest::Snippets => self.snippets = true,
+            DashboardRefreshRequest::Notes => self.notes = true,
+            DashboardRefreshRequest::Todos => self.todos = true,
+            DashboardRefreshRequest::Calendar => self.calendar = true,
+            DashboardRefreshRequest::Processes => self.processes = true,
+            DashboardRefreshRequest::Favorites => self.favorites = true,
+            DashboardRefreshRequest::Gestures => self.gestures = true,
+            DashboardRefreshRequest::SystemStatus => self.system_status = true,
+            DashboardRefreshRequest::RecycleBin => self.recycle_bin = true,
+        }
+    }
+
+    fn contains(&self, request: DashboardRefreshRequest) -> bool {
+        self.all
+            || match request {
+                DashboardRefreshRequest::All => self.all,
+                DashboardRefreshRequest::Clipboard => self.clipboard,
+                DashboardRefreshRequest::Snippets => self.snippets,
+                DashboardRefreshRequest::Notes => self.notes,
+                DashboardRefreshRequest::Todos => self.todos,
+                DashboardRefreshRequest::Calendar => self.calendar,
+                DashboardRefreshRequest::Processes => self.processes,
+                DashboardRefreshRequest::Favorites => self.favorites,
+                DashboardRefreshRequest::Gestures => self.gestures,
+                DashboardRefreshRequest::SystemStatus => self.system_status,
+                DashboardRefreshRequest::RecycleBin => self.recycle_bin,
+            }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PendingRefresh {
+    batch: RefreshBatch,
+    generation: u64,
+}
+
+struct DashboardShared {
+    snapshot: Mutex<Arc<DashboardDataSnapshot>>,
+    pending: Mutex<PendingRefresh>,
+    next_generation: AtomicU64,
+    completed_generation: Mutex<u64>,
+    completion: Condvar,
+    wake_tx: SyncSender<()>,
+    shutting_down: AtomicBool,
+}
+
+/// Cheap, cloneable dashboard read/request handle. It never executes refresh work.
+#[derive(Clone)]
 pub struct DashboardDataCache {
-    state: Mutex<DashboardDataState>,
+    shared: Arc<DashboardShared>,
 }
 
 impl DashboardDataCache {
-    pub fn new() -> Self {
+    fn disconnected() -> Self {
+        let (wake_tx, _wake_rx) = sync_channel(1);
         Self {
-            state: Mutex::new(DashboardDataState {
-                snapshot: Arc::new(DashboardDataSnapshot::default()),
-                last_process_refresh: Instant::now() - Duration::from_secs(60),
-                last_system_refresh: Instant::now() - Duration::from_secs(60),
-                last_recycle_refresh: Instant::now() - Duration::from_secs(60),
-                last_network_totals: (0, 0),
-                last_network_time: Instant::now() - Duration::from_secs(60),
-                refresh_requests: RefreshRequests::default(),
+            shared: Arc::new(DashboardShared {
+                snapshot: Mutex::new(Arc::new(DashboardDataSnapshot::default())),
+                pending: Mutex::new(PendingRefresh::default()),
+                next_generation: AtomicU64::new(0),
+                completed_generation: Mutex::new(0),
+                completion: Condvar::new(),
+                wake_tx,
+                shutting_down: AtomicBool::new(true),
             }),
         }
     }
 
+    pub fn new() -> Self {
+        Self::disconnected()
+    }
+
     pub fn snapshot(&self) -> Arc<DashboardDataSnapshot> {
-        self.state
+        self.shared
+            .snapshot
             .lock()
-            .map(|state| Arc::clone(&state.snapshot))
+            .map(|snapshot| Arc::clone(&snapshot))
             .unwrap_or_else(|_| Arc::new(DashboardDataSnapshot::default()))
     }
 
-    pub fn refresh_all(&self, plugins: &PluginManager) {
-        self.refresh_clipboard();
-        self.refresh_snippets();
-        self.refresh_notes();
-        self.refresh_todos();
-        self.refresh_calendar();
-        self.refresh_favorites();
-        self.refresh_gestures();
-        self.refresh_processes(plugins);
-        self.refresh_system_status();
-        self.refresh_recycle_bin();
-    }
-
-    pub fn refresh_clipboard(&self) {
-        let history = load_history(CLIPBOARD_FILE)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_clipboard_history(history));
+    pub fn request_refresh(&self, request: DashboardRefreshRequest) {
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return;
         }
-    }
-
-    pub fn refresh_snippets(&self) {
-        let snippets = load_snippets(SNIPPETS_FILE).unwrap_or_default();
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_snippets(snippets));
-        }
-    }
-
-    pub fn refresh_notes(&self) {
-        let notes = load_notes().unwrap_or_default();
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_notes(notes));
-        }
-    }
-
-    pub fn refresh_todos(&self) {
-        let todos = load_todos(TODO_FILE).unwrap_or_default();
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_todos(todos));
-        }
-    }
-
-    pub fn request_refresh_todos(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.refresh_requests.todos = true;
-        }
-    }
-
-    pub fn refresh_calendar(&self) {
-        let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
-        let snapshot = build_snapshot(Local::now().naive_local());
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_calendar(snapshot));
-        }
-    }
-
-    pub fn refresh_favorites(&self) {
-        let favorites = load_favs(FAV_FILE).unwrap_or_default();
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_favorites(favorites));
-        }
-    }
-
-    pub fn refresh_gestures(&self) {
-        let db = load_gestures(GESTURES_FILE).unwrap_or_default();
-        let usage = load_usage(GESTURES_USAGE_FILE);
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_gestures(db, usage));
-        }
-    }
-
-    pub fn maybe_refresh_processes(&self, plugins: &PluginManager, interval: Duration) {
-        let should_refresh = self
-            .state
-            .lock()
-            .map(|state| state.last_process_refresh.elapsed() >= interval)
-            .unwrap_or(false);
-        if should_refresh {
-            self.refresh_processes(plugins);
-        }
-    }
-
-    pub fn refresh_processes(&self, plugins: &PluginManager) {
-        let (processes, error) = Self::load_processes(plugins);
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_processes(processes, error));
-            state.last_process_refresh = Instant::now();
-        }
-    }
-
-    pub fn request_refresh_processes(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.refresh_requests.processes = true;
-        }
-    }
-
-    pub fn maybe_refresh_system_status(&self, interval: Duration) {
-        let should_refresh = self
-            .state
-            .lock()
-            .map(|state| state.last_system_refresh.elapsed() >= interval)
-            .unwrap_or(false);
-        if should_refresh {
-            self.refresh_system_status();
-        }
-    }
-
-    pub fn refresh_system_status(&self) {
-        let mut system = System::new_all();
-        system.refresh_cpu_usage();
-        system.refresh_memory();
-        let disks = Disks::new_with_refreshed_list();
-        let mut nets = Networks::new_with_refreshed_list();
-        nets.refresh(true);
-
-        let cpu_percent = system.global_cpu_usage();
-        let total_mem = system.total_memory() as f32;
-        let used_mem = system.used_memory() as f32;
-        let mem_percent = if total_mem > 0.0 {
-            used_mem / total_mem * 100.0
+        let generation = self.shared.next_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut pending) = self.shared.pending.lock() {
+            pending.batch.insert(request);
+            pending.generation = pending.generation.max(generation);
         } else {
-            0.0
-        };
-
-        let mut total_disk = 0u64;
-        let mut avail_disk = 0u64;
-        for d in disks.list() {
-            total_disk += d.total_space();
-            avail_disk += d.available_space();
+            return;
         }
-        let disk_percent = if total_disk > 0 {
-            (total_disk.saturating_sub(avail_disk)) as f32 / total_disk as f32 * 100.0
-        } else {
-            0.0
-        };
-
-        let mut total_rx = 0u64;
-        let mut total_tx = 0u64;
-        for data in nets.values() {
-            total_rx += data.total_received();
-            total_tx += data.total_transmitted();
-        }
-
-        let now = Instant::now();
-        let (last_totals, last_time) = if let Ok(state) = self.state.lock() {
-            (state.last_network_totals, state.last_network_time)
-        } else {
-            ((0, 0), now - Duration::from_secs(1))
-        };
-        let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
-        let rx_rate = (total_rx.saturating_sub(last_totals.0)) as f64 / dt;
-        let tx_rate = (total_tx.saturating_sub(last_totals.1)) as f64 / dt;
-
-        let snapshot = SystemStatusSnapshot {
-            cpu_percent,
-            mem_percent,
-            disk_percent,
-            net_rx_per_sec: rx_rate,
-            net_tx_per_sec: tx_rate,
-            volume_percent: get_system_volume(),
-            brightness_percent: get_main_display_brightness(),
-        };
-
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_system_status(Some(snapshot)));
-            state.last_system_refresh = now;
-            state.last_network_totals = (total_rx, total_tx);
-            state.last_network_time = now;
+        match self.shared.wake_tx.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => {}
+            Err(TrySendError::Disconnected(())) => {
+                self.shared.shutting_down.store(true, Ordering::Release);
+            }
         }
     }
 
-    pub fn request_refresh_system_status(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.refresh_requests.system_status = true;
-        }
-    }
-
-    pub fn maybe_refresh_recycle_bin(&self, interval: Duration) {
-        let should_refresh = self
-            .state
-            .lock()
-            .map(|state| state.last_recycle_refresh.elapsed() >= interval)
-            .unwrap_or(false);
-        if should_refresh {
-            self.refresh_recycle_bin();
-        }
-    }
-
-    pub fn refresh_recycle_bin(&self) {
-        let snapshot = launcher::query_recycle_bin().map(RecycleBinSnapshot::from);
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot = Arc::new(state.snapshot.with_recycle_bin(snapshot));
-            state.last_recycle_refresh = Instant::now();
-        }
-    }
-
-    pub fn request_refresh_recycle_bin(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.refresh_requests.recycle_bin = true;
-        }
-    }
-
-    pub fn flush_refresh_requests(&self, plugins: &PluginManager) {
-        let requests = if let Ok(mut state) = self.state.lock() {
-            let requests = state.refresh_requests;
-            state.refresh_requests = RefreshRequests::default();
-            requests
-        } else {
-            RefreshRequests::default()
-        };
-
-        if requests.todos {
-            self.refresh_todos();
-        }
-        if requests.processes {
-            self.refresh_processes(plugins);
-        }
-        if requests.system_status {
-            self.refresh_system_status();
-        }
-        if requests.recycle_bin {
-            self.refresh_recycle_bin();
-        }
-    }
-
-    fn load_processes(plugins: &PluginManager) -> (Vec<Action>, Option<String>) {
-        let plugin = plugins.iter().find(|p| p.name() == "processes");
-        if let Some(plugin) = plugin {
-            (plugin.search("ps"), None)
-        } else {
-            (Vec::new(), Some("Processes plugin not available.".into()))
+    #[cfg(test)]
+    pub(crate) fn wait_for_refresh(&self) {
+        let target = self.shared.next_generation.load(Ordering::Acquire);
+        let mut completed = self.shared.completed_generation.lock().unwrap();
+        while *completed < target {
+            completed = self.shared.completion.wait(completed).unwrap();
         }
     }
 }
 
+impl Default for DashboardDataCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+trait DashboardDataBackend: Send + 'static {
+    fn refresh(
+        &mut self,
+        batch: RefreshBatch,
+        current: &DashboardDataSnapshot,
+    ) -> DashboardDataSnapshot;
+}
+
+#[derive(Default)]
+struct ProductionDashboardBackend {
+    last_network_totals: (u64, u64),
+    last_network_time: Option<Instant>,
+}
+
+impl ProductionDashboardBackend {
+    fn system_status(&mut self, system: &mut System) -> SystemStatusSnapshot {
+        system.refresh_cpu_usage();
+        system.refresh_memory();
+        let disks = Disks::new_with_refreshed_list();
+        let mut networks = Networks::new_with_refreshed_list();
+        networks.refresh(true);
+
+        let total_memory = system.total_memory() as f32;
+        let total_disk = disks
+            .list()
+            .iter()
+            .map(|disk| disk.total_space())
+            .sum::<u64>();
+        let available_disk = disks
+            .list()
+            .iter()
+            .map(|disk| disk.available_space())
+            .sum::<u64>();
+        let totals = networks.values().fold((0_u64, 0_u64), |totals, data| {
+            (
+                totals.0 + data.total_received(),
+                totals.1 + data.total_transmitted(),
+            )
+        });
+        let now = Instant::now();
+        let elapsed = self
+            .last_network_time
+            .map(|last| now.duration_since(last).as_secs_f64().max(0.001))
+            .unwrap_or(1.0);
+        let snapshot = SystemStatusSnapshot {
+            cpu_percent: system.global_cpu_usage(),
+            mem_percent: if total_memory > 0.0 {
+                system.used_memory() as f32 / total_memory * 100.0
+            } else {
+                0.0
+            },
+            disk_percent: if total_disk > 0 {
+                total_disk.saturating_sub(available_disk) as f32 / total_disk as f32 * 100.0
+            } else {
+                0.0
+            },
+            net_rx_per_sec: totals.0.saturating_sub(self.last_network_totals.0) as f64 / elapsed,
+            net_tx_per_sec: totals.1.saturating_sub(self.last_network_totals.1) as f64 / elapsed,
+            volume_percent: get_system_volume(),
+            brightness_percent: get_main_display_brightness(),
+        };
+        self.last_network_totals = totals;
+        self.last_network_time = Some(now);
+        snapshot
+    }
+}
+
+impl DashboardDataBackend for ProductionDashboardBackend {
+    fn refresh(
+        &mut self,
+        batch: RefreshBatch,
+        current: &DashboardDataSnapshot,
+    ) -> DashboardDataSnapshot {
+        let mut next = current.clone();
+        let needs_system = batch.contains(DashboardRefreshRequest::Processes)
+            || batch.contains(DashboardRefreshRequest::SystemStatus);
+        let mut system = needs_system.then(System::new_all);
+        if batch.contains(DashboardRefreshRequest::Clipboard) {
+            next.clipboard_history = Arc::new(
+                load_history(CLIPBOARD_FILE)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        if batch.contains(DashboardRefreshRequest::Snippets) {
+            next.snippets = Arc::new(load_snippets(SNIPPETS_FILE).unwrap_or_default());
+        }
+        if batch.contains(DashboardRefreshRequest::Notes) {
+            next.notes = Arc::new(load_notes().unwrap_or_default());
+        }
+        if batch.contains(DashboardRefreshRequest::Todos) {
+            next.todos = Arc::new(load_todos(TODO_FILE).unwrap_or_default());
+        }
+        if batch.contains(DashboardRefreshRequest::Calendar) {
+            let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
+            next.calendar = Arc::new(build_snapshot(Local::now().naive_local()));
+        }
+        if batch.contains(DashboardRefreshRequest::Processes) {
+            let processes = system
+                .as_ref()
+                .expect("system collected for process refresh")
+                .processes()
+                .values()
+                .map(|process| crate::plugins::system_data::ProcessSnapshot {
+                    name: process.name().to_string_lossy().into_owned(),
+                    pid: process.pid().as_u32(),
+                })
+                .collect::<Vec<_>>();
+            next.processes = Arc::new(crate::plugins::processes::actions_from_snapshot(
+                "ps", &processes,
+            ));
+            next.process_error = None;
+        }
+        if batch.contains(DashboardRefreshRequest::Favorites) {
+            next.favorites = Arc::new(load_favs(FAV_FILE).unwrap_or_default());
+        }
+        if batch.contains(DashboardRefreshRequest::Gestures) {
+            next.gestures = Arc::new(GestureSnapshot {
+                db: Arc::new(load_gestures(GESTURES_FILE).unwrap_or_default()),
+                usage: Arc::new(load_usage(GESTURES_USAGE_FILE)),
+            });
+        }
+        if batch.contains(DashboardRefreshRequest::SystemStatus) {
+            next.system_status = Some(
+                self.system_status(
+                    system
+                        .as_mut()
+                        .expect("system collected for status refresh"),
+                ),
+            );
+        }
+        if batch.contains(DashboardRefreshRequest::RecycleBin) {
+            next.recycle_bin = launcher::query_recycle_bin().map(RecycleBinSnapshot::from);
+        }
+        next
+    }
+}
+
+/// Owns the dashboard worker. Dropping it signals shutdown and joins deterministically.
+pub struct DashboardRuntime {
+    cache: DashboardDataCache,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl DashboardRuntime {
+    pub fn start(repaint: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::start_with_backend(ProductionDashboardBackend::default(), repaint)
+    }
+
+    fn start_with_backend(
+        backend: impl DashboardDataBackend,
+        repaint: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let (wake_tx, wake_rx) = sync_channel(1);
+        let shared = Arc::new(DashboardShared {
+            snapshot: Mutex::new(Arc::new(DashboardDataSnapshot::default())),
+            pending: Mutex::new(PendingRefresh::default()),
+            next_generation: AtomicU64::new(0),
+            completed_generation: Mutex::new(0),
+            completion: Condvar::new(),
+            wake_tx,
+            shutting_down: AtomicBool::new(false),
+        });
+        let cache = DashboardDataCache {
+            shared: Arc::clone(&shared),
+        };
+        let worker = thread::Builder::new()
+            .name("dashboard-refresh".into())
+            .spawn(move || run_worker(shared, wake_rx, backend, Arc::new(repaint)))
+            .expect("failed to start dashboard refresh worker");
+        Self {
+            cache,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn cache(&self) -> DashboardDataCache {
+        self.cache.clone()
+    }
+}
+
+impl Drop for DashboardRuntime {
+    fn drop(&mut self) {
+        self.cache
+            .shared
+            .shutting_down
+            .store(true, Ordering::Release);
+        let _ = self.cache.shared.wake_tx.try_send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_worker(
+    shared: Arc<DashboardShared>,
+    wake_rx: Receiver<()>,
+    mut backend: impl DashboardDataBackend,
+    repaint: Arc<dyn Fn() + Send + Sync>,
+) {
+    while wake_rx.recv().is_ok() {
+        if shared.shutting_down.load(Ordering::Acquire) {
+            break;
+        }
+        let pending = shared
+            .pending
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
+        let batch = pending.batch;
+        if batch.is_empty() {
+            continue;
+        }
+        let timer = batch.all.then(crate::performance::Timer::start);
+        let current = shared
+            .snapshot
+            .lock()
+            .map(|snapshot| Arc::clone(&snapshot))
+            .unwrap_or_default();
+        let next = backend.refresh(batch, &current);
+        if let Ok(mut snapshot) = shared.snapshot.lock() {
+            *snapshot = Arc::new(next);
+        }
+        if let Some(timer) = timer {
+            timer.finish("startup.dashboard_initial_refresh_complete");
+        }
+        if let Ok(mut completed) = shared.completed_generation.lock() {
+            *completed = (*completed).max(pending.generation);
+            shared.completion.notify_all();
+        }
+        repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{Sender, TryRecvError, channel};
+
+    struct ControlledBackend {
+        started: Sender<RefreshBatch>,
+        release: Receiver<()>,
+        generation: usize,
+    }
+
+    impl DashboardDataBackend for ControlledBackend {
+        fn refresh(
+            &mut self,
+            batch: RefreshBatch,
+            current: &DashboardDataSnapshot,
+        ) -> DashboardDataSnapshot {
+            self.started.send(batch).unwrap();
+            self.release.recv().unwrap();
+            self.generation += 1;
+            let mut next = current.clone();
+            next.clipboard_history = Arc::new(vec![self.generation.to_string()]);
+            next
+        }
+    }
+
+    #[test]
+    fn all_subsumes_specific_requests() {
+        let mut batch = RefreshBatch::default();
+        batch.insert(DashboardRefreshRequest::Notes);
+        batch.insert(DashboardRefreshRequest::All);
+        batch.insert(DashboardRefreshRequest::Todos);
+        assert_eq!(
+            batch,
+            RefreshBatch {
+                all: true,
+                ..RefreshBatch::default()
+            }
+        );
+    }
+
+    #[test]
+    fn requests_arriving_during_work_form_a_followup_batch() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let runtime = DashboardRuntime::start_with_backend(
+            ControlledBackend {
+                started: started_tx,
+                release: release_rx,
+                generation: 0,
+            },
+            move || {
+                repaint_tx.send(()).unwrap();
+            },
+        );
+        let cache = runtime.cache();
+        cache.request_refresh(DashboardRefreshRequest::Notes);
+        assert!(
+            started_rx
+                .recv()
+                .unwrap()
+                .contains(DashboardRefreshRequest::Notes)
+        );
+        cache.request_refresh(DashboardRefreshRequest::Todos);
+        cache.request_refresh(DashboardRefreshRequest::Calendar);
+        assert!(cache.snapshot().clipboard_history.is_empty());
+        release_tx.send(()).unwrap();
+        repaint_rx.recv().unwrap();
+        let followup = started_rx.recv().unwrap();
+        assert!(followup.contains(DashboardRefreshRequest::Todos));
+        assert!(followup.contains(DashboardRefreshRequest::Calendar));
+        release_tx.send(()).unwrap();
+        repaint_rx.recv().unwrap();
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(cache.snapshot().clipboard_history.as_ref(), &["2"]);
+        drop(runtime);
+    }
+
+    #[test]
+    fn dropping_runtime_joins_an_idle_worker() {
+        let (started_tx, _started_rx) = channel();
+        let (_release_tx, release_rx) = channel();
+        let runtime = DashboardRuntime::start_with_backend(
+            ControlledBackend {
+                started: started_tx,
+                release: release_rx,
+                generation: 0,
+            },
+            || {},
+        );
+        drop(runtime);
+    }
+}
 #[cfg(target_os = "windows")]
 fn get_system_volume() -> Option<u8> {
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
@@ -618,10 +667,4 @@ fn get_main_display_brightness() -> Option<u8> {
 #[cfg(not(target_os = "windows"))]
 fn get_main_display_brightness() -> Option<u8> {
     None
-}
-
-impl Default for DashboardDataCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }

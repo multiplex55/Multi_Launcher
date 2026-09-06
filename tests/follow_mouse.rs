@@ -4,7 +4,7 @@ use multi_launcher::window_manager::{
     MOCK_MOUSE_LOCK, clear_mock_mouse_position, set_mock_mouse_position,
 };
 
-#[path = "mock_ctx.rs"]
+#[path = "support/mock_ctx.rs"]
 mod mock_ctx;
 use mock_ctx::MockCtx;
 

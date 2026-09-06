@@ -869,6 +869,19 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
+        let plugin_search_generation = self.plugins.search_generation();
+        if plugin_search_generation != self.last_plugin_search_generation {
+            self.last_plugin_search_generation = plugin_search_generation;
+            self.last_results_valid = false;
+            self.search();
+        }
+
+        crate::performance::record_frame(
+            self.visible_flag.load(Ordering::Relaxed),
+            ctx.input(|input| input.viewport().focused).unwrap_or(true),
+            self.should_show_dashboard(self.query.as_str()),
+        );
+
         if self
             .mkmacro_dialog
             .action_editor
@@ -1245,8 +1258,6 @@ impl eframe::App for LauncherApp {
             });
 
             if use_dashboard {
-                self.dashboard_data_cache
-                    .flush_refresh_requests(&self.plugins);
                 if !self.suggestions.is_empty() {
                     self.autocomplete_index = 0;
                     self.suggestions.clear();
@@ -1261,6 +1272,12 @@ impl eframe::App for LauncherApp {
                 } else {
                     None
                 };
+                let repaint_demand = self.dashboard.repaint_demand(
+                    dashboard_visible,
+                    dashboard_focused,
+                    self.reduce_dashboard_work_when_unfocused,
+                    show_diagnostics_widget,
+                );
                 let dash_ctx = DashboardContext {
                     actions: &self.actions,
                     actions_by_id: &self.actions_by_id,
@@ -1283,8 +1300,22 @@ impl eframe::App for LauncherApp {
                     diagnostics,
                     show_diagnostics_widget,
                 };
-                ctx.request_repaint_after(Duration::from_millis(250));
-                if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
+                if let Some(interval) = crate::dashboard::repaint_interval(
+                    crate::dashboard::RepaintPolicyInput {
+                        launcher_visible: dashboard_visible,
+                        dashboard_active: true,
+                        viewport_focused: dashboard_focused,
+                        reduce_when_unfocused: self.reduce_dashboard_work_when_unfocused,
+                        demand: repaint_demand,
+                    },
+                ) {
+                    crate::performance::record_dashboard_repaint_request();
+                    ctx.request_repaint_after(interval);
+                }
+                if crate::dashboard::dashboard_should_render(dashboard_visible, true)
+                    && let Some(action) =
+                        self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
+                {
                     self.activate_action(action.action, action.query_override, ActivationSource::Dashboard);
                 }
             } else {
@@ -1434,11 +1465,13 @@ impl eframe::App for LauncherApp {
             let mut dlg = std::mem::take(&mut self.dashboard_editor);
             let plugin_infos = self.plugins.plugin_infos();
             let plugin_commands = self.plugins.commands();
+            let dashboard_snapshot = self.dashboard_data_cache.snapshot();
             let settings_ctx = WidgetSettingsContext {
                 plugins: Some(&self.plugins),
                 plugin_infos: Some(&plugin_infos),
                 plugin_commands: Some(&plugin_commands),
                 actions: Some(self.actions.as_slice()),
+                favorites: Some(dashboard_snapshot.favorites.as_ref()),
                 usage: Some(&self.usage),
                 default_location: self.dashboard_default_location.as_deref(),
                 enabled_plugins: self.enabled_plugins.as_ref(),
@@ -1542,12 +1575,13 @@ impl eframe::App for LauncherApp {
         notes_dlg.ui(ctx, self);
         self.notes_dialog = notes_dlg;
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
-        let data_cache: *const DashboardDataCache = &self.dashboard_data_cache;
-        // SAFETY: `data_cache` points to a stable field on `self` for this call. The dialog
-        // only reads through `&DashboardDataCache` while `self` is mutably borrowed for app
-        // actions; no mutation of `dashboard_data_cache` occurs here.
-        let data_cache = unsafe { &*data_cache };
-        graph_dlg.ui(ctx, self, data_cache, crate::plugins::note::note_version());
+        let dashboard_snapshot = self.dashboard_data_cache.snapshot();
+        graph_dlg.ui(
+            ctx,
+            self,
+            dashboard_snapshot,
+            crate::plugins::note::note_version(),
+        );
         self.note_graph_dialog = graph_dlg;
         let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
         assets_dlg.ui(ctx, self);
@@ -1631,6 +1665,11 @@ impl eframe::App for LauncherApp {
         }
         self.enforce_pinned();
         self.update_panel_stack();
+        if !self.dashboard_initial_refresh_queued {
+            self.dashboard_initial_refresh_queued = true;
+            self.dashboard_data_cache
+                .request_refresh(DashboardRefreshRequest::All);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

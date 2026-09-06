@@ -24,7 +24,7 @@ mod notes_tags;
 mod now_playing;
 mod pinned_commands;
 mod pinned_query_results;
-mod plugin_home;
+pub(crate) mod plugin_home;
 mod process_list;
 mod query_list;
 mod query_suggestions;
@@ -108,6 +108,7 @@ pub struct WidgetSettingsContext<'a> {
     pub plugin_infos: Option<&'a [(String, String, Vec<String>)]>,
     pub plugin_commands: Option<&'a [Action]>,
     pub actions: Option<&'a [Action]>,
+    pub favorites: Option<&'a [crate::plugins::fav::FavEntry]>,
     pub usage: Option<&'a std::collections::HashMap<String, u32>>,
     pub default_location: Option<&'a str>,
     pub enabled_plugins: Option<&'a HashSet<String>>,
@@ -120,6 +121,7 @@ impl<'a> WidgetSettingsContext<'a> {
             plugin_infos: None,
             plugin_commands: None,
             actions: None,
+            favorites: None,
             usage: None,
             default_location: None,
             enabled_plugins: None,
@@ -151,7 +153,8 @@ pub trait Widget: Send {
 
 pub(crate) use query_suggestions::query_suggestions;
 pub(crate) use render::{
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin, gesture_focus_action,
-    gesture_toggle_action, merge_json, plugin_names, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, default_refresh_throttle_secs, edit_typed_settings, find_plugin,
+    gesture_focus_action, gesture_toggle_action, merge_json, observe_owned_search_publication,
+    observe_search_generation, plugin_names, refresh_schedule, refresh_settings_ui,
+    run_refresh_schedule, submit_background_refresh,
 };

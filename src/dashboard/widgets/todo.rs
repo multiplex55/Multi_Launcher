@@ -3,6 +3,7 @@ use super::{
     query_suggestions,
 };
 use crate::actions::Action;
+use crate::dashboard::DashboardRefreshRequest;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugins::todo::{TODO_FILE, TodoEntry, mark_done};
 use eframe::egui;
@@ -393,7 +394,8 @@ impl TodoWidget {
                             if let Err(err) = mark_done(TODO_FILE, idx) {
                                 tracing::error!("Failed to toggle todo #{idx}: {err}");
                             } else {
-                                ctx.data_cache.request_refresh_todos();
+                                ctx.data_cache
+                                    .request_refresh(DashboardRefreshRequest::Todos);
                             }
                         }
                         let mut label = entry.text.clone();

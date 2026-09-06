@@ -45,6 +45,7 @@ pub mod snippets;
 pub mod stopwatch;
 pub mod sysinfo;
 pub mod system;
+pub(crate) mod system_data;
 pub mod task_manager;
 pub mod tempfile;
 pub mod text_case;

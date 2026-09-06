@@ -1,17 +1,35 @@
 use crate::actions::Action;
-use crate::plugin::Plugin;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-use sysinfo::{ProcessesToUpdate, System};
+use crate::plugin::{Plugin, PluginSearchUpdates};
+use crate::plugins::system_data::{SystemDataCache, SystemDataRuntime};
+use std::sync::Arc;
 
-pub struct VolumePlugin;
+pub struct VolumePlugin {
+    cache: SystemDataCache,
+    _runtime: Option<SystemDataRuntime>,
+}
+
+impl VolumePlugin {
+    pub(crate) fn new(cache: SystemDataCache) -> Self {
+        Self {
+            cache,
+            _runtime: None,
+        }
+    }
+}
+
+impl Default for VolumePlugin {
+    fn default() -> Self {
+        let runtime = SystemDataRuntime::start(Arc::new(PluginSearchUpdates::default()));
+        let cache = runtime.cache();
+        Self {
+            cache,
+            _runtime: Some(runtime),
+        }
+    }
+}
 
 impl Plugin for VolumePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        static SYSTEM_CACHE: Lazy<Mutex<(System, Instant)>> =
-            Lazy::new(|| Mutex::new((System::new_all(), Instant::now())));
-        const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
         let trimmed = query.trim();
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "vol")
             && rest.is_empty()
@@ -62,30 +80,17 @@ impl Plugin for VolumePlugin {
                     if let Ok(level) = level_str.parse::<u32>()
                         && level <= 100
                     {
-                        let pid_opt = {
-                            let mut guard = match SYSTEM_CACHE.lock() {
-                                Ok(guard) => guard,
-                                Err(err) => {
-                                    tracing::error!(?err, "volume system cache lock poisoned");
-                                    return Vec::new();
-                                }
-                            };
-                            if guard.1.elapsed() > CACHE_TIMEOUT {
-                                guard.0.refresh_processes(ProcessesToUpdate::All, true);
-                                guard.1 = Instant::now();
-                            }
-                            guard
-                                .0
-                                .processes()
-                                .values()
-                                .find(|p| p.name().to_string_lossy().eq_ignore_ascii_case(exe))
-                                .map(|p| p.pid().as_u32())
-                        };
-                        if let Some(pid) = pid_opt {
+                        let snapshot = self.cache.snapshot_and_refresh();
+                        if let Some(process) = snapshot.as_deref().and_then(|snapshot| {
+                            snapshot
+                                .processes
+                                .iter()
+                                .find(|process| process.name.eq_ignore_ascii_case(exe))
+                        }) {
                             return vec![Action {
                                 label: format!("Set {exe} volume to {level}%"),
-                                desc: format!("PID {pid}"),
-                                action: format!("volume:pid:{pid}:{level}"),
+                                desc: format!("PID {}", process.pid),
+                                action: format!("volume:pid:{}:{level}", process.pid),
                                 args: None,
                             }];
                         }
@@ -124,5 +129,24 @@ impl Plugin for VolumePlugin {
                 args: None,
             },
         ]
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::system_data::{ProcessSnapshot, SystemDataSnapshot};
+
+    #[test]
+    fn name_lookup_uses_cached_process_snapshot() {
+        let plugin = VolumePlugin::new(SystemDataCache::from_snapshot(SystemDataSnapshot {
+            processes: Arc::new(vec![ProcessSnapshot {
+                name: "sample.exe".into(),
+                pid: 42,
+            }]),
+            ..SystemDataSnapshot::default()
+        }));
+        let actions = plugin.search("vol name SAMPLE.EXE 20");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "volume:pid:42:20");
     }
 }

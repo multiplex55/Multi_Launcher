@@ -1,7 +1,7 @@
 use super::{
-    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -46,6 +46,7 @@ struct VolumeSnapshot {
 pub struct VolumeWidget {
     cfg: VolumeConfig,
     cache: TimedCache<VolumeSnapshot>,
+    loader: BackgroundLoader<(), VolumeSnapshot>,
     refresh_pending: bool,
 }
 
@@ -55,6 +56,7 @@ impl VolumeWidget {
         Self {
             cfg,
             cache: TimedCache::new(VolumeSnapshot::default(), interval),
+            loader: BackgroundLoader::new(|()| Self::load_snapshot()),
             refresh_pending: true,
         }
     }
@@ -84,19 +86,21 @@ impl VolumeWidget {
         self.cache.set_interval(self.refresh_interval());
     }
 
-    fn refresh(&mut self) {
-        self.update_interval();
+    fn load_snapshot() -> VolumeSnapshot {
         let system_volume = get_system_volume().unwrap_or(50);
         let mut processes = get_process_volumes();
         processes.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
-        self.cache.refresh(|data| {
-            data.system_volume = system_volume;
-            data.processes = processes;
-        });
+        VolumeSnapshot {
+            system_volume,
+            processes,
+        }
     }
 
-    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
+    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>, repaint: &egui::Context) {
         self.update_interval();
+        if let Some(snapshot) = self.loader.poll() {
+            self.cache.refresh(|data| *data = snapshot);
+        }
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -109,7 +113,13 @@ impl VolumeWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            self.refresh();
+            submit_background_refresh(
+                &mut self.loader,
+                (),
+                repaint,
+                &mut self.refresh_pending,
+                &mut self.cache.last_refresh,
+            );
         }
     }
 
@@ -139,7 +149,7 @@ impl Widget for VolumeWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.maybe_refresh(ctx);
+        self.maybe_refresh(ctx, ui.ctx());
 
         let mut clicked = None;
 

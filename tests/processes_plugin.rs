@@ -2,51 +2,18 @@ use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::processes::ProcessesPlugin;
 
 #[test]
-fn prefix_ps_returns_both_actions() {
-    let plugin = ProcessesPlugin;
-    let results = plugin.search("ps");
-    assert!(
-        results
-            .iter()
-            .any(|a| a.action.starts_with("process:switch:"))
-    );
-    assert!(
-        results
-            .iter()
-            .any(|a| a.action.starts_with("process:kill:"))
-    );
+fn commands_preserve_process_query_prefixes() {
+    let plugin = ProcessesPlugin::default();
+    let actions: Vec<_> = plugin
+        .commands()
+        .into_iter()
+        .map(|action| action.action)
+        .collect();
+    assert_eq!(actions, ["query:ps ", "query:psk ", "query:pss "]);
 }
 
 #[test]
-fn prefix_psk_returns_only_kill() {
-    let plugin = ProcessesPlugin;
-    let results = plugin.search("psk");
-    assert!(!results.is_empty());
-    assert!(
-        results
-            .iter()
-            .all(|a| a.action.starts_with("process:kill:"))
-    );
-    assert!(
-        !results
-            .iter()
-            .any(|a| a.action.starts_with("process:switch:"))
-    );
-}
-
-#[test]
-fn prefix_pss_returns_only_switch() {
-    let plugin = ProcessesPlugin;
-    let results = plugin.search("pss");
-    assert!(!results.is_empty());
-    assert!(
-        results
-            .iter()
-            .all(|a| a.action.starts_with("process:switch:"))
-    );
-    assert!(
-        !results
-            .iter()
-            .any(|a| a.action.starts_with("process:kill:"))
-    );
+fn unrelated_query_returns_immediately_without_results() {
+    let plugin = ProcessesPlugin::default();
+    assert!(plugin.search("unrelated").is_empty());
 }

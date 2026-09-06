@@ -3,7 +3,7 @@ use super::{
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs};
+use crate::plugins::fav::FavEntry;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -229,8 +229,8 @@ fn available_choices(ctx: &WidgetSettingsContext<'_>) -> Vec<(String, String)> {
             out.push((a.action.clone(), format!("{} ({})", a.label, a.action)));
         }
     }
-    if let Ok(favs) = load_favs(FAV_FILE) {
-        for f in favs {
+    if let Some(favorites) = ctx.favorites {
+        for f in favorites {
             out.push((format!("fav:{}", f.label), format!("Favorite: {}", f.label)));
         }
     }
@@ -381,5 +381,26 @@ mod tests {
         );
         widget.refresh_cache(&ctx);
         assert_eq!(widget.cached_resolved[0].label, "Updated");
+    }
+
+    #[test]
+    fn settings_choices_use_supplied_favorites_snapshot() {
+        let favorites = vec![FavEntry {
+            label: "Snapshot favorite".into(),
+            action: "query:snapshot".into(),
+            args: None,
+        }];
+        let ctx = WidgetSettingsContext {
+            favorites: Some(&favorites),
+            ..WidgetSettingsContext::empty()
+        };
+
+        assert_eq!(
+            available_choices(&ctx),
+            vec![(
+                "fav:Snapshot favorite".into(),
+                "Favorite: Snapshot favorite".into()
+            )]
+        );
     }
 }

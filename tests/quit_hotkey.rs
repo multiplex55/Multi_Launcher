@@ -7,7 +7,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-#[path = "mock_ctx.rs"]
+#[path = "support/mock_ctx.rs"]
 mod mock_ctx;
 use mock_ctx::MockCtx;
 

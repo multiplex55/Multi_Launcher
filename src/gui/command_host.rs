@@ -1,3 +1,4 @@
+use crate::dashboard::DashboardRefreshRequest;
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
@@ -120,7 +121,8 @@ impl CalendarCommandHost for LauncherApp {
     }
 
     fn refresh_calendar_cache(&mut self) {
-        self.dashboard_data_cache.refresh_calendar();
+        self.dashboard_data_cache
+            .request_refresh(DashboardRefreshRequest::Calendar);
     }
 }
 
@@ -210,7 +212,8 @@ impl MouseGestureCommandHost for LauncherApp {
         gesture.enabled = args.enabled;
         crate::mouse_gestures::db::save_gestures(crate::mouse_gestures::db::GESTURES_FILE, &db)
             .map_err(|error| error.to_string())?;
-        self.dashboard_data_cache.refresh_gestures();
+        self.dashboard_data_cache
+            .request_refresh(DashboardRefreshRequest::Gestures);
         Ok(())
     }
 

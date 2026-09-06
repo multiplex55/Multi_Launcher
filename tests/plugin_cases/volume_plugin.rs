@@ -3,7 +3,7 @@ use multi_launcher::plugins::volume::VolumePlugin;
 
 #[test]
 fn search_set_zero() {
-    let plugin = VolumePlugin;
+    let plugin = VolumePlugin::default();
     let results = plugin.search("vol 0");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "volume:set:0");
@@ -11,7 +11,7 @@ fn search_set_zero() {
 
 #[test]
 fn search_set_fifty() {
-    let plugin = VolumePlugin;
+    let plugin = VolumePlugin::default();
     let results = plugin.search("vol 50");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "volume:set:50");
@@ -19,7 +19,7 @@ fn search_set_fifty() {
 
 #[test]
 fn search_mute_active() {
-    let plugin = VolumePlugin;
+    let plugin = VolumePlugin::default();
     let results = plugin.search("vol ma");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "volume:mute_active");
@@ -27,7 +27,7 @@ fn search_mute_active() {
 
 #[test]
 fn search_plain_vol() {
-    let plugin = VolumePlugin;
+    let plugin = VolumePlugin::default();
     let results = plugin.search("vol");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "volume:dialog");
@@ -35,7 +35,7 @@ fn search_plain_vol() {
 
 #[test]
 fn search_pid_level() {
-    let plugin = VolumePlugin;
+    let plugin = VolumePlugin::default();
     let results = plugin.search("vol pid 42 30");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].action, "volume:pid:42:30");
@@ -43,7 +43,7 @@ fn search_pid_level() {
 
 #[test]
 fn search_name_level_missing() {
-    let plugin = VolumePlugin;
+    let plugin = VolumePlugin::default();
     let results = plugin.search("vol name definitely_not_real.exe 20");
     assert!(results.is_empty());
 }

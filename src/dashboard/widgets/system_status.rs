@@ -3,6 +3,7 @@ use super::{
     default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
     run_refresh_schedule,
 };
+use crate::dashboard::DashboardRefreshRequest;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -146,7 +147,8 @@ impl Widget for SystemStatusWidget {
             &mut self.refresh_pending,
             &mut self.last_refresh,
         ) {
-            ctx.data_cache.request_refresh_system_status();
+            ctx.data_cache
+                .request_refresh(DashboardRefreshRequest::SystemStatus);
             self.last_refresh = std::time::Instant::now();
         }
         let snapshot = ctx.data_cache.snapshot();

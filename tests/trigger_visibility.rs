@@ -13,7 +13,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[path = "mock_ctx.rs"]
+#[path = "support/mock_ctx.rs"]
 mod mock_ctx;
 use mock_ctx::MockCtx;
 

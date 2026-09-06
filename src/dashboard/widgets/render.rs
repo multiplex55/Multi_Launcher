@@ -6,7 +6,178 @@ use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use eframe::egui;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+/// Widget-owned capacity-one loader for work that must not run on egui's render thread.
+pub(crate) struct BackgroundLoader<R: Send + 'static, T: Send + 'static> {
+    requests: Option<SyncSender<(R, egui::Context)>>,
+    results: Receiver<Result<T, &'static str>>,
+    worker: Option<JoinHandle<()>>,
+    in_flight: bool,
+    failure: Option<&'static str>,
+}
+
+impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
+    pub(crate) fn new(mut load: impl FnMut(R) -> T + Send + 'static) -> Self {
+        let (request_tx, request_rx) = mpsc::sync_channel::<(R, egui::Context)>(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("dashboard-widget-loader".into())
+            .spawn(move || {
+                while let Ok((request, repaint)) = request_rx.recv() {
+                    let result = catch_unwind(AssertUnwindSafe(|| load(request)));
+                    let panicked = result.is_err();
+                    let result =
+                        result.map_err(|_| "background loader workload panicked unexpectedly");
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                    repaint.request_repaint();
+                    if panicked {
+                        break;
+                    }
+                }
+            })
+            .expect("failed to start dashboard widget loader");
+        Self {
+            requests: Some(request_tx),
+            results: result_rx,
+            worker: Some(worker),
+            in_flight: false,
+            failure: None,
+        }
+    }
+
+    pub(crate) fn request(&mut self, request: R, repaint: &egui::Context) -> bool {
+        if self.in_flight {
+            return false;
+        }
+        let Some(requests) = self.requests.as_ref() else {
+            return false;
+        };
+        match requests.try_send((request, repaint.clone())) {
+            Ok(()) => {
+                self.in_flight = true;
+                true
+            }
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                self.in_flight = false;
+                self.requests.take();
+                self.failure = Some("background loader stopped unexpectedly");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn is_in_flight(&self) -> bool {
+        self.in_flight
+    }
+
+    pub(crate) fn poll(&mut self) -> Option<T> {
+        match self.results.try_recv() {
+            Ok(Ok(result)) => {
+                self.in_flight = false;
+                Some(result)
+            }
+            Ok(Err(failure)) => {
+                self.in_flight = false;
+                self.requests.take();
+                self.failure = Some(failure);
+                None
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.in_flight = false;
+                if self.requests.take().is_some() {
+                    self.failure = Some("background loader stopped unexpectedly");
+                }
+                None
+            }
+        }
+    }
+
+    pub(crate) fn take_failure(&mut self) -> Option<&'static str> {
+        self.failure.take()
+    }
+}
+
+impl<R: Send + 'static, T: Send + 'static> Drop for BackgroundLoader<R, T> {
+    fn drop(&mut self) {
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                // Providers used by production widgets are bounded. Reap an active worker away
+                // from egui so removing a widget never blocks the render thread.
+                let _ = thread::Builder::new()
+                    .name("dashboard-widget-reaper".into())
+                    .spawn(move || {
+                        let _ = worker.join();
+                    });
+            }
+        }
+    }
+}
+
+pub(crate) fn submit_background_refresh<R: Send + 'static, T: Send + 'static>(
+    loader: &mut BackgroundLoader<R, T>,
+    request: R,
+    repaint: &egui::Context,
+    refresh_pending: &mut bool,
+    last_refresh: &mut Instant,
+) -> bool {
+    if loader.request(request, repaint) {
+        // Submission, rather than publication, advances the schedule so a slow provider does not
+        // cause the automatic scheduler to immediately enqueue duplicate work after publication.
+        *last_refresh = Instant::now();
+        true
+    } else {
+        // An explicit request arriving in flight is retained for exactly one follow-up attempt.
+        *refresh_pending = true;
+        false
+    }
+}
+
+pub(crate) fn observe_search_generation(
+    generation: u64,
+    last_generation: &mut u64,
+    refresh_pending: &mut bool,
+) -> bool {
+    if generation == *last_generation {
+        return false;
+    }
+    *last_generation = generation;
+    *refresh_pending = true;
+    true
+}
+
+pub(crate) fn observe_owned_search_publication(
+    mode: RefreshMode,
+    generation: u64,
+    last_generation: &mut u64,
+    request_resolved: bool,
+    awaiting_ticket: &mut Option<u64>,
+    refresh_pending: &mut bool,
+) -> bool {
+    if mode != RefreshMode::Manual {
+        return observe_search_generation(generation, last_generation, refresh_pending);
+    }
+    let Some(_) = *awaiting_ticket else {
+        return false;
+    };
+    if !request_resolved {
+        return false;
+    }
+    *awaiting_ticket = None;
+    *last_generation = generation;
+    *refresh_pending = true;
+    true
+}
 
 pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {
     match (base, updates) {
@@ -51,10 +222,8 @@ pub(crate) fn plugin_names(ctx: &WidgetSettingsContext<'_>) -> Vec<String> {
 pub(crate) fn find_plugin<'a>(
     ctx: &'a DashboardContext<'a>,
     name: &str,
-) -> Option<&'a dyn crate::plugin::Plugin> {
-    ctx.plugins
-        .iter()
-        .find_map(|p| if p.name() == name { Some(&**p) } else { None })
+) -> Option<std::sync::RwLockReadGuard<'a, Box<dyn crate::plugin::Plugin>>> {
+    ctx.plugins.iter().find(|plugin| plugin.name() == name)
 }
 
 pub(crate) fn gesture_focus_action(
@@ -325,8 +494,13 @@ pub(crate) fn refresh_settings_ui(
 
 #[cfg(test)]
 mod tests {
-    use super::merge_json;
+    use super::{
+        BackgroundLoader, RefreshMode, TimedCache, merge_json, observe_owned_search_publication,
+        observe_search_generation, submit_background_refresh,
+    };
+    use crate::plugin::PluginSearchUpdates;
     use serde_json::json;
+    use std::sync::mpsc::{TryRecvError, channel};
 
     #[test]
     fn merge_json_preserves_unknown_fields() {
@@ -335,5 +509,183 @@ mod tests {
         let merged = merge_json(&base, &updates);
         assert_eq!(merged["known"], json!(2));
         assert_eq!(merged["extra"], json!({"keep": true}));
+    }
+
+    #[test]
+    fn background_loader_is_nonblocking_single_flight_and_owned() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let mut loader = BackgroundLoader::new(move |value: usize| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            value * 2
+        });
+        let repaint = eframe::egui::Context::default();
+        assert!(loader.request(21, &repaint));
+        started_rx.recv().unwrap();
+        assert!(!loader.request(22, &repaint));
+        assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+        release_tx.send(()).unwrap();
+        let result = loop {
+            if let Some(result) = loader.poll() {
+                break result;
+            }
+            std::thread::yield_now();
+        };
+        assert_eq!(result, 42);
+        drop(loader);
+    }
+
+    #[test]
+    fn dropping_active_loader_returns_before_provider_finishes() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (finished_tx, finished_rx) = channel();
+        let mut loader = BackgroundLoader::new(move |()| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            finished_tx.send(()).unwrap();
+        });
+        assert!(loader.request((), &eframe::egui::Context::default()));
+        started_rx.recv().unwrap();
+        drop(loader);
+        assert!(matches!(finished_rx.try_recv(), Err(TryRecvError::Empty)));
+        release_tx.send(()).unwrap();
+        finished_rx.recv().unwrap();
+    }
+
+    #[test]
+    fn panicking_loader_reports_explicit_failure_and_requests_repaint() {
+        let repaint = eframe::egui::Context::default();
+        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_wakes = std::sync::Arc::clone(&wakes);
+        repaint.set_request_repaint_callback(move |_| {
+            callback_wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let mut loader = BackgroundLoader::new(|(): ()| -> () { panic!("controlled panic") });
+        assert!(loader.request((), &repaint));
+        while loader.is_in_flight() {
+            let _ = loader.poll();
+            std::thread::yield_now();
+        }
+        while wakes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            loader.take_failure(),
+            Some("background loader workload panicked unexpectedly")
+        );
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(loader.take_failure(), None);
+        assert!(!loader.request((), &repaint));
+    }
+    #[test]
+    fn successful_submission_advances_schedule_and_inflight_request_queues_followup() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let mut loader = BackgroundLoader::new(move |value: usize| {
+            started_tx.send(value).unwrap();
+            release_rx.recv().unwrap();
+            value
+        });
+        let repaint = eframe::egui::Context::default();
+        let mut cache = TimedCache::new((), std::time::Duration::from_secs(60));
+        let mut pending = false;
+
+        assert!(submit_background_refresh(
+            &mut loader,
+            1,
+            &repaint,
+            &mut pending,
+            &mut cache.last_refresh,
+        ));
+        assert!(!cache.should_refresh());
+        started_rx.recv().unwrap();
+
+        pending = false;
+        assert!(!submit_background_refresh(
+            &mut loader,
+            2,
+            &repaint,
+            &mut pending,
+            &mut cache.last_refresh,
+        ));
+        assert!(pending);
+        release_tx.send(()).unwrap();
+        while loader.poll().is_none() {
+            std::thread::yield_now();
+        }
+
+        pending = false;
+        assert!(submit_background_refresh(
+            &mut loader,
+            2,
+            &repaint,
+            &mut pending,
+            &mut cache.last_refresh,
+        ));
+        assert_eq!(started_rx.recv().unwrap(), 2);
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn plugin_publication_generation_invalidates_cached_query_once() {
+        let mut observed = 4;
+        let mut pending = false;
+        assert!(observe_search_generation(5, &mut observed, &mut pending));
+        assert_eq!(observed, 5);
+        assert!(pending);
+        pending = false;
+        assert!(!observe_search_generation(5, &mut observed, &mut pending));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn unrelated_publication_does_not_arm_manual_provider_refresh() {
+        let updates = PluginSearchUpdates::default();
+        updates.notify("windows");
+        let mut observed_browser_generation = 0;
+        let mut manual_refresh_pending = false;
+        assert!(!observe_search_generation(
+            updates.source_generation("browser_tabs"),
+            &mut observed_browser_generation,
+            &mut manual_refresh_pending,
+        ));
+        assert!(!manual_refresh_pending);
+    }
+
+    #[test]
+    fn manual_request_consumes_own_later_publication_exactly_once() {
+        let mut observed = 3;
+        let mut awaiting = Some(3);
+        let mut pending = false;
+        assert!(!observe_owned_search_publication(
+            RefreshMode::Manual,
+            3,
+            &mut observed,
+            false,
+            &mut awaiting,
+            &mut pending,
+        ));
+        assert!(observe_owned_search_publication(
+            RefreshMode::Manual,
+            4,
+            &mut observed,
+            true,
+            &mut awaiting,
+            &mut pending,
+        ));
+        assert!(pending);
+        assert_eq!(awaiting, None);
+        pending = false;
+        assert!(!observe_owned_search_publication(
+            RefreshMode::Manual,
+            5,
+            &mut observed,
+            true,
+            &mut awaiting,
+            &mut pending,
+        ));
+        assert!(!pending);
     }
 }

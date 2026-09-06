@@ -1,3 +1,4 @@
+use crate::dashboard::DashboardRefreshRequest;
 use crate::gui::LauncherApp;
 use crate::gui::calendar_event_details::RecurrenceScope;
 use crate::plugins::calendar::{
@@ -551,7 +552,8 @@ impl CalendarEventEditor {
         }
 
         save_events(CALENDAR_EVENTS_FILE, &events).map_err(|e| e.to_string())?;
-        app.dashboard_data_cache.refresh_calendar();
+        app.dashboard_data_cache
+            .request_refresh(DashboardRefreshRequest::Calendar);
         app.calendar_selected_event = Some(id);
         Ok(())
     }

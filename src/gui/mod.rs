@@ -107,7 +107,8 @@ use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_a
 use crate::dashboard::config::DashboardConfig;
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::dashboard::{
-    Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, WidgetActivation,
+    Dashboard, DashboardContext, DashboardDataCache, DashboardEvent, DashboardRefreshRequest,
+    DashboardRuntime, WidgetActivation,
 };
 use crate::file_search::coordinator::SearchCoordinator;
 use crate::help_window::HelpWindow;
@@ -131,7 +132,7 @@ use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveActio
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
-use fst::{IntoStreamer, Map, MapBuilder, Streamer};
+use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -465,7 +466,9 @@ pub struct LauncherApp {
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
     pub dashboard: Dashboard,
+    dashboard_runtime: DashboardRuntime,
     dashboard_data_cache: DashboardDataCache,
+    dashboard_initial_refresh_queued: bool,
     pub dashboard_enabled: bool,
     pub dashboard_show_when_empty: bool,
     pub dashboard_path: String,
@@ -616,6 +619,7 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_plugin_search_generation: u64,
     last_timer_query: bool,
     last_stopwatch_query: bool,
     last_note_search_change: Option<Instant>,
@@ -1108,6 +1112,7 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         use std::path::Path;
 
+        let dashboard_timer = crate::performance::Timer::start();
         let dashboard_path = DashboardConfig::path_for(
             settings
                 .dashboard
@@ -1128,6 +1133,8 @@ impl LauncherApp {
             Some(dashboard_event_cb),
         );
         dashboard.attach_watcher();
+        dashboard_timer.finish("startup.dashboard_construction");
+        let watcher_timer = crate::performance::Timer::start();
 
         let (folder_aliases, folder_aliases_lc) = Self::folder_alias_maps();
         let (bookmark_aliases, bookmark_aliases_lc) = Self::bookmark_alias_maps();
@@ -1382,6 +1389,7 @@ impl LauncherApp {
             .and_then(|v| serde_json::from_value::<ClipboardModifyPluginSettings>(v.clone()).ok())
             .unwrap_or_default();
 
+        watcher_timer.finish("startup.watcher_initialization");
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let multi_manager =
             MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
@@ -1390,8 +1398,12 @@ impl LauncherApp {
             .iter()
             .map(|a| (a.action.clone(), a.clone()))
             .collect::<HashMap<_, _>>();
-        let dashboard_data_cache = DashboardDataCache::new();
-        dashboard_data_cache.refresh_all(&plugins);
+        let dashboard_runtime = DashboardRuntime::start({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
+        let dashboard_data_cache = dashboard_runtime.cache();
+        let mkmacro_timer = crate::performance::Timer::start();
         let mut mkmacro_dialog = MkMacroDialog::new_with_authoring_context(
             Arc::clone(&plugins.internal_services().mkmacro_store),
             mkmacro_dialog::MkMacroAuthoringContext {
@@ -1403,6 +1415,7 @@ impl LauncherApp {
             Arc::clone(&plugins.internal_services().mkmacro_store),
         );
         install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
+        mkmacro_timer.finish("startup.mkmacro");
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
@@ -1434,7 +1447,9 @@ impl LauncherApp {
             multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
             watchers,
             dashboard,
+            dashboard_runtime,
             dashboard_data_cache,
+            dashboard_initial_refresh_queued: false,
             dashboard_enabled: settings.dashboard.enabled,
             dashboard_show_when_empty: settings.dashboard.show_when_query_empty,
             dashboard_path: dashboard_path.to_string_lossy().to_string(),
@@ -1595,6 +1610,7 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_plugin_search_generation: 0,
             last_timer_query: false,
             last_stopwatch_query: false,
             last_note_search_change: None,
@@ -1649,13 +1665,24 @@ impl LauncherApp {
             }
         }
 
+        let action_cache_timer = crate::performance::Timer::start();
         app.update_action_cache();
+        action_cache_timer.finish("startup.action_filter_metadata");
+        let command_cache_timer = crate::performance::Timer::start();
         app.update_command_cache();
+        command_cache_timer.finish("startup.command_search_cache");
+        let completion_timer = crate::performance::Timer::start();
         app.rebuild_completion_index_now();
+        completion_timer.finish("startup.completion_index");
         app.search();
         let repaint_context = ctx.clone();
         app.clipboard_modify_immediate
-            .set_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
+            .set_repaint_callback(Arc::new({
+                let repaint_context = repaint_context.clone();
+                move || repaint_context.request_repaint()
+            }));
+        app.plugins
+            .set_search_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app.recompute_query_results_layout();
         app
@@ -1755,7 +1782,7 @@ impl LauncherApp {
                 .iter()
                 .any(|prefix| prefix.eq_ignore_ascii_case(head))
             {
-                prefixed_matches.push(plugin.as_ref());
+                prefixed_matches.push(plugin);
             }
         }
 
@@ -1769,7 +1796,7 @@ impl LauncherApp {
             return false;
         }
 
-        let plugin = prefixed_matches[0];
+        let plugin = &**prefixed_matches[0];
         if self
             .query_results_layout
             .plugin_opt_out

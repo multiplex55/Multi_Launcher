@@ -123,7 +123,9 @@ fn spawn_gui(
         .iter()
         .map(|(name, hotkey)| (name.as_str(), hotkey.as_str()))
         .collect::<Vec<_>>();
+    let manager_timer = multi_launcher::performance::Timer::start();
     let mut plugins = PluginManager::new_with_reserved_hotkeys(&reserved_launcher_hotkey_refs);
+    manager_timer.finish("startup.plugin_manager");
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
     let mut plugin_settings = settings.plugin_settings.clone();
@@ -136,6 +138,7 @@ fn spawn_gui(
             settings.note.templates_enabled,
         ),
     );
+    let registration_timer = multi_launcher::performance::Timer::start();
     plugins.reload_from_dirs(
         dirs,
         settings.clipboard_limit,
@@ -144,6 +147,7 @@ fn spawn_gui(
         &plugin_settings,
         Arc::clone(&actions),
     );
+    registration_timer.finish("startup.plugin_registration");
     // Ensure MG service starts even when there is no settings.json/plugin_settings entry yet.
     // Also ensures it is OFF if the plugin is disabled in enabled_plugins.
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
@@ -189,7 +193,8 @@ fn spawn_gui(
                     tracing::error!("failed to lock ctx_clone");
                 }
                 tracing::debug!("egui context stored");
-                Box::new(LauncherApp::new(
+                let launcher_timer = multi_launcher::performance::Timer::start();
+                let app = LauncherApp::new(
                     &cc.egui_ctx,
                     actions_for_window,
                     custom_len_for_window,
@@ -204,7 +209,9 @@ fn spawn_gui(
                     flag_clone,
                     restore_clone,
                     help_clone,
-                ))
+                );
+                launcher_timer.finish("startup.launcher_app");
+                Box::new(app)
             }),
         );
         let _ = event_tx.send(());
@@ -214,12 +221,15 @@ fn spawn_gui(
 }
 
 fn main() -> anyhow::Result<()> {
+    multi_launcher::performance::init_process_timer();
+    let settings_timer = multi_launcher::performance::Timer::start();
     let mut settings = Settings::load("settings.json").unwrap_or_default();
     multi_launcher::settings::set_settings_path("settings.json");
     if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings) {
         let _ = settings.save("settings.json");
     }
-    logging::init(settings.debug_logging, settings.log_file_path());
+    let _logging_guard = logging::init(settings.debug_logging, settings.log_file_path());
+    settings_timer.finish("startup.settings_load");
     tracing::debug!(?settings, "settings loaded");
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
         settings.enabled_plugins.as_ref(),
@@ -231,9 +241,11 @@ fn main() -> anyhow::Result<()> {
     {
         multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
     }
+    let actions_timer = multi_launcher::performance::Timer::start();
     let mut actions_vec = load_actions("actions.json").unwrap_or_default();
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
+    actions_timer.finish("startup.action_load");
 
     let (restart_tx, restart_rx) = channel::<Settings>();
     if let Ok(mut guard) = RESTART_TX.lock() {
@@ -247,12 +259,14 @@ fn main() -> anyhow::Result<()> {
         *guard = Some(event_tx.clone());
     }
 
+    let index_timer = multi_launcher::performance::Timer::start();
     if let Some(paths) = &settings.index_paths {
         let options = indexer::IndexOptions::with_max_items(settings.max_indexed_items);
         for batch in indexer::index_paths_batched(paths, options) {
             actions_vec.extend(batch?);
         }
     }
+    index_timer.finish("startup.action_indexing");
     let actions = Arc::new(actions_vec);
 
     let hotkey = settings.hotkey();

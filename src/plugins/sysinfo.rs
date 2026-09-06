@@ -1,26 +1,34 @@
 use crate::actions::Action;
-use crate::plugin::Plugin;
-use sysinfo::{Disks, System};
+use crate::plugin::{Plugin, PluginSearchUpdates};
+use crate::plugins::system_data::{SystemDataCache, SystemDataRuntime, SystemDataSnapshot};
+use std::sync::Arc;
 
 /// Display basic system usage statistics using the `info` prefix.
-pub struct SysInfoPlugin;
+pub struct SysInfoPlugin {
+    cache: SystemDataCache,
+    _runtime: Option<SystemDataRuntime>,
+}
 
 impl SysInfoPlugin {
-    fn cpu_action(system: &System) -> Action {
-        let usage = system.global_cpu_usage();
+    pub(crate) fn new(cache: SystemDataCache) -> Self {
+        Self {
+            cache,
+            _runtime: None,
+        }
+    }
+
+    fn cpu_action(snapshot: &SystemDataSnapshot) -> Action {
         Action {
-            label: format!("CPU usage {:.0}%", usage),
+            label: format!("CPU usage {:.0}%", snapshot.cpu_usage),
             desc: "SysInfo".into(),
             action: "sysinfo:cpu".into(),
             args: None,
         }
     }
 
-    fn mem_action(system: &System) -> Action {
-        let total = system.total_memory();
-        let used = system.used_memory();
-        let percent = if total > 0 {
-            used as f64 / total as f64 * 100.0
+    fn mem_action(snapshot: &SystemDataSnapshot) -> Action {
+        let percent = if snapshot.total_memory > 0 {
+            snapshot.used_memory as f64 / snapshot.total_memory as f64 * 100.0
         } else {
             0.0
         };
@@ -32,17 +40,10 @@ impl SysInfoPlugin {
         }
     }
 
-    fn disk_action() -> Action {
-        let disks = Disks::new_with_refreshed_list();
-        let mut total = 0u64;
-        let mut avail = 0u64;
-        for d in disks.list() {
-            total += d.total_space();
-            avail += d.available_space();
-        }
-        let used = total.saturating_sub(avail);
-        let percent = if total > 0 {
-            used as f64 / total as f64 * 100.0
+    fn disk_action(snapshot: &SystemDataSnapshot) -> Action {
+        let used = snapshot.total_disk.saturating_sub(snapshot.available_disk);
+        let percent = if snapshot.total_disk > 0 {
+            used as f64 / snapshot.total_disk as f64 * 100.0
         } else {
             0.0
         };
@@ -64,32 +65,44 @@ impl SysInfoPlugin {
     }
 }
 
+impl Default for SysInfoPlugin {
+    fn default() -> Self {
+        let runtime = SystemDataRuntime::start(Arc::new(PluginSearchUpdates::default()));
+        let cache = runtime.cache();
+        Self {
+            cache,
+            _runtime: Some(runtime),
+        }
+    }
+}
+
 impl Plugin for SysInfoPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         if !query.starts_with("info") {
             return Vec::new();
         }
         let trimmed = query.trim().to_lowercase();
-        let mut system = System::new_all();
-        system.refresh_cpu_usage();
-        system.refresh_memory();
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if let ["info", "cpu", "list", count] = parts.as_slice() {
+            return count
+                .parse::<usize>()
+                .ok()
+                .map(Self::cpu_list_action)
+                .into_iter()
+                .collect();
+        }
+        let Some(snapshot) = self.cache.snapshot_and_refresh() else {
+            return Vec::new();
+        };
         match parts.as_slice() {
             ["info"] => vec![
-                Self::cpu_action(&system),
-                Self::mem_action(&system),
-                Self::disk_action(),
+                Self::cpu_action(&snapshot),
+                Self::mem_action(&snapshot),
+                Self::disk_action(&snapshot),
             ],
-            ["info", "cpu"] => vec![Self::cpu_action(&system)],
-            ["info", "mem"] => vec![Self::mem_action(&system)],
-            ["info", "disk"] => vec![Self::disk_action()],
-            ["info", "cpu", "list", n] => {
-                if let Ok(count) = n.parse::<usize>() {
-                    vec![Self::cpu_list_action(count)]
-                } else {
-                    Vec::new()
-                }
-            }
+            ["info", "cpu"] => vec![Self::cpu_action(&snapshot)],
+            ["info", "mem"] => vec![Self::mem_action(&snapshot)],
+            ["info", "disk"] => vec![Self::disk_action(&snapshot)],
             _ => Vec::new(),
         }
     }
@@ -133,5 +146,35 @@ impl Plugin for SysInfoPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actions_materialize_from_cached_snapshot() {
+        let snapshot = SystemDataSnapshot {
+            cpu_usage: 12.4,
+            total_memory: 100,
+            used_memory: 25,
+            total_disk: 200,
+            available_disk: 50,
+            ..SystemDataSnapshot::default()
+        };
+        assert_eq!(SysInfoPlugin::cpu_action(&snapshot).label, "CPU usage 12%");
+        assert_eq!(
+            SysInfoPlugin::mem_action(&snapshot).label,
+            "Memory usage 25%"
+        );
+        assert_eq!(
+            SysInfoPlugin::disk_action(&snapshot).label,
+            "Disk usage 75%"
+        );
+        let plugin = SysInfoPlugin::new(SystemDataCache::from_snapshot(snapshot));
+        let actions = plugin.search("info");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].label, "CPU usage 12%");
     }
 }

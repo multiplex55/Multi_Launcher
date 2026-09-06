@@ -1,7 +1,7 @@
 use super::{
-    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
 };
 use crate::actions::Action;
 use crate::actions::system::{
@@ -55,6 +55,7 @@ struct SystemControlsSnapshot {
 pub struct SystemControlsWidget {
     cfg: SystemControlsConfig,
     cache: TimedCache<SystemControlsSnapshot>,
+    loader: BackgroundLoader<(), SystemControlsSnapshot>,
     refresh_pending: bool,
 }
 
@@ -64,6 +65,7 @@ impl SystemControlsWidget {
         Self {
             cfg,
             cache: TimedCache::new(SystemControlsSnapshot::default(), interval),
+            loader: BackgroundLoader::new(|()| Self::load_snapshot()),
             refresh_pending: true,
         }
     }
@@ -98,8 +100,7 @@ impl SystemControlsWidget {
         self.cache.set_interval(self.refresh_interval());
     }
 
-    fn refresh(&mut self) {
-        self.update_interval();
+    fn load_snapshot() -> SystemControlsSnapshot {
         let mut snapshot = SystemControlsSnapshot::default();
 
         if cfg!(target_os = "windows") {
@@ -142,11 +143,14 @@ impl SystemControlsWidget {
             snapshot.power_plan_error = Some("Power plans are not supported on this OS.".into());
         }
 
-        self.cache.refresh(|data| *data = snapshot);
+        snapshot
     }
 
-    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
+    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>, repaint: &egui::Context) {
         self.update_interval();
+        if let Some(snapshot) = self.loader.poll() {
+            self.cache.refresh(|data| *data = snapshot);
+        }
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -159,7 +163,13 @@ impl SystemControlsWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            self.refresh();
+            submit_background_refresh(
+                &mut self.loader,
+                (),
+                repaint,
+                &mut self.refresh_pending,
+                &mut self.cache.last_refresh,
+            );
         }
     }
 
@@ -197,7 +207,7 @@ impl Widget for SystemControlsWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.maybe_refresh(ctx);
+        self.maybe_refresh(ctx, ui.ctx());
         let mut clicked = None;
 
         ui.vertical(|ui| {

@@ -2,6 +2,7 @@ use crate::dashboard::config::{DashboardConfig, OverflowMode};
 use crate::dashboard::data_cache::DashboardDataCache;
 use crate::dashboard::diagnostics::{DashboardDiagnostics, DashboardDiagnosticsSnapshot};
 use crate::dashboard::layout::{NormalizedSlot, normalize_slots};
+use crate::dashboard::repaint::{RepaintDemand, aggregate_demands};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{actions::Action, common::json_watch::JsonWatcher};
 use eframe::egui;
@@ -414,6 +415,156 @@ impl Dashboard {
 
     pub fn diagnostics_snapshot(&self) -> DashboardDiagnosticsSnapshot {
         self.diagnostics.snapshot()
+    }
+
+    /// Return only the cadence demanded by widgets currently present on the dashboard.
+    /// Event-driven widgets do not keep egui awake.
+    pub fn repaint_demand(
+        &self,
+        dashboard_visible: bool,
+        dashboard_focused: bool,
+        reduce_when_unfocused: bool,
+        show_diagnostics_widget: bool,
+    ) -> RepaintDemand {
+        let periodic_allowed = dashboard_visible && (!reduce_when_unfocused || dashboard_focused);
+        let timers_running = self.slots.iter().any(|slot| slot.widget == "timers")
+            && !crate::plugins::timer::running_timers().is_empty();
+        let stopwatches_running = self.slots.iter().any(|slot| slot.widget == "stopwatch")
+            && !crate::plugins::stopwatch::running_stopwatches().is_empty();
+
+        aggregate_demands(self.slots.iter().map(|slot| {
+            slot_repaint_demand(
+                slot,
+                periodic_allowed,
+                show_diagnostics_widget,
+                timers_running,
+                stopwatches_running,
+            )
+        }))
+    }
+}
+
+const PERIODIC_WIDGETS: &[&str] = &[
+    "browser_tabs",
+    "calendar",
+    "command_history",
+    "layouts",
+    "pinned_query_results",
+    "processes",
+    "query_list",
+    "recycle_bin",
+    "scratchpad",
+    "system",
+    "system_controls",
+    "system_status",
+    "tempfiles",
+    "volume",
+    "windows",
+    "windows_overview",
+];
+
+fn slot_repaint_demand(
+    slot: &NormalizedSlot,
+    periodic_allowed: bool,
+    show_diagnostics_widget: bool,
+    timers_running: bool,
+    stopwatches_running: bool,
+) -> RepaintDemand {
+    match slot.widget.as_str() {
+        "timers" if timers_running => RepaintDemand::Fast,
+        "stopwatch" if stopwatches_running => RepaintDemand::Fast,
+        "notes_graph" if periodic_allowed => RepaintDemand::Fast,
+        "diagnostics" if periodic_allowed && show_diagnostics_widget => RepaintDemand::Slow,
+        widget
+            if periodic_allowed
+                && PERIODIC_WIDGETS.contains(&widget)
+                && !manual_refresh_only(&slot.settings) =>
+        {
+            RepaintDemand::Slow
+        }
+        _ => RepaintDemand::EventDriven,
+    }
+}
+
+fn manual_refresh_only(settings: &serde_json::Value) -> bool {
+    settings
+        .get("refresh_mode")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("manual"))
+        || settings
+            .get("manual_refresh_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod repaint_demand_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn slot(widget: &str, settings: serde_json::Value) -> NormalizedSlot {
+        NormalizedSlot {
+            id: None,
+            widget: widget.into(),
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            settings,
+            overflow: OverflowMode::Auto,
+        }
+    }
+
+    #[test]
+    fn static_and_manual_widgets_are_event_driven() {
+        assert_eq!(
+            slot_repaint_demand(&slot("recent_notes", json!({})), true, true, false, false,),
+            RepaintDemand::EventDriven
+        );
+        assert_eq!(
+            slot_repaint_demand(
+                &slot("processes", json!({ "refresh_mode": "manual" })),
+                true,
+                true,
+                false,
+                false,
+            ),
+            RepaintDemand::EventDriven
+        );
+    }
+
+    #[test]
+    fn aggregation_distinguishes_periodic_animation_and_time_displays() {
+        let periodic = slot("processes", json!({}));
+        assert_eq!(
+            slot_repaint_demand(&periodic, true, true, false, false),
+            RepaintDemand::Slow
+        );
+        assert_eq!(
+            slot_repaint_demand(&periodic, false, true, false, false),
+            RepaintDemand::EventDriven
+        );
+        let calendar = slot("calendar", json!({}));
+        assert_eq!(
+            slot_repaint_demand(&calendar, true, true, false, false),
+            RepaintDemand::Slow
+        );
+        assert_eq!(
+            slot_repaint_demand(&calendar, false, true, false, false),
+            RepaintDemand::EventDriven
+        );
+        assert_eq!(
+            slot_repaint_demand(&slot("notes_graph", json!({})), true, true, false, false,),
+            RepaintDemand::Fast
+        );
+        assert_eq!(
+            slot_repaint_demand(&slot("timers", json!({})), false, true, true, false,),
+            RepaintDemand::Fast
+        );
+        assert_eq!(
+            slot_repaint_demand(&slot("stopwatch", json!({})), false, true, false, true,),
+            RepaintDemand::Fast
+        );
     }
 }
 

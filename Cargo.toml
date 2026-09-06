@@ -108,3 +108,12 @@ harness = false
 [[bench]]
 name = "todo_widget_filtering"
 harness = false
+
+# Group only side-effect-free cases; Cargo auto-discovers every top-level tests/*.rs target.
+[[test]]
+name = "plugin_queries"
+path = "tests/suites/plugin_queries.rs"
+
+[[test]]
+name = "domain"
+path = "tests/suites/domain.rs"
