@@ -1272,6 +1272,12 @@ impl eframe::App for LauncherApp {
                 } else {
                     None
                 };
+                let repaint_demand = self.dashboard.repaint_demand(
+                    dashboard_visible,
+                    dashboard_focused,
+                    self.reduce_dashboard_work_when_unfocused,
+                    show_diagnostics_widget,
+                );
                 let dash_ctx = DashboardContext {
                     actions: &self.actions,
                     actions_by_id: &self.actions_by_id,
@@ -1294,9 +1300,22 @@ impl eframe::App for LauncherApp {
                     diagnostics,
                     show_diagnostics_widget,
                 };
-                crate::performance::record_dashboard_repaint_request();
-                ctx.request_repaint_after(Duration::from_millis(250));
-                if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
+                if let Some(interval) = crate::dashboard::repaint_interval(
+                    crate::dashboard::RepaintPolicyInput {
+                        launcher_visible: dashboard_visible,
+                        dashboard_active: true,
+                        viewport_focused: dashboard_focused,
+                        reduce_when_unfocused: self.reduce_dashboard_work_when_unfocused,
+                        demand: repaint_demand,
+                    },
+                ) {
+                    crate::performance::record_dashboard_repaint_request();
+                    ctx.request_repaint_after(interval);
+                }
+                if crate::dashboard::dashboard_should_render(dashboard_visible, true)
+                    && let Some(action) =
+                        self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
+                {
                     self.activate_action(action.action, action.query_override, ActivationSource::Dashboard);
                 }
             } else {

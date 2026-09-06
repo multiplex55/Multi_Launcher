@@ -39,6 +39,7 @@ stale-reference searches, and `git diff --check`.
 
 **Status:** `complete`
 **Dependency:** Milestones 1-2 (`424bc23`, `a2a1f8d`; complete).
+**Commit:** `544c4c6`
 
 Remove measured blocking/dynamic work from synchronous search without changing `Plugin`. Add an
 owned bounded public-IP cache worker with TTL, backoff, timeout, single-flight, repaint and shutdown.
@@ -49,7 +50,7 @@ Planned commit: `perf(search): remove blocking dynamic work from query handling`
 
 ## Milestone 4 - Idle, repaint, and worker lifecycle
 
-**Status:** `pending`  
+**Status:** `complete`
 **Dependency:** Milestones 1-3 final runtime state.
 
 Add a small pure state-aware repaint policy while preserving timer, animation, toast, file-search,
@@ -246,6 +247,82 @@ Commands completed successfully:
   violation in the first benchmark attempt; the deterministic cached/control path is the valid
   repeatable workload.
 
+## Milestone 4 idle/repaint results
+
+The unconditional dashboard 250 ms repaint was replaced by a pure state-aware policy. Widget
+demand is aggregated only from slots in the active dashboard: static and manual-refresh widgets
+are event-driven; configurable auto/throttled refresh widgets and diagnostics request a one-second
+cadence; running timers, running stopwatches, and the notes-graph animation retain the 250 ms fast
+cadence. When `reduce_dashboard_work_when_unfocused` applies, background periodic/animation work
+stops and fast time-sensitive demand degrades to one second. A hidden launcher schedules no
+dashboard repaint and skips dashboard widget rendering entirely. Dashboard-inactive search/results
+views schedule no dashboard repaint.
+
+Specialized schedules remain local: active File Search keeps its existing polling repaint and stops
+on terminal events; clipboard preview and Multi Manager reconnect keep their 150 ms schedules;
+toasts retain their own egui lifecycle; MkMacro jobs and overlays repaint from completion/runtime
+events. The policy does not introduce a global scheduler or async runtime.
+
+### Repaint/idle measurement
+
+The M1 release baseline produced four frames and four dashboard repaint requests per second for 12
+successive one-second visible/focused default-dashboard windows. The M4 release build was run three
+times from the same isolated warm-filesystem fixture for 15, 12, and 12 seconds, with the log placed
+outside the watched data directory. Each run produced the expected startup frame and asynchronous
+dashboard-refresh publication, then no `runtime.frames` sample at all: after the sub-one-second
+refresh event there was no periodic frame at which the one-second sampler could emit. This is
+evidence that the default static dashboard no longer keeps egui awake (4 scheduled frames/s to no
+recurring scheduled frames), not a numeric CPU utilization claim.
+
+| State / feature | Final cadence/evidence |
+|---|---|
+| Hidden launcher | No dashboard schedule; widget rendering is gated off. Deterministic policy test. |
+| Dashboard inactive | No dashboard schedule. Deterministic policy test. |
+| Visible, focused, static/event-driven dashboard | No recurring schedule; three release traces plus policy test. |
+| Visible, focused, auto-refresh or diagnostics | Slow, 1 s. Deterministic aggregation/policy tests. |
+| Visible, focused, running timer/stopwatch | Fast, 250 ms, preserving countdown display/completion polling. Deterministic aggregation/policy tests plus timer/stopwatch regressions. |
+| Visible, focused, notes-graph animation | Fast, 250 ms. Deterministic aggregation/policy test. |
+| Visible, unfocused, reduction enabled | Background demand stops; fast time-sensitive demand becomes 1 s. Deterministic policy test. |
+| Visible, unfocused, reduction disabled | Same cadence as focused. Deterministic policy test. |
+| Toast | Existing toast-owned animation/lifetime repaint unchanged; toast regressions passed. |
+| Active File Search | Existing active-search repaint and terminal-event stop unchanged; File Search regressions passed. |
+| Active MkMacro/visual overlay | Existing job/runtime/overlay event repaint unchanged; MkMacro runtime/visual regressions passed. |
+
+Native hidden/focus automation and stable process-wide CPU sampling were not credible on this host,
+so CPU percentages and native focus-transition frame counts are deliberately not reported. The pure
+matrix covers those state decisions, while the repeated release traces establish the actual static
+idle outcome. Active feature cadence is asserted deterministically rather than using wall-clock UI
+tests.
+
+### Production worker inventory
+
+| Classification | Call sites / ownership | Decision |
+|---|---|---|
+| Long-lived services | GUI/hotkey runtime, `hotkey::runtime`, mouse-gesture service, MkMacro UIA/runtime/recorder/hotkey services, Multi Manager runtime, dashboard runtime, plugin system-data and IP runtimes | Owned stop/channel lifecycles; dashboard/system/IP shutdown and coalescing were already made deterministic in M2/M3. No M4 change. |
+| UI-lifetime workers | File Search coordinator, clipboard-immediate coordinator, MkMacro visual-overlay service, Multi Manager capture/reconnect | Existing cancellation, pending/single-flight state, repaint callbacks, and generation/result ownership retained. No measured duplicate idle work. |
+| Short bounded tasks | system actions, sound playback, clipboard transformations, diff scans/file operations, browser-tab refresh, preview/crop/image authoring jobs, launcher-command submissions | Work is demand-triggered and bounded. Browser Tabs already guards refresh with its cache/single-flight flag; diff and image paths suppress stale generations. No M4 change. |
+| External-process readers | Ripgrep and Everything stdout/stderr readers | One bounded reader pair per owned child process; cancellation/output bounds already present. No M4 change. |
+| Potential repeated spawn reviewed | browser-tab discovery, File Search requests, diff scans, image preview/crop jobs, clipboard immediate execution | Existing single-flight, cancellation, or generation checks prevent duplicate/stale application. No evidence justified replacing them with persistent workers. |
+| Test workers | deterministic broker, cancellation, repaint, and worker-lifecycle fixtures under `src`/`tests` | Test-only; excluded from production count and unchanged. |
+
+No new worker was introduced in M4. The audit found no measured duplicate, polling, detached-lifetime,
+shutdown, cancellation, or stale-result defect beyond the worker fixes already completed in M2/M3,
+so benign bounded/owned workers were intentionally left alone.
+
+Verification completed successfully: `cargo fmt --all --check`; `cargo check`; the 5-test repaint
+policy/aggregation selection; the 6-test dashboard registry/diagnostics selection; and 72 visibility,
+timer, stopwatch, toast, File Search, and MkMacro integration tests. A release binary was built for
+three repeated idle traces. `git diff --check` is recorded after final ledger cleanup.
+
+### Rejected milestone 4 optimizations
+
+- A global scheduler, Tokio runtime, Desktop Interaction service, or MkMacro decomposition: no
+  measured issue required the architectural scope.
+- Replacing well-behaved bounded workers solely to reduce spawn call count: the audit found existing
+  cancellation/single-flight/generation ownership sufficient.
+- Reporting process CPU percentages: the host did not provide a stable isolated sampler and the
+  application shares OS/graphics activity; repaint cadence is the credible evidence collected.
+
 ## Developer baseline
 
 | Metric | Baseline | Method / limitation |
@@ -280,6 +357,6 @@ reclassified as a pass.
 |---|---|---|
 | 1 | `424bc23` | `perf: establish runtime and build performance baselines` |
 | 2 | `a2a1f8d` | `perf(dashboard): move refresh work off the UI thread` |
-| 3 | pending | `perf(search): remove blocking dynamic work from query handling` |
+| 3 | `544c4c6` | `perf(search): remove blocking dynamic work from query handling` |
 | 4 | pending | `perf(runtime): reduce unnecessary idle and repaint work` |
 | 5 | pending | `perf(dev): improve cargo and nextest iteration time` |
