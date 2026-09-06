@@ -126,18 +126,18 @@ Unless a milestone states otherwise, verification means: focused unit/integratio
 - **Design/invariants:** stable mutex name derived from normalized root identity; guard lives through shutdown; duplicate exits cleanly with concise feedback; unique test names; no lock file/cross-process file locking. Preserve CWD/settings-relative paths.
 - **Acceptance/tests:** first acquisition succeeds, duplicate reports already running, independent roots/names do not conflict, guard release permits reacquisition; test names isolated under Nextest; startup acquires before settings/recovery. Run targeted tests, format check, `cargo check`, Nextest subset, diff check.
 - **Risks:** path normalization identity collisions, abandoned mutex semantics, test interference, changing startup path behavior.
-- **Files/results/commit:** `Cargo.toml`, `src/main.rs`, `src/platform/mod.rs`, `src/platform/app_data.rs`, `src/platform/single_instance.rs`, this ledger / `cargo test platform::single_instance --lib` 6 passed; `cargo test platform::app_data --lib` 2 passed; `cargo nextest run -E 'test(/platform::(single_instance|app_data)/)'` 8 passed; `cargo fmt --all -- --check` passed; `cargo check` passed; `git diff --check` passed; startup diff and path/API compatibility inspected / _pending orchestrator commit_.
+- **Files/results/commit:** `Cargo.toml`, `src/main.rs`, `src/platform/mod.rs`, `src/platform/app_data.rs`, `src/platform/single_instance.rs`, this ledger / `cargo test platform::single_instance --lib` 6 passed; `cargo test platform::app_data --lib` 2 passed; `cargo nextest run -E 'test(/platform::(single_instance|app_data)/)'` 8 passed; `cargo fmt --all -- --check` passed; `cargo check` passed; `git diff --check` passed; startup diff and path/API compatibility inspected / `cb9b71b feat(startup): enforce single-instance data ownership`.
 
 ### 2. Typed atomic JSON foundation
 
-- **Status:** `pending`; **depends on:** 1.
+- **Status:** `complete`; **depends on:** 1.
 - **Objective:** build a small typed JSON load/save API on `common::atomic_file` that distinguishes missing, empty, valid, malformed, unreadable, invalid, and unsupported states.
 - **Repository finding:** the atomic byte primitive is strong, but load semantics and domain context are duplicated; older stores direct-write JSON.
 - **Likely files:** `src/common/persistence.rs` or `json_file.rs`, `src/common/atomic_file.rs`, `src/common/mod.rs`, tests.
 - **Design/invariants:** preserve `save_atomic`; contextual operation/store/path errors; decoding/validation separated from migration writes; explicit durable policy; no ORM/global path-lock manager/schema change.
 - **Acceptance/tests:** missing/empty/valid/malformed/unreadable are distinct; atomic successful output parses; replacement failure preserves destination and cleans temp; expected parents created; existing atomic retry/backup behavior retained.
 - **Risks:** generic API complexity, accidental serialization differences, Windows replacement edge cases, unnecessary `sync_all` on hot paths.
-- **Files/results/commit:** _pending / pending / pending_.
+- **Files/results/commit:** `src/common/persistence.rs`, `src/common/mod.rs`, this ledger / `cargo test common::persistence --lib` 8 passed; `cargo test common::atomic_file --lib` 2 passed; `cargo nextest run -E 'test(/common::(persistence|atomic_file)/)'` 10 passed; `cargo fmt --all -- --check` passed; `cargo check` passed; `git diff --check` passed; API/serialization diff inspected and existing atomic failure seam retained unchanged / _pending orchestrator commit_.
 
 ### 3. Settings startup corruption safety and transactions
 
