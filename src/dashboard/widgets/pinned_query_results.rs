@@ -1,8 +1,7 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin,
-    observe_owned_search_publication, plugin_names, query_suggestions, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, observe_owned_search_publication,
+    plugin_names, query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::common::query::{apply_action_filters, split_action_filters};
@@ -77,7 +76,7 @@ pub struct PinnedQueryResultsWidget {
     error: Option<String>,
     refresh_pending: bool,
     last_search_generation: u64,
-    awaiting_generation: Option<u64>,
+    awaiting_ticket: Option<u64>,
 }
 
 impl PinnedQueryResultsWidget {
@@ -89,7 +88,7 @@ impl PinnedQueryResultsWidget {
             error: None,
             refresh_pending: false,
             last_search_generation: 0,
-            awaiting_generation: None,
+            awaiting_ticket: None,
         }
     }
 
@@ -262,9 +261,10 @@ impl PinnedQueryResultsWidget {
 
     fn refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        let (actions, error) = self.run_query(ctx);
+        let (actions, error, ticket) = self.run_query(ctx);
         self.error = error;
         self.cache.refresh(|data| *data = actions);
+        self.awaiting_ticket = ticket;
     }
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
@@ -280,7 +280,9 @@ impl PinnedQueryResultsWidget {
             schedule.mode,
             generation,
             &mut self.last_search_generation,
-            &mut self.awaiting_generation,
+            ctx.plugins
+                .published_search_ticket_for(self.cfg.engine.trim()),
+            &mut self.awaiting_ticket,
             &mut self.refresh_pending,
         );
         if run_refresh_schedule(
@@ -290,18 +292,19 @@ impl PinnedQueryResultsWidget {
             &mut self.cache.last_refresh,
         ) {
             self.refresh(ctx);
-            if schedule.mode == RefreshMode::Manual {
-                self.awaiting_generation = Some(generation);
+            if schedule.mode != RefreshMode::Manual {
+                self.awaiting_ticket = None;
             }
         }
     }
 
-    fn run_query(&self, ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>) {
+    fn run_query(&self, ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>, Option<u64>) {
         let query = self.cfg.query.trim();
         if query.is_empty() {
             return (
                 Vec::new(),
                 Some("Set a query in the widget settings.".into()),
+                None,
             );
         }
 
@@ -314,23 +317,24 @@ impl PinnedQueryResultsWidget {
                 Some(format!(
                     "Engine '{engine_name}' is disabled in plugin settings."
                 )),
+                None,
             );
         }
-        let Some(plugin) = find_plugin(ctx, engine_name) else {
-            return (
-                Vec::new(),
-                Some(format!("Engine '{engine_name}' is not available.")),
-            );
-        };
 
         let (filtered_query, filters) = split_action_filters(query);
-        let mut actions = plugin.search(filtered_query.trim());
+        let (mut actions, ticket) = match ctx
+            .plugins
+            .search_plugin_with_ticket(engine_name, filtered_query.trim())
+        {
+            Ok(result) => result,
+            Err(error) => return (Vec::new(), Some(error.into()), None),
+        };
         actions = apply_action_filters(actions, &filters);
         let limit = self.cfg.limit.max(1);
         if actions.len() > limit {
             actions.truncate(limit);
         }
-        (actions, None)
+        (actions, None, ticket)
     }
 
     fn build_click_action(&self, action: &Action) -> WidgetAction {

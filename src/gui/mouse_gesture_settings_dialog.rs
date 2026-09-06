@@ -86,15 +86,19 @@ impl MouseGestureSettingsDialog {
         apply_runtime_settings(self.settings.clone());
 
         // If the plugin is currently loaded, ensure it receives the new settings.
-        for mut plugin in app.plugins.iter_mut() {
-            if plugin.name() == "mouse_gestures" {
-                plugin.apply_settings(
-                    app.settings_editor
-                        .get_plugin_setting_value("mouse_gestures")
-                        .unwrap_or(&serde_json::Value::Null),
+        match app.plugins.try_write_plugin("mouse_gestures") {
+            Ok(mut plugin) => plugin.apply_settings(
+                app.settings_editor
+                    .get_plugin_setting_value("mouse_gestures")
+                    .unwrap_or(&serde_json::Value::Null),
+            ),
+            Err("plugin busy") => {
+                self.last_error = Some(
+                    "Mouse gesture plugin is busy; settings were saved and will apply after reload."
+                        .into(),
                 );
-                break;
             }
+            Err(_) => {}
         }
 
         self.dirty = false;

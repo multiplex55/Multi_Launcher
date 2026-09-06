@@ -71,6 +71,7 @@ struct CacheState {
     snapshot: Option<Arc<SystemDataSnapshot>>,
     fresh_until: Option<Instant>,
     in_flight: bool,
+    in_flight_ticket: Option<u64>,
     shutting_down: bool,
 }
 
@@ -78,6 +79,7 @@ struct CacheState {
 pub(crate) struct SystemDataCache {
     state: Arc<Mutex<CacheState>>,
     wake: SyncSender<()>,
+    updates: Arc<PluginSearchUpdates>,
 }
 
 impl SystemDataCache {
@@ -89,9 +91,11 @@ impl SystemDataCache {
                 snapshot: Some(Arc::new(snapshot)),
                 fresh_until: Some(Instant::now() + REFRESH_TTL),
                 in_flight: false,
+                in_flight_ticket: None,
                 shutting_down: false,
             })),
             wake,
+            updates: Arc::new(PluginSearchUpdates::default()),
         }
     }
     pub(crate) fn snapshot_and_refresh(&self) -> Option<Arc<SystemDataSnapshot>> {
@@ -101,8 +105,10 @@ impl SystemDataCache {
         };
         if !state.in_flight && !state.fresh_until.is_some_and(|deadline| now < deadline) {
             state.in_flight = true;
+            state.in_flight_ticket = Some(self.updates.begin_refresh("system_data"));
             if self.wake.try_send(()).is_err() {
                 state.in_flight = false;
+                state.in_flight_ticket = None;
             }
         }
         state.snapshot.as_ref().map(Arc::clone)
@@ -132,11 +138,24 @@ impl SystemDataRuntime {
             .name("plugin-system-data-refresh".into())
             .spawn({
                 let publication = Arc::clone(&publication);
-                move || run_worker(receiver, worker_state, publication, provider, updates)
+                let worker_updates = Arc::clone(&updates);
+                move || {
+                    run_worker(
+                        receiver,
+                        worker_state,
+                        publication,
+                        provider,
+                        worker_updates,
+                    )
+                }
             })
             .expect("start plugin system-data worker");
         let runtime = Self {
-            cache: SystemDataCache { state, wake },
+            cache: SystemDataCache {
+                state,
+                wake,
+                updates,
+            },
             publication,
             worker: Some(worker),
         };
@@ -182,19 +201,19 @@ fn run_worker(
         let Ok(_publication) = publication.lock() else {
             break;
         };
-        let published = if let Ok(mut state) = state.lock() {
+        let ticket = if let Ok(mut state) = state.lock() {
             if state.shutting_down {
                 break;
             }
             state.snapshot = Some(Arc::new(snapshot));
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
-            true
+            state.in_flight_ticket.take()
         } else {
-            false
+            None
         };
-        if published {
-            updates.notify("system_data");
+        if let Some(ticket) = ticket {
+            updates.notify_ticket("system_data", ticket);
         }
     }
 }

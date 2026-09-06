@@ -68,6 +68,7 @@ struct PluginHomeSource {
     mode: PluginHomeMode,
     query: String,
     generation: u64,
+    plugin_epoch: u64,
 }
 
 struct PluginHomeRequest {
@@ -81,6 +82,27 @@ struct PluginHomeResult {
 }
 
 impl PluginHomeWidget {
+    fn loader() -> BackgroundLoader<PluginHomeRequest, PluginHomeResult> {
+        BackgroundLoader::new(|request: PluginHomeRequest| {
+            let actions = request
+                .plugin
+                .read()
+                .ok()
+                .map(|plugin| match request.source.mode {
+                    PluginHomeMode::Commands => plugin.commands(),
+                    PluginHomeMode::Search if request.source.query.trim().is_empty() => Vec::new(),
+                    PluginHomeMode::Search => {
+                        search_plugin_actions(&**plugin, &request.source.query)
+                    }
+                })
+                .unwrap_or_default();
+            PluginHomeResult {
+                source: request.source,
+                actions,
+            }
+        })
+    }
+
     pub fn new(cfg: PluginHomeConfig) -> Self {
         Self {
             cfg,
@@ -88,27 +110,7 @@ impl PluginHomeWidget {
             cached_actions: Vec::new(),
             cached_at: None,
             requested_source: None,
-            loader: BackgroundLoader::new(|request: PluginHomeRequest| {
-                let actions = request
-                    .plugin
-                    .plugin
-                    .read()
-                    .ok()
-                    .map(|plugin| match request.source.mode {
-                        PluginHomeMode::Commands => plugin.commands(),
-                        PluginHomeMode::Search if request.source.query.trim().is_empty() => {
-                            Vec::new()
-                        }
-                        PluginHomeMode::Search => {
-                            search_plugin_actions(&**plugin, &request.source.query)
-                        }
-                    })
-                    .unwrap_or_default();
-                PluginHomeResult {
-                    source: request.source,
-                    actions,
-                }
-            }),
+            loader: Self::loader(),
         }
     }
 
@@ -147,6 +149,18 @@ impl PluginHomeWidget {
         plugin: crate::plugin::OwnedPluginHandle,
         repaint: &egui::Context,
     ) -> &[Action] {
+        let old_epoch = self
+            .requested_source
+            .as_ref()
+            .or(self.cached_source.as_ref())
+            .map(|source| source.plugin_epoch);
+        if old_epoch.is_some_and(|epoch| epoch != source.plugin_epoch) {
+            self.loader = Self::loader();
+            self.requested_source = None;
+            self.cached_source = None;
+            self.cached_actions.clear();
+            self.cached_at = None;
+        }
         if let Some(result) = self.loader.poll() {
             self.requested_source = None;
             if result.source == source {
@@ -267,6 +281,7 @@ impl Widget for PluginHomeWidget {
             ui.label("Set a query to preview search results.");
         }
         let generation = Self::source_generation(ctx, &plugin_name);
+        let plugin_epoch = plugin.epoch;
         let source = PluginHomeSource {
             plugin: plugin_name,
             mode: self.cfg.mode,
@@ -276,6 +291,7 @@ impl Widget for PluginHomeWidget {
             } else {
                 0
             },
+            plugin_epoch,
         };
         let actions = self.update_actions(source, plugin, ui.ctx()).to_vec();
 
@@ -349,6 +365,28 @@ mod tests {
         }
     }
 
+    struct ResultPlugin;
+
+    impl crate::plugin::Plugin for ResultPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            vec![Action {
+                label: "new instance".into(),
+                desc: String::new(),
+                action: "new".into(),
+                args: None,
+            }]
+        }
+        fn name(&self) -> &str {
+            "blocked"
+        }
+        fn description(&self) -> &str {
+            "replacement"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
     #[test]
     fn cold_render_boundary_returns_before_blocked_provider() {
         let (started_tx, started_rx) = channel();
@@ -368,6 +406,7 @@ mod tests {
             mode: PluginHomeMode::Search,
             query: "blocked query".into(),
             generation: 7,
+            plugin_epoch: 1,
         };
 
         assert!(
@@ -397,6 +436,7 @@ mod tests {
             mode: PluginHomeMode::Search,
             query: "query".into(),
             generation: 3,
+            plugin_epoch: 1,
         };
         widget.update_actions(source.clone(), plugin.clone(), &egui::Context::default());
         while calls.load(std::sync::atomic::Ordering::Relaxed) == 0 {
@@ -417,5 +457,54 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn new_plugin_epoch_replaces_blocked_executor_and_suppresses_old_result() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let old = crate::plugin::OwnedPluginHandle::for_test_epoch(
+            Box::new(BlockedPlugin {
+                started: started_tx,
+                release: std::sync::Mutex::new(release_rx),
+            }),
+            10,
+        );
+        let new = crate::plugin::OwnedPluginHandle::for_test_epoch(Box::new(ResultPlugin), 11);
+        let mut widget = PluginHomeWidget::new(PluginHomeConfig {
+            plugin: Some("blocked".into()),
+            mode: PluginHomeMode::Search,
+            query_seed: Some("query".into()),
+            limit: 5,
+        });
+        let old_source = PluginHomeSource {
+            plugin: "blocked".into(),
+            mode: PluginHomeMode::Search,
+            query: "query".into(),
+            generation: 0,
+            plugin_epoch: 10,
+        };
+        widget.update_actions(old_source, old, &egui::Context::default());
+        started_rx.recv().unwrap();
+        let new_source = PluginHomeSource {
+            plugin: "blocked".into(),
+            mode: PluginHomeMode::Search,
+            query: "query".into(),
+            generation: 0,
+            plugin_epoch: 11,
+        };
+        assert!(
+            widget
+                .update_actions(new_source.clone(), new.clone(), &egui::Context::default())
+                .is_empty()
+        );
+        while widget.cached_source.as_ref() != Some(&new_source) {
+            widget.update_actions(new_source.clone(), new.clone(), &egui::Context::default());
+            std::thread::yield_now();
+        }
+        assert_eq!(widget.cached_actions[0].label, "new instance");
+        release_tx.send(()).unwrap();
+        widget.update_actions(new_source, new, &egui::Context::default());
+        assert_eq!(widget.cached_actions[0].label, "new instance");
     }
 }

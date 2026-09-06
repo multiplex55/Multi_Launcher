@@ -132,6 +132,7 @@ pub struct LayoutsWidget {
     pending_requests: VecDeque<LayoutRequest>,
     next_generation: u64,
     applied_generation: u64,
+    latest_ui_generation: u64,
     refresh_pending: bool,
     rename_target: Option<String>,
     rename_value: String,
@@ -161,6 +162,7 @@ impl LayoutsWidget {
             pending_requests: VecDeque::new(),
             next_generation: 0,
             applied_generation: 0,
+            latest_ui_generation: 0,
             refresh_pending: false,
             rename_target: None,
             rename_value: String::new(),
@@ -217,14 +219,31 @@ impl LayoutsWidget {
         self.dirty = self.active_layout != self.last_saved_layout;
     }
 
-    fn enqueue(&mut self, kind: LayoutRequestKind) {
+    fn enqueue(&mut self, kind: LayoutRequestKind) -> Result<(), String> {
+        const MAX_PENDING_OPERATIONS: usize = 32;
+        if self.pending_requests.len() >= MAX_PENDING_OPERATIONS {
+            if let Some(index) = self
+                .pending_requests
+                .iter()
+                .position(|request| matches!(request.kind, LayoutRequestKind::Refresh))
+            {
+                self.pending_requests.remove(index);
+            } else {
+                return Err("Layout operation queue is busy; retry shortly.".into());
+            }
+        }
         self.next_generation += 1;
+        let generation = self.next_generation;
+        if !matches!(kind, LayoutRequestKind::Refresh) {
+            self.latest_ui_generation = generation;
+        }
         self.pending_requests.push_back(LayoutRequest {
-            generation: self.next_generation,
+            generation,
             cfg: self.cfg.clone(),
             path: layouts_config_path().to_path_buf(),
             kind,
         });
+        Ok(())
     }
 
     fn load_active_layout(&mut self, name: &str) -> Result<(), String> {
@@ -239,8 +258,7 @@ impl LayoutsWidget {
     }
 
     fn save_layout(&mut self, layout: Layout) -> Result<(), String> {
-        self.enqueue(LayoutRequestKind::Save(layout));
-        Ok(())
+        self.enqueue(LayoutRequestKind::Save(layout))
     }
 
     fn apply_layout_change(&mut self, layout: Layout) -> Result<(), String> {
@@ -277,7 +295,7 @@ impl LayoutsWidget {
             return Err("No active layout selected.".to_string());
         };
         let display_name = format!("{} (copy)", layout.name);
-        self.enqueue(LayoutRequestKind::Duplicate(layout));
+        self.enqueue(LayoutRequestKind::Duplicate(layout))?;
         Ok(display_name)
     }
 
@@ -299,8 +317,7 @@ impl LayoutsWidget {
         else {
             return Ok(());
         };
-        self.enqueue(LayoutRequestKind::Export { path, layout });
-        Ok(())
+        self.enqueue(LayoutRequestKind::Export { path, layout })
     }
 
     fn parse_layout_json(contents: &str) -> Result<Layout, String> {
@@ -316,8 +333,7 @@ impl LayoutsWidget {
     }
 
     fn begin_import(&mut self, path: PathBuf) -> Result<(), String> {
-        self.enqueue(LayoutRequestKind::ReadImport(path));
-        Ok(())
+        self.enqueue(LayoutRequestKind::ReadImport(path))
     }
 
     fn maybe_refresh(
@@ -350,7 +366,7 @@ impl LayoutsWidget {
                 .iter()
                 .any(|request| matches!(request.kind, LayoutRequestKind::Refresh))
             {
-                self.enqueue(LayoutRequestKind::Refresh);
+                let _ = self.enqueue(LayoutRequestKind::Refresh);
             }
         }
         if !self.loader.is_in_flight()
@@ -363,7 +379,9 @@ impl LayoutsWidget {
     }
 
     fn apply_result(&mut self, result: LayoutResult) {
-        if result.generation < self.applied_generation {
+        if result.generation < self.applied_generation
+            || result.generation < self.latest_ui_generation
+        {
             return;
         }
         self.applied_generation = result.generation;
@@ -579,8 +597,7 @@ impl LayoutsWidget {
             from: from.to_string(),
             to: new_name.to_string(),
             select: self.active_layout_name.as_deref() == Some(from),
-        });
-        Ok(())
+        })
     }
 
     fn health_label(health: &LayoutHealth) -> (String, egui::Color32) {
@@ -678,17 +695,12 @@ impl Widget for LayoutsWidget {
                         if let Err(err) = self.save_layout(layout) {
                             self.set_status(err, egui::Color32::YELLOW);
                         } else {
-                            self.set_status("Layout updated.", egui::Color32::GREEN);
+                            self.set_status("Update queued.", egui::Color32::YELLOW);
                         }
                     }
                     if ui.button("Duplicate layout").clicked() {
                         match self.duplicate_active_layout() {
-                            Ok(name) => {
-                                self.set_status(
-                                    format!("Duplicated layout as '{name}'."),
-                                    egui::Color32::GREEN,
-                                );
-                            }
+                            Ok(_) => self.set_status("Duplicate queued.", egui::Color32::YELLOW),
                             Err(err) => self.set_status(err, egui::Color32::YELLOW),
                         }
                     }
@@ -703,7 +715,7 @@ impl Widget for LayoutsWidget {
                     if ui.button("Export layout").clicked() {
                         match self.export_active_layout() {
                             Ok(()) => {
-                                self.set_status("Exported layout.", egui::Color32::GREEN);
+                                self.set_status("Export queued.", egui::Color32::YELLOW);
                             }
                             Err(err) => self.set_status(err, egui::Color32::YELLOW),
                         }
@@ -713,10 +725,7 @@ impl Widget for LayoutsWidget {
                     {
                         match self.begin_import(path) {
                             Ok(()) => {
-                                self.set_status(
-                                    "Layout loaded. Choose how to import.",
-                                    egui::Color32::YELLOW,
-                                );
+                                self.set_status("Import read queued.", egui::Color32::YELLOW);
                             }
                             Err(err) => self.set_status(err, egui::Color32::YELLOW),
                         }
@@ -754,8 +763,10 @@ impl Widget for LayoutsWidget {
                         self.pending_import = None;
                     }
                     if ui.button("Import as new").clicked() {
-                        self.enqueue(LayoutRequestKind::ImportNew(pending.layout.clone()));
-                        self.set_status("Import queued.", egui::Color32::YELLOW);
+                        match self.enqueue(LayoutRequestKind::ImportNew(pending.layout.clone())) {
+                            Ok(()) => self.set_status("Import queued.", egui::Color32::YELLOW),
+                            Err(error) => self.set_status(error, egui::Color32::YELLOW),
+                        }
                         self.pending_import = None;
                     }
                     if ui.button("Cancel").clicked() {
@@ -1051,6 +1062,108 @@ mod tests {
                 .layouts
                 .iter()
                 .any(|layout| layout.name == "widget")
+        );
+    }
+
+    #[test]
+    fn newer_queued_edit_suppresses_older_fifo_status_and_snapshot() {
+        let mut widget = LayoutsWidget::default();
+        widget.latest_ui_generation = 2;
+        widget.apply_result(LayoutResult {
+            generation: 1,
+            data: Some(LayoutsWidget::data_from_store(
+                &LayoutsConfig::default(),
+                LayoutStore {
+                    layouts: vec![layout("older")],
+                    ..LayoutStore::default()
+                },
+                true,
+            )),
+            selected: Some(layout("older")),
+            imported: None,
+            message: Some("older saved".into()),
+            error: None,
+        });
+        assert!(widget.cache.data.store.layouts.is_empty());
+        assert!(widget.status.is_none());
+
+        widget.apply_result(LayoutResult {
+            generation: 2,
+            data: None,
+            selected: None,
+            imported: None,
+            message: None,
+            error: Some("newer failed".into()),
+        });
+        assert_eq!(widget.error.as_deref(), Some("newer failed"));
+        assert!(widget.status.is_none());
+
+        widget.latest_ui_generation = 3;
+        widget.apply_result(LayoutResult {
+            generation: 3,
+            data: None,
+            selected: None,
+            imported: None,
+            message: Some("newest saved".into()),
+            error: None,
+        });
+        assert!(widget.error.is_none());
+        assert_eq!(
+            widget.status.as_ref().map(|status| status.text.as_str()),
+            Some("newest saved")
+        );
+    }
+
+    #[test]
+    fn two_fifo_edits_merge_at_execution_and_only_latest_result_is_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layouts.json");
+        layouts_storage::save_layouts(&path, &LayoutStore::default()).unwrap();
+        let cfg = LayoutsConfig {
+            show_health_indicator: false,
+            ..LayoutsConfig::default()
+        };
+        let first = LayoutsWidget::execute_request(LayoutRequest {
+            generation: 1,
+            cfg: cfg.clone(),
+            path: path.clone(),
+            kind: LayoutRequestKind::Save(layout("first")),
+        });
+        let second = LayoutsWidget::execute_request(LayoutRequest {
+            generation: 2,
+            cfg,
+            path: path.clone(),
+            kind: LayoutRequestKind::Save(layout("second")),
+        });
+        let disk = layouts_storage::load_layouts(&path).unwrap();
+        assert_eq!(
+            disk.layouts
+                .iter()
+                .map(|layout| layout.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+
+        let mut widget = LayoutsWidget::default();
+        widget.latest_ui_generation = 2;
+        widget.apply_result(first);
+        assert!(widget.status.is_none());
+        widget.apply_result(second);
+        assert_eq!(widget.error, None);
+        assert_eq!(
+            widget.status.as_ref().map(|status| status.text.as_str()),
+            Some("Layout updated.")
+        );
+        assert_eq!(
+            widget
+                .cache
+                .data
+                .store
+                .layouts
+                .iter()
+                .map(|layout| layout.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
         );
     }
 }

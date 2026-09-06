@@ -115,11 +115,56 @@ pub trait Plugin: Send + Sync {
 #[derive(Default)]
 pub(crate) struct PluginSearchUpdates {
     generation: AtomicU64,
+    next_ticket: AtomicU64,
+    active_tickets: Mutex<HashMap<&'static str, u64>>,
+    published_tickets: Mutex<HashMap<&'static str, u64>>,
     source_generations: Mutex<HashMap<&'static str, u64>>,
     repaint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl PluginSearchUpdates {
+    pub(crate) fn begin_refresh(&self, source: &'static str) -> u64 {
+        let ticket = self.next_ticket.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut active) = self.active_tickets.lock() {
+            active.insert(source, ticket);
+        }
+        ticket
+    }
+
+    pub(crate) fn active_ticket(&self, source: &str) -> Option<u64> {
+        let source = Self::canonical_source(source);
+        self.active_tickets.lock().ok()?.get(source).copied()
+    }
+
+    pub(crate) fn published_ticket(&self, source: &str) -> Option<u64> {
+        let source = Self::canonical_source(source);
+        self.published_tickets.lock().ok()?.get(source).copied()
+    }
+
+    pub(crate) fn notify_ticket(&self, source: &'static str, ticket: u64) {
+        let committed = self.active_tickets.lock().ok().is_some_and(|mut active| {
+            if active.get(source).copied() != Some(ticket) {
+                return false;
+            }
+            active.remove(source);
+            true
+        });
+        if !committed {
+            return;
+        }
+        if let Ok(mut published) = self.published_tickets.lock() {
+            published.insert(source, ticket);
+        }
+        self.notify(source);
+    }
+
+    fn canonical_source(source: &str) -> &str {
+        match source {
+            "processes" | "sysinfo" | "volume" => "system_data",
+            source => source,
+        }
+    }
+
     pub(crate) fn notify(&self, source: &'static str) {
         self.generation.fetch_add(1, Ordering::Release);
         if let Ok(mut generations) = self.source_generations.lock() {
@@ -140,10 +185,7 @@ impl PluginSearchUpdates {
     }
 
     pub(crate) fn source_generation(&self, source: &str) -> u64 {
-        let source = match source {
-            "processes" | "sysinfo" | "volume" => "system_data",
-            source => source,
-        };
+        let source = Self::canonical_source(source);
         self.source_generations
             .lock()
             .ok()
@@ -166,25 +208,43 @@ pub struct PluginInternalServices {
 }
 
 pub struct PluginManager {
-    plugins: Vec<Arc<RwLock<Box<dyn Plugin>>>>,
+    plugins: Vec<Arc<PluginSlot>>,
     services: PluginInternalServices,
-    #[allow(dead_code)]
-    libs: Vec<Arc<libloading::Library>>,
+    next_plugin_epoch: u64,
+}
+
+struct PluginSlot {
+    name: String,
+    plugin: RwLock<Box<dyn Plugin>>,
+    _library: Option<Arc<libloading::Library>>,
+    epoch: u64,
 }
 
 #[derive(Clone)]
 pub(crate) struct OwnedPluginHandle {
-    pub(crate) plugin: Arc<RwLock<Box<dyn Plugin>>>,
-    _libraries: Vec<Arc<libloading::Library>>,
+    pub(crate) epoch: u64,
+    slot: Arc<PluginSlot>,
 }
 
 impl OwnedPluginHandle {
     #[cfg(test)]
     pub(crate) fn for_test(plugin: Box<dyn Plugin>) -> Self {
-        Self {
-            plugin: Arc::new(RwLock::new(plugin)),
-            _libraries: Vec::new(),
-        }
+        Self::for_test_epoch(plugin, 1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_epoch(plugin: Box<dyn Plugin>, epoch: u64) -> Self {
+        let slot = Arc::new(PluginSlot {
+            name: plugin.name().to_string(),
+            plugin: RwLock::new(plugin),
+            _library: None,
+            epoch,
+        });
+        Self { epoch, slot }
+    }
+
+    pub(crate) fn read(&self) -> std::sync::LockResult<RwLockReadGuard<'_, Box<dyn Plugin>>> {
+        self.slot.plugin.read()
     }
 }
 
@@ -210,7 +270,7 @@ impl PluginManager {
                 search_updates: Arc::new(PluginSearchUpdates::default()),
                 system_data_runtime: None,
             },
-            libs: Vec::new(),
+            next_plugin_epoch: 0,
         }
     }
 
@@ -230,7 +290,7 @@ impl PluginManager {
                 search_updates: Arc::new(PluginSearchUpdates::default()),
                 system_data_runtime: None,
             },
-            libs: Vec::new(),
+            next_plugin_epoch: 0,
         }
     }
 
@@ -244,6 +304,54 @@ impl PluginManager {
 
     pub fn search_generation_for(&self, source: &str) -> u64 {
         self.services.search_updates.source_generation(source)
+    }
+
+    pub(crate) fn active_search_ticket_for(&self, source: &str) -> Option<u64> {
+        self.services.search_updates.active_ticket(source)
+    }
+
+    pub(crate) fn published_search_ticket_for(&self, source: &str) -> Option<u64> {
+        self.services.search_updates.published_ticket(source)
+    }
+
+    pub(crate) fn search_plugin_with_ticket(
+        &self,
+        name: &str,
+        query: &str,
+    ) -> Result<(Vec<Action>, Option<u64>), &'static str> {
+        let slot = self
+            .plugins
+            .iter()
+            .find(|slot| slot.name == name)
+            .ok_or("plugin unavailable")?;
+        let plugin = slot.plugin.try_read().map_err(|_| "plugin busy")?;
+        let actions = plugin.search(query);
+        Ok((actions, self.active_search_ticket_for(name)))
+    }
+
+    pub(crate) fn active_search_tickets_for_query(&self, query: &str) -> Vec<(&'static str, u64)> {
+        let head = split_action_filters(query)
+            .0
+            .split_whitespace()
+            .next()
+            .map(str::to_ascii_lowercase);
+        let Some(head) = head.as_deref() else {
+            return Vec::new();
+        };
+        let sources: &[&'static str] = match head {
+            "tab" | "tabs" => &["browser_tabs"],
+            "win" | "window" | "windows" => &["windows"],
+            "ip" => &["ip"],
+            "ps" | "psk" | "pss" | "info" | "vol" => &["system_data"],
+            _ => &[],
+        };
+        sources
+            .iter()
+            .filter_map(|source| {
+                self.active_search_ticket_for(source)
+                    .map(|ticket| (*source, ticket))
+            })
+            .collect()
     }
 
     pub fn set_search_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
@@ -276,7 +384,7 @@ impl PluginManager {
                 search_updates: Arc::new(PluginSearchUpdates::default()),
                 system_data_runtime: None,
             },
-            libs: Vec::new(),
+            next_plugin_epoch: 0,
         }
     }
 
@@ -304,7 +412,6 @@ impl PluginManager {
         self.clear_plugins();
         // Drop previously loaded dynamic libraries to avoid accumulating
         // duplicate handles when reloading plugins.
-        self.libs.clear();
         self.register_with_settings(WebSearchPlugin, plugin_settings);
         self.register_with_settings(CalculatorPlugin::default(), plugin_settings);
         self.register_with_settings(UnitConvertPlugin, plugin_settings);
@@ -404,7 +511,22 @@ impl PluginManager {
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
         tracing::debug!("registered plugin {}", plugin.name());
-        self.plugins.push(Arc::new(RwLock::new(plugin)));
+        self.register_slot(plugin, None);
+    }
+
+    fn register_slot(
+        &mut self,
+        plugin: Box<dyn Plugin>,
+        library: Option<Arc<libloading::Library>>,
+    ) {
+        self.next_plugin_epoch = self.next_plugin_epoch.wrapping_add(1).max(1);
+        let name = plugin.name().to_string();
+        self.plugins.push(Arc::new(PluginSlot {
+            name,
+            plugin: RwLock::new(plugin),
+            _library: library,
+            epoch: self.next_plugin_epoch,
+        }));
     }
 
     fn register_with_settings<P: Plugin + 'static>(
@@ -420,7 +542,7 @@ impl PluginManager {
 
     /// Return a list of registered plugin names.
     pub fn plugin_names(&self) -> Vec<String> {
-        self.iter().map(|p| p.name().to_string()).collect()
+        self.plugins.iter().map(|slot| slot.name.clone()).collect()
     }
 
     /// Return names, descriptions and capabilities for all plugins.
@@ -456,24 +578,37 @@ impl PluginManager {
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = RwLockWriteGuard<'_, Box<dyn Plugin>>> {
-        self.plugins.iter().filter_map(|plugin| plugin.write().ok())
+        self.plugins
+            .iter()
+            .filter_map(|slot| slot.plugin.write().ok())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RwLockReadGuard<'_, Box<dyn Plugin>>> {
-        self.plugins.iter().filter_map(|plugin| plugin.read().ok())
+        self.plugins
+            .iter()
+            .filter_map(|slot| slot.plugin.read().ok())
     }
 
     pub(crate) fn owned_plugin(&self, name: &str) -> Option<OwnedPluginHandle> {
-        self.plugins.iter().find_map(|plugin| {
-            let matches = plugin
-                .read()
-                .ok()
-                .is_some_and(|plugin| plugin.name() == name);
+        self.plugins.iter().find_map(|slot| {
+            let matches = slot.name == name;
             matches.then(|| OwnedPluginHandle {
-                plugin: Arc::clone(plugin),
-                _libraries: self.libs.clone(),
+                epoch: slot.epoch,
+                slot: Arc::clone(slot),
             })
         })
+    }
+
+    pub(crate) fn try_write_plugin(
+        &self,
+        name: &str,
+    ) -> Result<RwLockWriteGuard<'_, Box<dyn Plugin>>, &'static str> {
+        let slot = self
+            .plugins
+            .iter()
+            .find(|slot| slot.name == name)
+            .ok_or("plugin unavailable")?;
+        slot.plugin.try_write().map_err(|_| "plugin busy")
     }
 
     pub fn load_dir(
@@ -504,8 +639,7 @@ impl PluginManager {
                     plugin.apply_settings(val);
                 }
                 let name = plugin.name().to_string();
-                self.plugins.push(Arc::new(RwLock::new(plugin)));
-                self.libs.push(lib);
+                self.register_slot(plugin, Some(lib));
                 tracing::debug!("loaded plugin {name}");
             }
         }
@@ -577,6 +711,45 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    struct BlockingPlugin {
+        started: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    struct NamedPlugin(&'static str);
+
+    impl Plugin for NamedPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            self.0
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    impl Plugin for BlockingPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "blocking"
+        }
+        fn description(&self) -> &str {
+            "blocking"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
     #[test]
     fn built_in_search_updates_increment_generation_and_repaint() {
         let manager = PluginManager::new();
@@ -589,6 +762,66 @@ mod tests {
         assert_eq!(manager.search_generation(), before + 1);
         assert_eq!(manager.search_generation_for("test"), source_before + 1);
         assert_eq!(manager.search_generation_for("unrelated"), 0);
+    }
+
+    #[test]
+    fn refresh_tickets_distinguish_joined_fresh_and_unrelated_publications() {
+        let updates = PluginSearchUpdates::default();
+        let ticket = updates.begin_refresh("windows");
+        assert_eq!(updates.active_ticket("windows"), Some(ticket));
+        assert_eq!(updates.published_ticket("windows"), None);
+        updates.notify("browser_tabs");
+        assert_eq!(updates.active_ticket("windows"), Some(ticket));
+        assert_eq!(updates.published_ticket("windows"), None);
+        updates.notify_ticket("windows", ticket);
+        assert_eq!(updates.active_ticket("windows"), None);
+        assert_eq!(updates.published_ticket("windows"), Some(ticket));
+    }
+
+    #[test]
+    fn superseded_ticket_cannot_publish_or_notify() {
+        let updates = PluginSearchUpdates::default();
+        let stale = updates.begin_refresh("windows");
+        let current = updates.begin_refresh("windows");
+        updates.notify_ticket("windows", stale);
+        assert_eq!(updates.generation(), 0);
+        assert_eq!(updates.active_ticket("windows"), Some(current));
+        assert_eq!(updates.published_ticket("windows"), None);
+        updates.notify_ticket("windows", current);
+        assert_eq!(updates.generation(), 1);
+        assert_eq!(updates.published_ticket("windows"), Some(current));
+    }
+
+    #[test]
+    fn plugin_instance_epoch_advances_across_reload() {
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(NamedPlugin("epoch")));
+        let first = manager.owned_plugin("epoch").unwrap().epoch;
+        manager.clear_plugins();
+        manager.register(Box::new(NamedPlugin("epoch")));
+        assert!(manager.owned_plugin("epoch").unwrap().epoch > first);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_handle_pins_only_its_originating_library() {
+        let first_library = Arc::new(unsafe { Library::new("kernel32.dll").unwrap() });
+        let unrelated_library = Arc::new(unsafe { Library::new("kernel32.dll").unwrap() });
+        let mut manager = PluginManager::new();
+        manager.register_slot(
+            Box::new(NamedPlugin("first")),
+            Some(Arc::clone(&first_library)),
+        );
+        manager.register_slot(
+            Box::new(NamedPlugin("unrelated")),
+            Some(Arc::clone(&unrelated_library)),
+        );
+        let first_handle = manager.owned_plugin("first").unwrap();
+        manager.clear_plugins();
+        assert_eq!(Arc::strong_count(&first_library), 2);
+        assert_eq!(Arc::strong_count(&unrelated_library), 1);
+        drop(first_handle);
+        assert_eq!(Arc::strong_count(&first_library), 1);
     }
     #[test]
     fn shared_catalog_handle_preserved_across_reload() {
@@ -606,5 +839,36 @@ mod tests {
             &handle,
             &manager.internal_services().clipboard_modifier_catalog
         ));
+    }
+
+    #[test]
+    fn blocked_search_settings_frame_reports_busy_without_waiting() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(BlockingPlugin {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let handle = manager.owned_plugin("blocking").unwrap();
+        let worker = std::thread::spawn(move || {
+            let plugin = handle.read().unwrap();
+            plugin.search("query");
+        });
+        started_rx.recv().unwrap();
+        let mut rendered_busy = false;
+        let context = egui::Context::default();
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if matches!(manager.try_write_plugin("blocking"), Err("plugin busy")) {
+                    ui.label("blocking settings are temporarily busy; retry next frame.");
+                    rendered_busy = true;
+                }
+            });
+        });
+        assert!(rendered_busy);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(manager.try_write_plugin("blocking").is_ok());
     }
 }

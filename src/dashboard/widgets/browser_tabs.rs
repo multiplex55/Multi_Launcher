@@ -1,7 +1,7 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin,
-    observe_owned_search_publication, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, observe_owned_search_publication,
+    refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -49,7 +49,7 @@ pub struct BrowserTabsWidget {
     error: Option<String>,
     refresh_pending: bool,
     last_search_generation: u64,
-    awaiting_generation: Option<u64>,
+    awaiting_ticket: Option<u64>,
 }
 
 impl BrowserTabsWidget {
@@ -61,7 +61,7 @@ impl BrowserTabsWidget {
             error: None,
             refresh_pending: false,
             last_search_generation: 0,
-            awaiting_generation: None,
+            awaiting_ticket: None,
         }
     }
 
@@ -101,9 +101,10 @@ impl BrowserTabsWidget {
 
     fn refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        let (actions, error) = Self::load_tabs(ctx, self.cfg.limit.max(1));
+        let (actions, error, ticket) = Self::load_tabs(ctx, self.cfg.limit.max(1));
         self.error = error;
         self.cache.refresh(|data| *data = actions);
+        self.awaiting_ticket = ticket;
     }
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
@@ -119,7 +120,8 @@ impl BrowserTabsWidget {
             schedule.mode,
             generation,
             &mut self.last_search_generation,
-            &mut self.awaiting_generation,
+            ctx.plugins.published_search_ticket_for("browser_tabs"),
+            &mut self.awaiting_ticket,
             &mut self.refresh_pending,
         );
         if run_refresh_schedule(
@@ -129,25 +131,25 @@ impl BrowserTabsWidget {
             &mut self.cache.last_refresh,
         ) {
             self.refresh(ctx);
-            if schedule.mode == RefreshMode::Manual {
-                self.awaiting_generation = Some(generation);
+            if schedule.mode != RefreshMode::Manual {
+                self.awaiting_ticket = None;
             }
         }
     }
 
-    fn load_tabs(ctx: &DashboardContext<'_>, limit: usize) -> (Vec<Action>, Option<String>) {
-        let Some(plugin) = find_plugin(ctx, "browser_tabs") else {
-            return (
-                Vec::new(),
-                Some("Browser tabs plugin not available.".into()),
-            );
-        };
-
-        let mut actions = plugin.search("tab");
+    fn load_tabs(
+        ctx: &DashboardContext<'_>,
+        limit: usize,
+    ) -> (Vec<Action>, Option<String>, Option<u64>) {
+        let (mut actions, ticket) =
+            match ctx.plugins.search_plugin_with_ticket("browser_tabs", "tab") {
+                Ok(result) => result,
+                Err(error) => return (Vec::new(), Some(error.into()), None),
+            };
         if actions.len() > limit {
             actions.truncate(limit);
         }
-        (actions, None)
+        (actions, None, ticket)
     }
 }
 

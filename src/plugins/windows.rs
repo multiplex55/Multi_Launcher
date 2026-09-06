@@ -46,6 +46,7 @@ struct CacheState {
     windows: Arc<Vec<WindowInfo>>,
     fresh_until: Option<Instant>,
     in_flight: bool,
+    in_flight_ticket: Option<u64>,
     shutting_down: bool,
 }
 
@@ -54,6 +55,7 @@ struct WindowCache {
     wake: SyncSender<()>,
     worker: Mutex<Option<JoinHandle<()>>>,
     publication: Arc<Mutex<()>>,
+    updates: Arc<PluginSearchUpdates>,
 }
 
 impl WindowCache {
@@ -62,6 +64,7 @@ impl WindowCache {
             windows: Arc::new(Vec::new()),
             fresh_until: None,
             in_flight: false,
+            in_flight_ticket: None,
             shutting_down: false,
         }));
         let (wake, receiver) = sync_channel(1);
@@ -71,7 +74,16 @@ impl WindowCache {
             .name("window-enumeration-refresh".into())
             .spawn({
                 let publication = Arc::clone(&publication);
-                move || run_worker(receiver, worker_state, publication, provider, updates)
+                let worker_updates = Arc::clone(&updates);
+                move || {
+                    run_worker(
+                        receiver,
+                        worker_state,
+                        publication,
+                        provider,
+                        worker_updates,
+                    )
+                }
             })
             .expect("start window enumeration worker");
         Self {
@@ -79,6 +91,7 @@ impl WindowCache {
             wake,
             worker: Mutex::new(Some(worker)),
             publication,
+            updates,
         }
     }
 
@@ -92,8 +105,10 @@ impl WindowCache {
                 .is_some_and(|deadline| Instant::now() < deadline)
         {
             state.in_flight = true;
+            state.in_flight_ticket = Some(self.updates.begin_refresh("windows"));
             if self.wake.try_send(()).is_err() {
                 state.in_flight = false;
+                state.in_flight_ticket = None;
             }
         }
         Arc::clone(&state.windows)
@@ -146,19 +161,19 @@ fn run_worker(
         let Ok(_publication) = publication.lock() else {
             break;
         };
-        let published = if let Ok(mut state) = state.lock() {
+        let ticket = if let Ok(mut state) = state.lock() {
             if state.shutting_down {
                 break;
             }
             state.windows = Arc::new(windows);
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
-            true
+            state.in_flight_ticket.take()
         } else {
-            false
+            None
         };
-        if published {
-            updates.notify("windows");
+        if let Some(ticket) = ticket {
+            updates.notify_ticket("windows", ticket);
         }
     }
 }

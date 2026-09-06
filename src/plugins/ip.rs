@@ -66,6 +66,7 @@ struct CacheState {
     fresh_until: Option<Instant>,
     retry_after: Option<Instant>,
     in_flight: bool,
+    in_flight_ticket: Option<u64>,
     shutting_down: bool,
 }
 
@@ -75,6 +76,7 @@ struct PublicIpCache {
     wake: SyncSender<()>,
     worker: Option<JoinHandle<()>>,
     clock: Arc<dyn Clock>,
+    updates: Arc<PluginSearchUpdates>,
 }
 
 impl PublicIpCache {
@@ -92,6 +94,7 @@ impl PublicIpCache {
             .name("public-ip-refresh".into())
             .spawn({
                 let publication = Arc::clone(&publication);
+                let worker_updates = Arc::clone(&updates);
                 move || {
                     run_worker(
                         receiver,
@@ -99,7 +102,7 @@ impl PublicIpCache {
                         publication,
                         provider,
                         worker_clock,
-                        updates,
+                        worker_updates,
                     )
                 }
             })
@@ -110,6 +113,7 @@ impl PublicIpCache {
             wake,
             worker: Some(worker),
             clock,
+            updates,
         }
     }
 
@@ -120,8 +124,10 @@ impl PublicIpCache {
         let backing_off = state.retry_after.is_some_and(|deadline| now < deadline);
         if !fresh && !backing_off && !state.in_flight {
             state.in_flight = true;
+            state.in_flight_ticket = Some(self.updates.begin_refresh("ip"));
             if self.wake.try_send(()).is_err() {
                 state.in_flight = false;
+                state.in_flight_ticket = None;
             }
         }
         state.last_good.clone()
@@ -164,7 +170,7 @@ fn run_worker(
         let Ok(_publication) = publication.lock() else {
             break;
         };
-        let published = if let Ok(mut state) = state.lock() {
+        let ticket = if let Ok(mut state) = state.lock() {
             if state.shutting_down {
                 break;
             }
@@ -180,12 +186,12 @@ fn run_worker(
                     state.retry_after = Some(now + FAILURE_BACKOFF);
                 }
             }
-            true
+            state.in_flight_ticket.take()
         } else {
-            false
+            None
         };
-        if published {
-            updates.notify("ip");
+        if let Some(ticket) = ticket {
+            updates.notify_ticket("ip", ticket);
         }
     }
 }

@@ -284,8 +284,7 @@ impl SettingsEditor {
             .clone()
             .unwrap_or_else(|| "valid".to_owned());
 
-        for mut plugin in app.plugins.iter_mut() {
-            let name = plugin.name().to_string();
+        for name in app.plugins.plugin_names() {
             if name == "notes" {
                 continue;
             }
@@ -296,6 +295,13 @@ impl SettingsEditor {
             if !enabled {
                 continue;
             }
+            let Ok(mut plugin) = app.plugins.try_write_plugin(&name) else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("{name} settings are temporarily busy; retry next frame."),
+                );
+                continue;
+            };
             let has_settings =
                 plugin.default_settings().is_some() || self.plugin_settings.contains_key(&name);
             if !has_settings {

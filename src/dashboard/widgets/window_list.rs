@@ -1,7 +1,7 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin,
-    observe_owned_search_publication, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, observe_owned_search_publication,
+    refresh_schedule, refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -49,7 +49,7 @@ pub struct WindowsWidget {
     error: Option<String>,
     refresh_pending: bool,
     last_search_generation: u64,
-    awaiting_generation: Option<u64>,
+    awaiting_ticket: Option<u64>,
 }
 
 impl WindowsWidget {
@@ -61,7 +61,7 @@ impl WindowsWidget {
             error: None,
             refresh_pending: false,
             last_search_generation: 0,
-            awaiting_generation: None,
+            awaiting_ticket: None,
         }
     }
 
@@ -101,9 +101,10 @@ impl WindowsWidget {
 
     fn refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        let (actions, error) = Self::load_windows(ctx);
+        let (actions, error, ticket) = Self::load_windows(ctx);
         self.error = error;
         self.cache.refresh(|data| *data = actions);
+        self.awaiting_ticket = ticket;
     }
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
@@ -119,7 +120,8 @@ impl WindowsWidget {
             schedule.mode,
             generation,
             &mut self.last_search_generation,
-            &mut self.awaiting_generation,
+            ctx.plugins.published_search_ticket_for("windows"),
+            &mut self.awaiting_ticket,
             &mut self.refresh_pending,
         );
         if run_refresh_schedule(
@@ -129,17 +131,17 @@ impl WindowsWidget {
             &mut self.cache.last_refresh,
         ) {
             self.refresh(ctx);
-            if schedule.mode == RefreshMode::Manual {
-                self.awaiting_generation = Some(generation);
+            if schedule.mode != RefreshMode::Manual {
+                self.awaiting_ticket = None;
             }
         }
     }
 
-    fn load_windows(ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>) {
-        let Some(plugin) = find_plugin(ctx, "windows") else {
-            return (Vec::new(), Some("Windows plugin not available.".into()));
-        };
-        (plugin.search("win"), None)
+    fn load_windows(ctx: &DashboardContext<'_>) -> (Vec<Action>, Option<String>, Option<u64>) {
+        match ctx.plugins.search_plugin_with_ticket("windows", "win") {
+            Ok((actions, ticket)) => (actions, None, ticket),
+            Err(error) => (Vec::new(), Some(error.into()), None),
+        }
     }
 
     fn grouped_actions(&self) -> Vec<(String, Option<Action>, Option<Action>)> {

@@ -130,19 +130,20 @@ pub(crate) fn observe_owned_search_publication(
     mode: RefreshMode,
     generation: u64,
     last_generation: &mut u64,
-    awaiting_generation: &mut Option<u64>,
+    published_ticket: Option<u64>,
+    awaiting_ticket: &mut Option<u64>,
     refresh_pending: &mut bool,
 ) -> bool {
     if mode != RefreshMode::Manual {
         return observe_search_generation(generation, last_generation, refresh_pending);
     }
-    let Some(request_generation) = *awaiting_generation else {
+    let Some(request_ticket) = *awaiting_ticket else {
         return false;
     };
-    if generation <= request_generation {
+    if published_ticket != Some(request_ticket) {
         return false;
     }
-    *awaiting_generation = None;
+    *awaiting_ticket = None;
     *last_generation = generation;
     *refresh_pending = true;
     true
@@ -607,6 +608,7 @@ mod tests {
             RefreshMode::Manual,
             3,
             &mut observed,
+            Some(2),
             &mut awaiting,
             &mut pending,
         ));
@@ -614,6 +616,7 @@ mod tests {
             RefreshMode::Manual,
             4,
             &mut observed,
+            Some(3),
             &mut awaiting,
             &mut pending,
         ));
@@ -624,6 +627,7 @@ mod tests {
             RefreshMode::Manual,
             5,
             &mut observed,
+            Some(4),
             &mut awaiting,
             &mut pending,
         ));

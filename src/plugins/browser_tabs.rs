@@ -81,6 +81,7 @@ mod imp {
         tabs: Arc<Vec<TabInfo>>,
         last_refresh: Instant,
         in_flight: bool,
+        in_flight_ticket: Option<u64>,
         refresh_disabled: bool,
         messages: Vec<String>,
         shutting_down: bool,
@@ -115,6 +116,7 @@ mod imp {
                     tabs: Arc::new(Vec::new()),
                     last_refresh: Instant::now() - Duration::from_secs(60),
                     in_flight: false,
+                    in_flight_ticket: None,
                     refresh_disabled: false,
                     shutting_down: false,
                     messages: Vec::new(),
@@ -159,8 +161,10 @@ mod imp {
                 return;
             }
             state.in_flight = true;
+            state.in_flight_ticket = Some(self.shared.updates.begin_refresh("browser_tabs"));
             if self.shared.wake.try_send(()).is_err() {
                 state.in_flight = false;
+                state.in_flight_ticket = None;
             }
         }
 
@@ -182,6 +186,7 @@ mod imp {
                 state.tabs = Arc::new(tabs);
                 state.last_refresh = Instant::now();
                 state.in_flight = false;
+                state.in_flight_ticket = None;
                 state.refresh_disabled = true;
             }
         }
@@ -230,7 +235,7 @@ mod imp {
             let Ok(_publication) = shared.publication.lock() else {
                 break;
             };
-            let published = if let Ok(mut state) = shared.state.lock() {
+            let ticket = if let Ok(mut state) = shared.state.lock() {
                 if state.shutting_down {
                     break;
                 }
@@ -238,12 +243,12 @@ mod imp {
                 state.last_refresh = Instant::now();
                 state.in_flight = false;
                 state.messages.push("Tab cache refreshed".into());
-                true
+                state.in_flight_ticket.take()
             } else {
-                false
+                None
             };
-            if published {
-                shared.updates.notify("browser_tabs");
+            if let Some(ticket) = ticket {
+                shared.updates.notify_ticket("browser_tabs", ticket);
             }
         }
     }
@@ -486,8 +491,10 @@ mod imp {
                 Arc::clone(&updates),
             );
             assert!(cache.cached_actions("", false).is_empty());
+            let ticket = updates.active_ticket("browser_tabs").unwrap();
             started_rx.recv().unwrap();
             assert!(cache.cached_actions("", true).is_empty());
+            assert_eq!(updates.active_ticket("browser_tabs"), Some(ticket));
             assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
             release_tx
                 .send(vec![TabInfo {
@@ -498,9 +505,12 @@ mod imp {
                 .unwrap();
             repaint_rx.recv().unwrap();
             assert_eq!(updates.generation(), 1);
+            assert_eq!(updates.active_ticket("browser_tabs"), None);
+            assert_eq!(updates.published_ticket("browser_tabs"), Some(ticket));
             let actions = cache.cached_actions("doc", false);
             assert_eq!(actions.len(), 1);
             assert_eq!(actions[0].action, "tab:switch:1_2");
+            assert_eq!(updates.active_ticket("browser_tabs"), None);
             drop(cache);
         }
 

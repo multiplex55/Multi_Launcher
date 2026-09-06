@@ -605,6 +605,40 @@ searches; and `git diff --check`. Criterion measured the populated 1,000-tab cac
 193.51–203.11 us and the static clear command at 1.0779–1.1231 us, with no statistically detected
 regression.
 
+### Fifth independent-review remediation
+
+**Status:** `complete`
+
+Plugin ownership now uses one slot per plugin, with the originating dynamic-library handle stored only
+on that slot (built-ins store no library handle) and a monotonically increasing instance epoch.
+Plugin Home includes that epoch in request/result identity and replaces its background executor and
+cache when an instance changes. A blocked old instance therefore cannot populate or block the
+replacement instance, while unrelated DLLs are no longer retained by every outstanding plugin
+handle. Plugin settings and mouse-gesture settings use nonblocking write acquisition and show a
+clear busy diagnostic instead of waiting behind Plugin Home's background read.
+
+Layouts now bounds its typed operation queue at 32 entries, preferentially discards a redundant
+queued refresh under pressure, and records the latest submitted UI mutation generation. Older FIFO
+results cannot roll back the visible snapshot or status while a newer edit is queued; success and
+error status is published only from the worker result. Every mutation still reloads and merges the
+current store at execution time.
+
+The internal built-in refresh service now assigns exact tickets to Browser Tabs, Windows, public-IP,
+and shared-system refreshes. Search callers observe whether they scheduled or joined current work;
+dedicated manual widgets and Query List await only those exact tickets, consume completion once, and
+perform no follow-up for a fresh cache. Query List derives relevant asynchronous sources from the
+routed command head. Superseded tickets cannot publish, increment generation, or repaint, preventing
+stale instance work from satisfying current consumers. The public Plugin trait and dynamic-plugin ABI
+remain unchanged.
+
+Verification passed: focused deterministic settings-frame, Plugin Home epoch-reload, Layouts FIFO,
+ticket join/fresh/unrelated/stale-publication, and widget-consumption tests; `cargo fmt --all -- --check`;
+`cargo check`; `cargo nextest run --no-fail-fast` (3,004 passed, 7 skipped, 3,011 total across
+70 binaries in 41.987 s after compilation); `cargo build --release` (2m07s); the Browser Tabs
+Criterion benchmark; stale-path/render-I/O searches; and `git diff --check`. Criterion measured the
+populated 1,000-tab cached filter path at 199.06–213.36 us and the separate static clear command at
+1.1047–1.1414 us, with no statistically detected regression.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -639,3 +673,4 @@ regression.
 | Review remediation 1 | `e6f8baf` | `fix(perf): resolve final review findings` |
 | Review remediation 2 | `4596f72` | `fix(perf): harden async refresh lifecycles` |
 | Review remediation 3 | `bb10a3e` | `fix(perf): stabilize async cache invalidation` |
+| Review remediation 4 | `7c0daf3` | `fix(perf): harden async cache ownership` |
