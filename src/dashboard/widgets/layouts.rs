@@ -518,41 +518,50 @@ impl LayoutsWidget {
                     Ok((None, None, None, Some("Exported layout.".into())))
                 }
                 kind => {
-                    let mut store = layouts_storage::load_layouts(&request.path)
-                        .map_err(|err| format!("Failed to load layouts: {err}"))?;
-                    let (selected, message) = match kind {
-                        LayoutRequestKind::Save(layout) => {
-                            layouts_storage::upsert_layout(&mut store, layout.clone());
-                            (Some(layout), "Layout updated.".to_string())
-                        }
-                        LayoutRequestKind::Duplicate(mut layout) => {
-                            layout.name = Self::unique_layout_name(&layout.name, &store, " (copy)");
-                            layout.created_at = Some(Utc::now().to_rfc3339());
-                            layouts_storage::upsert_layout(&mut store, layout.clone());
-                            let message = format!("Duplicated layout as '{}'.", layout.name);
-                            (Some(layout), message)
-                        }
-                        LayoutRequestKind::Rename { from, to, select } => {
-                            if store.layouts.iter().any(|layout| layout.name == to) {
-                                return Err("A layout with that name already exists.".into());
+                    let mut selected = None;
+                    let mut message = String::new();
+                    let store = layouts_storage::update_layouts(&request.path, |store| {
+                        (selected, message) = match kind {
+                            LayoutRequestKind::Save(layout) => {
+                                layouts_storage::upsert_layout(store, layout.clone());
+                                (Some(layout), "Layout updated.".to_string())
                             }
-                            let layout = store.layouts.iter_mut().find(|layout| layout.name == from)
-                                .ok_or_else(|| "Layout not found.".to_string())?;
-                            layout.name = to;
-                            (
-                                select.then(|| layout.clone()),
-                                "Layout renamed.".to_string(),
-                            )
-                        }
-                        LayoutRequestKind::ImportNew(mut layout) => {
-                            layout.name = Self::unique_layout_name(&layout.name, &store, " (imported)");
-                            layouts_storage::upsert_layout(&mut store, layout.clone());
-                            (Some(layout), "Layout imported.".to_string())
-                        }
-                        _ => unreachable!(),
-                    };
-                    layouts_storage::save_layouts(&request.path, &store)
-                        .map_err(|err| format!("Failed to save layouts: {err}"))?;
+                            LayoutRequestKind::Duplicate(mut layout) => {
+                                layout.name =
+                                    Self::unique_layout_name(&layout.name, store, " (copy)");
+                                layout.created_at = Some(Utc::now().to_rfc3339());
+                                layouts_storage::upsert_layout(store, layout.clone());
+                                let message = format!("Duplicated layout as '{}'.", layout.name);
+                                (Some(layout), message)
+                            }
+                            LayoutRequestKind::Rename { from, to, select } => {
+                                if store.layouts.iter().any(|layout| layout.name == to) {
+                                    return Err(anyhow::anyhow!(
+                                        "A layout with that name already exists."
+                                    ));
+                                }
+                                let layout = store
+                                    .layouts
+                                    .iter_mut()
+                                    .find(|layout| layout.name == from)
+                                    .ok_or_else(|| anyhow::anyhow!("Layout not found."))?;
+                                layout.name = to;
+                                (
+                                    select.then(|| layout.clone()),
+                                    "Layout renamed.".to_string(),
+                                )
+                            }
+                            LayoutRequestKind::ImportNew(mut layout) => {
+                                layout.name =
+                                    Self::unique_layout_name(&layout.name, store, " (imported)");
+                                layouts_storage::upsert_layout(store, layout.clone());
+                                (Some(layout), "Layout imported.".to_string())
+                            }
+                            _ => unreachable!(),
+                        };
+                        Ok(true)
+                    })
+                    .map_err(|err| format!("Failed to update layouts: {err}"))?;
                     let data = Self::data_from_store(&request.cfg, store, true);
                     Ok((Some(data), selected, None, Some(message)))
                 }
@@ -1103,6 +1112,55 @@ mod tests {
                 .iter()
                 .any(|layout| layout.name == "widget")
         );
+    }
+
+    #[test]
+    fn invalid_store_rejects_mutation_and_refresh_retains_last_good_then_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layouts.json");
+        let original = b"{broken";
+        std::fs::write(&path, original).unwrap();
+        let config = LayoutsConfig {
+            show_health_indicator: false,
+            ..LayoutsConfig::default()
+        };
+        let mutation = LayoutsWidget::execute_request(LayoutRequest {
+            generation: 1,
+            cfg: config.clone(),
+            path: path.clone(),
+            kind: LayoutRequestKind::Save(layout("rejected")),
+        });
+        assert!(mutation.error.is_some());
+        assert!(mutation.data.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let mut widget = LayoutsWidget::default();
+        widget.cache.data.store.layouts.push(layout("last-good"));
+        widget.apply_result(LayoutsWidget::execute_request(LayoutRequest {
+            generation: 2,
+            cfg: config.clone(),
+            path: path.clone(),
+            kind: LayoutRequestKind::Refresh,
+        }));
+        assert!(widget.error.is_some());
+        assert!(layouts_storage::get_layout(&widget.cache.data.store, "last-good").is_some());
+
+        crate::common::persistence::save_json_atomic(
+            &path,
+            &LayoutStore {
+                layouts: vec![layout("recovered")],
+                ..LayoutStore::default()
+            },
+        )
+        .unwrap();
+        widget.apply_result(LayoutsWidget::execute_request(LayoutRequest {
+            generation: 3,
+            cfg: config,
+            path,
+            kind: LayoutRequestKind::Refresh,
+        }));
+        assert!(widget.error.is_none());
+        assert!(layouts_storage::get_layout(&widget.cache.data.store, "recovered").is_some());
     }
 
     #[test]

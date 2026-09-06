@@ -551,7 +551,6 @@ pub fn save_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut store = layouts_storage::load_layouts(layouts_config_path())?;
     let windows = collect_layout_windows(LayoutWindowOptions {
         only_active_monitor: flags.only_active_monitor,
         include_minimized: flags.include_minimized,
@@ -566,8 +565,10 @@ pub fn save_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
         options: LayoutOptions::default(),
         ignore: Vec::new(),
     };
-    layouts_storage::upsert_layout(&mut store, layout);
-    layouts_storage::save_layouts(layouts_config_path(), &store)?;
+    layouts_storage::update_layouts(layouts_config_path(), move |store| {
+        layouts_storage::upsert_layout(store, layout);
+        Ok(true)
+    })?;
     Ok(())
 }
 
@@ -716,15 +717,20 @@ pub fn edit_layouts() -> anyhow::Result<()> {
 pub fn remove_layout(name: &str, flags: Option<&str>) -> anyhow::Result<()> {
     ensure_layout_name(name)?;
     let flags = parse_flags(flags);
-    let mut store = layouts_storage::load_layouts(layouts_config_path())?;
-    if layouts_storage::get_layout(&store, name).is_none() {
-        anyhow::bail!("layout '{name}' not found");
-    }
     if flags.dry_run {
+        let store = layouts_storage::load_layouts(layouts_config_path())?;
+        if layouts_storage::get_layout(&store, name).is_none() {
+            anyhow::bail!("layout '{name}' not found");
+        }
         return Ok(());
     }
-    let _ = remove_saved_layout(&mut store, name);
-    layouts_storage::save_layouts(layouts_config_path(), &store)?;
+    let name = name.to_string();
+    layouts_storage::update_layouts(layouts_config_path(), move |store| {
+        if layouts_storage::get_layout(store, &name).is_none() {
+            anyhow::bail!("layout '{name}' not found");
+        }
+        Ok(remove_saved_layout(store, &name))
+    })?;
     Ok(())
 }
 
