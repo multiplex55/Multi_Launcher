@@ -52,7 +52,7 @@ pub struct CommandHistoryWidget {
     cfg: CommandHistoryConfig,
     filter: String,
     cached_pins: Vec<HistoryPin>,
-    pins_loader: BackgroundLoader<(), Vec<HistoryPin>>,
+    pins_loader: BackgroundLoader<(), anyhow::Result<Vec<HistoryPin>>>,
     last_pins_load: Instant,
 }
 
@@ -62,9 +62,7 @@ impl CommandHistoryWidget {
             cfg,
             filter: String::new(),
             cached_pins: Vec::new(),
-            pins_loader: BackgroundLoader::new(|()| {
-                crate::history::load_pins(HISTORY_PINS_FILE).unwrap_or_default()
-            }),
+            pins_loader: BackgroundLoader::new(|()| crate::history::load_pins(HISTORY_PINS_FILE)),
             last_pins_load: Instant::now() - Duration::from_secs(10),
         }
     }
@@ -96,8 +94,8 @@ impl CommandHistoryWidget {
     }
 
     fn refresh_pins(&mut self, repaint: &egui::Context) {
-        if let Some(pins) = self.pins_loader.poll() {
-            self.cached_pins = pins;
+        if let Some(result) = self.pins_loader.poll() {
+            publish_pins_or_retain(&mut self.cached_pins, result);
         }
         if self.last_pins_load.elapsed() > Duration::from_secs(2) {
             if self.pins_loader.request((), repaint) {
@@ -401,18 +399,57 @@ impl Widget for CommandHistoryWidget {
                     });
                 }
                 if entry.missing && ui.button("Unpin").clicked() {
-                    let _ = crate::history::remove_pin(
-                        HISTORY_PINS_FILE,
-                        &entry.action_id,
-                        entry.action.args.as_deref(),
-                    );
-                    self.cached_pins
-                        .retain(|p| p.action_id != entry.action_id || p.args != entry.action.args);
+                    if matches!(
+                        crate::history::remove_pin(
+                            HISTORY_PINS_FILE,
+                            &entry.action_id,
+                            entry.action.args.as_deref(),
+                        ),
+                        Ok(true)
+                    ) {
+                        self.cached_pins.retain(|p| {
+                            p.action_id != entry.action_id || p.args != entry.action.args
+                        });
+                    }
                 }
                 ui.label(timestamp);
             });
         }
 
         clicked
+    }
+}
+
+fn publish_pins_or_retain(current: &mut Vec<HistoryPin>, result: anyhow::Result<Vec<HistoryPin>>) {
+    match result {
+        Ok(pins) => *current = pins,
+        Err(error) => tracing::error!(%error, "dashboard retained last-good history pins"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pin(action_id: &str) -> HistoryPin {
+        HistoryPin {
+            action_id: action_id.into(),
+            label: action_id.into(),
+            desc: String::new(),
+            args: None,
+            query: action_id.into(),
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn failed_pin_reload_retains_last_good_then_recovers() {
+        let initial = vec![pin("saved")];
+        let mut current = initial.clone();
+        publish_pins_or_retain(&mut current, Err(anyhow::anyhow!("invalid pins")));
+        assert_eq!(current, initial);
+        let recovered = vec![pin("recovered")];
+        publish_pins_or_retain(&mut current, Ok(recovered.clone()));
+        assert_eq!(current, recovered);
     }
 }

@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::shell::{SHELL_CMDS_FILE, ShellCmdEntry, load_shell_cmds, save_shell_cmds};
+use crate::plugins::shell::{SHELL_CMDS_FILE, ShellCmdEntry, load_shell_cmds, replace_shell_cmds};
 use eframe::egui;
 
 #[derive(Default)]
@@ -10,11 +10,12 @@ pub struct ShellCmdDialog {
     name: String,
     args: String,
     keep_open: bool,
+    load_error: Option<String>,
 }
 
 impl ShellCmdDialog {
     pub fn open(&mut self) {
-        self.entries = load_shell_cmds(SHELL_CMDS_FILE).unwrap_or_default();
+        let _ = self.load_from(SHELL_CMDS_FILE);
         self.open = true;
         self.edit_idx = None;
         self.name.clear();
@@ -22,12 +23,42 @@ impl ShellCmdDialog {
         self.keep_open = false;
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_shell_cmds(SHELL_CMDS_FILE, &self.entries) {
+    fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
+        match load_shell_cmds(path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_entries(&mut self, path: &str, candidate: Vec<ShellCmdEntry>) -> anyhow::Result<()> {
+        match replace_shell_cmds(path, candidate) {
+            Ok(committed) => {
+                self.entries = committed;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<ShellCmdEntry>) -> bool {
+        if let Err(e) = self.commit_entries(SHELL_CMDS_FILE, candidate) {
             app.report_error_message("ui operation", format!("Failed to save commands: {e}"));
+            false
         } else {
             app.search();
             app.focus_input();
+            true
         }
     }
 
@@ -36,10 +67,20 @@ impl ShellCmdDialog {
             return;
         }
         let mut close = false;
-        let mut save_now = false;
+        let mut save_candidate = None;
         egui::Window::new("Shell Commands")
             .open(&mut self.open)
             .show(ctx, |ui| {
+                if let Some(error) = &self.load_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Shell commands are read-only because loading failed: {error}"),
+                    );
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    return;
+                }
                 if let Some(idx) = self.edit_idx {
                     ui.horizontal(|ui| {
                         ui.label("Name");
@@ -62,23 +103,20 @@ impl ShellCmdDialog {
                             if self.name.trim().is_empty() || self.args.trim().is_empty() {
                                 app.report_error_message("ui operation", "Both fields required");
                             } else {
-                                if idx == self.entries.len() {
-                                    self.entries.push(ShellCmdEntry {
+                                let mut candidate = self.entries.clone();
+                                if idx == candidate.len() {
+                                    candidate.push(ShellCmdEntry {
                                         name: self.name.clone(),
                                         args: self.args.clone(),
                                         autocomplete: true,
                                         keep_open: self.keep_open,
                                     });
-                                } else if let Some(e) = self.entries.get_mut(idx) {
+                                } else if let Some(e) = candidate.get_mut(idx) {
                                     e.name = self.name.clone();
                                     e.args = self.args.clone();
                                     e.keep_open = self.keep_open;
                                 }
-                                self.edit_idx = None;
-                                self.name.clear();
-                                self.args.clear();
-                                self.keep_open = false;
-                                save_now = true;
+                                save_candidate = Some(candidate);
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -109,8 +147,9 @@ impl ShellCmdDialog {
                             }
                         });
                     if let Some(idx) = remove {
-                        self.entries.remove(idx);
-                        save_now = true;
+                        let mut candidate = self.entries.clone();
+                        candidate.remove(idx);
+                        save_candidate = Some(candidate);
                     }
                     if ui.button("Add Command").clicked() {
                         self.edit_idx = Some(self.entries.len());
@@ -123,8 +162,13 @@ impl ShellCmdDialog {
                     }
                 }
             });
-        if save_now {
-            self.save(app);
+        if let Some(candidate) = save_candidate
+            && self.save(app, candidate)
+        {
+            self.edit_idx = None;
+            self.name.clear();
+            self.args.clear();
+            self.keep_open = false;
         }
         if close {
             self.open = false;
@@ -215,5 +259,32 @@ mod tests {
         };
         dlg.open();
         assert!(!dlg.keep_open);
+    }
+
+    #[test]
+    fn invalid_reload_and_commit_keep_last_good_and_read_only() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("commands.json");
+        let initial = vec![ShellCmdEntry {
+            name: "saved".into(),
+            args: "echo saved".into(),
+            autocomplete: true,
+            keep_open: false,
+        }];
+        crate::plugins::shell::save_shell_cmds(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = ShellCmdDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        let invalid = b"invalid commands";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(dialog.load_from(path.to_str().unwrap()).is_err());
+        assert_eq!(dialog.entries, initial);
+        assert!(dialog.load_error.is_some());
+        assert!(
+            dialog
+                .commit_entries(path.to_str().unwrap(), Vec::new())
+                .is_err()
+        );
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

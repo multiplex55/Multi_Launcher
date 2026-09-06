@@ -546,7 +546,16 @@ impl LauncherApp {
 
     fn pin_result_menu(&mut self, ui: &mut egui::Ui, action: &Action) {
         ui.separator();
-        let pins = history::load_pins(HISTORY_PINS_FILE).unwrap_or_default();
+        let pins = match history::load_pins(HISTORY_PINS_FILE) {
+            Ok(pins) => pins,
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Pinned results are read-only: {error}"),
+                );
+                return;
+            }
+        };
         let is_pinned = pins.iter().any(|pin| pin.matches_action(action));
         let pin = HistoryPin {
             action_id: action.action.clone(),
