@@ -170,12 +170,12 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 - Work: delete temporary bridge and remaining feature string routing; reduce activation to lifecycle; keep bus exhaustive and short; migrate helper-coupled tests; add architectural regression coverage; remove stale compatibility paths.
 - Acceptance: raw action routing lives only in canonical parser; no giant GUI chain, old parser/plan, raw helper, or legacy bridge remains; compatibility formats are unchanged.
 - Verification: stale-reference searches, `cargo fmt --all --check`, `cargo check`, `cargo nextest run`, and `cargo clippy --all-targets`.
-- Commit: `refactor(commands): remove legacy activation router` (hash recorded after commit)
+- Commit: `10d21f3 refactor(commands): remove legacy activation router`
 - Verification record: architecture 2/2 and focused headless GUI/bus 6/6 passed; clean-environment full Nextest passed 2948/2948 with 7 skipped across 127 binaries; `cargo clippy --all-targets` exited 0 with existing warnings only; `cargo fmt --all --check`, `cargo check`, `git diff --check`, exhaustive dispatch, raw-routing, and stale-symbol audits passed. An initial full run inherited `RUST_LOG=warn` and failed only the logging info-event test; that target passed 2/2 with the variable removed before the clean full run. Parent review found no remaining scope issue.
 
 ## Integration and independent review
 
-- Status: pending
+- Status: complete
 - After milestone 15, inspect the cumulative diff and stale-reference searches; run full formatting, check, Nextest, and Clippy verification.
 - Spawn an independent high-reasoning reviewer against the original request, this ledger, cumulative branch diff, surrounding architecture, and tests.
 - Remediate substantive findings sequentially with an implementer and a separate commit when meaningful; rerun affected and full verification until review is clear.
@@ -183,4 +183,8 @@ This is the durable execution ledger for the Phase 1 typed command bus and launc
 
 ## Review record
 
-Pending.
+Independent review identified four compatibility/architecture issues after Milestone 15: malformed recognized protocols had lost claimed lifecycle semantics, malformed MkMacro actions no longer followed their legacy GUI error lifecycle, a test-only confirmed-action seam reparsed `Action`, and unknown `fav:*` logging policy was not fully preserved. Commit `4560fc0 fix(commands): preserve malformed activation compatibility` resolved the malformed protocol, MkMacro, and confirmed-invocation findings with typed compatibility variants and regression coverage.
+
+A focused re-review then found that the favorite logging compatibility fix still classified the raw action prefix inside a handler. Commit `7e6379e refactor(commands): type external protocol provenance` moved that classification into parser-owned `ExternalNamespace` metadata and expanded the architecture guard across all command handlers. The final independent re-review reported no substantive findings.
+
+Final verification on the exact reviewed commit set: clean-environment `cargo nextest run` passed 2958/2958 with 7 skipped across 127 binaries; `cargo clippy --all-targets` exited 0 with existing warnings only; final focused parser, handler, bus, GUI lifecycle, confirmation, headless compatibility, and architecture suites passed; `cargo check`, `cargo fmt --all --check`, `git diff --check`, stale-reference searches, single-parser-entry audit, exhaustive-dispatch audit, and raw-handler-routing audit passed.
