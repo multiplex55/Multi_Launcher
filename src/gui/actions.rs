@@ -24,24 +24,13 @@ fn format_wrap_links_toast(result: NoteMutationResult) -> String {
     )
 }
 
-fn validate_note_new_payload(slug: &str, template: Option<&str>) -> Result<(), String> {
-    let slug_has_whitespace = slug.chars().any(char::is_whitespace);
-    let slug_has_delimiter = slug.contains(':');
-    let template_invalid = template.map(|tpl| tpl.trim().is_empty()).unwrap_or(false);
-    if slug.is_empty() || slug_has_whitespace || slug_has_delimiter || template_invalid {
-        return Err("Malformed note action".to_string());
-    }
-    Ok(())
-}
-
 impl LauncherApp {
     pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
         let pending = self.pending_confirm.take();
         if confirmed && let Some(pending) = pending {
-            self.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+            self.dispatch_command_invocation(pending.invocation);
         }
     }
-
     pub(crate) fn launcher_interaction_snapshot(&self) -> LauncherInteractionSnapshot {
         let panel_instances = Self::TRACKED_PANELS
             .iter()
@@ -91,1027 +80,45 @@ impl LauncherApp {
             self.test_activation_trace.push((a.clone(), source));
         }
         let before = self.launcher_interaction_snapshot();
-        if !self.maybe_confirm_destructive_action(&a, query_override.clone(), source) {
-            self.activate_action_confirmed(a, query_override, source);
+        match crate::commands::parse_command(a, query_override, source) {
+            Ok(invocation) => {
+                if !self.maybe_confirm_destructive_action(&invocation) {
+                    self.dispatch_command_invocation(invocation);
+                }
+            }
+            Err(error) => self.report_error_message(error.domain, error.message),
         }
         self.restore_for_new_launcher_interaction(&before);
     }
+
     fn maybe_confirm_destructive_action(
         &mut self,
-        a: &Action,
-        query_override: Option<String>,
-        source: ActivationSource,
+        invocation: &crate::commands::CommandInvocation,
     ) -> bool {
         if !self.require_confirm_destructive {
             return false;
         }
-        if let Some(kind) = DestructiveAction::from_action(a) {
-            self.pending_confirm = Some(PendingConfirmAction {
-                action: a.clone(),
-                query_override,
-                source,
+        if let Some(kind) = DestructiveAction::from_command(&invocation.command) {
+            self.pending_confirm = Some(PendingConfirmCommand {
+                invocation: invocation.clone(),
             });
-            self.confirm_modal.open_for_source(kind, Some(source));
+            self.confirm_modal
+                .open_for_source(kind, Some(invocation.source));
             return true;
         }
-        false
-    }
-
-    pub(crate) fn activate_action_confirmed(
-        &mut self,
-        a: Action,
-        query_override: Option<String>,
-        source: ActivationSource,
-    ) {
-        if self.handle_clipboard_modify_action(&a, source) {
-            return;
-        }
-        if self.handle_file_search_action(&a.action) {
-            return;
-        }
-        if self.handle_diff_action(&a.action) {
-            return;
-        }
-        if let Some(new_query) = query_override {
-            self.query = new_query;
-            self.last_timer_query =
-                self.query.starts_with("timer list") || self.query.starts_with("alarm list");
-            self.search();
-        }
-        let mut focus_after_launcher = false;
-        if a.action == "launcher:show"
-            && let Some(query) = a.args.as_ref()
-        {
-            self.query = query.to_string();
-            self.last_timer_query =
-                query.starts_with("timer list") || query.starts_with("alarm list");
-            self.search();
-            self.move_cursor_end = true;
-            focus_after_launcher = true;
-        }
-        if self.handle_launcher_action(&a.action) {
-            if focus_after_launcher {
-                self.focus_input();
-            }
-            return;
-        }
-        let current = self.query.clone();
-        let mut refresh = false;
-        let mut set_focus = false;
-        let mut command_changed_query = false;
-        if let Some(new_q) = a.action.strip_prefix("queryexec:") {
-            tracing::debug!("queryexec action via activation: {new_q}");
-            self.query = new_q.to_string();
-            self.last_timer_query =
-                new_q.starts_with("timer list") || new_q.starts_with("alarm list");
-            self.search();
-            self.move_cursor_end = true;
-            if let Some(action) = self.results.first().cloned() {
-                self.activate_action(action, None, source);
-            }
-            // Query dispatch remains interactive even when its first result
-            // happens to perform work outside the Launcher.
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
-            self.move_cursor_end = true;
-            self.focus_input();
-            return;
-        } else if let Some(new_q) = a.action.strip_prefix("query:") {
-            tracing::debug!("query action via activation: {new_q}");
-            self.query = if let Some(query_arg) = a
-                .args
-                .as_deref()
-                .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
-                .and_then(|value| {
-                    value
-                        .get("query")
-                        .and_then(|query| query.as_str())
-                        .map(str::to_string)
-                }) {
-                format!("{} {}", new_q.trim_end(), query_arg)
-            } else {
-                new_q.to_string()
-            };
-            self.last_timer_query =
-                new_q.starts_with("timer list") || new_q.starts_with("alarm list");
-            self.search();
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
-            self.move_cursor_end = true;
-            self.focus_input();
-            return;
-        } else if a.action == "help:show" {
-            self.help_window.open = true;
-        } else if a.action == "timer:dialog:timer" {
-            self.timer_dialog.open_timer();
-        } else if a.action == "timer:dialog:alarm" {
-            self.timer_dialog.open_alarm();
-        } else if a.action == "calendar:open" || a.action.starts_with("calendar:open:") {
-            let view = a.action.strip_prefix("calendar:open:").unwrap_or("default");
-            let now = chrono::Local::now().naive_local();
-            let mut state =
-                crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
-                    .unwrap_or_default();
-            state.last_opened = Some(now);
-            state.last_viewed_day = Some(now.date());
-            if let Err(err) = crate::plugins::calendar::save_state(
-                crate::plugins::calendar::CALENDAR_STATE_FILE,
-                &state,
-            ) {
-                self.add_error_toast(format!("Calendar state error: {err}"));
-            }
-            if self.dashboard_enabled {
-                self.query.clear();
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-            }
-            self.open_calendar_popover(Some(now.date()));
-            if self.enable_toasts {
-                let label = if view == "default" {
-                    "Opened calendar".to_string()
-                } else {
-                    format!("Opened calendar ({view} view)")
-                };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: label.into(),
-                        kind: ToastKind::Success,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
-        } else if let Some(reference) = a.action.strip_prefix("calendar:jump:") {
-            let now = chrono::Local::now().naive_local();
-            match crate::plugins::calendar::parse_date_reference(reference, now.date()) {
-                Some(date) => {
-                    let mut state = crate::plugins::calendar::load_state(
-                        crate::plugins::calendar::CALENDAR_STATE_FILE,
-                    )
-                    .unwrap_or_default();
-                    state.last_opened = Some(now);
-                    state.last_viewed_day = Some(date);
-                    if let Err(err) = crate::plugins::calendar::save_state(
-                        crate::plugins::calendar::CALENDAR_STATE_FILE,
-                        &state,
-                    ) {
-                        self.add_error_toast(format!("Calendar state error: {err}"));
-                    }
-                    if self.dashboard_enabled {
-                        self.query.clear();
-                        command_changed_query = true;
-                        refresh = true;
-                        set_focus = true;
-                    }
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Jumped to {}", date.format("%Y-%m-%d")).into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                None => {
-                    self.add_error_toast(format!("Invalid date reference: {reference}"));
-                }
-            }
-        } else if let Some(input) = a.action.strip_prefix("calendar:add:") {
-            let now = chrono::Local::now().naive_local();
-            match crate::plugins::calendar::parse_calendar_add(input, now) {
-                Ok(request) => match crate::plugins::calendar::add_event(request, now) {
-                    Ok(event) => {
-                        self.dashboard_data_cache.refresh_calendar();
-                        if self.preserve_command {
-                            self.query = "cal add ".into();
-                        } else {
-                            self.query.clear();
-                        }
-                        command_changed_query = true;
-                        refresh = true;
-                        set_focus = true;
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: format!("Added {}", event.title).into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        self.add_error_toast(format!("Calendar add failed: {err}"));
-                    }
-                },
-                Err(err) => {
-                    self.add_error_toast(err);
-                }
-            }
-        } else if let Some(input) = a.action.strip_prefix("calendar:search:") {
-            match crate::plugins::calendar::parse_calendar_search(input) {
-                Ok(request) => {
-                    let results = crate::plugins::calendar::search_events(&request);
-                    let actions: Vec<Action> = results
-                        .into_iter()
-                        .map(|event| Action {
-                            label: crate::plugins::calendar::format_event_label(&event),
-                            desc: "Calendar".into(),
-                            action: format!("calendar:jump:{}", event.start.format("%Y-%m-%d")),
-                            args: None,
-                        })
-                        .collect();
-                    self.query = format!("cal find {input}");
-                    self.results = actions;
-                    self.selected = None;
-                    self.last_search_query = self.query.clone();
-                    self.last_results_valid = true;
-                    self.update_suggestions();
-                    command_changed_query = true;
-                    set_focus = true;
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: format!("Found {} events", self.results.len()).into(),
-                                kind: ToastKind::Info,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                Err(err) => {
-                    self.add_error_toast(err);
-                }
-            }
-        } else if a.action == "calendar:upcoming" {
-            let now = chrono::Local::now().naive_local();
-            let events = crate::plugins::calendar::CALENDAR_DATA
-                .read()
-                .map(|d| d.clone())
-                .unwrap_or_default();
-            let until = now + chrono::Duration::days(7);
-            let instances = crate::plugins::calendar::expand_instances(&events, now, until, 50);
-            let titles: std::collections::HashMap<_, _> =
-                events.into_iter().map(|e| (e.id, e.title)).collect();
-            self.query = "cal upcoming".into();
-            self.results = instances
-                .into_iter()
-                .map(|instance| {
-                    let title = titles
-                        .get(&instance.source_event_id)
-                        .cloned()
-                        .unwrap_or_else(|| "Calendar event".to_string());
-                    let label = if instance.all_day {
-                        format!("{} ({} all-day)", title, instance.start.format("%Y-%m-%d"))
-                    } else {
-                        format!(
-                            "{} ({} {})",
-                            title,
-                            instance.start.format("%Y-%m-%d"),
-                            instance.start.format("%H:%M")
-                        )
-                    };
-                    Action {
-                        label,
-                        desc: "Calendar".into(),
-                        action: format!("calendar:jump:{}", instance.start.format("%Y-%m-%d")),
-                        args: None,
-                    }
-                })
-                .collect();
-            self.selected = None;
-            self.last_search_query = self.query.clone();
-            self.last_results_valid = true;
-            self.update_suggestions();
-            command_changed_query = true;
-            set_focus = true;
-        } else if let Some(input) = a.action.strip_prefix("calendar:snooze:") {
-            let mut parts = input.split_whitespace();
-            if let (Some(duration_str), Some(event_id)) = (parts.next(), parts.next()) {
-                if let Some(duration) = crate::plugins::calendar::parse_duration_spec(duration_str)
-                {
-                    match crate::plugins::calendar::snooze_event(event_id, duration) {
-                        Ok(true) => {
-                            self.dashboard_data_cache.refresh_calendar();
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Snoozed event {event_id}").into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        Ok(false) => {
-                            self.add_error_toast(format!("Event not found: {event_id}"));
-                        }
-                        Err(err) => {
-                            self.add_error_toast(format!("Snooze failed: {err}"));
-                        }
-                    }
-                } else {
-                    self.add_error_toast("Invalid snooze duration (use 10m, 1h, 2d)");
-                }
-            } else {
-                self.add_error_toast("Provide a duration and event id to snooze");
-            }
-        } else if a.action == "shell:dialog" {
-            self.shell_cmd_dialog.open();
-        } else if a.action == "note:dialog" {
-            self.notes_dialog.open();
-        } else if a.action == "note:graph_dialog" {
-            self.note_graph_dialog.open_with_args(a.args.as_deref());
-        } else if a.action == "note:unused_assets" {
-            self.unused_assets_dialog.open();
-        } else if a.action == "bookmark:dialog" {
-            self.add_bookmark_dialog.open();
-        } else if a.action == "snippet:dialog" {
-            self.snippet_dialog.open();
-        } else if let Some(alias) = a.action.strip_prefix("snippet:edit:") {
-            self.snippet_dialog.open_edit(alias);
-        } else if a.action == "macro:dialog" {
-            self.macro_dialog.open();
-        } else if a.action == "mkmacro:dialog" {
-            self.mkmacro_dialog.open();
-        } else if a.action == "crop:image" {
-            self.handle_crop_image_action();
-        } else if a.action == "crop:screenshot" {
-            self.begin_crop_screenshot();
-        } else if a.action == "mg:dialog" {
-            self.mouse_gestures_dialog.open();
-        } else if a.action == "mg:dialog:add" {
-            self.mouse_gestures_dialog.open_add();
-        } else if a.action == "mg:dialog:binding" {
-            self.mouse_gestures_dialog.open_binding_editor();
-        } else if a.action == "mg:dialog:focus" {
-            if let Some(args) = a
-                .args
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<GestureFocusArgs>(raw).ok())
-            {
-                self.mouse_gestures_dialog
-                    .open_focus(&args.label, &args.tokens, args.dir_mode);
-            } else {
-                self.mouse_gestures_dialog.open();
-            }
-        } else if a.action == "mg:dialog:settings" {
-            self.open_mouse_gesture_settings_dialog();
-        } else if a.action == "mg:toggle" {
-            if let Some(args) = a
-                .args
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<GestureToggleArgs>(raw).ok())
-            {
-                let mut db = load_gestures(GESTURES_FILE).unwrap_or_default();
-                if let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
-                    gesture.label == args.label
-                        && gesture.tokens == args.tokens
-                        && gesture.dir_mode == args.dir_mode
-                }) {
-                    gesture.enabled = args.enabled;
-                    if let Err(err) = save_gestures(GESTURES_FILE, &db) {
-                        self.report_error_message(
-                            "launcher",
-                            format!("Failed to save mouse gestures: {err}"),
-                        );
-                    } else {
-                        self.dashboard_data_cache.refresh_gestures();
-                    }
-                }
-            }
-        } else if let Some(label) = a.action.strip_prefix("fav:dialog:") {
-            if label.is_empty() {
-                self.fav_dialog.open();
-            } else {
-                self.fav_dialog.open_edit(label);
-            }
-        } else if a.action == "todo:dialog" {
-            self.todo_dialog.open();
-        } else if a.action == "todo:view" {
-            self.todo_view_dialog.open();
-        } else if let Some(idx) = a.action.strip_prefix("todo:edit:") {
-            if let Ok(i) = idx.parse::<usize>() {
-                self.todo_view_dialog.open_edit(i);
-            }
-        } else if a.action == "clipboard:dialog" {
-            self.clipboard_dialog.open();
-        } else if let Some(slug) = a.action.strip_prefix("note:open:") {
-            let slug = slug.to_string();
-            self.open_note_panel(&slug, None);
-        } else if let Some(encoded) = a
-            .action
-            .strip_prefix(crate::plugins::note::NOTE_NEW_JSON_PREFIX)
-        {
-            let payload = match crate::plugins::note::decode_note_new_payload(encoded) {
-                Ok(payload) => payload,
-                Err(err) => {
-                    self.report_error_message(
-                        "launcher",
-                        format!("Malformed note action payload: {err}"),
-                    );
-                    return;
-                }
-            };
-            if let Err(err) = validate_note_new_payload(&payload.slug, payload.template.as_deref())
-            {
-                self.report_error_message("launcher", err);
-                return;
-            }
-            self.open_note_panel(&payload.slug, payload.template.as_deref());
-        } else if let Some(rest) = a.action.strip_prefix("note:new:") {
-            let slug = match urlencoding::decode(rest.trim()) {
-                Ok(decoded) => decoded.into_owned(),
-                Err(_) => {
-                    self.report_error_message(
-                        "launcher",
-                        format!("Malformed note action: {}", a.action),
-                    );
-                    return;
-                }
-            };
-            let template = a.args.as_deref().and_then(|args| {
-                serde_json::from_str::<serde_json::Value>(args)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("template")
-                            .and_then(|template| template.as_str())
-                            .map(str::to_string)
-                    })
-            });
-            if let Err(err) = validate_note_new_payload(&slug, template.as_deref()) {
-                self.report_error_message("launcher", err);
-                return;
-            }
-            self.open_note_panel(&slug, template.as_deref());
-        } else if a.action == "note:templates_disabled" {
-            self.report_error_message("launcher", "Note templates are disabled in settings");
-        } else if a.action == "note:tags" {
-            self.open_note_tags();
-            set_focus = true;
-        } else if let Some(link) = a.action.strip_prefix("note:link:") {
-            self.open_note_link(link);
-        } else if let Some(slug) = a.action.strip_prefix("note:meta:wrap-links:") {
-            self.wrap_note_plain_links(slug);
-        } else if let Some(link_id) = a.action.strip_prefix("link:open:") {
-            if let Ok(parsed) = crate::linking::parse_link_id(link_id) {
-                match parsed.target_type {
-                    crate::linking::LinkTarget::Note => {
-                        self.open_note_panel(&parsed.target_id, None);
-                    }
-                    crate::linking::LinkTarget::Todo => {
-                        self.query = format!("todo links id:{}", parsed.target_id);
-                        self.search();
-                    }
-                    _ => {
-                        self.report_error_message(
-                            "launcher",
-                            format!("Unsupported link target: {}", link_id),
-                        );
-                    }
-                }
-            } else {
-                self.report_error_message("launcher", format!("Invalid link id: {}", link_id));
-            }
-        } else if let Some(slug) = a.action.strip_prefix("note:remove:") {
-            self.delete_note(slug);
-        } else if a.action == "convert:panel" {
-            self.convert_panel.open();
-        } else if a.action == "tempfile:dialog" {
-            self.tempfile_dialog.open();
-        } else if a.action == "settings:dialog" {
-            self.open_settings_dialog();
-        } else if a.action == "dashboard:settings" {
-            let registry = self.dashboard.registry().clone();
-            self.dashboard_editor.open(&self.dashboard_path, &registry);
-            self.show_dashboard_editor = true;
-        } else if a.action == "theme:dialog" {
-            self.open_theme_settings_dialog();
-        } else if a.action == "volume:dialog" {
-            self.volume_dialog.open();
-        } else if a.action == "brightness:dialog" {
-            self.brightness_dialog.open();
-        } else if let Some(n) = a.action.strip_prefix("sysinfo:cpu_list:") {
-            if let Ok(count) = n.parse::<usize>() {
-                self.cpu_list_dialog.open(count);
-            }
-        } else if a.action.starts_with("tab:switch:") {
-            if self.enable_toasts {
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: format!("Switching to {}", a.label).into(),
-                        kind: ToastKind::Info,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
-            let act = a.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = launch_action(&act) {
-                    tracing::error!(?e, "failed to switch tab");
-                }
-            });
-            if a.action != "help:show" {
-                self.record_history_usage(&a, &current, source);
-            }
-        } else if a.action == "mm:open" {
-            self.open_multi_manager();
-        } else if a.action == "mm:settings" {
-            self.open_multi_manager_settings();
-        } else if a.action == "mm:save" {
-            self.multi_manager_save();
-        } else if a.action == "mm:reload" {
-            self.multi_manager_reload();
-        } else if a.action == "mm:send-all-home" {
-            self.multi_manager_send_all_home();
-        } else if a.action == "mm:reconnect" {
-            self.multi_manager_start_manual_reconnect();
-        } else if a.action == "mm:save-bindings" {
-            self.multi_manager_save_bindings();
-        } else if a.action == "mm:restore-bindings" {
-            self.multi_manager_restore_bindings();
-        } else if a.action == "mm:import" {
-            self.multi_manager_import();
-        } else if a.action == "mm:recapture-all" {
-            self.multi_manager_start_recapture_all();
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:toggle:") {
-            self.multi_manager_toggle_workspace(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:home:") {
-            self.multi_manager_send_home(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:target:") {
-            self.multi_manager_send_target(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:capture:") {
-            self.multi_manager_start_capture(workspace_id);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:disable:") {
-            self.multi_manager_set_workspace_disabled(workspace_id, true);
-        } else if let Some(workspace_id) = a.action.strip_prefix("mm:enable:") {
-            self.multi_manager_set_workspace_disabled(workspace_id, false);
-        } else if let Some(mode) = a.action.strip_prefix("screenshot:") {
-            use crate::actions::screenshot::Mode as ScreenshotMode;
-            let (mode, clip, tool) = match mode {
-                "window" => (ScreenshotMode::Window, false, MarkupTool::Rectangle),
-                "region" => (ScreenshotMode::Region, false, MarkupTool::Rectangle),
-                "region_markup" => (ScreenshotMode::Region, false, MarkupTool::Pen),
-                "desktop" => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
-                "window_clip" => (ScreenshotMode::Window, true, MarkupTool::Rectangle),
-                "region_clip" => (ScreenshotMode::Region, true, MarkupTool::Rectangle),
-                "desktop_clip" => (ScreenshotMode::Desktop, true, MarkupTool::Rectangle),
-                _ => (ScreenshotMode::Desktop, false, MarkupTool::Rectangle),
-            };
-            let screenshot_result =
-                crate::plugins::screenshot::launch_editor(self, mode, clip, tool);
-            if self.handle_screenshot_launch_result(screenshot_result) && a.action != "help:show" {
-                self.record_history_usage(&a, &current, source);
-            }
-        } else if let Err(e) = execute_action(&a) {
-            if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                tracing::error!(?e, fav=%a.label, "failed to run favorite");
-            }
-            self.report_error_message("launcher", format!("Failed: {e}"));
-            self.add_error_toast(format!("Failed: {e}"));
-        } else {
-            if a.desc == "Fav" && !a.action.starts_with("fav:") {
-                tracing::info!(fav=%a.label, command=%a.action, "ran favorite");
-            }
-            if self.enable_toasts && a.action != "recycle:clean" {
-                let msg = if a.action.starts_with("clipboard:") {
-                    format!("Copied {}", a.label)
-                } else {
-                    format!("Launched {}", a.label)
-                };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: msg.into(),
-                        kind: ToastKind::Success,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
-            }
-            if a.action != "help:show" {
-                self.record_history_usage(&a, &current, source);
-            }
-            if a.action == "note:reload" {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Reloaded notes".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("bookmark:add:") {
-                if self.preserve_command {
-                    self.query = "bm add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("bookmark:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("folder:add:") {
-                if self.preserve_command {
-                    self.query = "f add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("folder:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("fav:add:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("fav:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("todo:add:") {
-                if self.preserve_command {
-                    self.query = "todo add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts
-                    && let Some(text) = a
-                        .action
-                        .strip_prefix("todo:add:")
-                        .and_then(|r| r.split('|').next())
-                {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Added todo {text}").into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:remove:") {
-                refresh = true;
-                set_focus = true;
-                if current.starts_with("note list") {
-                    self.pending_query = Some(current.clone());
-                    command_changed_query = true;
-                }
-                if self.enable_toasts {
-                    let label = a.label.strip_prefix("Remove todo ").unwrap_or(&a.label);
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Removed todo {label}").into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:done:") {
-                refresh = true;
-                set_focus = true;
-                self.pending_query = Some(current.clone());
-                command_changed_query = true;
-                if self.enable_toasts {
-                    let label = a
-                        .label
-                        .trim_start_matches("[x] ")
-                        .trim_start_matches("[ ] ");
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Toggled todo {label}").into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:pset:") {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Updated todo priority".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("todo:tag:") {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Updated todo tags".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action == "todo:clear" {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: "Cleared completed todos".into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("snippet:remove:") {
-                refresh = true;
-                set_focus = true;
-                if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Removed snippet {}", a.label).into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-            } else if a.action.starts_with("tempfile:remove:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("tempfile:alias:") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action == "tempfile:new" || a.action.starts_with("tempfile:new:") {
-                if self.preserve_command {
-                    self.query = "tmp new ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:cancel:") && current.starts_with("timer rm") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:pause:") && current.starts_with("timer pause") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:resume:") && current.starts_with("timer resume") {
-                refresh = true;
-                set_focus = true;
-            } else if a.action.starts_with("timer:start:") && current.starts_with("timer add") {
-                if self.preserve_command {
-                    self.query = "timer add ".into();
-                } else {
-                    self.query.clear();
-                }
-                command_changed_query = true;
-                set_focus = true;
-            }
-            if self.clear_query_after_run && !command_changed_query {
-                self.query.clear();
-                refresh = true;
-                set_focus = true;
-            }
-            if self.hide_after_run
-                && !a.action.starts_with("bookmark:add:")
-                && !a.action.starts_with("bookmark:remove:")
-                && !a.action.starts_with("folder:add:")
-                && !a.action.starts_with("folder:remove:")
-                && !a.action.starts_with("snippet:remove:")
-                && !a.action.starts_with("fav:add:")
-                && !a.action.starts_with("fav:remove:")
-                && !a.action.starts_with("screenshot:")
-                && !a.action.starts_with("calc:")
-                && !a.action.starts_with("todo:done:")
-            {
-                self.visible_flag.store(false, Ordering::SeqCst);
-            }
-        }
-        if refresh {
-            self.last_results_valid = false;
-            self.search();
-        }
-        let _ = command_changed_query;
-        if set_focus {
-            self.focus_input();
-        } else if self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open() {
-            self.focus_input();
-        }
-    }
-
-    pub(crate) fn handle_clipboard_modify_action(
-        &mut self,
-        action: &Action,
-        source: ActivationSource,
-    ) -> bool {
-        use crate::clipboard_modify::actions::{
-            ClipboardModifyActionPayload, ClipboardModifySectionPayload, EXECUTE_PREFIX,
-            OPEN_PREFIX, UNDO_PREFIX, decode_action_payload,
-        };
-        use crate::clipboard_modify::parser::ClipboardModifyIntent;
-
-        if action.action.starts_with("query:") {
-            return false;
-        }
-        let is_clipboard_modify = action.action.starts_with("clipboard_modify:");
-        if !is_clipboard_modify {
-            return false;
-        }
-
-        let payload = action
-            .args
-            .as_deref()
-            .and_then(|args| decode_action_payload::<ClipboardModifyActionPayload>(args).ok());
-
-        if action.action.starts_with(OPEN_PREFIX) || action.action == "clipboard_modify:open" {
-            let section = match payload {
-                Some(ClipboardModifyActionPayload::OpenDialogSection { section }) => section,
-                _ if action.action.ends_with(":templates") => {
-                    ClipboardModifySectionPayload::Templates
-                }
-                _ if action.action.ends_with(":saved-pipelines") => {
-                    ClipboardModifySectionPayload::SavedPipelines
-                }
-                _ if action.action.ends_with(":manage-templates") => {
-                    ClipboardModifySectionPayload::ManageTemplates
-                }
-                _ if action.action.ends_with(":manage-pipelines") => {
-                    ClipboardModifySectionPayload::ManagePipelines
-                }
-                _ if action.action.ends_with(":help") => ClipboardModifySectionPayload::Help,
-                _ => ClipboardModifySectionPayload::Modify,
-            };
-            let section = match section {
-                ClipboardModifySectionPayload::Modify => ClipboardModifyDialogSection::Modify,
-                ClipboardModifySectionPayload::Templates => ClipboardModifyDialogSection::Templates,
-                ClipboardModifySectionPayload::SavedPipelines => {
-                    ClipboardModifyDialogSection::SavedPipelines
-                }
-                ClipboardModifySectionPayload::ManageTemplates => {
-                    ClipboardModifyDialogSection::ManageTemplates
-                }
-                ClipboardModifySectionPayload::ManagePipelines => {
-                    ClipboardModifyDialogSection::ManagePipelines
-                }
-                ClipboardModifySectionPayload::Help => ClipboardModifyDialogSection::Help,
-            };
-            self.clipboard_modify_dialog.open_section(
-                section,
-                &crate::clipboard_modify::runtime::clipboard_service(),
-            );
-            return true;
-        }
-
-        if action.action.starts_with(UNDO_PREFIX) || action.action == "clipboard_modify:undo" {
-            match crate::clipboard_modify::runtime::undo() {
-                Ok(()) => {
-                    self.handle_clipboard_modify_gui_event(
-                        ClipboardModifyGuiEvent::ImmediateOperationComplete,
-                    );
-                    self.visible_flag.store(false, Ordering::SeqCst);
-                    if self.enable_toasts {
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: "Undid Clipboard Modify".into(),
-                                kind: ToastKind::Success,
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                Err(err) => self.report_clipboard_modify_action_error(err.to_string()),
-            }
-            return true;
-        }
-
-        if action.action.starts_with(EXECUTE_PREFIX) || action.action == "clipboard_modify:execute"
-        {
-            let payload = match payload {
-                Some(payload) => payload,
-                None => {
-                    self.report_clipboard_modify_action_error("missing execute payload".into());
-                    return true;
-                }
-            };
-            let (intent, canonical_command, hide_launcher_on_success) = match payload {
-                ClipboardModifyActionPayload::ExecuteAdHocStages {
-                    canonical_command,
-                    stages,
-                } => (
-                    ClipboardModifyIntent::Stages(stages),
-                    canonical_command,
-                    true,
-                ),
-                ClipboardModifyActionPayload::ExecuteTemplate {
-                    canonical_command,
-                    name,
-                } => (
-                    ClipboardModifyIntent::ApplyTemplate { name },
-                    canonical_command,
-                    self.clipboard_modify_hide_launcher_after_apply,
-                ),
-                ClipboardModifyActionPayload::ExecuteSavedPipeline {
-                    canonical_command,
-                    name,
-                } => (
-                    ClipboardModifyIntent::ApplySavedPipeline { name },
-                    canonical_command,
-                    self.clipboard_modify_hide_launcher_after_apply,
-                ),
-                _ => {
-                    self.report_clipboard_modify_action_error("unexpected execute payload".into());
-                    return true;
-                }
-            };
-            let meta = ImmediateRequestMetadata {
-                action: action.clone(),
-                query: canonical_command,
-                source,
-                hide_launcher_on_success,
-            };
-            match self.clipboard_modify_immediate.start(
-                intent,
-                self.clipboard_modify_runtime.catalog_snapshot(),
-                meta.clone(),
-            ) {
-                Ok(id) => {
-                    self.pending_clipboard_modify_immediate.insert(id.0, meta);
-                }
-                Err(err) => {
-                    self.report_clipboard_modify_action_error(err.message);
-                    self.visible_flag.store(true, Ordering::SeqCst);
-                    self.move_cursor_end = true;
-                    self.focus_input();
-                }
-            }
-            return true;
-        }
-
-        if action.action == "clipboard_modify:error" {
-            self.report_clipboard_modify_action_error(action.desc.clone());
-            return true;
-        }
-
         false
     }
 
     pub(crate) fn drain_clipboard_modify_immediate(&mut self) {
         let mut typed_events = Vec::new();
-        for ev in self.clipboard_modify_immediate.drain_completions() {
-            let meta = self
-                .pending_clipboard_modify_immediate
-                .remove(&ev.request_id.0);
+        for (meta, ev) in self.clipboard_modify_immediate.drain_completions() {
             match ev.result {
                 Ok(()) => {
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationComplete,
                     ));
-                    if let Some(meta) = meta.as_ref() {
-                        self.record_history_usage(&meta.action, &meta.query, meta.source);
-                    }
-                    // Missing metadata uses the conservative historical policy: hide.
-                    if meta
-                        .as_ref()
-                        .map(|meta| meta.hide_launcher_on_success)
-                        .unwrap_or(true)
-                    {
+                    self.record_history_usage(&meta.action, &meta.query, meta.source);
+                    if meta.hide_launcher_on_success {
                         self.visible_flag.store(false, Ordering::SeqCst);
                     } else {
                         self.visible_flag.store(true, Ordering::SeqCst);
@@ -1134,11 +141,9 @@ impl LauncherApp {
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationFailed,
                     ));
-                    if let Some(meta) = meta {
-                        self.query = meta.query;
-                        self.last_results_valid = false;
-                        self.search();
-                    }
+                    self.query = meta.query;
+                    self.last_results_valid = false;
+                    self.search();
                     self.visible_flag.store(true, Ordering::SeqCst);
                     self.move_cursor_end = true;
                     self.focus_input();
@@ -1215,100 +220,12 @@ impl LauncherApp {
         }
     }
 
-    fn report_clipboard_modify_action_error(&mut self, err: String) {
-        let msg = format!("Invalid clipboard modify action: {err}");
-        self.set_inline_error(msg.clone());
-        self.add_error_toast(msg);
-    }
-
-    fn handle_file_search_action(&mut self, action: &str) -> bool {
-        use crate::file_search::actions::{
-            CANCEL_ACTION, FileSearchModePayload, FileSearchStartPayload, MODE_PREFIX, OPEN_ACTION,
-            START_PREFIX, decode_action_payload,
-        };
-
-        if action == OPEN_ACTION {
-            self.file_search_dialog.open();
-            return true;
-        }
-        if action == CANCEL_ACTION {
-            self.file_search_dialog
-                .cancel_search(&mut self.file_search_coordinator);
-            return true;
-        }
-        if let Some(encoded) = action.strip_prefix(MODE_PREFIX) {
-            self.file_search_dialog.open();
-            match decode_action_payload::<FileSearchModePayload>(encoded).and_then(|payload| {
-                payload.validate()?;
-                Ok(payload)
-            }) {
-                Ok(payload) => {
-                    let mode = match payload.search_kind() {
-                        crate::file_search::model::SearchKind::Filename => {
-                            crate::gui::FileSearchMode::Filename
-                        }
-                        crate::file_search::model::SearchKind::Content => {
-                            crate::gui::FileSearchMode::Content
-                        }
-                    };
-                    self.file_search_dialog.open_with_mode(mode);
-                }
-                Err(err) => self.report_file_search_action_error(err),
-            }
-            return true;
-        }
-        if let Some(encoded) = action.strip_prefix(START_PREFIX) {
-            self.file_search_dialog.open();
-            match decode_action_payload::<FileSearchStartPayload>(encoded).and_then(|payload| {
-                payload.validate()?;
-                Ok(payload)
-            }) {
-                Ok(payload) => {
-                    let mode = match payload.search_kind() {
-                        crate::file_search::model::SearchKind::Filename => {
-                            crate::gui::FileSearchMode::Filename
-                        }
-                        crate::file_search::model::SearchKind::Content => {
-                            crate::gui::FileSearchMode::Content
-                        }
-                    };
-                    let root = payload.root_path();
-                    self.file_search_dialog.open_and_start(
-                        mode,
-                        root,
-                        payload.text,
-                        &mut self.file_search_coordinator,
-                    );
-                }
-                Err(err) => self.report_file_search_action_error(err),
-            }
-            return true;
-        }
-        false
-    }
-
-    fn handle_diff_action(&mut self, action: &str) -> bool {
-        let Some(encoded) = action.strip_prefix(crate::diff::query::OPEN_PREFIX) else {
-            return false;
-        };
-        match crate::diff::query::decode_payload(encoded) {
-            Ok(payload) => {
-                if let Err(error) = self.diff_dialog.open_payload(payload) {
-                    self.report_error_message("diff", error);
-                }
-            }
-            Err(error) => self.report_error_message("diff", error),
-        }
-        true
-    }
-
-    fn report_file_search_action_error(&mut self, err: String) {
-        let msg = format!("Invalid file search action: {err}");
-        self.set_inline_error(msg.clone());
-        self.add_error_toast(msg);
-    }
-
-    fn record_history_usage(&mut self, action: &Action, query: &str, source: ActivationSource) {
+    pub(crate) fn record_history_usage(
+        &mut self,
+        action: &Action,
+        query: &str,
+        source: ActivationSource,
+    ) {
         let _ = history::append_history(
             HistoryEntry {
                 query: query.to_string(),
@@ -1357,41 +274,13 @@ impl LauncherApp {
         }
     }
 
-    fn handle_launcher_action(&mut self, action: &str) -> bool {
-        match action {
-            "launcher:toggle" => {
-                let next = !self.visible_flag.load(Ordering::SeqCst);
-                self.visible_flag.store(next, Ordering::SeqCst);
-                if next {
-                    self.restore_flag.store(true, Ordering::SeqCst);
-                }
-                true
-            }
-            "launcher:show" => {
-                self.visible_flag.store(true, Ordering::SeqCst);
-                self.restore_flag.store(true, Ordering::SeqCst);
-                true
-            }
-            "launcher:hide" => {
-                self.visible_flag.store(false, Ordering::SeqCst);
-                true
-            }
-            "launcher:focus" | "launcher:restore" => {
-                self.visible_flag.store(true, Ordering::SeqCst);
-                self.restore_flag.store(true, Ordering::SeqCst);
-                true
-            }
-            _ => false,
-        }
-    }
-
     pub(crate) fn reduce_crop_image_picker_result(
         result: Option<std::path::PathBuf>,
     ) -> Option<std::path::PathBuf> {
         result
     }
 
-    fn handle_crop_image_action(&mut self) {
+    pub(crate) fn handle_crop_image_action(&mut self) {
         let path = rfd::FileDialog::new()
             .add_filter("PNG, JPEG, or BMP image", &["png", "jpg", "jpeg", "bmp"])
             .pick_file();
@@ -1411,7 +300,7 @@ impl LauncherApp {
         }
     }
 
-    fn begin_crop_screenshot(&mut self) {
+    pub(crate) fn begin_crop_screenshot(&mut self) {
         if self.crop_screenshot_operation.is_some() {
             self.add_error_toast("A screenshot crop selection is already active");
             return;
@@ -1534,7 +423,216 @@ mod tests {
         assert_eq!(LauncherApp::reduce_crop_image_picker_result(None), None);
         assert!(!app.crop_dialog.is_open());
     }
+    fn dialog_action(action: &str) -> Action {
+        Action {
+            label: action.into(),
+            desc: "Test".into(),
+            action: action.into(),
+            args: None,
+        }
+    }
 
+    #[test]
+    fn typed_dialog_commands_open_their_existing_gui_panels() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+
+        let mut help = new_app(&ctx);
+        help.activate_action(dialog_action("help:show"), None, ActivationSource::Enter);
+        assert!(help.help_window.open);
+
+        let mut convert = new_app(&ctx);
+        convert.activate_action(
+            dialog_action("convert:panel"),
+            None,
+            ActivationSource::Click,
+        );
+        assert!(convert.convert_panel.open);
+
+        let dir = tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        Settings::default()
+            .save(settings_path.to_str().unwrap())
+            .unwrap();
+        let mut settings = new_app(&ctx);
+        settings.settings_path = settings_path.to_string_lossy().into_owned();
+        settings.activate_action(
+            dialog_action("settings:dialog"),
+            None,
+            ActivationSource::Dashboard,
+        );
+        assert!(settings.show_settings);
+        assert!(settings.error.is_none());
+
+        let mut dashboard = new_app(&ctx);
+        dashboard.dashboard_enabled = false;
+        dashboard.activate_action(
+            dialog_action("dashboard:settings"),
+            None,
+            ActivationSource::Gesture,
+        );
+        assert!(dashboard.show_dashboard_editor && dashboard.dashboard_editor.open);
+
+        let mut theme = new_app(&ctx);
+        theme.activate_action(dialog_action("theme:dialog"), None, ActivationSource::Macro);
+        assert!(theme.theme_settings_dialog_open);
+    }
+
+    #[test]
+    fn typed_dialog_preserves_query_launcher_interactivity_restore_and_history_exemption() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "help query".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+
+        app.activate_action(
+            dialog_action("help:show"),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert!(app.help_window.open);
+        assert_eq!(app.query, "help query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.usage.contains_key("help:show"));
+    }
+
+    #[test]
+    fn typed_simple_dialogs_preserve_interactive_lifecycle() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let cases = [
+            ("timer:dialog:timer", Panel::TimerDialog),
+            ("timer:dialog:alarm", Panel::TimerDialog),
+            ("shell:dialog", Panel::ShellCmdDialog),
+            ("bookmark:dialog", Panel::AddBookmarkDialog),
+            ("snippet:dialog", Panel::SnippetDialog),
+            ("snippet:edit:sample", Panel::SnippetDialog),
+            ("fav:dialog:", Panel::FavDialog),
+            ("macro:dialog", Panel::MacroDialog),
+            ("mkmacro:dialog", Panel::MkMacroDialog),
+            ("todo:dialog", Panel::TodoDialog),
+            ("clipboard:dialog", Panel::ClipboardDialog),
+            ("tempfile:dialog", Panel::TempfileDialog),
+            ("volume:dialog", Panel::VolumeDialog),
+            ("brightness:dialog", Panel::BrightnessDialog),
+            ("sysinfo:cpu_list:4", Panel::CpuListDialog),
+        ];
+
+        for (raw, panel) in cases {
+            let mut app = new_app(&ctx);
+            app.query = "keep me".into();
+            app.clear_query_after_run = true;
+            app.hide_after_run = true;
+            app.visible_flag.store(false, Ordering::SeqCst);
+            app.restore_flag.store(false, Ordering::SeqCst);
+
+            app.activate_action(dialog_action(raw), None, ActivationSource::Dashboard);
+
+            assert!(app.is_panel_open(panel), "{raw} did not open {panel:?}");
+            assert_eq!(app.query, "keep me", "{raw} cleared the query");
+            assert!(
+                app.visible_flag.load(Ordering::SeqCst),
+                "{raw} stayed hidden"
+            );
+            assert!(
+                app.restore_flag.load(Ordering::SeqCst),
+                "{raw} did not restore"
+            );
+            assert!(!app.usage.contains_key(raw), "{raw} recorded history");
+        }
+    }
+    #[test]
+    fn typed_calendar_search_preserves_results_metadata_and_no_history() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "before".into();
+        app.selected = Some(3);
+        app.last_results_valid = false;
+
+        let action = dialog_action("calendar:search:definitely-unmatched-calendar-query");
+        app.activate_action(action, None, ActivationSource::Dashboard);
+
+        assert_eq!(app.query, "cal find definitely-unmatched-calendar-query");
+        assert!(app.results.is_empty());
+        assert_eq!(app.selected, None);
+        assert_eq!(app.last_search_query, app.query);
+        assert!(app.last_results_valid);
+        assert!(
+            !app.usage
+                .contains_key("calendar:search:definitely-unmatched-calendar-query")
+        );
+    }
+
+    #[test]
+    fn typed_calendar_open_persists_state_and_ignores_generic_clear_hide_policy() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.dashboard_enabled = false;
+        app.query = "keep calendar query".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        app.activate_action(
+            dialog_action("calendar:open:week"),
+            None,
+            ActivationSource::Click,
+        );
+
+        let state =
+            crate::plugins::calendar::load_state(crate::plugins::calendar::CALENDAR_STATE_FILE)
+                .unwrap();
+        let today = chrono::Local::now().naive_local().date();
+        assert_eq!(state.last_viewed_day, Some(today));
+        assert!(state.last_opened.is_some());
+        assert!(app.calendar_popover_open);
+        assert_eq!(app.calendar_selected_date, Some(today));
+        assert_eq!(app.query, "keep calendar query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.usage.contains_key("calendar:open:week"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn typed_calendar_errors_use_existing_error_toast_gating_without_inline_error() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = false;
+
+        app.activate_action(
+            dialog_action("calendar:jump:not-a-date"),
+            None,
+            ActivationSource::Enter,
+        );
+        assert!(app.test_toast_messages.is_empty());
+        assert!(app.error.is_none());
+
+        app.show_error_toasts = true;
+        app.activate_action(
+            dialog_action("calendar:jump:not-a-date"),
+            None,
+            ActivationSource::Enter,
+        );
+        assert_eq!(
+            app.test_toast_messages.last().map(String::as_str),
+            Some("Invalid date reference: not-a-date")
+        );
+        assert!(app.error.is_none());
+        assert!(!app.usage.contains_key("calendar:jump:not-a-date"));
+    }
     fn note(title: &str, slug: &str, content: &str) -> Note {
         Note {
             title: title.into(),
@@ -1570,16 +668,19 @@ mod tests {
     }
 
     fn activate_wrap_links(app: &mut LauncherApp, slug: &str) {
-        app.activate_action_confirmed(
-            Action {
+        app.dispatch_command_invocation(crate::commands::CommandInvocation {
+            command: crate::commands::Command::Note(crate::commands::NoteCommand::WrapLinks {
+                slug: slug.into(),
+            }),
+            original_action: Action {
                 label: "Wrap links".into(),
                 desc: "Notes".into(),
                 action: format!("note:meta:wrap-links:{slug}"),
                 args: None,
             },
-            None,
-            ActivationSource::Enter,
-        );
+            query_override: None,
+            source: ActivationSource::Enter,
+        });
     }
 
     #[test]
@@ -1701,6 +802,7 @@ mod tests {
 
     #[test]
     fn destructive_confirmation_supports_queue_confirm_and_cancel_paths() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let notes_dir = dir.path().join("notes");
         std::fs::create_dir_all(&notes_dir).unwrap();
@@ -1733,13 +835,112 @@ mod tests {
             .pending_confirm
             .take()
             .expect("queued destructive action");
-        assert_eq!(pending.source, ActivationSource::Dashboard);
-        app.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        assert_eq!(pending.invocation.source, ActivationSource::Dashboard);
+        app.dispatch_command_invocation(pending.invocation);
         assert!(load_notes().unwrap().is_empty());
 
         std::env::set_current_dir(original_dir).unwrap();
     }
 
+    #[test]
+    fn malformed_todo_remove_is_claimed_before_destructive_confirmation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+        let action = Action {
+            label: "Remove malformed todo".into(),
+            desc: "Todo".into(),
+            action: "todo:remove:not-an-index".into(),
+            args: None,
+        };
+
+        app.activate_action(action.clone(), None, ActivationSource::Click);
+
+        let pending = app.pending_confirm.as_ref().expect("typed pending command");
+        assert_eq!(pending.invocation.original_action, action);
+        assert!(matches!(
+            pending.invocation.command,
+            crate::commands::Command::Todo(crate::commands::TodoCommand::Compatibility {
+                kind: crate::commands::TodoCompatibilityKind::Remove,
+            })
+        ));
+        assert_eq!(pending.invocation.source, ActivationSource::Click);
+    }
+    #[test]
+    fn pending_confirmation_retains_typed_invocation_metadata() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = true;
+        let action = Action {
+            label: "Remove todo".into(),
+            desc: "Todo".into(),
+            action: "todo:remove:7".into(),
+            args: None,
+        };
+
+        app.activate_action(
+            action.clone(),
+            Some("retained query".into()),
+            ActivationSource::Gesture,
+        );
+
+        let pending = app.pending_confirm.as_ref().expect("typed pending command");
+        assert!(matches!(
+            pending.invocation.command,
+            crate::commands::Command::Todo(crate::commands::TodoCommand::Remove { index: 7 })
+        ));
+        assert_eq!(pending.invocation.original_action, action);
+        assert_eq!(
+            pending.invocation.query_override.as_deref(),
+            Some("retained query")
+        );
+        assert_eq!(pending.invocation.source, ActivationSource::Gesture);
+    }
+
+    #[test]
+    fn malformed_mkmacro_preserves_query_override_failure_toasts_and_refocus() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.enable_toasts = true;
+        app.show_error_toasts = true;
+        app.show_inline_errors = true;
+        app.focus_query = false;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        app.activate_action(
+            Action {
+                label: "Invalid macro".into(),
+                desc: "Test".into(),
+                action: "mkmacro:future".into(),
+                args: None,
+            },
+            Some("retained override".into()),
+            ActivationSource::Enter,
+        );
+
+        let expected = "Failed: invalid mkmacro action: mkmacro:future";
+        assert_eq!(app.query, "retained override");
+        assert_eq!(app.error.as_deref(), Some(expected));
+        assert!(
+            app.focus_query,
+            "legacy failure policy refocuses the launcher"
+        );
+        assert_eq!(
+            app.test_toast_messages
+                .iter()
+                .filter(|message| message.as_str() == expected)
+                .count(),
+            2,
+            "reporting and the explicit legacy failure toast are both retained"
+        );
+        let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
+        assert!(log.contains(&format!("[error:launcher] {expected}")));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
     #[test]
     fn action_execution_errors_flow_through_unified_ui_reporting() {
         let dir = tempfile::tempdir().unwrap();
@@ -1772,6 +973,12 @@ mod tests {
         let log = std::fs::read_to_string(crate::toast_log::TOAST_LOG_FILE).unwrap();
         assert!(log.contains("[error:launcher] Failed: injected failure"));
         assert!(log.contains("Failed: injected failure"));
+        assert!(!app.usage.contains_key("exec:broken"));
+        assert!(
+            history::get_history()
+                .iter()
+                .all(|entry| entry.action.action != "exec:broken")
+        );
 
         set_execute_action_hook(None);
         std::env::set_current_dir(original_dir).unwrap();
@@ -1801,7 +1008,7 @@ mod tests {
         let history_entries = history::get_history();
         assert!(history_entries.len() > before_len);
         let latest = history_entries.front().expect("latest history entry");
-        assert_eq!(latest.action.action, action.action);
+        assert_eq!(latest.action, action);
         assert_eq!(latest.query, "track me");
         assert_eq!(latest.source.as_deref(), Some("gesture"));
 
@@ -1809,6 +1016,45 @@ mod tests {
         std::env::set_current_dir(original_dir).unwrap();
     }
 
+    #[test]
+    fn typed_todo_done_applies_pending_query_history_and_hide_exemption() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        history::clear_history().unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.query = "todo list active".into();
+        let action = Action {
+            label: "[ ] Ship it".into(),
+            desc: "Todo".into(),
+            action: "todo:done:3".into(),
+            args: None,
+        };
+
+        set_execute_action_hook(Some(Box::new(|received| {
+            assert_eq!(received.action, "todo:done:3");
+            Ok(())
+        })));
+        app.activate_action(action.clone(), None, ActivationSource::Dashboard);
+        set_execute_action_hook(None);
+
+        assert_eq!(app.pending_query.as_deref(), Some("todo list active"));
+        assert_eq!(app.query, "todo list active");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.usage.get("todo:done:3"), Some(&1));
+        let latest = history::get_history().pop_front().unwrap();
+        assert_eq!(latest.action, action);
+        assert_eq!(latest.query, "todo list active");
+        assert_eq!(latest.source.as_deref(), Some("dashboard"));
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
     #[test]
     fn interactive_activation_restores_hidden_launcher_but_external_work_does_not() {
         let ctx = egui::Context::default();
@@ -1861,6 +1107,271 @@ mod tests {
     }
 
     #[test]
+    fn query_activation_applies_args_searches_and_restores_input_focus() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.selected = Some(3);
+
+        app.activate_action(
+            Action {
+                label: "Query".into(),
+                desc: "Test".into(),
+                action: "query:note search ".into(),
+                args: Some(r#"{"query":"needle"}"#.into()),
+            },
+            None,
+            ActivationSource::Click,
+        );
+
+        assert_eq!(app.query, "note search needle");
+        assert_eq!(app.last_search_query, "note search needle");
+        assert_eq!(app.selected, None);
+        assert!(app.focus_query && app.move_cursor_end);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn queryexec_searches_and_recursively_activates_first_result_with_original_source() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.command_cache = vec![Action {
+            label: "Help".into(),
+            desc: "Test".into(),
+            action: "help:show".into(),
+            args: Some("retained".into()),
+        }];
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+
+        app.activate_action(
+            Action {
+                label: "Run first result".into(),
+                desc: "Test".into(),
+                action: "queryexec:".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert_eq!(app.query, "");
+        assert_eq!(app.results[0].action, "help:show");
+        assert!(app.help_window.open);
+        assert_eq!(
+            app.test_activation_trace
+                .iter()
+                .map(|(action, source)| (action.action.as_str(), *source))
+                .collect::<Vec<_>>(),
+            [
+                ("queryexec:", ActivationSource::Dashboard),
+                ("help:show", ActivationSource::Dashboard),
+            ]
+        );
+        assert!(app.focus_query && app.move_cursor_end);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn specialized_actions_ignore_query_override_before_dispatch() {
+        let ctx = egui::Context::default();
+
+        let mut file_search = new_app(&ctx);
+        file_search.query = "file search query".into();
+        file_search.clear_query_after_run = true;
+        file_search.hide_after_run = true;
+        file_search.activate_action(
+            Action {
+                label: "File Search".into(),
+                desc: "Test".into(),
+                action: crate::file_search::actions::OPEN_ACTION.into(),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(file_search.query, "file search query");
+        assert!(file_search.file_search_dialog.open);
+        assert!(file_search.visible_flag.load(Ordering::SeqCst));
+        assert!(!file_search.focus_query);
+        assert!(
+            !file_search
+                .usage
+                .contains_key(crate::file_search::actions::OPEN_ACTION)
+        );
+
+        let payload = crate::diff::query::DiffOpenPayload {
+            left: None,
+            right: None,
+        };
+        let encoded = crate::diff::query::encode_payload(&payload).unwrap();
+        let mut diff = new_app(&ctx);
+        diff.query = "diff query".into();
+        diff.clear_query_after_run = true;
+        diff.hide_after_run = true;
+        diff.visible_flag.store(true, Ordering::SeqCst);
+        diff.activate_action(
+            Action {
+                label: "Diff".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::diff::query::OPEN_PREFIX),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(diff.query, "diff query");
+        assert!(diff.diff_dialog.open);
+        assert!(diff.visible_flag.load(Ordering::SeqCst));
+        assert!(!diff.focus_query);
+        assert!(
+            !diff
+                .usage
+                .contains_key(&format!("{}{encoded}", crate::diff::query::OPEN_PREFIX))
+        );
+
+        let mut clipboard_modify = new_app(&ctx);
+        clipboard_modify.query = "clipboard query".into();
+        clipboard_modify.activate_action(
+            Action {
+                label: "Clipboard Modify".into(),
+                desc: "Test".into(),
+                action: "clipboard_modify:open:help".into(),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(clipboard_modify.query, "clipboard query");
+        assert!(clipboard_modify.clipboard_modify_dialog.open);
+        assert_eq!(
+            clipboard_modify.clipboard_modify_dialog.section,
+            ClipboardModifyDialogSection::Help
+        );
+    }
+
+    #[test]
+    fn typed_file_search_start_and_diff_open_preserve_wire_payload_state() {
+        let ctx = egui::Context::default();
+        let dir = tempdir().unwrap();
+
+        let root = dir.path().to_string_lossy().into_owned();
+        let start = crate::file_search::actions::FileSearchStartPayload {
+            kind: crate::file_search::actions::FileSearchKindPayload::Content,
+            root: Some(root.clone()),
+            text: "needle".into(),
+        };
+        let encoded = crate::file_search::actions::encode_action_payload(&start).unwrap();
+        let mut file_search = new_app(&ctx);
+        file_search.activate_action(
+            Action {
+                label: "Search content".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::file_search::actions::START_PREFIX),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert!(file_search.file_search_dialog.open);
+        assert_eq!(
+            file_search.file_search_dialog.selected_mode,
+            crate::gui::FileSearchMode::Content
+        );
+        assert_eq!(file_search.file_search_dialog.custom_roots, [root]);
+        assert_eq!(file_search.file_search_dialog.search_text, "needle");
+
+        let left = dir.path().join("left.txt");
+        let right = dir.path().join("right.txt");
+        std::fs::write(&left, "left").unwrap();
+        std::fs::write(&right, "right").unwrap();
+        let payload = crate::diff::query::DiffOpenPayload {
+            left: Some(left.to_string_lossy().into_owned()),
+            right: Some(right.to_string_lossy().into_owned()),
+        };
+        let encoded = crate::diff::query::encode_payload(&payload).unwrap();
+        let mut diff = new_app(&ctx);
+        diff.activate_action(
+            Action {
+                label: "Compare files".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::diff::query::OPEN_PREFIX),
+                args: None,
+            },
+            Some("ignored override".into()),
+            ActivationSource::Dashboard,
+        );
+        assert!(diff.diff_dialog.open);
+        assert!(matches!(
+            diff.diff_dialog.workspace.current_view.view,
+            crate::diff::model::DiffView::TextCompare(_)
+        ));
+        assert_eq!(
+            diff.diff_dialog.workspace.left_visible.as_str(),
+            payload.left.as_deref().unwrap()
+        );
+        assert_eq!(
+            diff.diff_dialog.workspace.right_visible.as_str(),
+            payload.right.as_deref().unwrap()
+        );
+    }
+
+    #[test]
+    fn typed_file_search_and_diff_malformed_payloads_preserve_reporting_policy() {
+        let ctx = egui::Context::default();
+
+        let invalid_start = crate::file_search::actions::FileSearchStartPayload {
+            kind: crate::file_search::actions::FileSearchKindPayload::Content,
+            root: None,
+            text: "   ".into(),
+        };
+        let encoded = crate::file_search::actions::encode_action_payload(&invalid_start).unwrap();
+        let mut file_search = new_app(&ctx);
+        file_search.show_inline_errors = false;
+        file_search.enable_toasts = true;
+        file_search.show_error_toasts = true;
+        file_search.activate_action(
+            Action {
+                label: "Invalid File Search".into(),
+                desc: "Test".into(),
+                action: format!("{}{encoded}", crate::file_search::actions::START_PREFIX),
+                args: None,
+            },
+            None,
+            ActivationSource::Dashboard,
+        );
+        let expected = "Invalid file search action: File search text cannot be empty";
+        assert!(file_search.file_search_dialog.open);
+        assert_eq!(file_search.error.as_deref(), Some(expected));
+        assert_eq!(file_search.test_toast_messages, [expected]);
+
+        let invalid_diff = Action {
+            label: "Invalid Diff".into(),
+            desc: "Test".into(),
+            action: format!("{}bad", crate::diff::query::OPEN_PREFIX),
+            args: None,
+        };
+        let crate::commands::Command::Diff(crate::commands::DiffCommand::Invalid {
+            error: expected_diff_error,
+            ..
+        }) = crate::commands::parse_action(&invalid_diff).unwrap()
+        else {
+            panic!("expected typed invalid Diff command");
+        };
+        let mut diff = new_app(&ctx);
+        diff.show_inline_errors = true;
+        diff.enable_toasts = true;
+        diff.show_error_toasts = true;
+        diff.activate_action(invalid_diff, None, ActivationSource::Dashboard);
+        assert!(!diff.diff_dialog.open);
+        assert_eq!(diff.error.as_deref(), Some(expected_diff_error.as_str()));
+        assert_eq!(diff.test_toast_messages, [expected_diff_error]);
+    }
+
+    #[test]
     fn macro_clipboard_modify_activation_is_claimed_before_static_launch() {
         let _lock = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
@@ -1893,6 +1404,136 @@ mod tests {
         assert_eq!(app.test_activation_trace[0].1, ActivationSource::Macro);
         set_execute_action_hook(None);
     }
+    #[test]
+    fn typed_multi_manager_commands_preserve_interactive_lifecycle_exemptions() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep me".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        app.activate_action(
+            Action {
+                label: "MultiManager settings".into(),
+                desc: "MultiManager".into(),
+                action: "mm:settings".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert!(app.multi_manager_settings_dialog.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.query, "keep me");
+        assert!(!app.usage.contains_key("mm:settings"));
+    }
+
+    fn mouse_gesture_action(action: &str, args: Option<String>) -> Action {
+        Action {
+            label: "Mouse gesture".into(),
+            desc: "Mouse Gestures".into(),
+            action: action.into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn typed_mouse_gesture_dialogs_restore_the_launcher_and_ignore_clear_hide() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep me".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(false, Ordering::SeqCst);
+
+        app.activate_action(
+            mouse_gesture_action("mg:dialog", None),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert!(app.mouse_gestures_dialog.open);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.query, "keep me");
+        assert!(!app.usage.contains_key("mg:dialog"));
+    }
+
+    #[test]
+    fn malformed_mouse_gesture_payloads_keep_their_claimed_fallbacks() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut focus = new_app(&ctx);
+        focus.activate_action(
+            mouse_gesture_action("mg:dialog:focus", Some("not-json".into())),
+            None,
+            ActivationSource::Gesture,
+        );
+        assert!(focus.mouse_gestures_dialog.open);
+
+        let mut toggle = new_app(&ctx);
+        toggle.query = "unchanged".into();
+        toggle.clear_query_after_run = true;
+        toggle.hide_after_run = true;
+        toggle.visible_flag.store(true, Ordering::SeqCst);
+        toggle.activate_action(
+            mouse_gesture_action("mg:toggle", Some("not-json".into())),
+            None,
+            ActivationSource::Dashboard,
+        );
+        assert_eq!(toggle.query, "unchanged");
+        assert!(toggle.visible_flag.load(Ordering::SeqCst));
+        assert!(toggle.focus_query);
+        assert!(!toggle.usage.contains_key("mg:toggle"));
+    }
+
+    #[test]
+    fn typed_mouse_gesture_toggle_persists_and_refreshes_dashboard_cache() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let db = crate::mouse_gestures::db::GestureDb {
+            schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+            gestures: vec![crate::mouse_gestures::db::GestureEntry {
+                label: "Back".into(),
+                tokens: "L".into(),
+                dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: Vec::new(),
+            }],
+        };
+        crate::mouse_gestures::db::save_gestures(crate::mouse_gestures::db::GESTURES_FILE, &db)
+            .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let args = crate::mouse_gestures::selection::GestureToggleArgs {
+            label: "Back".into(),
+            tokens: "L".into(),
+            dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+            enabled: false,
+        };
+        app.activate_action(
+            mouse_gesture_action("mg:toggle", Some(serde_json::to_string(&args).unwrap())),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        let persisted =
+            crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
+                .unwrap();
+        assert!(!persisted.gestures[0].enabled);
+        let snapshot = app.dashboard_data_cache.snapshot();
+        assert!(!snapshot.gestures.db.gestures[0].enabled);
+        assert!(!app.usage.contains_key("mg:toggle"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1902,6 +1543,7 @@ mod clipboard_modify_gui_action_tests {
         encode_action_payload, execute_saved_pipeline_payload, execute_stages_payload,
         execute_template_payload, open_dialog_payload, undo_payload,
     };
+    use crate::clipboard_modify::coordinator::ImmediateRequestMetadata;
     use crate::clipboard_modify::model::{OperationId, StageArguments, StageSpec};
     use crate::clipboard_modify::parser::ModifySection;
 
@@ -1914,11 +1556,20 @@ mod clipboard_modify_gui_action_tests {
         }
     }
 
+    fn activate(app: &mut LauncherApp, action: &Action, source: ActivationSource) -> bool {
+        let claimed = matches!(
+            crate::commands::parse_action(action),
+            Ok(crate::commands::Command::ClipboardModify(_))
+        );
+        app.activate_action(action.clone(), None, source);
+        claimed
+    }
     #[test]
     fn query_clipboard_modify_completion_is_not_claimed() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(!app.handle_clipboard_modify_action(
+        assert!(!activate(
+            &mut app,
             &action("query:cm camel-case", None),
             ActivationSource::Enter
         ));
@@ -1928,11 +1579,12 @@ mod clipboard_modify_gui_action_tests {
     fn execute_without_payload_reports_missing_and_does_not_start() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:execute", None),
             ActivationSource::Enter
         ));
-        assert!(app.pending_clipboard_modify_immediate.is_empty());
+        assert!(!app.clipboard_modify_immediate.has_pending());
         assert!(
             app.error
                 .as_deref()
@@ -1947,11 +1599,12 @@ mod clipboard_modify_gui_action_tests {
         for payload in [open_dialog_payload(ModifySection::Help), undo_payload()] {
             let mut app = super::tests::new_app(&ctx);
             let args = encode_action_payload(&payload).unwrap();
-            assert!(app.handle_clipboard_modify_action(
+            assert!(activate(
+                &mut app,
                 &action("clipboard_modify:execute", Some(args)),
                 ActivationSource::Enter
             ));
-            assert!(app.pending_clipboard_modify_immediate.is_empty());
+            assert!(!app.clipboard_modify_immediate.has_pending());
             assert!(
                 app.error
                     .as_deref()
@@ -1972,11 +1625,10 @@ mod clipboard_modify_gui_action_tests {
         }]))
         .unwrap();
         let action = action("clipboard_modify:execute", Some(args));
-        assert!(app.handle_clipboard_modify_action(&action, ActivationSource::Enter));
+        assert!(activate(&mut app, &action, ActivationSource::Enter));
         let meta = app
-            .pending_clipboard_modify_immediate
-            .values()
-            .next()
+            .clipboard_modify_immediate
+            .pending_metadata(crate::clipboard_modify::coordinator::OperationId(1))
             .expect("pending immediate metadata");
         assert_eq!(meta.query, "cm camel-case");
         assert_eq!(meta.action.action, "clipboard_modify:execute");
@@ -1994,14 +1646,14 @@ mod clipboard_modify_gui_action_tests {
                 let mut app = super::tests::new_app(&ctx);
                 app.clipboard_modify_hide_launcher_after_apply = expected;
                 let args = encode_action_payload(&payload).unwrap();
-                assert!(app.handle_clipboard_modify_action(
+                assert!(activate(
+                    &mut app,
                     &action("clipboard_modify:execute", Some(args)),
                     ActivationSource::Enter,
                 ));
                 let meta = app
-                    .pending_clipboard_modify_immediate
-                    .values()
-                    .next()
+                    .clipboard_modify_immediate
+                    .pending_metadata(crate::clipboard_modify::coordinator::OperationId(1))
                     .unwrap();
                 assert_eq!(meta.hide_launcher_on_success, expected);
             }
@@ -2012,11 +1664,13 @@ mod clipboard_modify_gui_action_tests {
     fn clipboard_modify_handler_claims_only_clipboard_modify_actions() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(!app.handle_clipboard_modify_action(
+        assert!(!activate(
+            &mut app,
             &action("clipboard:upper", None),
             ActivationSource::Enter
         ));
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:error", None),
             ActivationSource::Enter
         ));
@@ -2027,7 +1681,8 @@ mod clipboard_modify_gui_action_tests {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
         let args = encode_action_payload(&open_dialog_payload(ModifySection::Templates)).unwrap();
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:open:templates", Some(args)),
             ActivationSource::Click
         ));
@@ -2063,7 +1718,8 @@ mod clipboard_modify_gui_action_tests {
             (ModifySection::Help, ClipboardModifyDialogSection::Help),
         ] {
             let args = encode_action_payload(&open_dialog_payload(modify_section)).unwrap();
-            assert!(app.handle_clipboard_modify_action(
+            assert!(activate(
+                &mut app,
                 &action("clipboard_modify:open", Some(args)),
                 ActivationSource::Click
             ));
@@ -2086,7 +1742,8 @@ mod clipboard_modify_gui_action_tests {
             ),
             ("help", ClipboardModifyDialogSection::Help),
         ] {
-            assert!(app.handle_clipboard_modify_action(
+            assert!(activate(
+                &mut app,
                 &action(&format!("clipboard_modify:open:{suffix}"), None),
                 ActivationSource::Click
             ));
@@ -2105,9 +1762,9 @@ mod clipboard_modify_gui_action_tests {
         }]))
         .unwrap();
         let act = action("clipboard_modify:execute", Some(args));
-        assert!(app.handle_clipboard_modify_action(&act, ActivationSource::Enter));
+        assert!(activate(&mut app, &act, ActivationSource::Enter));
         let query_before = app.query.clone();
-        assert!(app.handle_clipboard_modify_action(&act, ActivationSource::Enter));
+        assert!(activate(&mut app, &act, ActivationSource::Enter));
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert_eq!(app.query, query_before);
         assert!(app.move_cursor_end);
@@ -2129,8 +1786,6 @@ mod clipboard_modify_gui_action_tests {
             source: ActivationSource::Enter,
             hide_launcher_on_success: false,
         };
-        app.pending_clipboard_modify_immediate
-            .insert(7, meta.clone());
         app.query = "changed".into();
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta.clone(),
@@ -2169,8 +1824,6 @@ mod clipboard_modify_gui_action_tests {
             source: ActivationSource::Gesture,
             hide_launcher_on_success: true,
         };
-        app.pending_clipboard_modify_immediate
-            .insert(8, meta.clone());
         let before_len = history::get_history().len();
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta.clone(),
@@ -2207,8 +1860,6 @@ mod clipboard_modify_gui_action_tests {
             source: ActivationSource::Enter,
             hide_launcher_on_success: false,
         };
-        app.pending_clipboard_modify_immediate
-            .insert(9, meta.clone());
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta,
             crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
@@ -2230,7 +1881,8 @@ mod clipboard_modify_gui_action_tests {
     fn malformed_payload_failure_leaves_coordinator_ready_for_valid_command() {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:execute", Some("not-json".into())),
             ActivationSource::Enter
         ));
@@ -2240,7 +1892,8 @@ mod clipboard_modify_gui_action_tests {
             arguments: StageArguments::default(),
         }]))
         .unwrap();
-        assert!(app.handle_clipboard_modify_action(
+        assert!(activate(
+            &mut app,
             &action("clipboard_modify:execute", Some(args)),
             ActivationSource::Enter
         ));

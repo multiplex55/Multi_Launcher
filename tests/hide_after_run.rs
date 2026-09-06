@@ -1,12 +1,45 @@
 use eframe::egui;
 use multi_launcher::actions::Action;
-use multi_launcher::gui::LauncherApp;
+use multi_launcher::gui::{ActivationSource, LauncherApp, set_execute_action_hook};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
+use once_cell::sync::Lazy;
+use std::path::PathBuf;
 use std::sync::{
-    Arc,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
+
+static EXECUTION_HOOK_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+struct ActivationTestGuard {
+    original_dir: PathBuf,
+    _temp_dir: tempfile::TempDir,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl ActivationTestGuard {
+    fn new() -> Self {
+        let lock = EXECUTION_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original_dir = std::env::current_dir().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        Self {
+            original_dir,
+            _temp_dir: temp_dir,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for ActivationTestGuard {
+    fn drop(&mut self) {
+        set_execute_action_hook(None);
+        let _ = std::env::set_current_dir(&self.original_dir);
+    }
+}
 
 fn new_app_with_settings(
     ctx: &egui::Context,
@@ -38,6 +71,7 @@ fn new_app_with_settings(
 }
 
 fn run_action(action: &str) -> bool {
+    let _guard = ActivationTestGuard::new();
     let ctx = egui::Context::default();
     let actions = vec![Action {
         label: "test".into(),
@@ -90,23 +124,14 @@ fn run_action(action: &str) -> bool {
     );
     flag.store(true, Ordering::SeqCst);
     let a = app.results[0].clone();
-    if multi_launcher::launcher::launch_action(&a).is_ok()
-        && app.hide_after_run
-        && !a.action.starts_with("bookmark:add:")
-        && !a.action.starts_with("bookmark:remove:")
-        && !a.action.starts_with("folder:add:")
-        && !a.action.starts_with("folder:remove:")
-        && !a.action.starts_with("calc:")
-        && !a.action.starts_with("todo:done:")
-    {
-        flag.store(false, Ordering::SeqCst);
-    }
+    set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+    app.activate_action(a, None, ActivationSource::Enter);
     !flag.load(Ordering::SeqCst)
 }
 
 #[test]
 fn hide_after_run_updates_visibility() {
-    assert!(run_action("history:clear"));
+    assert!(run_action("exec:test"));
 }
 
 #[test]

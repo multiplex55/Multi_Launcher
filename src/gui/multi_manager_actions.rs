@@ -1139,7 +1139,15 @@ mod tests {
             .multi_manager
             .reconnect_in_progress
             .store(true, Ordering::Relaxed);
-        command_app.activate_action_confirmed(action_mm_reconnect(), None, ActivationSource::Enter);
+        let action = action_mm_reconnect();
+        command_app.dispatch_command_invocation(crate::commands::CommandInvocation {
+            command: crate::commands::Command::MultiManager(
+                crate::commands::MultiManagerCommand::Reconnect,
+            ),
+            original_action: action,
+            query_override: None,
+            source: ActivationSource::Enter,
+        });
 
         assert_eq!(button_app.error, command_app.error);
         assert_eq!(command_app.error.as_deref(), None);

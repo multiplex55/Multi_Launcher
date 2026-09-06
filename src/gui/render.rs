@@ -1636,7 +1636,6 @@ impl eframe::App for LauncherApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.clipboard_modify_dialog.cleanup_after_close();
         self.clipboard_modify_immediate.cancel_pending();
-        self.pending_clipboard_modify_immediate.clear();
         self.clipboard_modify_events.clear();
         self.clipboard_modify_watcher = None;
         self.multi_manager.shutdown();
@@ -1987,7 +1986,9 @@ mod tests {
         });
         assert_eq!(response, LauncherCommandResponse::Activated);
         assert_eq!(
-            app.pending_confirm.as_ref().map(|pending| pending.source),
+            app.pending_confirm
+                .as_ref()
+                .map(|pending| pending.invocation.source),
             Some(ActivationSource::Macro)
         );
     }
@@ -2004,7 +2005,9 @@ mod tests {
         });
         assert_eq!(response, LauncherCommandResponse::Activated);
         assert_eq!(
-            app.pending_confirm.as_ref().map(|pending| pending.source),
+            app.pending_confirm
+                .as_ref()
+                .map(|pending| pending.invocation.source),
             Some(ActivationSource::Macro)
         );
 
@@ -2049,7 +2052,9 @@ mod tests {
         assert!(app.confirm_modal.is_open());
         assert_eq!(app.confirm_modal.source_copy(), Some("Triggered by macro"));
         assert_eq!(
-            app.pending_confirm.as_ref().map(|pending| pending.source),
+            app.pending_confirm
+                .as_ref()
+                .map(|pending| pending.invocation.source),
             Some(ActivationSource::Macro)
         );
         assert_eq!(executions.load(Ordering::SeqCst), 0);

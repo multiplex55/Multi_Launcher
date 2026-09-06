@@ -1,6 +1,9 @@
 use eframe::egui;
 
-use super::ActivationSource;
+use crate::commands::{
+    ActivationSource, BrowserTabCommand, ClipboardCommand, Command, NoteCommand, StorageCommand,
+    TodoCommand, TodoCompatibilityKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmationResult {
@@ -25,20 +28,24 @@ pub enum DestructiveAction {
 }
 
 impl DestructiveAction {
-    pub fn from_action(action: &crate::actions::Action) -> Option<Self> {
-        match action.action.as_str() {
-            "clipboard:clear" => Some(Self::ClearClipboard),
-            "history:clear" => Some(Self::ClearHistory),
-            "todo:clear" => Some(Self::ClearTodos),
-            "tempfile:clear" => Some(Self::ClearTempfiles),
-            "tab:clear" => Some(Self::ClearBrowserTabCache),
-            "recycle:clean" => Some(Self::EmptyRecycleBin),
-            _ if action.action.starts_with("todo:remove:") => Some(Self::DeleteTodo),
-            _ if action.action.starts_with("note:remove:") => Some(Self::DeleteNote),
+    pub fn from_command(command: &Command) -> Option<Self> {
+        match command {
+            Command::Clipboard(ClipboardCommand::Clear) => Some(Self::ClearClipboard),
+            Command::Storage(StorageCommand::HistoryClear) => Some(Self::ClearHistory),
+            Command::Todo(TodoCommand::Clear) => Some(Self::ClearTodos),
+            Command::Storage(StorageCommand::TempfileClear) => Some(Self::ClearTempfiles),
+            Command::BrowserTab(BrowserTabCommand::Clear) => Some(Self::ClearBrowserTabCache),
+            Command::Storage(StorageCommand::RecycleClean) => Some(Self::EmptyRecycleBin),
+            Command::Todo(
+                TodoCommand::Remove { .. }
+                | TodoCommand::Compatibility {
+                    kind: TodoCompatibilityKind::Remove,
+                },
+            ) => Some(Self::DeleteTodo),
+            Command::Note(NoteCommand::Remove { .. }) => Some(Self::DeleteNote),
             _ => None,
         }
     }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::ClearClipboard => "Clear clipboard history",
@@ -64,36 +71,59 @@ impl DestructiveAction {
 mod tests {
     use super::{ConfirmationModal, DestructiveAction};
     use crate::actions::Action;
-    use crate::gui::ActivationSource;
+    use crate::commands::{ActivationSource, Command, NoteCommand, parse_action};
+
+    fn command(raw: &str) -> Command {
+        parse_action(&Action {
+            label: raw.into(),
+            desc: "test".into(),
+            action: raw.into(),
+            args: None,
+        })
+        .unwrap()
+    }
 
     #[test]
-    fn from_action_maps_note_remove() {
-        let action = Action {
-            label: "Delete note".into(),
-            desc: "Notes".into(),
-            action: "note:remove:project-idea".into(),
-            args: None,
-        };
-
+    fn from_command_maps_note_remove() {
+        let command = command("note:remove:project-idea");
         assert_eq!(
-            DestructiveAction::from_action(&action),
+            DestructiveAction::from_command(&command),
             Some(DestructiveAction::DeleteNote)
         );
+        assert!(matches!(command, Command::Note(NoteCommand::Remove { .. })));
+    }
+
+    #[test]
+    fn typed_destructive_metadata_maps_all_eight_existing_protocols() {
+        for (raw, expected) in [
+            ("clipboard:clear", DestructiveAction::ClearClipboard),
+            ("history:clear", DestructiveAction::ClearHistory),
+            ("todo:clear", DestructiveAction::ClearTodos),
+            ("tempfile:clear", DestructiveAction::ClearTempfiles),
+            ("tab:clear", DestructiveAction::ClearBrowserTabCache),
+            ("recycle:clean", DestructiveAction::EmptyRecycleBin),
+            ("todo:remove:2", DestructiveAction::DeleteTodo),
+            ("todo:remove:not-an-index", DestructiveAction::DeleteTodo),
+            ("note:remove:alpha", DestructiveAction::DeleteNote),
+        ] {
+            assert_eq!(
+                DestructiveAction::from_command(&command(raw)),
+                Some(expected),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
     fn macro_source_is_rendered_in_confirmation_text() {
         let mut modal = ConfirmationModal::default();
-
         modal.open_for_source(
             DestructiveAction::ClearHistory,
             Some(ActivationSource::Macro),
         );
-
         assert_eq!(modal.source_label.as_deref(), Some("Triggered by macro"));
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct ConfirmationModal {
     open: bool,

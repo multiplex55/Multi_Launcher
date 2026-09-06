@@ -7,7 +7,7 @@ use crate::clipboard_modify::executor::{
 };
 use crate::clipboard_modify::model::{ClipboardModifierCatalog, StageSpec};
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
-use crate::gui::ActivationSource;
+use crate::commands::ActivationSource;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -469,7 +469,9 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
         });
         Ok(id)
     }
-    pub fn drain_completions(&mut self) -> Vec<ImmediateCompletionEvent> {
+    pub fn drain_completions(
+        &mut self,
+    ) -> Vec<(ImmediateRequestMetadata, ImmediateCompletionEvent)> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             if let Some(meta) = self.pending.remove(&ev.request_id.0) {
@@ -482,7 +484,7 @@ impl<S: ClipboardCommit> ImmediateExecutionCoordinator<S> {
                 } else {
                     self.diagnostics.failed += 1;
                 }
-                out.push(ev);
+                out.push((meta, ev));
             }
         }
         out
@@ -624,7 +626,11 @@ mod tests {
             )
             .unwrap();
         std::thread::sleep(Duration::from_millis(50));
-        let ev = ic.drain_completions().pop().unwrap();
+        let (metadata, ev) = ic.drain_completions().pop().unwrap();
+        assert_eq!(metadata.action, action());
+        assert_eq!(metadata.query, "cm upper");
+        assert_eq!(metadata.source, ActivationSource::Enter);
+        assert!(metadata.hide_launcher_on_success);
         assert_eq!(ev.request_id, id);
         assert_eq!(ev.character_count, 3);
         assert_eq!(ev.line_count, 2);
@@ -698,7 +704,7 @@ mod tests {
     ) -> ImmediateCompletionEvent {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(ev) = ic.drain_completions().pop() {
+            if let Some((_, ev)) = ic.drain_completions().pop() {
                 return ev;
             }
             assert!(
@@ -877,7 +883,7 @@ mod tests {
         )
         .unwrap();
         std::thread::sleep(Duration::from_millis(50));
-        let ev = ic.drain_completions().pop().unwrap();
+        let (_, ev) = ic.drain_completions().pop().unwrap();
         assert!(ev.result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }

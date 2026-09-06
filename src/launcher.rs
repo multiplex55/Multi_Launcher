@@ -43,103 +43,6 @@ pub(crate) fn toggle_system_mute() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::actions::Action;
-    use crate::launcher::parse::{ActionKind, parse_action_kind};
-
-    #[test]
-    fn parse_volume_pid_toggle_mute() {
-        let action = Action {
-            label: String::new(),
-            desc: String::new(),
-            action: "volume:pid_toggle_mute:42".into(),
-            args: None,
-        };
-        assert_eq!(
-            parse_action_kind(&action),
-            ActionKind::VolumeToggleMuteProcess { pid: 42 }
-        );
-    }
-
-    #[test]
-    fn parse_volume_toggle_mute() {
-        let action = Action {
-            label: String::new(),
-            desc: String::new(),
-            action: "volume:toggle_mute".into(),
-            args: None,
-        };
-        assert_eq!(parse_action_kind(&action), ActionKind::VolumeToggleMute);
-    }
-
-    #[test]
-    fn parse_power_plan_set() {
-        let action = Action {
-            label: String::new(),
-            desc: String::new(),
-            action: "power:plan:set:balanced".into(),
-            args: None,
-        };
-        assert_eq!(
-            parse_action_kind(&action),
-            ActionKind::PowerPlanSet { guid: "balanced" }
-        );
-    }
-
-    #[test]
-    fn parse_todo_add_payload_with_delimiters_and_whitespace() {
-        let payload = crate::plugins::todo::TodoAddActionPayload {
-            text: "ship | release, notes now".into(),
-            priority: 9,
-            tags: vec!["team|alpha,beta".into(), "has space".into()],
-            refs: Vec::new(),
-        };
-        let encoded = crate::plugins::todo::encode_todo_add_action_payload(&payload)
-            .expect("encode todo add payload");
-        let action = Action {
-            label: String::new(),
-            desc: String::new(),
-            action: format!("todo:add:{encoded}"),
-            args: None,
-        };
-
-        assert_eq!(
-            parse_action_kind(&action),
-            ActionKind::TodoAdd {
-                text: "ship | release, notes now".into(),
-                priority: 9,
-                tags: vec!["team|alpha,beta".into(), "has space".into()],
-                refs: Vec::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_todo_tag_payload_with_delimiters_and_whitespace() {
-        let payload = crate::plugins::todo::TodoTagActionPayload {
-            idx: 12,
-            tags: vec!["owner|dev,ops".into(), "needs review".into()],
-        };
-        let encoded = crate::plugins::todo::encode_todo_tag_action_payload(&payload)
-            .expect("encode todo tag payload");
-        let action = Action {
-            label: String::new(),
-            desc: String::new(),
-            action: format!("todo:tag:{encoded}"),
-            args: None,
-        };
-
-        assert_eq!(
-            parse_action_kind(&action),
-            ActionKind::TodoSetTags {
-                idx: 12,
-                tags: vec!["owner|dev,ops".into(), "needs review".into()],
-            }
-        );
-    }
-}
-
 pub(crate) fn mute_active_window() {
     use windows::Win32::Media::Audio::{
         IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
@@ -363,7 +266,5 @@ pub(crate) fn system_command(action: &str) -> Option<std::process::Command> {
 }
 
 pub(crate) mod exec;
-pub(crate) mod parse;
-pub(crate) mod plan;
 
 pub use exec::launch_action;

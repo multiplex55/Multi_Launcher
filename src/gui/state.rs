@@ -1,4 +1,5 @@
 use crate::actions::Action;
+pub use crate::commands::ActivationSource;
 use crate::dashboard::DashboardEvent;
 use std::fmt::Display;
 
@@ -28,30 +29,9 @@ pub enum WatchEvent {
     ClipboardModify(ClipboardModifyGuiEvent),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActivationSource {
-    Enter,
-    Click,
-    Dashboard,
-    Gesture,
-    Macro,
-}
-
-impl ActivationSource {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Enter => "enter",
-            Self::Click => "click",
-            Self::Dashboard => "dashboard",
-            Self::Gesture => "gesture",
-            Self::Macro => "macro",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::ActivationSource;
+    use crate::commands::ActivationSource;
 
     #[test]
     fn activation_source_labels_are_stable() {
@@ -93,10 +73,8 @@ pub(crate) enum ResultContextMenuKind {
 }
 
 #[derive(Clone)]
-pub(crate) struct PendingConfirmAction {
-    pub(crate) action: Action,
-    pub(crate) query_override: Option<String>,
-    pub(crate) source: ActivationSource,
+pub(crate) struct PendingConfirmCommand {
+    pub(crate) invocation: crate::commands::CommandInvocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

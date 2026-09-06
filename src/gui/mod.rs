@@ -9,6 +9,7 @@ mod calendar_event_editor;
 mod calendar_popover;
 mod clipboard_dialog;
 mod clipboard_modify_dialog;
+mod command_host;
 mod confirmation_modal;
 mod convert_panel;
 mod cpu_list_dialog;
@@ -99,7 +100,7 @@ use crate::actions::folders;
 use crate::actions::{Action, load_actions};
 use crate::actions_editor::ActionsEditor;
 use crate::clipboard_modify::coordinator::{
-    ImmediateCompletionEvent, ImmediateExecutionCoordinator, ImmediateRequestMetadata,
+    ImmediateCompletionEvent, ImmediateExecutionCoordinator,
 };
 use crate::clipboard_modify::runtime::{ClipboardModifyRuntime, clipboard_service};
 use crate::common::query::{ActionFilterMetadata, action_matches_filters, split_action_filters};
@@ -112,9 +113,7 @@ use crate::file_search::coordinator::SearchCoordinator;
 use crate::help_window::HelpWindow;
 use crate::history::{self, HISTORY_PINS_FILE, HistoryEntry, HistoryPin};
 use crate::indexer;
-use crate::launcher::launch_action;
-use crate::mouse_gestures::db::{GESTURES_FILE, load_gestures, save_gestures};
-use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
+
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
@@ -153,8 +152,9 @@ use std::time::{Duration, Instant};
 use url::Url;
 use watch::watch_file;
 
-pub use state::{ActivationSource, ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
-pub(crate) use state::{PendingConfirmAction, ResultContextMenuKind, UiErrorEvent};
+pub use crate::commands::ActivationSource;
+pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
+pub(crate) use state::{PendingConfirmCommand, ResultContextMenuKind, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -293,17 +293,17 @@ pub fn set_activation_hook(hook: Option<ActivationHook>) {
     }
 }
 
-/// Dispatch an already-resolved launcher action without performing another plugin search.
-/// Raw macro queries use the launcher query broker; this API never performs plugin search.
-pub(crate) fn execute_action(action: &Action) -> anyhow::Result<()> {
+pub(crate) fn execute_parsed_action(
+    command: &crate::commands::Command,
+    action: &Action,
+) -> anyhow::Result<()> {
     if let Ok(guard) = EXECUTE_ACTION_HOOK.lock()
         && let Some(ref hook) = *guard
     {
         return hook(action);
     }
-    launch_action(action)
+    crate::commands::headless::execute(command.clone(), action)
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Panel {
     AliasDialog,
@@ -418,6 +418,7 @@ pub struct LauncherApp {
     /// duplicates the pointer, keeping the action data itself shared. When
     /// actions are edited the entire `Arc` is replaced with a new one.
     pub actions: Arc<Vec<Action>>,
+    command_bus: Arc<crate::commands::CommandBus>,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
     actions_by_id: HashMap<String, Action>,
@@ -545,7 +546,6 @@ pub struct LauncherApp {
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
-    pending_clipboard_modify_immediate: HashMap<u64, ImmediateRequestMetadata>,
     pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
     clipboard_modify_immediate: ImmediateExecutionCoordinator<
         crate::clipboard_modify::clipboard::ProductionClipboardService,
@@ -621,7 +621,7 @@ pub struct LauncherApp {
     last_note_search_change: Option<Instant>,
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
-    pending_confirm: Option<PendingConfirmAction>,
+    pending_confirm: Option<PendingConfirmCommand>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
     pub file_search_selected_kind: crate::file_search::model::SearchKind,
@@ -1405,6 +1405,7 @@ impl LauncherApp {
         install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
         let mut app = Self {
             actions: Arc::clone(&actions),
+            command_bus: Arc::new(crate::commands::CommandBus),
             query: String::new(),
             results: (*actions).clone(),
             matcher: SkimMatcherV2::default(),
@@ -1526,7 +1527,6 @@ impl LauncherApp {
             ),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
-            pending_clipboard_modify_immediate: HashMap::new(),
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
                 .hide_launcher_after_apply,
             clipboard_modify_immediate: ImmediateExecutionCoordinator::new(clipboard_service()),
@@ -2181,20 +2181,6 @@ impl LauncherApp {
             registered_hotkeys.clear();
         } else {
             tracing::error!("failed to lock registered_hotkeys");
-        }
-    }
-
-    fn handle_screenshot_launch_result(
-        &mut self,
-        result: anyhow::Result<crate::plugins::screenshot::ScreenshotLaunchOutcome>,
-    ) -> bool {
-        match result {
-            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Completed) => true,
-            Ok(crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled) => false,
-            Err(e) => {
-                self.report_error_message("launcher", format!("Failed: {e}"));
-                false
-            }
         }
     }
 
@@ -3570,32 +3556,6 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_cancel_does_not_report_failure_or_toast() {
-        let _guard = TEST_MUTEX.lock().unwrap();
-        let temp = tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.enable_toasts = true;
-        app.show_error_toasts = true;
-        app.show_inline_errors = true;
-
-        let before_log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap_or_default();
-        let handled = app.handle_screenshot_launch_result(Ok(
-            crate::plugins::screenshot::ScreenshotLaunchOutcome::Cancelled,
-        ));
-        let after_log = std::fs::read_to_string(TOAST_LOG_FILE).unwrap_or_default();
-
-        assert!(!handled);
-        assert!(app.error.is_none());
-        assert_eq!(before_log, after_log);
-
-        std::env::set_current_dir(original_dir).unwrap();
-    }
-
-    #[test]
     fn report_error_records_when_ui_is_disabled() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let temp = tempdir().unwrap();
@@ -4490,7 +4450,7 @@ mod tests {
 
         assert_eq!(load_notes().unwrap().len(), 1);
         let pending = app.pending_confirm.take().expect("pending confirm action");
-        app.activate_action_confirmed(pending.action, pending.query_override, pending.source);
+        app.dispatch_command_invocation(pending.invocation);
         assert!(load_notes().unwrap().is_empty());
 
         std::env::set_current_dir(orig_dir).unwrap();
