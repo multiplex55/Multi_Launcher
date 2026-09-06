@@ -743,6 +743,14 @@ explicit same-source retry, identity-change recovery, and bounded-retirement tes
 - Making runtime changes from the baseline alone: deferred to later milestones; this milestone
   changes measurement boundaries only.
 
+## Independent final review
+
+**Status:** CLEAR
+
+No substantive unresolved correctness, UI-thread blocking, async lifecycle, refresh-ticket, dynamic
+reload, benchmark, test-topology, command ABI/configuration compatibility, or performance-ledger
+claim defects remain.
+
 ## Commit record
 
 | Milestone | Commit | Subject |
@@ -759,3 +767,4 @@ explicit same-source retry, identity-change recovery, and bounded-retirement tes
 | Review remediation 5 | `6b63ea7` | `fix(perf): make async completion request-specific` |
 | Review remediation 6 | `5116bbc` | `fix(perf): close async ticket and reload races` |
 | Review remediation 7 | `1835b14` | `fix(perf): contain background worker failures` |
+| Review remediation 8 | `1fd7066` | `fix(perf): stop repeated plugin query failures` |
