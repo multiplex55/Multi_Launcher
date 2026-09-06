@@ -81,11 +81,12 @@ impl Plugin for VolumePlugin {
                         && level <= 100
                     {
                         let snapshot = self.cache.snapshot_and_refresh();
-                        if let Some(process) = snapshot
-                            .processes
-                            .iter()
-                            .find(|process| process.name.eq_ignore_ascii_case(exe))
-                        {
+                        if let Some(process) = snapshot.as_deref().and_then(|snapshot| {
+                            snapshot
+                                .processes
+                                .iter()
+                                .find(|process| process.name.eq_ignore_ascii_case(exe))
+                        }) {
                             return vec![Action {
                                 label: format!("Set {exe} volume to {level}%"),
                                 desc: format!("PID {}", process.pid),

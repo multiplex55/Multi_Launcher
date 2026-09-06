@@ -446,6 +446,7 @@ impl Dashboard {
 
 const PERIODIC_WIDGETS: &[&str] = &[
     "browser_tabs",
+    "calendar",
     "command_history",
     "layouts",
     "pinned_query_results",
@@ -541,6 +542,15 @@ mod repaint_demand_tests {
         );
         assert_eq!(
             slot_repaint_demand(&periodic, false, true, false, false),
+            RepaintDemand::EventDriven
+        );
+        let calendar = slot("calendar", json!({}));
+        assert_eq!(
+            slot_repaint_demand(&calendar, true, true, false, false),
+            RepaintDemand::Slow
+        );
+        assert_eq!(
+            slot_repaint_demand(&calendar, false, true, false, false),
             RepaintDemand::EventDriven
         );
         assert_eq!(

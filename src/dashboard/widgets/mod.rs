@@ -151,7 +151,7 @@ pub trait Widget: Send {
 
 pub(crate) use query_suggestions::query_suggestions;
 pub(crate) use render::{
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin, gesture_focus_action,
-    gesture_toggle_action, merge_json, plugin_names, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, default_refresh_throttle_secs, edit_typed_settings, find_plugin,
+    gesture_focus_action, gesture_toggle_action, merge_json, plugin_names, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule,
 };

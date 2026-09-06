@@ -5,6 +5,7 @@ use multi_launcher::{
     completion,
     gui::LauncherApp,
     plugin::{Plugin, PluginManager},
+    plugins::browser_tabs::BrowserTabsPlugin,
     settings::Settings,
 };
 use std::collections::{HashMap, HashSet};
@@ -206,7 +207,6 @@ fn bench_dynamic_plugins(c: &mut Criterion) {
         ("sysinfo", "info cpu"),
         ("network", "net"),
         ("volume", "vol name definitely_not_real.exe 20"),
-        ("browser_tabs", "tab clear"),
         ("shell", "sh"),
         ("layout", "layout"),
         ("mouse_gestures", "mg"),
@@ -218,6 +218,37 @@ fn bench_dynamic_plugins(c: &mut Criterion) {
             b.iter(|| black_box(plugins.search_filtered(black_box(query), Some(&enabled), None)))
         });
     }
+    let mut browser_plugins = PluginManager::new();
+    browser_plugins.register(Box::new(BrowserTabsPlugin::with_cached_tabs_for_benchmark(
+        (0..1_000).map(|index| {
+            (
+                format!("Project documentation {index:04}"),
+                format!("https://example.test/docs/{index}"),
+                vec![index],
+            )
+        }),
+    )));
+    let browser_enabled = HashSet::from(["browser_tabs".to_owned()]);
+    group.throughput(Throughput::Elements(1_000));
+    group.bench_function("browser_tabs_cached_filter_1000", |b| {
+        b.iter(|| {
+            black_box(browser_plugins.search_filtered(
+                black_box("tab documentation 0420"),
+                Some(&browser_enabled),
+                None,
+            ))
+        })
+    });
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("browser_tabs_clear_command", |b| {
+        b.iter(|| {
+            black_box(browser_plugins.search_filtered(
+                black_box("tab clear"),
+                Some(&browser_enabled),
+                None,
+            ))
+        })
+    });
     group.finish();
 }
 fn bench_completion(c: &mut Criterion) {

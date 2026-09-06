@@ -1,71 +1,71 @@
-#[path = "../clipboard_modify_config.rs"]
+#[path = "../domain_cases/clipboard_modify_config.rs"]
 mod clipboard_modify_config;
 
-#[path = "../clipboard_modify_runtime.rs"]
+#[path = "../domain_cases/clipboard_modify_runtime.rs"]
 mod clipboard_modify_runtime;
 
-#[path = "../command_bus_architecture.rs"]
+#[path = "../domain_cases/command_bus_architecture.rs"]
 mod command_bus_architecture;
 
-#[path = "../dependency_security.rs"]
+#[path = "../domain_cases/dependency_security.rs"]
 mod dependency_security;
 
-#[path = "../diff_file_ops.rs"]
+#[path = "../domain_cases/diff_file_ops.rs"]
 mod diff_file_ops;
 
-#[path = "../diff_folder_engine.rs"]
+#[path = "../domain_cases/diff_folder_engine.rs"]
 mod diff_folder_engine;
 
-#[path = "../diff_sessions.rs"]
+#[path = "../domain_cases/diff_sessions.rs"]
 mod diff_sessions;
 
-#[path = "../diff_text_engine.rs"]
+#[path = "../domain_cases/diff_text_engine.rs"]
 mod diff_text_engine;
 
-#[path = "../diff_watch.rs"]
+#[path = "../domain_cases/diff_watch.rs"]
 mod diff_watch;
 
-#[path = "../file_search_e2e.rs"]
+#[path = "../domain_cases/file_search_e2e.rs"]
 mod file_search_e2e;
 
-#[path = "../file_search_state.rs"]
+#[path = "../domain_cases/file_search_state.rs"]
 mod file_search_state;
 
-#[path = "../hotkey.rs"]
+#[path = "../domain_cases/hotkey.rs"]
 mod hotkey;
 
-#[path = "../indexer.rs"]
+#[path = "../domain_cases/indexer.rs"]
 mod indexer;
 
-#[path = "../is_valid_key_combo.rs"]
+#[path = "../domain_cases/is_valid_key_combo.rs"]
 mod is_valid_key_combo;
 
-#[path = "../mouse_gestures_overlay.rs"]
+#[path = "../domain_cases/mouse_gestures_overlay.rs"]
 mod mouse_gestures_overlay;
 
-#[path = "../note_graph_settings.rs"]
+#[path = "../domain_cases/note_graph_settings.rs"]
 mod note_graph_settings;
 
-#[path = "../note_more_limit.rs"]
+#[path = "../domain_cases/note_more_limit.rs"]
 mod note_more_limit;
 
-#[path = "../offscreen.rs"]
+#[path = "../domain_cases/offscreen.rs"]
 mod offscreen;
 
-#[path = "../ranking.rs"]
+#[path = "../domain_cases/ranking.rs"]
 mod ranking;
 
-#[path = "../selection.rs"]
+#[path = "../domain_cases/selection.rs"]
 mod selection;
 
-#[path = "../theme_settings.rs"]
+#[path = "../domain_cases/theme_settings.rs"]
 mod theme_settings;
 
-#[path = "../theme_settings_dialog.rs"]
+#[path = "../domain_cases/theme_settings_dialog.rs"]
 mod theme_settings_dialog;
 
-#[path = "../todo_dialog.rs"]
+#[path = "../domain_cases/todo_dialog.rs"]
 mod todo_dialog;
 
-#[path = "../usage.rs"]
+#[path = "../domain_cases/usage.rs"]
 mod usage;

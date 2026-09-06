@@ -68,7 +68,7 @@ impl SystemDataProvider for ProductionSystemDataProvider {
 
 #[derive(Default)]
 struct CacheState {
-    snapshot: Arc<SystemDataSnapshot>,
+    snapshot: Option<Arc<SystemDataSnapshot>>,
     fresh_until: Option<Instant>,
     in_flight: bool,
 }
@@ -85,17 +85,17 @@ impl SystemDataCache {
         let (wake, _receiver) = sync_channel(1);
         Self {
             state: Arc::new(Mutex::new(CacheState {
-                snapshot: Arc::new(snapshot),
+                snapshot: Some(Arc::new(snapshot)),
                 fresh_until: Some(Instant::now() + REFRESH_TTL),
                 in_flight: false,
             })),
             wake,
         }
     }
-    pub(crate) fn snapshot_and_refresh(&self) -> Arc<SystemDataSnapshot> {
+    pub(crate) fn snapshot_and_refresh(&self) -> Option<Arc<SystemDataSnapshot>> {
         let now = Instant::now();
         let Ok(mut state) = self.state.lock() else {
-            return Arc::new(SystemDataSnapshot::default());
+            return None;
         };
         if !state.in_flight && !state.fresh_until.is_some_and(|deadline| now < deadline) {
             state.in_flight = true;
@@ -103,7 +103,7 @@ impl SystemDataCache {
                 state.in_flight = false;
             }
         }
-        Arc::clone(&state.snapshot)
+        state.snapshot.as_ref().map(Arc::clone)
     }
 }
 
@@ -167,7 +167,7 @@ fn run_worker(
         }
         let snapshot = provider.refresh();
         if let Ok(mut state) = state.lock() {
-            state.snapshot = Arc::new(snapshot);
+            state.snapshot = Some(Arc::new(snapshot));
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
         }
@@ -217,16 +217,17 @@ mod tests {
                     available_disk: 50,
                 },
             },
-            updates,
+            Arc::clone(&updates),
         );
         let cache = runtime.cache();
         cache.snapshot_and_refresh();
         started_rx.recv().unwrap();
-        assert!(cache.snapshot_and_refresh().processes.is_empty());
+        assert!(cache.snapshot_and_refresh().is_none());
         assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
         release_tx.send(()).unwrap();
         repaint_rx.recv().unwrap();
-        let snapshot = cache.snapshot_and_refresh();
+        assert_eq!(updates.generation(), 1);
+        let snapshot = cache.snapshot_and_refresh().unwrap();
         assert_eq!(snapshot.processes[0].pid, 42);
         assert_eq!(snapshot.used_memory, 40);
         drop(runtime);

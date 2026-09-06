@@ -17,76 +17,268 @@
 //!
 //! The plugin is Windows-only; on other platforms it returns no results.
 use crate::actions::Action;
-use crate::plugin::Plugin;
+use crate::plugin::{Plugin, PluginSearchUpdates};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-#[derive(Default)]
 pub struct BrowserTabsPlugin {
     recalc_each_query: bool,
+    cache: imp::BrowserTabsCache,
 }
 
 mod imp {
     use super::*;
     use once_cell::sync::Lazy;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, RwLock};
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+    use std::sync::{Mutex, Weak};
+    use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
-    #[cfg(not(test))]
     use tracing::{error, warn};
 
-    #[derive(Clone)]
+    const CACHE_TTL: Duration = Duration::from_secs(2);
+
+    #[derive(Clone, Debug)]
     pub(super) struct TabInfo {
-        title: String,
-        url: String,
-        runtime_id: Vec<i32>,
+        pub(super) title: String,
+        pub(super) url: String,
+        pub(super) runtime_id: Vec<i32>,
     }
 
-    static CACHE: Lazy<RwLock<Vec<TabInfo>>> = Lazy::new(|| RwLock::new(Vec::new()));
-    static LAST_REFRESH: Lazy<Mutex<Instant>> =
-        Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
-    static REFRESHING: AtomicBool = AtomicBool::new(false);
-    #[cfg(not(test))]
+    trait TabProvider: Send + 'static {
+        fn enumerate(&mut self) -> Vec<TabInfo>;
+    }
+
+    struct ProductionTabProvider;
+
+    impl TabProvider for ProductionTabProvider {
+        fn enumerate(&mut self) -> Vec<TabInfo> {
+            enumerate_tabs()
+        }
+    }
+
+    struct CacheState {
+        tabs: Arc<Vec<TabInfo>>,
+        last_refresh: Instant,
+        in_flight: bool,
+        refresh_disabled: bool,
+        messages: Vec<String>,
+    }
+
+    struct Shared {
+        state: Mutex<CacheState>,
+        wake: SyncSender<()>,
+        shutting_down: AtomicBool,
+        updates: Arc<PluginSearchUpdates>,
+    }
+
+    static CURRENT: Lazy<Mutex<Weak<Shared>>> = Lazy::new(|| Mutex::new(Weak::new()));
+
+    pub(super) struct BrowserTabsCache {
+        shared: Arc<Shared>,
+        worker: Mutex<Option<JoinHandle<()>>>,
+    }
+
+    impl BrowserTabsCache {
+        pub(super) fn start(updates: Arc<PluginSearchUpdates>) -> Self {
+            Self::start_with_provider(ProductionTabProvider, updates)
+        }
+
+        fn start_with_provider(
+            provider: impl TabProvider,
+            updates: Arc<PluginSearchUpdates>,
+        ) -> Self {
+            let (wake, receiver) = sync_channel(1);
+            let shared = Arc::new(Shared {
+                state: Mutex::new(CacheState {
+                    tabs: Arc::new(Vec::new()),
+                    last_refresh: Instant::now() - Duration::from_secs(60),
+                    in_flight: false,
+                    refresh_disabled: false,
+                    messages: Vec::new(),
+                }),
+                wake,
+                shutting_down: AtomicBool::new(false),
+                updates,
+            });
+            let worker_shared = Arc::clone(&shared);
+            let worker = thread::Builder::new()
+                .name("browser-tabs-refresh".into())
+                .spawn(move || run_worker(receiver, worker_shared, provider))
+                .expect("start Browser Tabs refresh worker");
+            if let Ok(mut current) = CURRENT.lock() {
+                *current = Arc::downgrade(&shared);
+            }
+            Self {
+                shared,
+                worker: Mutex::new(Some(worker)),
+            }
+        }
+
+        pub(super) fn cached_actions(&self, filter: &str, force: bool) -> Vec<Action> {
+            self.request_refresh(force);
+            let tabs = self
+                .shared
+                .state
+                .lock()
+                .map(|state| Arc::clone(&state.tabs))
+                .unwrap_or_default();
+            materialize_actions(&tabs, filter)
+        }
+
+        fn request_refresh(&self, force: bool) {
+            let Ok(mut state) = self.shared.state.lock() else {
+                return;
+            };
+            if state.refresh_disabled
+                || state.in_flight
+                || (!force && state.last_refresh.elapsed() <= CACHE_TTL)
+            {
+                return;
+            }
+            state.in_flight = true;
+            if self.shared.wake.try_send(()).is_err() {
+                state.in_flight = false;
+            }
+        }
+
+        fn clear(&self) {
+            clear_shared(&self.shared);
+        }
+
+        pub(super) fn take_messages(&self) -> Vec<String> {
+            self.shared
+                .state
+                .lock()
+                .map(|mut state| std::mem::take(&mut state.messages))
+                .unwrap_or_default()
+        }
+
+        pub(super) fn install_snapshot(&self, tabs: Vec<TabInfo>) {
+            if let Ok(mut state) = self.shared.state.lock() {
+                state.tabs = Arc::new(tabs);
+                state.last_refresh = Instant::now();
+                state.in_flight = false;
+                state.refresh_disabled = true;
+            }
+        }
+    }
+
+    impl Drop for BrowserTabsCache {
+        fn drop(&mut self) {
+            self.shared.shutting_down.store(true, Ordering::Release);
+            let _ = self.shared.wake.try_send(());
+            if let Ok(worker) = self.worker.get_mut()
+                && let Some(worker) = worker.take()
+            {
+                // UI Automation FindAll has no cancellation or timeout API. Shutdown is owned and
+                // deterministic once an in-progress provider call returns, but cannot preempt a
+                // Windows UIA call that is itself hung.
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn run_worker(receiver: Receiver<()>, shared: Arc<Shared>, mut provider: impl TabProvider) {
+        while receiver.recv().is_ok() {
+            if shared.shutting_down.load(Ordering::Acquire) {
+                break;
+            }
+            let tabs = provider.enumerate();
+            if let Ok(mut state) = shared.state.lock() {
+                state.tabs = Arc::new(tabs);
+                state.last_refresh = Instant::now();
+                state.in_flight = false;
+                state.messages.push("Tab cache refreshed".into());
+            }
+            shared.updates.notify();
+        }
+    }
+
+    fn materialize_actions(tabs: &[TabInfo], filter: &str) -> Vec<Action> {
+        tabs.iter()
+            .filter(|tab| {
+                !tab.runtime_id.is_empty()
+                    && (filter.is_empty()
+                        || tab.title.to_lowercase().contains(filter)
+                        || tab.url.to_lowercase().contains(filter))
+            })
+            .map(|tab| {
+                let id = tab
+                    .runtime_id
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                Action {
+                    label: format!("Switch to {}", tab.title),
+                    desc: if tab.url.is_empty() {
+                        "Browser Tab".into()
+                    } else {
+                        tab.url.clone()
+                    },
+                    action: format!("tab:switch:{id}"),
+                    args: None,
+                }
+            })
+            .collect()
+    }
+
+    fn current() -> Option<Arc<Shared>> {
+        CURRENT.lock().ok()?.upgrade()
+    }
+
+    pub(super) fn take_current_messages() -> Vec<String> {
+        let Some(shared) = current() else {
+            return Vec::new();
+        };
+        shared
+            .state
+            .lock()
+            .map(|mut state| std::mem::take(&mut state.messages))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn rebuild_current() {
+        if let Some(shared) = current()
+            && let Ok(mut state) = shared.state.lock()
+            && !state.in_flight
+        {
+            state.in_flight = true;
+            if shared.wake.try_send(()).is_err() {
+                state.in_flight = false;
+            }
+        }
+    }
+
+    fn clear_shared(shared: &Shared) {
+        if let Ok(mut state) = shared.state.lock() {
+            state.tabs = Arc::new(Vec::new());
+            state.last_refresh = Instant::now() - Duration::from_secs(60);
+            state.messages.push("Tab cache cleared".into());
+        }
+        shared.updates.notify();
+    }
+
+    pub(super) fn clear_current() {
+        if let Some(shared) = current() {
+            clear_shared(&shared);
+        }
+    }
+
     static LAST_ENUM_ERR: Lazy<Mutex<Instant>> =
         Lazy::new(|| Mutex::new(Instant::now() - Duration::from_secs(60)));
-    static MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-    pub(super) fn take_messages() -> Vec<String> {
-        if let Ok(mut list) = MESSAGES.lock() {
-            let out = list.clone();
-            list.clear();
-            out
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn push_message(msg: String) {
-        if let Ok(mut list) = MESSAGES.lock() {
-            list.push(msg);
-        }
-    }
-
-    #[cfg(not(test))]
     fn log_enum_error(msg: &str, err: windows::core::Error) {
-        match LAST_ENUM_ERR.lock() {
-            Ok(mut last) => {
-                if last.elapsed() > Duration::from_secs(30) {
-                    error!(?err, "BrowserTabsPlugin: {msg}");
-                    *last = Instant::now();
-                }
-            }
-            Err(lock_err) => {
-                error!(
-                    ?lock_err,
-                    ?err,
-                    "BrowserTabsPlugin: {msg} (enum error throttle lock poisoned)"
-                );
-            }
+        if let Ok(mut last) = LAST_ENUM_ERR.lock()
+            && last.elapsed() > Duration::from_secs(30)
+        {
+            error!(?err, "BrowserTabsPlugin: {msg}");
+            *last = Instant::now();
         }
     }
 
-    #[cfg(not(test))]
     fn enumerate_tabs() -> Vec<TabInfo> {
         use windows::Win32::System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -101,62 +293,56 @@ mod imp {
                 log_enum_error("CoInitializeEx failed", e);
                 return out;
             }
-
             let automation = match CoCreateInstance::<_, IUIAutomation>(
                 &CUIAutomation,
                 None,
                 CLSCTX_INPROC_SERVER,
             ) {
-                Ok(a) => a,
+                Ok(value) => value,
                 Err(e) => {
                     log_enum_error("CoCreateInstance(IUIAutomation) failed", e);
                     CoUninitialize();
                     return out;
                 }
             };
-
             let root = match automation.GetRootElement() {
-                Ok(r) => r,
+                Ok(value) => value,
                 Err(e) => {
                     log_enum_error("GetRootElement failed", e);
                     CoUninitialize();
                     return out;
                 }
             };
-
             let cond = match automation.CreatePropertyCondition(
                 UIA_ControlTypePropertyId,
                 &VARIANT::from(UIA_TabItemControlTypeId.0),
             ) {
-                Ok(c) => c,
+                Ok(value) => value,
                 Err(e) => {
                     warn!(?e, "BrowserTabsPlugin: CreatePropertyCondition failed");
                     CoUninitialize();
                     return out;
                 }
             };
-
             let tabs = match root.FindAll(TreeScope_Subtree, &cond) {
-                Ok(t) => t,
+                Ok(value) => value,
                 Err(e) => {
                     warn!(?e, "BrowserTabsPlugin: FindAll failed");
                     CoUninitialize();
                     return out;
                 }
             };
-
             let count = match tabs.Length() {
-                Ok(c) => c,
+                Ok(value) => value,
                 Err(e) => {
                     warn!(?e, "BrowserTabsPlugin: tabs.Length failed");
                     CoUninitialize();
                     return out;
                 }
             };
-
             for i in 0..count {
                 let elem = match tabs.GetElement(i) {
-                    Ok(e) => e,
+                    Ok(value) => value,
                     Err(e) => {
                         warn!(?e, "BrowserTabsPlugin: GetElement failed");
                         continue;
@@ -164,13 +350,11 @@ mod imp {
                 };
                 let title = elem.CurrentName().unwrap_or_default().to_string();
                 let mut url = String::new();
-                match elem.GetCurrentPropertyValue(UIA_LegacyIAccessibleValuePropertyId) {
-                    Ok(var) => {
-                        if let Ok(bstr) = BSTR::try_from(&var) {
-                            url = bstr.to_string();
-                        }
-                    }
-                    Err(e) => warn!(?e, "BrowserTabsPlugin: GetCurrentPropertyValue failed"),
+                if let Ok(value) =
+                    elem.GetCurrentPropertyValue(UIA_LegacyIAccessibleValuePropertyId)
+                    && let Ok(bstr) = BSTR::try_from(&value)
+                {
+                    url = bstr.to_string();
                 }
                 let mut runtime_id = Vec::new();
                 if let Ok(sa_ptr) = elem.GetRuntimeId() {
@@ -190,215 +374,119 @@ mod imp {
                         let _ = SafeArrayDestroy(psa);
                     }
                 }
-                if runtime_id.is_empty() {
-                    continue;
-                }
-                out.push(TabInfo {
-                    title,
-                    url,
-                    runtime_id,
-                });
-            }
-
-            CoUninitialize();
-        }
-        out
-    }
-
-    #[cfg(not(test))]
-    fn refresh_cache() {
-        let tabs = enumerate_tabs();
-        if let Ok(mut cache) = CACHE.write() {
-            *cache = tabs;
-        } else {
-            warn!("BrowserTabsPlugin: failed to lock cache for writing");
-        }
-        if let Ok(mut last) = LAST_REFRESH.lock() {
-            *last = Instant::now();
-        } else {
-            warn!("BrowserTabsPlugin: failed to lock last refresh time");
-        }
-        REFRESHING.store(false, Ordering::Release);
-        push_message("Tab cache refreshed".into());
-    }
-
-    #[cfg(test)]
-    fn refresh_cache() {
-        if let Ok(mut cache) = CACHE.write() {
-            cache.clear();
-        }
-        if let Ok(mut last) = LAST_REFRESH.lock() {
-            *last = Instant::now();
-        }
-        REFRESHING.store(false, Ordering::Release);
-    }
-
-    #[cfg(not(test))]
-    fn trigger_refresh() {
-        let refresh_needed = {
-            if let Ok(last) = LAST_REFRESH.lock() {
-                last.elapsed() > Duration::from_secs(2)
-            } else {
-                false
-            }
-        };
-        if refresh_needed
-            && REFRESHING
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            std::thread::spawn(refresh_cache);
-        }
-    }
-
-    #[cfg(test)]
-    fn trigger_refresh() {
-        let refresh_needed = {
-            if let Ok(last) = LAST_REFRESH.lock() {
-                last.elapsed() > Duration::from_secs(2)
-            } else {
-                false
-            }
-        };
-        if refresh_needed {
-            refresh_cache();
-        }
-    }
-
-    #[cfg(not(test))]
-    pub(super) fn force_refresh() {
-        if REFRESHING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            std::thread::spawn(refresh_cache);
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn force_refresh() {
-        refresh_cache();
-    }
-
-    pub(super) fn clear_cache() {
-        if let Ok(mut cache) = CACHE.write() {
-            cache.clear();
-        }
-        if let Ok(mut last) = LAST_REFRESH.lock() {
-            *last = Instant::now() - Duration::from_secs(60);
-        }
-        REFRESHING.store(false, Ordering::Release);
-        push_message("Tab cache cleared".into());
-    }
-
-    pub(super) fn cached_actions(filter: &str, force: bool) -> Vec<Action> {
-        if force {
-            force_refresh();
-        } else {
-            trigger_refresh();
-        }
-
-        let mut out = Vec::new();
-        if let Ok(cache) = CACHE.read() {
-            for tab in cache.iter() {
-                if filter.is_empty()
-                    || tab.title.to_lowercase().contains(filter)
-                    || tab.url.to_lowercase().contains(filter)
-                {
-                    if tab.runtime_id.is_empty() {
-                        continue;
-                    }
-                    let id_str = tab
-                        .runtime_id
-                        .iter()
-                        .map(|i| i.to_string())
-                        .collect::<Vec<_>>()
-                        .join("_");
-                    out.push(Action {
-                        label: format!("Switch to {}", tab.title),
-                        desc: if tab.url.is_empty() {
-                            "Browser Tab".into()
-                        } else {
-                            tab.url.clone()
-                        },
-                        action: format!("tab:switch:{id_str}"),
-                        args: None,
+                if !runtime_id.is_empty() {
+                    out.push(TabInfo {
+                        title,
+                        url,
+                        runtime_id,
                     });
                 }
             }
+            CoUninitialize();
         }
         out
     }
 
     #[cfg(test)]
     mod tests {
-        use super::super::BrowserTabsPlugin;
         use super::*;
-        use std::thread::sleep;
-        use std::time::{Duration, Instant};
+        use std::sync::mpsc::{Sender, TryRecvError, channel};
 
-        #[test]
-        fn search_refreshes_cache() {
-            {
-                let mut cache = CACHE.write().unwrap();
-                cache.clear();
-                cache.push(TabInfo {
-                    title: "Dummy".into(),
-                    url: "about:blank".into(),
-                    runtime_id: vec![1],
-                });
+        struct ControlledProvider {
+            started: Sender<()>,
+            release: Receiver<Vec<TabInfo>>,
+        }
+
+        impl TabProvider for ControlledProvider {
+            fn enumerate(&mut self) -> Vec<TabInfo> {
+                self.started.send(()).unwrap();
+                self.release.recv().unwrap()
             }
-
-            {
-                let mut last = LAST_REFRESH.lock().unwrap();
-                *last = Instant::now();
-            }
-
-            let plugin = BrowserTabsPlugin::default();
-            let first = plugin.search("tab ");
-            assert_eq!(first.len(), 1);
-            assert!(first[0].label.contains("Dummy"));
-
-            {
-                let mut last = LAST_REFRESH.lock().unwrap();
-                *last = Instant::now() - Duration::from_secs(60);
-            }
-
-            let _ = plugin.search("tab ");
-            sleep(Duration::from_millis(500));
-            let refreshed = plugin.search("tab ");
-            assert!(refreshed.iter().all(|a| !a.label.contains("Dummy")));
         }
 
         #[test]
-        fn force_refresh_clears_cache() {
-            {
-                let mut cache = CACHE.write().unwrap();
-                cache.clear();
-                cache.push(TabInfo {
-                    title: "Dummy".into(),
-                    url: String::new(),
-                    runtime_id: vec![1],
-                });
-            }
-
-            {
-                let mut last = LAST_REFRESH.lock().unwrap();
-                *last = Instant::now() - Duration::from_secs(60);
-            }
-
-            force_refresh();
-
-            {
-                let cache = CACHE.read().unwrap();
-                assert!(cache.is_empty());
-            }
-
-            {
-                let last = LAST_REFRESH.lock().unwrap();
-                assert!(last.elapsed() < Duration::from_secs(1));
-            }
+        fn refresh_is_nonblocking_single_flight_notifies_and_shuts_down() {
+            let (started_tx, started_rx) = channel();
+            let (release_tx, release_rx) = channel();
+            let (repaint_tx, repaint_rx) = channel();
+            let updates = Arc::new(PluginSearchUpdates::default());
+            updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+            let cache = BrowserTabsCache::start_with_provider(
+                ControlledProvider {
+                    started: started_tx,
+                    release: release_rx,
+                },
+                Arc::clone(&updates),
+            );
+            assert!(cache.cached_actions("", false).is_empty());
+            started_rx.recv().unwrap();
+            assert!(cache.cached_actions("", true).is_empty());
+            assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+            release_tx
+                .send(vec![TabInfo {
+                    title: "Documentation".into(),
+                    url: "https://example.test/docs".into(),
+                    runtime_id: vec![1, 2],
+                }])
+                .unwrap();
+            repaint_rx.recv().unwrap();
+            assert_eq!(updates.generation(), 1);
+            let actions = cache.cached_actions("doc", false);
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].action, "tab:switch:1_2");
+            drop(cache);
         }
+
+        #[test]
+        fn populated_snapshot_filters_without_discovery() {
+            let updates = Arc::new(PluginSearchUpdates::default());
+            let cache = BrowserTabsCache::start_with_provider(
+                ControlledProvider {
+                    started: channel().0,
+                    release: channel().1,
+                },
+                updates,
+            );
+            cache.install_snapshot(vec![TabInfo {
+                title: "Release notes".into(),
+                url: "https://example.test/release".into(),
+                runtime_id: vec![7],
+            }]);
+            assert_eq!(cache.cached_actions("release", false).len(), 1);
+            drop(cache);
+        }
+    }
+}
+
+impl BrowserTabsPlugin {
+    pub(crate) fn with_updates(updates: Arc<PluginSearchUpdates>) -> Self {
+        Self {
+            recalc_each_query: false,
+            cache: imp::BrowserTabsCache::start(updates),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_cached_tabs_for_benchmark(
+        tabs: impl IntoIterator<Item = (String, String, Vec<i32>)>,
+    ) -> Self {
+        let plugin = Self::default();
+        plugin.cache.install_snapshot(
+            tabs.into_iter()
+                .map(|(title, url, runtime_id)| imp::TabInfo {
+                    title,
+                    url,
+                    runtime_id,
+                })
+                .collect(),
+        );
+        plugin
+    }
+}
+
+impl Default for BrowserTabsPlugin {
+    fn default() -> Self {
+        Self::with_updates(Arc::new(PluginSearchUpdates::default()))
     }
 }
 
@@ -430,7 +518,7 @@ impl Plugin for BrowserTabsPlugin {
 
         let filter = rest.to_lowercase();
 
-        imp::cached_actions(&filter, self.recalc_each_query)
+        self.cache.cached_actions(&filter, self.recalc_each_query)
     }
 
     fn name(&self) -> &str {
@@ -507,13 +595,13 @@ pub struct BrowserTabsPluginSettings {
 }
 
 pub fn take_cache_messages() -> Vec<String> {
-    imp::take_messages()
+    imp::take_current_messages()
 }
 
 pub fn rebuild_cache() {
-    imp::force_refresh();
+    imp::rebuild_current();
 }
 
 pub fn clear_cache() {
-    imp::clear_cache();
+    imp::clear_current();
 }

@@ -1,5 +1,6 @@
 use super::{
-    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    BackgroundLoader, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -51,6 +52,7 @@ pub struct CommandHistoryWidget {
     cfg: CommandHistoryConfig,
     filter: String,
     cached_pins: Vec<HistoryPin>,
+    pins_loader: BackgroundLoader<(), Vec<HistoryPin>>,
     last_pins_load: Instant,
 }
 
@@ -60,6 +62,9 @@ impl CommandHistoryWidget {
             cfg,
             filter: String::new(),
             cached_pins: Vec::new(),
+            pins_loader: BackgroundLoader::new(|()| {
+                crate::history::load_pins(HISTORY_PINS_FILE).unwrap_or_default()
+            }),
             last_pins_load: Instant::now() - Duration::from_secs(10),
         }
     }
@@ -90,10 +95,14 @@ impl CommandHistoryWidget {
         )
     }
 
-    fn refresh_pins(&mut self) {
+    fn refresh_pins(&mut self, repaint: &egui::Context) {
+        if let Some(pins) = self.pins_loader.poll() {
+            self.cached_pins = pins;
+        }
         if self.last_pins_load.elapsed() > Duration::from_secs(2) {
-            self.cached_pins = crate::history::load_pins(HISTORY_PINS_FILE).unwrap_or_default();
-            self.last_pins_load = Instant::now();
+            if self.pins_loader.request((), repaint) {
+                self.last_pins_load = Instant::now();
+            }
         }
     }
 
@@ -307,7 +316,7 @@ impl Widget for CommandHistoryWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
-        self.refresh_pins();
+        self.refresh_pins(ui.ctx());
         let mut clicked = None;
         ui.label("Command history");
 

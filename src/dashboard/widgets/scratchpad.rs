@@ -1,7 +1,7 @@
 use super::{
-    RefreshMode, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, RefreshMode, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use chrono::NaiveDateTime;
@@ -52,6 +52,19 @@ struct ScratchpadStorage {
     content: String,
 }
 
+enum ScratchpadRequest {
+    Load(PathBuf),
+    Save { path: PathBuf, content: String },
+}
+
+enum ScratchpadResult {
+    Loaded(String, Option<String>),
+    Saved {
+        content: String,
+        error: Option<String>,
+    },
+}
+
 pub struct ScratchpadWidget {
     cfg: ScratchpadConfig,
     content: String,
@@ -60,21 +73,30 @@ pub struct ScratchpadWidget {
     refresh_pending: bool,
     last_refresh: Instant,
     error: Option<String>,
+    loader: BackgroundLoader<ScratchpadRequest, ScratchpadResult>,
 }
 
 impl ScratchpadWidget {
     pub fn new(cfg: ScratchpadConfig) -> Self {
         let interval = Duration::from_secs_f32(cfg.refresh_interval_secs.max(1.0));
-        let path = storage_path_for(&cfg);
-        let (content, error) = load_storage(&path);
         Self {
             cfg,
-            content,
+            content: String::new(),
             dirty: false,
             last_edit: None,
-            refresh_pending: false,
+            refresh_pending: true,
             last_refresh: Instant::now() - interval,
-            error,
+            error: None,
+            loader: BackgroundLoader::new(|request| match request {
+                ScratchpadRequest::Load(path) => {
+                    let (content, error) = load_storage(&path);
+                    ScratchpadResult::Loaded(content, error)
+                }
+                ScratchpadRequest::Save { path, content } => {
+                    let error = save_storage(&path, &content).err();
+                    ScratchpadResult::Saved { content, error }
+                }
+            }),
         }
     }
 
@@ -127,15 +149,9 @@ impl ScratchpadWidget {
         ui.id().with("scratchpad_text")
     }
 
-    fn reload_from_storage(&mut self) {
+    fn reload_from_storage(&mut self, repaint: &egui::Context) -> bool {
         let path = storage_path_for(&self.cfg);
-        let (content, error) = load_storage(&path);
-        if error.is_none() {
-            self.content = content;
-            self.dirty = false;
-            self.last_edit = None;
-        }
-        self.error = error;
+        self.loader.request(ScratchpadRequest::Load(path), repaint)
     }
 
     fn schedule_save(&mut self) {
@@ -143,7 +159,7 @@ impl ScratchpadWidget {
         self.last_edit = Some(Instant::now());
     }
 
-    fn save_if_ready(&mut self) {
+    fn save_if_ready(&mut self, repaint: &egui::Context) {
         if !self.dirty {
             return;
         }
@@ -155,14 +171,14 @@ impl ScratchpadWidget {
             return;
         }
         let path = storage_path_for(&self.cfg);
-        match save_storage(&path, &self.content) {
-            Ok(()) => {
-                self.dirty = false;
-                self.error = None;
-            }
-            Err(err) => {
-                self.error = Some(err);
-            }
+        if self.loader.request(
+            ScratchpadRequest::Save {
+                path,
+                content: self.content.clone(),
+            },
+            repaint,
+        ) {
+            self.last_edit = None;
         }
     }
 
@@ -200,6 +216,25 @@ impl Widget for ScratchpadWidget {
         ctx: &DashboardContext<'_>,
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
+        if let Some(result) = self.loader.poll() {
+            match result {
+                ScratchpadResult::Loaded(content, error) => {
+                    if !self.dirty && error.is_none() {
+                        self.content = content;
+                        self.last_edit = None;
+                    }
+                    self.error = error;
+                }
+                ScratchpadResult::Saved { content, error } => {
+                    if error.is_none() && self.content == content {
+                        self.dirty = false;
+                    } else if error.is_some() && self.dirty && self.last_edit.is_none() {
+                        self.last_edit = Some(Instant::now());
+                    }
+                    self.error = error;
+                }
+            }
+        }
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -213,8 +248,11 @@ impl Widget for ScratchpadWidget {
             &mut self.last_refresh,
         ) {
             if !self.dirty {
-                self.reload_from_storage();
-                self.last_refresh = Instant::now();
+                if self.reload_from_storage(ui.ctx()) {
+                    self.last_refresh = Instant::now();
+                } else {
+                    self.refresh_pending = true;
+                }
             } else {
                 self.refresh_pending = true;
             }
@@ -247,7 +285,7 @@ impl Widget for ScratchpadWidget {
             self.schedule_save();
         }
 
-        self.save_if_ready();
+        self.save_if_ready(ui.ctx());
 
         None
     }

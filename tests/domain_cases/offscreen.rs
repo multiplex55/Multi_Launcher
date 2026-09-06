@@ -1,7 +1,7 @@
 use eframe::egui;
 use multi_launcher::visibility::apply_visibility;
 
-#[path = "mock_ctx.rs"]
+#[path = "../support/mock_ctx.rs"]
 mod mock_ctx;
 use mock_ctx::MockCtx;
 

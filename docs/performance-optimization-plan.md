@@ -177,7 +177,7 @@ than a real HTTP benchmark.
 | SysInfo | 1.000-1.061 s cases; system/disk enumeration per search | 2.511 us | Shared immutable system snapshot/background refresh added. |
 | Volume name lookup | 0.481 s cold case | 3.242 us | Existing five-second intent retained; refresh moved to shared worker. |
 | Network | Existing refresh-rate cache; 0.060-0.074 s test cases | 4.097 us | Existing cache sufficient; unchanged. |
-| Browser Tabs | Existing async single-flight cache | 2.115 us (`tab clear` cached/control path) | Existing cache retained; unsafe UI Automation discovery excluded from Criterion. |
+| Browser Tabs | Async single-flight cache | 203.04 us (1,000 populated cached tabs); 1.428 us (`tab clear`) | Discovery is excluded from Criterion; cached filtering/materialization and the static command are measured separately. |
 | Shell | Routed file work only for explicit subcommands | 1.861 us (`sh`) | Unchanged-fast; existing behavior retained. |
 | Layout | Explicit config access | 30.905 us (`layout`) | Unchanged-fast; cache staleness/complexity not justified. |
 | Mouse Gestures | Static root query; file loads only for explicit inspection subcommands | 3.435 us (`mg`) | Unchanged-fast; existing gesture database behavior retained. |
@@ -386,11 +386,12 @@ aggregate is not mislabeled as pure linker CPU time.
 
 ### Test topology and isolation
 
-`autotests = false` makes every intended top-level test explicit. `plugin_queries` groups simple,
-side-effect-free plugin parsing/search tests; `domain` groups pure configuration, parsing,
-diff/search algorithms, model, and fake-backend tests. Normal Nextest parallelism remains enabled.
-The original files remain the source modules, so no assertions or meaningful tests were removed.
-Nextest listed exactly 2,983 tests before and after; the final 70-binary suite runs 2,976 with 7 skipped.
+Cargo automatic test discovery covers every top-level stateful test. `plugin_queries` groups simple,
+side-effect-free plugin parsing/search tests under `tests/plugin_cases`; `domain` groups pure
+configuration, parsing, diff/search algorithms, model, and fake-backend tests under
+`tests/domain_cases`. Normal Nextest parallelism remains enabled. No assertions or meaningful tests
+were removed. The post-review inventory lists 2,984 tests; the final 70-binary suite runs 2,977 with
+7 skipped.
 
 Sixty-five stateful files stay as independent integration binaries. The isolation audit retained
 separate processes for current-directory and environment mutation; shared stores and files; global
@@ -402,9 +403,10 @@ MkMacro authoring/store/launcher integration, mouse-gesture service/database/UI,
 and watcher/screenshot tests. Combining these under the standard Rust harness would allow parallel
 tests to share process globals, so a larger umbrella or one giant target was rejected.
 
-`mock_ctx.rs` is retained solely through `#[path]` by visibility tests and no longer builds as an empty
-standalone executable. A separate mock-context crate was rejected: three consumers are already
-isolated and the tiny helper has no independent dependencies or measured compilation bottleneck.
+`mock_ctx.rs` is retained under `tests/support` solely through `#[path]` by visibility tests and does
+not build as an empty standalone executable. A separate mock-context crate was rejected: its
+consumers are already isolated and the tiny helper has no independent dependencies or measured
+compilation bottleneck.
 
 ### Slow tests, logging defect, and feature/profile audit
 
@@ -438,6 +440,58 @@ passed, 7 skipped), plus three comparable 67-binary candidate runs and a slow-st
 ledger edit. Both umbrellas also passed under ordinary `cargo test` (100 domain and 111 plugin-query tests). The required clean isolated attempt and two subsequent no-run attempts are explicitly
 recorded as failed due to the temporary disk-exhaustion/PDB condition rather than claimed as passes.
 
+## Independent-review remediation
+
+**Status:** `complete`
+
+The independent review found eight substantive gaps. System Controls, Tempfiles, Layouts,
+Scratchpad, and Command History now send automatic refresh/load/save work through widget-owned,
+capacity-one workers. Requests are single-flight, completed snapshots wake egui, and dropping a
+widget closes and joins its worker. A deterministic blocked-loader test proves request submission
+does not wait for the provider and that duplicate work is coalesced. A release fixture containing
+all five widgets reached the first usable frame in 481.484 ms; this is one warm-host regression
+sample, not a general maximum-frame-time claim.
+
+Browser Tabs now owns an injectable capacity-one worker and immutable cache instead of detached
+threads and a process-global snapshot. Publication increments `PluginSearchUpdates` and invokes its
+repaint callback, so a cached launcher query reruns after discovery. Channel-controlled tests cover
+nonblocking cold search, single-flight refresh, publication generation/repaint, populated filtering,
+and owned shutdown without sleeps. Windows UI Automation's `FindAll` API exposes no hard timeout or
+cancellation handle: shutdown is deterministic after an in-progress call returns, but cannot
+preempt a UIA call that is itself hung. Criterion keeps native discovery disabled only in its
+injected fixture and measures 1,000-tab cached filtering/materialization separately from the static
+clear command: 203.04 us and 1.428 us point estimates respectively (20 samples, one-second warmup,
+two-second measurement).
+
+Shared system-data readiness is now `Option`-backed. Cold Processes, SysInfo, and named-process
+Volume searches request refresh but emit no fabricated data; last-good snapshots remain available
+after publication. Channel-controlled coverage exercises cold state, publication,
+generation/repaint notification, and refreshed reads. Dashboard `All` refresh creates one
+`System` value for both process actions and system status instead of enumerating twice, and the
+obsolete self-enumerating dashboard helper was removed. Calendar is explicitly slow-periodic while
+focused and becomes event-driven when unfocused-work reduction applies; deterministic policy
+coverage asserts both transitions.
+
+Cargo automatic integration-test discovery is restored. The two pure umbrellas remain explicit,
+with source modules under `tests/domain_cases` and `tests/plugin_cases`; the shared mock context is
+under `tests/support`. Stateful top-level tests are auto-discovered, no targets are duplicated, and
+the final inventory lists 2,984 tests across 70 binaries (the previous 2,983 plus the new
+background-loader lifecycle test).
+
+Final-HEAD warm startup measurement from an isolated fixture: plugin manager 60.419 ms, plugin
+registration 17.665 ms, `LauncherApp` construction 74.782 ms, first usable frame 393.764 ms, and
+dashboard initial publication 496.153 ms. These values include the final system/IP/Browser Tabs
+worker construction and supersede the post-Milestone-2-only evidence for final-state regression
+assessment.
+
+Final remediation verification passed: `cargo fmt --all --check`; `cargo check`; focused Browser
+Tabs, system-data, dashboard-cache, widget, repaint-policy, and SysInfo tests; `cargo nextest list`
+(2,984 tests, 70 binaries); `cargo nextest run --no-fail-fast` (2,977 passed, 7 skipped in 40.776 s
+after a 7m39s rebuild); corrected Browser Tabs Criterion workloads; `cargo build --release`
+(2m05s); `git diff --check`; and stale-path searches. The first full-run attempt stopped during
+test compilation on a moved test-only `Arc`; the ownership was corrected and the authoritative
+rerun passed completely.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -468,4 +522,4 @@ recorded as failed due to the temporary disk-exhaustion/PDB condition rather tha
 | 2 | `a2a1f8d` | `perf(dashboard): move refresh work off the UI thread` |
 | 3 | `544c4c6` | `perf(search): remove blocking dynamic work from query handling` |
 | 4 | `9885f20` | `perf(runtime): reduce unnecessary idle and repaint work` |
-| 5 | pending | `perf(dev): improve cargo and nextest iteration time` |
+| 5 | `707459e` | `perf(dev): improve cargo and nextest iteration time` |

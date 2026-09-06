@@ -1,7 +1,7 @@
 use super::{
-    RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, refresh_schedule, refresh_settings_ui,
-    run_refresh_schedule,
+    BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
+    WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -89,6 +89,7 @@ pub struct LayoutsWidget {
     cfg: LayoutsConfig,
     cache: TimedCache<LayoutsData>,
     error: Option<String>,
+    loader: BackgroundLoader<LayoutsConfig, (LayoutsData, Option<String>)>,
     refresh_pending: bool,
     rename_target: Option<String>,
     rename_value: String,
@@ -112,6 +113,7 @@ impl LayoutsWidget {
                 interval,
             ),
             error: None,
+            loader: BackgroundLoader::new(|cfg: LayoutsConfig| Self::load_layouts(&cfg)),
             refresh_pending: false,
             rename_target: None,
             rename_value: String::new(),
@@ -155,13 +157,6 @@ impl LayoutsWidget {
 
     fn update_interval(&mut self) {
         self.cache.set_interval(self.refresh_interval());
-    }
-
-    fn refresh(&mut self) {
-        self.update_interval();
-        let (data, error) = Self::load_layouts(&self.cfg);
-        self.error = error;
-        self.cache.refresh(|cache| *cache = data);
     }
 
     fn set_status(&mut self, text: impl Into<String>, color: egui::Color32) {
@@ -301,11 +296,20 @@ impl LayoutsWidget {
         Ok(())
     }
 
-    fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>, visible: bool) {
+    fn maybe_refresh(
+        &mut self,
+        ctx: &DashboardContext<'_>,
+        repaint: &egui::Context,
+        visible: bool,
+    ) {
         if !visible {
             return;
         }
         self.update_interval();
+        if let Some((data, error)) = self.loader.poll() {
+            self.error = error;
+            self.cache.refresh(|cache| *cache = data);
+        }
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
@@ -318,7 +322,9 @@ impl LayoutsWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            self.refresh();
+            if !self.loader.request(self.cfg.clone(), repaint) {
+                self.refresh_pending = true;
+            }
         }
     }
 
@@ -459,7 +465,7 @@ impl Widget for LayoutsWidget {
         _activation: WidgetActivation,
     ) -> Option<WidgetAction> {
         let visible = ui.is_rect_visible(ui.available_rect_before_wrap());
-        self.maybe_refresh(ctx, visible);
+        self.maybe_refresh(ctx, ui.ctx(), visible);
 
         if let Some(err) = &self.error {
             ui.colored_label(egui::Color32::YELLOW, err);

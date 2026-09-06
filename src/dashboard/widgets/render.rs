@@ -6,7 +6,79 @@ use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use eframe::egui;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+/// Widget-owned capacity-one loader for work that must not run on egui's render thread.
+pub(crate) struct BackgroundLoader<R: Send + 'static, T: Send + 'static> {
+    requests: Option<SyncSender<(R, egui::Context)>>,
+    results: Receiver<T>,
+    worker: Option<JoinHandle<()>>,
+    in_flight: bool,
+}
+
+impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
+    pub(crate) fn new(mut load: impl FnMut(R) -> T + Send + 'static) -> Self {
+        let (request_tx, request_rx) = mpsc::sync_channel::<(R, egui::Context)>(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("dashboard-widget-loader".into())
+            .spawn(move || {
+                while let Ok((request, repaint)) = request_rx.recv() {
+                    let result = load(request);
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                    repaint.request_repaint();
+                }
+            })
+            .expect("failed to start dashboard widget loader");
+        Self {
+            requests: Some(request_tx),
+            results: result_rx,
+            worker: Some(worker),
+            in_flight: false,
+        }
+    }
+
+    pub(crate) fn request(&mut self, request: R, repaint: &egui::Context) -> bool {
+        if self.in_flight {
+            return false;
+        }
+        match self
+            .requests
+            .as_ref()
+            .expect("loader request channel missing")
+            .try_send((request, repaint.clone()))
+        {
+            Ok(()) => {
+                self.in_flight = true;
+                true
+            }
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    pub(crate) fn poll(&mut self) -> Option<T> {
+        match self.results.try_recv() {
+            Ok(result) => {
+                self.in_flight = false;
+                Some(result)
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
+    }
+}
+
+impl<R: Send + 'static, T: Send + 'static> Drop for BackgroundLoader<R, T> {
+    fn drop(&mut self) {
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {
     match (base, updates) {
@@ -325,8 +397,9 @@ pub(crate) fn refresh_settings_ui(
 
 #[cfg(test)]
 mod tests {
-    use super::merge_json;
+    use super::{BackgroundLoader, merge_json};
     use serde_json::json;
+    use std::sync::mpsc::{TryRecvError, channel};
 
     #[test]
     fn merge_json_preserves_unknown_fields() {
@@ -335,5 +408,30 @@ mod tests {
         let merged = merge_json(&base, &updates);
         assert_eq!(merged["known"], json!(2));
         assert_eq!(merged["extra"], json!({"keep": true}));
+    }
+
+    #[test]
+    fn background_loader_is_nonblocking_single_flight_and_owned() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let mut loader = BackgroundLoader::new(move |value: usize| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            value * 2
+        });
+        let repaint = eframe::egui::Context::default();
+        assert!(loader.request(21, &repaint));
+        started_rx.recv().unwrap();
+        assert!(!loader.request(22, &repaint));
+        assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+        release_tx.send(()).unwrap();
+        let result = loop {
+            if let Some(result) = loader.poll() {
+                break result;
+            }
+            std::thread::yield_now();
+        };
+        assert_eq!(result, 42);
+        drop(loader);
     }
 }

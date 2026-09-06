@@ -91,7 +91,9 @@ impl Plugin for SysInfoPlugin {
                 .into_iter()
                 .collect();
         }
-        let snapshot = self.cache.snapshot_and_refresh();
+        let Some(snapshot) = self.cache.snapshot_and_refresh() else {
+            return Vec::new();
+        };
         match parts.as_slice() {
             ["info"] => vec![
                 Self::cpu_action(&snapshot),

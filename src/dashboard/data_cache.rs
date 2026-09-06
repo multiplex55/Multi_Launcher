@@ -262,8 +262,7 @@ struct ProductionDashboardBackend {
 }
 
 impl ProductionDashboardBackend {
-    fn system_status(&mut self) -> SystemStatusSnapshot {
-        let mut system = System::new_all();
+    fn system_status(&mut self, system: &mut System) -> SystemStatusSnapshot {
         system.refresh_cpu_usage();
         system.refresh_memory();
         let disks = Disks::new_with_refreshed_list();
@@ -322,6 +321,9 @@ impl DashboardDataBackend for ProductionDashboardBackend {
         current: &DashboardDataSnapshot,
     ) -> DashboardDataSnapshot {
         let mut next = current.clone();
+        let needs_system = batch.contains(DashboardRefreshRequest::Processes)
+            || batch.contains(DashboardRefreshRequest::SystemStatus);
+        let mut system = needs_system.then(System::new_all);
         if batch.contains(DashboardRefreshRequest::Clipboard) {
             next.clipboard_history = Arc::new(
                 load_history(CLIPBOARD_FILE)
@@ -344,7 +346,19 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             next.calendar = Arc::new(build_snapshot(Local::now().naive_local()));
         }
         if batch.contains(DashboardRefreshRequest::Processes) {
-            next.processes = Arc::new(crate::plugins::processes::enumerate_process_actions("ps"));
+            let processes = system
+                .as_ref()
+                .expect("system collected for process refresh")
+                .processes()
+                .values()
+                .map(|process| crate::plugins::system_data::ProcessSnapshot {
+                    name: process.name().to_string_lossy().into_owned(),
+                    pid: process.pid().as_u32(),
+                })
+                .collect::<Vec<_>>();
+            next.processes = Arc::new(crate::plugins::processes::actions_from_snapshot(
+                "ps", &processes,
+            ));
             next.process_error = None;
         }
         if batch.contains(DashboardRefreshRequest::Favorites) {
@@ -357,7 +371,13 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             });
         }
         if batch.contains(DashboardRefreshRequest::SystemStatus) {
-            next.system_status = Some(self.system_status());
+            next.system_status = Some(
+                self.system_status(
+                    system
+                        .as_mut()
+                        .expect("system collected for status refresh"),
+                ),
+            );
         }
         if batch.contains(DashboardRefreshRequest::RecycleBin) {
             next.recycle_bin = launcher::query_recycle_bin().map(RecycleBinSnapshot::from);

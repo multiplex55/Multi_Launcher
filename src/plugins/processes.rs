@@ -2,7 +2,6 @@ use crate::actions::Action;
 use crate::plugin::{Plugin, PluginSearchUpdates};
 use crate::plugins::system_data::{ProcessSnapshot, SystemDataCache, SystemDataRuntime};
 use std::sync::Arc;
-use sysinfo::System;
 
 pub struct ProcessesPlugin {
     cache: SystemDataCache,
@@ -78,19 +77,16 @@ fn actions_from_processes(
         .collect()
 }
 
-pub(crate) fn enumerate_process_actions(query: &str) -> Vec<Action> {
+pub(crate) fn actions_from_snapshot(query: &str, processes: &[ProcessSnapshot]) -> Vec<Action> {
     let Some((mode, filter)) = parse_query(query) else {
         return Vec::new();
     };
     actions_from_processes(
         mode,
         &filter,
-        System::new_all().processes().values().map(|process| {
-            (
-                process.name().to_string_lossy().into_owned(),
-                process.pid().as_u32(),
-            )
-        }),
+        processes
+            .iter()
+            .map(|process| (process.name.clone(), process.pid)),
     )
 }
 
@@ -99,7 +95,9 @@ impl Plugin for ProcessesPlugin {
         let Some((mode, filter)) = parse_query(query) else {
             return Vec::new();
         };
-        let snapshot = self.cache.snapshot_and_refresh();
+        let Some(snapshot) = self.cache.snapshot_and_refresh() else {
+            return Vec::new();
+        };
         actions_from_processes(
             mode,
             &filter,
