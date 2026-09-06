@@ -60,6 +60,9 @@ pub struct PluginHomeWidget {
     cached_at: Option<Instant>,
     requested_source: Option<PluginHomeSource>,
     loader: BackgroundLoader<PluginHomeRequest, PluginHomeResult>,
+    retiring_loader: Option<BackgroundLoader<PluginHomeRequest, PluginHomeResult>>,
+    config_epoch: u64,
+    reload_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +72,7 @@ struct PluginHomeSource {
     query: String,
     generation: u64,
     plugin_epoch: u64,
+    config_epoch: u64,
 }
 
 struct PluginHomeRequest {
@@ -111,7 +115,29 @@ impl PluginHomeWidget {
             cached_at: None,
             requested_source: None,
             loader: Self::loader(),
+            retiring_loader: None,
+            config_epoch: 0,
+            reload_pending: false,
         }
+    }
+
+    fn reset_executor(&mut self) -> bool {
+        if self.loader.is_in_flight() {
+            if self.retiring_loader.is_some() {
+                self.reload_pending = true;
+                return false;
+            }
+            let old = std::mem::replace(&mut self.loader, Self::loader());
+            self.retiring_loader = Some(old);
+        } else {
+            self.loader = Self::loader();
+        }
+        self.requested_source = None;
+        self.cached_source = None;
+        self.cached_actions.clear();
+        self.cached_at = None;
+        self.reload_pending = false;
+        true
     }
 
     fn plugin_name<'a>(&'a self, ctx: &'a DashboardContext<'_>) -> Option<String> {
@@ -149,17 +175,12 @@ impl PluginHomeWidget {
         plugin: crate::plugin::OwnedPluginHandle,
         repaint: &egui::Context,
     ) -> &[Action] {
-        let old_epoch = self
-            .requested_source
-            .as_ref()
-            .or(self.cached_source.as_ref())
-            .map(|source| source.plugin_epoch);
-        if old_epoch.is_some_and(|epoch| epoch != source.plugin_epoch) {
-            self.loader = Self::loader();
-            self.requested_source = None;
-            self.cached_source = None;
-            self.cached_actions.clear();
-            self.cached_at = None;
+        if self
+            .retiring_loader
+            .as_mut()
+            .is_some_and(|loader| loader.poll().is_some())
+        {
+            self.retiring_loader = None;
         }
         if let Some(result) = self.loader.poll() {
             self.requested_source = None;
@@ -168,6 +189,17 @@ impl PluginHomeWidget {
                 self.cached_actions = result.actions;
                 self.cached_at = Some(Instant::now());
             }
+        }
+        let old_identity = self
+            .requested_source
+            .as_ref()
+            .or(self.cached_source.as_ref())
+            .map(|source| (source.plugin_epoch, source.config_epoch));
+        if old_identity
+            .is_some_and(|identity| identity != (source.plugin_epoch, source.config_epoch))
+            && !self.reset_executor()
+        {
+            return &self.cached_actions;
         }
         let stale = self.cached_source.as_ref() != Some(&source)
             || self
@@ -292,8 +324,15 @@ impl Widget for PluginHomeWidget {
                 0
             },
             plugin_epoch,
+            config_epoch: self.config_epoch,
         };
         let actions = self.update_actions(source, plugin, ui.ctx()).to_vec();
+        if self.reload_pending {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Plugin refresh is busy; the latest configuration is pending.",
+            );
+        }
 
         if actions.is_empty() {
             ui.label("No actions available for this plugin.");
@@ -306,10 +345,8 @@ impl Widget for PluginHomeWidget {
     fn on_config_updated(&mut self, settings: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<PluginHomeConfig>(settings.clone()) {
             self.cfg = cfg;
-            self.cached_source = None;
-            self.cached_actions.clear();
-            self.cached_at = None;
-            self.requested_source = None;
+            self.config_epoch = self.config_epoch.wrapping_add(1).max(1);
+            self.reset_executor();
         }
     }
 }
@@ -407,6 +444,7 @@ mod tests {
             query: "blocked query".into(),
             generation: 7,
             plugin_epoch: 1,
+            config_epoch: 0,
         };
 
         assert!(
@@ -437,6 +475,7 @@ mod tests {
             query: "query".into(),
             generation: 3,
             plugin_epoch: 1,
+            config_epoch: 0,
         };
         widget.update_actions(source.clone(), plugin.clone(), &egui::Context::default());
         while calls.load(std::sync::atomic::Ordering::Relaxed) == 0 {
@@ -483,6 +522,7 @@ mod tests {
             query: "query".into(),
             generation: 0,
             plugin_epoch: 10,
+            config_epoch: 0,
         };
         widget.update_actions(old_source, old, &egui::Context::default());
         started_rx.recv().unwrap();
@@ -492,6 +532,7 @@ mod tests {
             query: "query".into(),
             generation: 0,
             plugin_epoch: 11,
+            config_epoch: 0,
         };
         assert!(
             widget
@@ -506,5 +547,69 @@ mod tests {
         release_tx.send(()).unwrap();
         widget.update_actions(new_source, new, &egui::Context::default());
         assert_eq!(widget.cached_actions[0].label, "new instance");
+    }
+
+    #[test]
+    fn config_update_retires_one_blocked_loader_and_new_config_proceeds() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let old = crate::plugin::OwnedPluginHandle::for_test_epoch(
+            Box::new(BlockedPlugin {
+                started: started_tx,
+                release: std::sync::Mutex::new(release_rx),
+            }),
+            20,
+        );
+        let new = crate::plugin::OwnedPluginHandle::for_test_epoch(Box::new(ResultPlugin), 21);
+        let mut widget = PluginHomeWidget::new(PluginHomeConfig {
+            plugin: Some("blocked".into()),
+            mode: PluginHomeMode::Search,
+            query_seed: Some("old".into()),
+            limit: 5,
+        });
+        widget.update_actions(
+            PluginHomeSource {
+                plugin: "blocked".into(),
+                mode: PluginHomeMode::Search,
+                query: "old".into(),
+                generation: 0,
+                plugin_epoch: 20,
+                config_epoch: 0,
+            },
+            old,
+            &egui::Context::default(),
+        );
+        started_rx.recv().unwrap();
+
+        widget.on_config_updated(&serde_json::json!({
+            "plugin": "blocked",
+            "mode": "search",
+            "query_seed": "new",
+            "limit": 5
+        }));
+        for index in 0..8 {
+            widget.on_config_updated(&serde_json::json!({
+                "plugin": "blocked",
+                "mode": "search",
+                "query_seed": format!("new-{index}"),
+                "limit": 5
+            }));
+        }
+        assert!(widget.retiring_loader.is_some());
+        let source = PluginHomeSource {
+            plugin: "blocked".into(),
+            mode: PluginHomeMode::Search,
+            query: widget.cfg.query_seed.clone().unwrap(),
+            generation: 0,
+            plugin_epoch: 21,
+            config_epoch: widget.config_epoch,
+        };
+        while widget.cached_source.as_ref() != Some(&source) {
+            widget.update_actions(source.clone(), new.clone(), &egui::Context::default());
+            std::thread::yield_now();
+        }
+        assert_eq!(widget.cached_actions[0].label, "new instance");
+        assert!(widget.retiring_loader.is_some());
+        release_tx.send(()).unwrap();
     }
 }

@@ -99,16 +99,20 @@ impl WindowCache {
         let Ok(mut state) = self.state.lock() else {
             return Arc::new(Vec::new());
         };
-        if !state.in_flight
-            && !state
-                .fresh_until
-                .is_some_and(|deadline| Instant::now() < deadline)
+        if !state
+            .fresh_until
+            .is_some_and(|deadline| Instant::now() < deadline)
         {
-            state.in_flight = true;
-            state.in_flight_ticket = Some(self.updates.begin_refresh("windows"));
-            if self.wake.try_send(()).is_err() {
+            let ticket = self.updates.schedule_or_join("windows");
+            crate::plugin::record_search_refresh_ticket("windows", ticket.id);
+            if ticket.start {
+                state.in_flight = true;
+                state.in_flight_ticket = Some(ticket.id);
+            }
+            if ticket.start && self.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                self.updates.cancel_ticket("windows", ticket.id);
             }
         }
         Arc::clone(&state.windows)
@@ -121,6 +125,9 @@ impl Drop for WindowCache {
             let _publication = self.publication.lock().ok();
             if let Ok(mut state) = self.state.lock() {
                 state.shutting_down = true;
+                if let Some(ticket) = state.in_flight_ticket.take() {
+                    self.updates.cancel_ticket("windows", ticket);
+                }
             }
         }
         let _ = self.wake.try_send(());
@@ -173,7 +180,7 @@ fn run_worker(
             None
         };
         if let Some(ticket) = ticket {
-            updates.notify_ticket("windows", ticket);
+            updates.publish_ticket("windows", ticket);
         }
     }
 }
@@ -349,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_while_blocked_suppresses_stale_snapshot_and_notification() {
+    fn drop_while_blocked_resolves_ticket_and_suppresses_stale_publication() {
         let (started_tx, started_rx) = channel();
         let (release_tx, release_rx) = channel();
         let (finished_tx, finished_rx) = channel();
@@ -369,6 +376,7 @@ mod tests {
         assert!(plugin.search("win").is_empty());
         started_rx.recv().unwrap();
         drop(plugin);
+        repaint_rx.recv().unwrap();
         release_tx
             .send(vec![WindowInfo {
                 title: "stale".into(),
@@ -379,7 +387,7 @@ mod tests {
         while Arc::strong_count(&updates) > 1 {
             std::thread::yield_now();
         }
-        assert_eq!(updates.generation(), 0);
+        assert_eq!(updates.generation(), 1);
         assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

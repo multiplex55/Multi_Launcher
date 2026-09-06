@@ -122,12 +122,17 @@ impl PublicIpCache {
         let mut state = self.state.lock().ok()?;
         let fresh = state.fresh_until.is_some_and(|deadline| now < deadline);
         let backing_off = state.retry_after.is_some_and(|deadline| now < deadline);
-        if !fresh && !backing_off && !state.in_flight {
-            state.in_flight = true;
-            state.in_flight_ticket = Some(self.updates.begin_refresh("ip"));
-            if self.wake.try_send(()).is_err() {
+        if !fresh && !backing_off {
+            let ticket = self.updates.schedule_or_join("ip");
+            crate::plugin::record_search_refresh_ticket("ip", ticket.id);
+            if ticket.start {
+                state.in_flight = true;
+                state.in_flight_ticket = Some(ticket.id);
+            }
+            if ticket.start && self.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                self.updates.cancel_ticket("ip", ticket.id);
             }
         }
         state.last_good.clone()
@@ -140,6 +145,9 @@ impl Drop for PublicIpCache {
             let _publication = self.publication.lock().ok();
             if let Ok(mut state) = self.state.lock() {
                 state.shutting_down = true;
+                if let Some(ticket) = state.in_flight_ticket.take() {
+                    self.updates.cancel_ticket("ip", ticket);
+                }
             }
         }
         let _ = self.wake.try_send(());
@@ -191,7 +199,7 @@ fn run_worker(
             None
         };
         if let Some(ticket) = ticket {
-            updates.notify_ticket("ip", ticket);
+            updates.publish_ticket("ip", ticket);
         }
     }
 }
@@ -404,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_during_active_lookup_suppresses_publication_and_repaint() {
+    fn drop_during_active_lookup_resolves_ticket_and_suppresses_stale_publication() {
         let (started_tx, started_rx) = channel();
         let (release_tx, release_rx) = channel();
         let (repaint_tx, repaint_rx) = channel();
@@ -430,7 +438,8 @@ mod tests {
         }
         release_tx.send(()).unwrap();
         dropped_rx.recv().unwrap();
-        assert_eq!(updates.generation(), 0);
+        repaint_rx.recv().unwrap();
+        assert_eq!(updates.generation(), 1);
         assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

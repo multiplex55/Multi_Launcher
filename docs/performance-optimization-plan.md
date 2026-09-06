@@ -639,6 +639,41 @@ Criterion benchmark; stale-path/render-I/O searches; and `git diff --check`. Cri
 populated 1,000-tab cached filter path at 199.06–213.36 us and the separate static clear command at
 1.1047–1.1414 us, with no statistically detected regression.
 
+### Sixth independent-review remediation
+
+**Status:** `complete`
+
+Built-in refresh tickets now live in one mutex-protected per-source registry. Scheduling atomically
+returns either a new ticket or the exact joined ticket; provider searches return those transaction
+tickets directly through an internal capture boundary instead of looking up active state after
+search. Publication, cancellation, resolution, and supersession use the same state. Channel-send
+failure, provider shutdown, plugin reload/drop, and supersession resolve waiters and notify repaint,
+while stale workers cannot publish. The explicit `tab:cache` rebuild now participates in the same
+ticket and notification protocol. Query List receives tickets directly from the routed searches.
+
+Layouts classifies results as snapshot, mutation, import-read, or export. Only snapshot-bearing
+results participate in mutation revision suppression; export and import-read success/errors remain
+independently deliverable in heterogeneous FIFO sequences. Cancelling the export dialog returns an
+explicit not-queued outcome, so the UI never reports a queued export that does not exist.
+
+Plugin Home carries both plugin-instance and widget-configuration epochs. Configuration changes move
+at most one active loader into one retiring slot and immediately provide a replacement loader; a
+second outstanding retirement is represented as a visible pending state rather than spawning more
+workers. Old results are discarded before current configuration materialization. Dynamic plugin
+slots record their originating DLL path, and same-path reload is deferred while an owned handle pins
+that slot. Settings displays the deferred path and retry guidance. This bounds retained DLLs and
+worker/reaper ownership to one active plus one retiring operation per widget. Windows UI Automation
+still cannot be preempted inside an individual OS call.
+
+Verification passed: deterministic completion-before-return, disconnected-send, joined cancellation,
+shutdown/reload, supersession, explicit tab-cache notification, heterogeneous Layouts FIFO, blocked
+`on_config_updated`, repeated retirement, and DLL deferral tests; `cargo fmt --all -- --check`;
+`cargo check`; `cargo nextest run --no-fail-fast` (3,011 passed, 7 skipped, 3,018 total across
+70 binaries in 40.959 s after compilation); `cargo build --release` (2m11s); Browser Tabs
+Criterion; stale-path audits; and `git diff --check`. Criterion measured the populated 1,000-tab
+cached filter path at 203.43–213.80 us and the separate clear command at 1.1250–1.1763 us, with no
+statistically detected regression.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -674,3 +709,4 @@ populated 1,000-tab cached filter path at 199.06–213.36 us and the separate st
 | Review remediation 2 | `4596f72` | `fix(perf): harden async refresh lifecycles` |
 | Review remediation 3 | `bb10a3e` | `fix(perf): stabilize async cache invalidation` |
 | Review remediation 4 | `7c0daf3` | `fix(perf): harden async cache ownership` |
+| Review remediation 5 | `6b63ea7` | `fix(perf): make async completion request-specific` |

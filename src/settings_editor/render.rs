@@ -284,6 +284,16 @@ impl SettingsEditor {
             .clone()
             .unwrap_or_else(|| "valid".to_owned());
 
+        for path in app.plugins.deferred_plugin_reload_paths() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!(
+                    "Plugin reload pending for '{}'; close active plugin views and reload again.",
+                    path.display()
+                ),
+            );
+        }
+
         for name in app.plugins.plugin_names() {
             if name == "notes" {
                 continue;

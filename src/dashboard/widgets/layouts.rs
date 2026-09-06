@@ -117,11 +117,20 @@ struct LayoutRequest {
 #[derive(Debug)]
 struct LayoutResult {
     generation: u64,
+    class: LayoutOperationClass,
     data: Option<LayoutsData>,
     selected: Option<Layout>,
     imported: Option<PendingImport>,
     message: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutOperationClass {
+    Snapshot,
+    Mutation,
+    ImportRead,
+    Export,
 }
 
 pub struct LayoutsWidget {
@@ -132,7 +141,7 @@ pub struct LayoutsWidget {
     pending_requests: VecDeque<LayoutRequest>,
     next_generation: u64,
     applied_generation: u64,
-    latest_ui_generation: u64,
+    latest_mutation_generation: u64,
     refresh_pending: bool,
     rename_target: Option<String>,
     rename_value: String,
@@ -162,7 +171,7 @@ impl LayoutsWidget {
             pending_requests: VecDeque::new(),
             next_generation: 0,
             applied_generation: 0,
-            latest_ui_generation: 0,
+            latest_mutation_generation: 0,
             refresh_pending: false,
             rename_target: None,
             rename_value: String::new(),
@@ -234,8 +243,14 @@ impl LayoutsWidget {
         }
         self.next_generation += 1;
         let generation = self.next_generation;
-        if !matches!(kind, LayoutRequestKind::Refresh) {
-            self.latest_ui_generation = generation;
+        if matches!(
+            kind,
+            LayoutRequestKind::Save(_)
+                | LayoutRequestKind::Duplicate(_)
+                | LayoutRequestKind::Rename { .. }
+                | LayoutRequestKind::ImportNew(_)
+        ) {
+            self.latest_mutation_generation = generation;
         }
         self.pending_requests.push_back(LayoutRequest {
             generation,
@@ -307,17 +322,26 @@ impl LayoutsWidget {
         Ok(())
     }
 
-    fn export_active_layout(&mut self) -> Result<(), String> {
+    fn export_active_layout(&mut self) -> Result<bool, String> {
         let Some(layout) = self.active_layout.clone() else {
             return Err("No active layout selected.".to_string());
         };
-        let Some(path) = FileDialog::new()
+        let path = FileDialog::new()
             .set_file_name(format!("{}.json", layout.name))
-            .save_file()
-        else {
-            return Ok(());
+            .save_file();
+        self.enqueue_export_choice(layout, path)
+    }
+
+    fn enqueue_export_choice(
+        &mut self,
+        layout: Layout,
+        path: Option<PathBuf>,
+    ) -> Result<bool, String> {
+        let Some(path) = path else {
+            return Ok(false);
         };
-        self.enqueue(LayoutRequestKind::Export { path, layout })
+        self.enqueue(LayoutRequestKind::Export { path, layout })?;
+        Ok(true)
     }
 
     fn parse_layout_json(contents: &str) -> Result<Layout, String> {
@@ -379,12 +403,19 @@ impl LayoutsWidget {
     }
 
     fn apply_result(&mut self, result: LayoutResult) {
-        if result.generation < self.applied_generation
-            || result.generation < self.latest_ui_generation
+        let snapshot_result = matches!(
+            result.class,
+            LayoutOperationClass::Snapshot | LayoutOperationClass::Mutation
+        );
+        if snapshot_result
+            && (result.generation < self.applied_generation
+                || result.generation < self.latest_mutation_generation)
         {
             return;
         }
-        self.applied_generation = result.generation;
+        if snapshot_result {
+            self.applied_generation = result.generation;
+        }
         self.error = result.error;
         if let Some(data) = result.data {
             self.cache.refresh(|cache| *cache = data);
@@ -458,6 +489,12 @@ impl LayoutsWidget {
 
     fn execute_request(request: LayoutRequest) -> LayoutResult {
         let generation = request.generation;
+        let class = match &request.kind {
+            LayoutRequestKind::Refresh => LayoutOperationClass::Snapshot,
+            LayoutRequestKind::ReadImport(_) => LayoutOperationClass::ImportRead,
+            LayoutRequestKind::Export { .. } => LayoutOperationClass::Export,
+            _ => LayoutOperationClass::Mutation,
+        };
         let result = (|| -> Result<(Option<LayoutsData>, Option<Layout>, Option<PendingImport>, Option<String>), String> {
             match request.kind {
                 LayoutRequestKind::Refresh => {
@@ -524,6 +561,7 @@ impl LayoutsWidget {
         match result {
             Ok((data, selected, imported, message)) => LayoutResult {
                 generation,
+                class,
                 data,
                 selected,
                 imported,
@@ -532,6 +570,7 @@ impl LayoutsWidget {
             },
             Err(error) => LayoutResult {
                 generation,
+                class,
                 data: None,
                 selected: None,
                 imported: None,
@@ -714,9 +753,10 @@ impl Widget for LayoutsWidget {
                     }
                     if ui.button("Export layout").clicked() {
                         match self.export_active_layout() {
-                            Ok(()) => {
+                            Ok(true) => {
                                 self.set_status("Export queued.", egui::Color32::YELLOW);
                             }
+                            Ok(false) => {}
                             Err(err) => self.set_status(err, egui::Color32::YELLOW),
                         }
                     }
@@ -1068,9 +1108,10 @@ mod tests {
     #[test]
     fn newer_queued_edit_suppresses_older_fifo_status_and_snapshot() {
         let mut widget = LayoutsWidget::default();
-        widget.latest_ui_generation = 2;
+        widget.latest_mutation_generation = 2;
         widget.apply_result(LayoutResult {
             generation: 1,
+            class: LayoutOperationClass::Mutation,
             data: Some(LayoutsWidget::data_from_store(
                 &LayoutsConfig::default(),
                 LayoutStore {
@@ -1089,6 +1130,7 @@ mod tests {
 
         widget.apply_result(LayoutResult {
             generation: 2,
+            class: LayoutOperationClass::Mutation,
             data: None,
             selected: None,
             imported: None,
@@ -1098,9 +1140,10 @@ mod tests {
         assert_eq!(widget.error.as_deref(), Some("newer failed"));
         assert!(widget.status.is_none());
 
-        widget.latest_ui_generation = 3;
+        widget.latest_mutation_generation = 3;
         widget.apply_result(LayoutResult {
             generation: 3,
+            class: LayoutOperationClass::Mutation,
             data: None,
             selected: None,
             imported: None,
@@ -1145,7 +1188,7 @@ mod tests {
         );
 
         let mut widget = LayoutsWidget::default();
-        widget.latest_ui_generation = 2;
+        widget.latest_mutation_generation = 2;
         widget.apply_result(first);
         assert!(widget.status.is_none());
         widget.apply_result(second);
@@ -1165,6 +1208,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+    }
+
+    #[test]
+    fn auxiliary_fifo_results_are_not_suppressed_by_newer_mutations() {
+        let mut widget = LayoutsWidget::default();
+        widget.latest_mutation_generation = 3;
+        widget.apply_result(LayoutResult {
+            generation: 1,
+            class: LayoutOperationClass::Export,
+            data: None,
+            selected: None,
+            imported: None,
+            message: None,
+            error: Some("export failed".into()),
+        });
+        assert_eq!(widget.error.as_deref(), Some("export failed"));
+
+        widget.apply_result(LayoutResult {
+            generation: 2,
+            class: LayoutOperationClass::ImportRead,
+            data: None,
+            selected: None,
+            imported: Some(PendingImport {
+                layout: layout("imported"),
+                source: PathBuf::from("import.json"),
+            }),
+            message: Some("Layout loaded. Choose how to import.".into()),
+            error: None,
+        });
+        assert_eq!(
+            widget
+                .pending_import
+                .as_ref()
+                .map(|pending| pending.layout.name.as_str()),
+            Some("imported")
+        );
+        assert_eq!(
+            widget.status.as_ref().map(|status| status.text.as_str()),
+            Some("Layout loaded. Choose how to import.")
+        );
+    }
+
+    #[test]
+    fn cancelled_export_is_not_queued() {
+        let mut widget = LayoutsWidget::default();
+        assert!(
+            !widget
+                .enqueue_export_choice(layout("cancelled"), None)
+                .unwrap()
+        );
+        assert!(widget.pending_requests.is_empty());
+        assert_eq!(widget.next_generation, 0);
     }
 }
 

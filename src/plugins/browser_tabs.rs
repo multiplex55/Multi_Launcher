@@ -150,22 +150,26 @@ mod imp {
             materialize_actions(&tabs, filter)
         }
 
-        fn request_refresh(&self, force: bool) {
+        fn request_refresh(&self, force: bool) -> Option<u64> {
             let Ok(mut state) = self.shared.state.lock() else {
-                return;
+                return None;
             };
-            if state.refresh_disabled
-                || state.in_flight
-                || (!force && state.last_refresh.elapsed() <= CACHE_TTL)
-            {
-                return;
+            if state.refresh_disabled || (!force && state.last_refresh.elapsed() <= CACHE_TTL) {
+                return None;
+            }
+            let ticket = self.shared.updates.schedule_or_join("browser_tabs");
+            crate::plugin::record_search_refresh_ticket("browser_tabs", ticket.id);
+            if !ticket.start {
+                return Some(ticket.id);
             }
             state.in_flight = true;
-            state.in_flight_ticket = Some(self.shared.updates.begin_refresh("browser_tabs"));
+            state.in_flight_ticket = Some(ticket.id);
             if self.shared.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                self.shared.updates.cancel_ticket("browser_tabs", ticket.id);
             }
+            Some(ticket.id)
         }
 
         fn clear(&self) {
@@ -186,7 +190,9 @@ mod imp {
                 state.tabs = Arc::new(tabs);
                 state.last_refresh = Instant::now();
                 state.in_flight = false;
-                state.in_flight_ticket = None;
+                if let Some(ticket) = state.in_flight_ticket.take() {
+                    self.shared.updates.cancel_ticket("browser_tabs", ticket);
+                }
                 state.refresh_disabled = true;
             }
         }
@@ -198,6 +204,9 @@ mod imp {
                 let _publication = self.shared.publication.lock().ok();
                 if let Ok(mut state) = self.shared.state.lock() {
                     state.shutting_down = true;
+                    if let Some(ticket) = state.in_flight_ticket.take() {
+                        self.shared.updates.cancel_ticket("browser_tabs", ticket);
+                    }
                 }
             }
             let _ = self.shared.wake.try_send(());
@@ -248,7 +257,7 @@ mod imp {
                 None
             };
             if let Some(ticket) = ticket {
-                shared.updates.notify_ticket("browser_tabs", ticket);
+                shared.updates.publish_ticket("browser_tabs", ticket);
             }
         }
     }
@@ -302,9 +311,16 @@ mod imp {
             && let Ok(mut state) = shared.state.lock()
             && !state.in_flight
         {
+            let ticket = shared.updates.schedule_or_join("browser_tabs");
+            if !ticket.start {
+                return;
+            }
             state.in_flight = true;
+            state.in_flight_ticket = Some(ticket.id);
             if shared.wake.try_send(()).is_err() {
                 state.in_flight = false;
+                state.in_flight_ticket = None;
+                shared.updates.cancel_ticket("browser_tabs", ticket.id);
             }
         }
     }
@@ -534,7 +550,31 @@ mod imp {
         }
 
         #[test]
-        fn drop_while_blocked_suppresses_stale_snapshot_and_notification() {
+        fn explicit_rebuild_acquires_publishes_and_notifies_ticket() {
+            let (started_tx, started_rx) = channel();
+            let (release_tx, release_rx) = channel();
+            let (repaint_tx, repaint_rx) = channel();
+            let updates = Arc::new(PluginSearchUpdates::default());
+            updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+            let cache = BrowserTabsCache::start_with_provider(
+                ControlledProvider {
+                    started: started_tx,
+                    release: release_rx,
+                },
+                Arc::clone(&updates),
+            );
+            rebuild_current();
+            let ticket = updates.active_ticket("browser_tabs").unwrap();
+            started_rx.recv().unwrap();
+            release_tx.send(Vec::new()).unwrap();
+            repaint_rx.recv().unwrap();
+            assert_eq!(updates.published_ticket("browser_tabs"), Some(ticket));
+            assert!(updates.ticket_resolved("browser_tabs", ticket));
+            drop(cache);
+        }
+
+        #[test]
+        fn drop_while_blocked_resolves_ticket_and_suppresses_stale_publication() {
             let (started_tx, started_rx) = channel();
             let (release_tx, release_rx) = channel();
             let (finished_tx, finished_rx) = channel();
@@ -552,6 +592,7 @@ mod imp {
             assert!(cache.cached_actions("", false).is_empty());
             started_rx.recv().unwrap();
             drop(cache);
+            repaint_rx.recv().unwrap();
             release_tx
                 .send(vec![TabInfo {
                     title: "stale".into(),
@@ -563,7 +604,7 @@ mod imp {
             while Arc::strong_count(&updates) > 1 {
                 std::thread::yield_now();
             }
-            assert_eq!(updates.generation(), 0);
+            assert_eq!(updates.generation(), 1);
             assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
         }
 

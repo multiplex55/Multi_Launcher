@@ -116,11 +116,14 @@ impl BrowserTabsWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
+        let request_resolved = self
+            .awaiting_ticket
+            .is_some_and(|ticket| ctx.plugins.search_ticket_resolved("browser_tabs", ticket));
         observe_owned_search_publication(
             schedule.mode,
             generation,
             &mut self.last_search_generation,
-            ctx.plugins.published_search_ticket_for("browser_tabs"),
+            request_resolved,
             &mut self.awaiting_ticket,
             &mut self.refresh_pending,
         );

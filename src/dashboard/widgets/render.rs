@@ -130,17 +130,17 @@ pub(crate) fn observe_owned_search_publication(
     mode: RefreshMode,
     generation: u64,
     last_generation: &mut u64,
-    published_ticket: Option<u64>,
+    request_resolved: bool,
     awaiting_ticket: &mut Option<u64>,
     refresh_pending: &mut bool,
 ) -> bool {
     if mode != RefreshMode::Manual {
         return observe_search_generation(generation, last_generation, refresh_pending);
     }
-    let Some(request_ticket) = *awaiting_ticket else {
+    let Some(_) = *awaiting_ticket else {
         return false;
     };
-    if published_ticket != Some(request_ticket) {
+    if !request_resolved {
         return false;
     }
     *awaiting_ticket = None;
@@ -608,7 +608,7 @@ mod tests {
             RefreshMode::Manual,
             3,
             &mut observed,
-            Some(2),
+            false,
             &mut awaiting,
             &mut pending,
         ));
@@ -616,7 +616,7 @@ mod tests {
             RefreshMode::Manual,
             4,
             &mut observed,
-            Some(3),
+            true,
             &mut awaiting,
             &mut pending,
         ));
@@ -627,7 +627,7 @@ mod tests {
             RefreshMode::Manual,
             5,
             &mut observed,
-            Some(4),
+            true,
             &mut awaiting,
             &mut pending,
         ));

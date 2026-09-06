@@ -103,12 +103,17 @@ impl SystemDataCache {
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
-        if !state.in_flight && !state.fresh_until.is_some_and(|deadline| now < deadline) {
-            state.in_flight = true;
-            state.in_flight_ticket = Some(self.updates.begin_refresh("system_data"));
-            if self.wake.try_send(()).is_err() {
+        if !state.fresh_until.is_some_and(|deadline| now < deadline) {
+            let ticket = self.updates.schedule_or_join("system_data");
+            crate::plugin::record_search_refresh_ticket("system_data", ticket.id);
+            if ticket.start {
+                state.in_flight = true;
+                state.in_flight_ticket = Some(ticket.id);
+            }
+            if ticket.start && self.wake.try_send(()).is_err() {
                 state.in_flight = false;
                 state.in_flight_ticket = None;
+                self.updates.cancel_ticket("system_data", ticket.id);
             }
         }
         state.snapshot.as_ref().map(Arc::clone)
@@ -173,6 +178,9 @@ impl Drop for SystemDataRuntime {
             let _publication = self.publication.lock().ok();
             if let Ok(mut state) = self.cache.state.lock() {
                 state.shutting_down = true;
+                if let Some(ticket) = state.in_flight_ticket.take() {
+                    self.cache.updates.cancel_ticket("system_data", ticket);
+                }
             }
         }
         let _ = self.cache.wake.try_send(());
@@ -213,7 +221,7 @@ fn run_worker(
             None
         };
         if let Some(ticket) = ticket {
-            updates.notify_ticket("system_data", ticket);
+            updates.publish_ticket("system_data", ticket);
         }
     }
 }
@@ -227,6 +235,25 @@ mod tests {
         started: Sender<()>,
         release: Receiver<()>,
         snapshot: SystemDataSnapshot,
+    }
+
+    #[test]
+    fn disconnected_wake_cancels_and_resolves_exact_scheduling_ticket() {
+        let (wake, receiver) = sync_channel(1);
+        drop(receiver);
+        let updates = Arc::new(PluginSearchUpdates::default());
+        let cache = SystemDataCache {
+            state: Arc::new(Mutex::new(CacheState::default())),
+            wake,
+            updates: Arc::clone(&updates),
+        };
+        let (_, tickets) =
+            crate::plugin::capture_search_refresh_tickets(|| cache.snapshot_and_refresh());
+        assert_eq!(tickets.len(), 1);
+        let (source, ticket) = tickets[0];
+        assert_eq!(source, "system_data");
+        assert!(updates.ticket_resolved(source, ticket));
+        assert_eq!(updates.active_ticket(source), None);
     }
 
     impl SystemDataProvider for ControlledProvider {
@@ -326,7 +353,8 @@ mod tests {
         }
         release_tx.send(()).unwrap();
         dropped_rx.recv().unwrap();
-        assert_eq!(updates.generation(), 0);
+        repaint_rx.recv().unwrap();
+        assert_eq!(updates.generation(), 1);
         assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

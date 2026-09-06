@@ -276,12 +276,15 @@ impl PinnedQueryResultsWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
+        let request_resolved = self.awaiting_ticket.is_some_and(|ticket| {
+            ctx.plugins
+                .search_ticket_resolved(self.cfg.engine.trim(), ticket)
+        });
         observe_owned_search_publication(
             schedule.mode,
             generation,
             &mut self.last_search_generation,
-            ctx.plugins
-                .published_search_ticket_for(self.cfg.engine.trim()),
+            request_resolved,
             &mut self.awaiting_ticket,
             &mut self.refresh_pending,
         );

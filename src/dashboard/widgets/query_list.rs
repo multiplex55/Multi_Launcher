@@ -118,20 +118,20 @@ impl QueryListWidget {
 
     fn refresh(&mut self, ctx: &DashboardContext<'_>) -> Vec<(&'static str, u64)> {
         let query = self.cfg.query.trim();
-        let actions = if query.is_empty() {
-            Vec::new()
+        let (actions, tickets) = if query.is_empty() {
+            (Vec::new(), Vec::new())
         } else {
-            ctx.plugins.search_filtered(query, None, None)
+            ctx.plugins.search_filtered_with_tickets(query, None, None)
         };
         self.cache.refresh(|data| *data = actions);
-        ctx.plugins.active_search_tickets_for_query(query)
+        tickets
     }
 
     fn observe_search_updates(
         &mut self,
         schedule: RefreshSchedule,
         generation: u64,
-        published_ticket: impl Fn(&str) -> Option<u64>,
+        ticket_resolved: impl Fn(&str, u64) -> bool,
     ) {
         if schedule.mode != RefreshMode::Manual {
             observe_search_generation(
@@ -143,7 +143,7 @@ impl QueryListWidget {
             && self
                 .awaiting_tickets
                 .iter()
-                .all(|(source, ticket)| published_ticket(source) == Some(*ticket))
+                .all(|(source, ticket)| ticket_resolved(source, *ticket))
         {
             self.awaiting_tickets.clear();
             self.last_search_generation = generation;
@@ -159,9 +159,11 @@ impl QueryListWidget {
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
-        self.observe_search_updates(schedule, ctx.plugins.search_generation(), |source| {
-            ctx.plugins.published_search_ticket_for(source)
-        });
+        self.observe_search_updates(
+            schedule,
+            ctx.plugins.search_generation(),
+            |source, ticket| ctx.plugins.search_ticket_resolved(source, ticket),
+        );
         if self.last_query != self.cfg.query {
             self.last_query = self.cfg.query.clone();
             self.refresh_pending = true;
@@ -200,7 +202,7 @@ mod tests {
             widget.cfg.refresh_throttle_secs,
         );
 
-        widget.observe_search_updates(schedule, updates.generation(), |_| None);
+        widget.observe_search_updates(schedule, updates.generation(), |_, _| false);
 
         assert!(!widget.refresh_pending);
         assert_eq!(widget.last_search_generation, 0);
@@ -219,22 +221,22 @@ mod tests {
             widget.cfg.refresh_throttle_secs,
         );
 
-        widget.observe_search_updates(schedule, 1, |source| match source {
-            "windows" => Some(7),
-            "browser_tabs" => Some(8),
-            _ => None,
+        widget.observe_search_updates(schedule, 1, |source, ticket| match source {
+            "windows" => ticket == 7,
+            "browser_tabs" => ticket == 8,
+            _ => false,
         });
         assert!(!widget.refresh_pending);
-        widget.observe_search_updates(schedule, 2, |source| match source {
-            "windows" => Some(7),
-            "browser_tabs" => Some(9),
-            _ => None,
+        widget.observe_search_updates(schedule, 2, |source, ticket| match source {
+            "windows" => ticket == 7,
+            "browser_tabs" => ticket == 9,
+            _ => false,
         });
         assert!(widget.refresh_pending);
         assert!(widget.awaiting_tickets.is_empty());
 
         widget.refresh_pending = false;
-        widget.observe_search_updates(schedule, 3, |_| Some(9));
+        widget.observe_search_updates(schedule, 3, |_, _| true);
         assert!(!widget.refresh_pending);
     }
 
@@ -249,7 +251,7 @@ mod tests {
             widget.cfg.manual_refresh_only,
             widget.cfg.refresh_throttle_secs,
         );
-        widget.observe_search_updates(schedule, 4, |_| Some(99));
+        widget.observe_search_updates(schedule, 4, |_, _| true);
         assert!(!widget.refresh_pending);
         assert!(widget.awaiting_tickets.is_empty());
     }
