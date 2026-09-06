@@ -284,7 +284,7 @@ impl SettingsEditor {
             .clone()
             .unwrap_or_else(|| "valid".to_owned());
 
-        for plugin in app.plugins.iter_mut() {
+        for mut plugin in app.plugins.iter_mut() {
             let name = plugin.name().to_string();
             if name == "notes" {
                 continue;

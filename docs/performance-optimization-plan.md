@@ -572,6 +572,39 @@ registration at 16.617 ms, `LauncherApp` construction at 60.327 ms, first usable
 372.122 ms, and dashboard initial publication at 549.592 ms. This is a single warm-host regression
 sample, not a cold-start or maximum-frame-time claim.
 
+### Fourth independent-review remediation
+
+**Status:** `complete`
+
+Layouts now uses a typed, generation-tagged operation queue for refresh, save, duplicate, rename,
+import read/write, and export. Every mutation reloads the current on-disk store in the worker before
+merging and saving, so command or external edits are preserved; monotonically applied results prevent
+an older refresh snapshot from replacing a completed mutation. Plugin Home now submits owned plugin
+handles to a capacity-one background loader and caches results by source plus a two-second TTL. Cold
+rendering never invokes plugin search, mutable plugins without explicit generations cannot remain
+permanently stale, and dynamic-library guards travel with outstanding plugin work.
+
+Manual Browser Tabs, Windows, Windows Overview, and pinned-query widgets record the source generation
+at an explicit refresh and consume exactly one later publication to materialize the completed
+snapshot. Publications without an outstanding request, including unrelated or later same-source
+work, do not arm manual refresh. Browser Tabs forced discovery is now coalesced by a fixed two-second
+cooldown rather than remembered per filter, so more than 32 simultaneous query consumers cannot
+thrash discovery.
+
+Browser Tabs, Windows, public-IP, and shared-system workers serialize shutdown with the complete
+snapshot/publication/notification transaction through a dedicated lifecycle mutex. Snapshot locks
+are released before repaint callbacks, avoiding reentrant deadlock, while Drop either observes the
+committed notification or suppresses the publication before returning. UI Automation remains
+unpreemptible inside an individual Windows call; process-wide single-flight still bounds it to one
+active production enumeration.
+
+Final verification passed: focused deterministic tests; `cargo fmt --all --check`; `cargo check`;
+`cargo nextest run --no-fail-fast` (2,994 passed, 7 skipped, 3,001 total across 70 binaries in
+37.877 s); the Browser Tabs Criterion benchmark; `cargo build --release` (2m05s); stale render-I/O
+searches; and `git diff --check`. Criterion measured the populated 1,000-tab cached filter path at
+193.51–203.11 us and the static clear command at 1.0779–1.1231 us, with no statistically detected
+regression.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -605,3 +638,4 @@ sample, not a cold-start or maximum-frame-time claim.
 | 5 | `707459e` | `perf(dev): improve cargo and nextest iteration time` |
 | Review remediation 1 | `e6f8baf` | `fix(perf): resolve final review findings` |
 | Review remediation 2 | `4596f72` | `fix(perf): harden async refresh lifecycles` |
+| Review remediation 3 | `bb10a3e` | `fix(perf): stabilize async cache invalidation` |

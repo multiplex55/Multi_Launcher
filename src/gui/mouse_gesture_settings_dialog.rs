@@ -86,7 +86,7 @@ impl MouseGestureSettingsDialog {
         apply_runtime_settings(self.settings.clone());
 
         // If the plugin is currently loaded, ensure it receives the new settings.
-        for plugin in app.plugins.iter_mut() {
+        for mut plugin in app.plugins.iter_mut() {
             if plugin.name() == "mouse_gestures" {
                 plugin.apply_settings(
                     app.settings_editor

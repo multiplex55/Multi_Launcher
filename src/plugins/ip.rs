@@ -66,12 +66,13 @@ struct CacheState {
     fresh_until: Option<Instant>,
     retry_after: Option<Instant>,
     in_flight: bool,
+    shutting_down: bool,
 }
 
 struct PublicIpCache {
     state: Arc<Mutex<CacheState>>,
+    publication: Arc<Mutex<()>>,
     wake: SyncSender<()>,
-    shutting_down: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     clock: Arc<dyn Clock>,
 }
@@ -83,28 +84,30 @@ impl PublicIpCache {
         updates: Arc<PluginSearchUpdates>,
     ) -> Self {
         let state = Arc::new(Mutex::new(CacheState::default()));
-        let shutting_down = Arc::new(AtomicBool::new(false));
         let (wake, receiver) = sync_channel(1);
+        let publication = Arc::new(Mutex::new(()));
         let worker_state = Arc::clone(&state);
-        let worker_shutdown = Arc::clone(&shutting_down);
         let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
             .name("public-ip-refresh".into())
-            .spawn(move || {
-                run_worker(
-                    receiver,
-                    worker_state,
-                    worker_shutdown,
-                    provider,
-                    worker_clock,
-                    updates,
-                )
+            .spawn({
+                let publication = Arc::clone(&publication);
+                move || {
+                    run_worker(
+                        receiver,
+                        worker_state,
+                        publication,
+                        provider,
+                        worker_clock,
+                        updates,
+                    )
+                }
             })
             .expect("start public IP refresh worker");
         Self {
             state,
+            publication,
             wake,
-            shutting_down,
             worker: Some(worker),
             clock,
         }
@@ -127,7 +130,12 @@ impl PublicIpCache {
 
 impl Drop for PublicIpCache {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::Release);
+        {
+            let _publication = self.publication.lock().ok();
+            if let Ok(mut state) = self.state.lock() {
+                state.shutting_down = true;
+            }
+        }
         let _ = self.wake.try_send(());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -138,21 +146,28 @@ impl Drop for PublicIpCache {
 fn run_worker(
     receiver: Receiver<()>,
     state: Arc<Mutex<CacheState>>,
-    shutting_down: Arc<AtomicBool>,
+    publication: Arc<Mutex<()>>,
     provider: Arc<dyn PublicIpProvider>,
     clock: Arc<dyn Clock>,
     updates: Arc<PluginSearchUpdates>,
 ) {
     while receiver.recv().is_ok() {
-        if shutting_down.load(Ordering::Acquire) {
+        if state
+            .lock()
+            .map(|state| state.shutting_down)
+            .unwrap_or(true)
+        {
             break;
         }
         let result = provider.lookup();
-        if shutting_down.load(Ordering::Acquire) {
-            break;
-        }
         let now = clock.now();
-        if let Ok(mut state) = state.lock() {
+        let Ok(_publication) = publication.lock() else {
+            break;
+        };
+        let published = if let Ok(mut state) = state.lock() {
+            if state.shutting_down {
+                break;
+            }
             state.in_flight = false;
             match result {
                 Ok(value) => {
@@ -165,8 +180,13 @@ fn run_worker(
                     state.retry_after = Some(now + FAILURE_BACKOFF);
                 }
             }
+            true
+        } else {
+            false
+        };
+        if published {
+            updates.notify("ip");
         }
-        updates.notify("ip");
     }
 }
 
@@ -375,5 +395,36 @@ mod tests {
     fn dropping_an_idle_plugin_joins_its_worker() {
         let (plugin, _clock, _started, _release, _repaint) = fixture([Ok("203.0.113.10".into())]);
         drop(plugin);
+    }
+
+    #[test]
+    fn drop_during_active_lookup_suppresses_publication_and_repaint() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let provider = Arc::new(ControlledProvider {
+            started: started_tx,
+            releases: Mutex::new(release_rx),
+            results: Mutex::new([Ok("stale".into())].into_iter().collect()),
+        });
+        let plugin =
+            IpPlugin::with_provider(provider, Arc::new(ManualClock::new()), Arc::clone(&updates));
+        let state = Arc::clone(&plugin.public_ip.state);
+        plugin.search("ip");
+        started_rx.recv().unwrap();
+        let (dropped_tx, dropped_rx) = channel();
+        std::thread::spawn(move || {
+            drop(plugin);
+            dropped_tx.send(()).unwrap();
+        });
+        while !state.lock().unwrap().shutting_down {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+        dropped_rx.recv().unwrap();
+        assert_eq!(updates.generation(), 0);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

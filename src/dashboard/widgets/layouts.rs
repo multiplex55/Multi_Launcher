@@ -1,7 +1,7 @@
 use super::{
     BackgroundLoader, RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext,
     WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
-    refresh_settings_ui, run_refresh_schedule, submit_background_refresh,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
@@ -13,6 +13,7 @@ use chrono::Utc;
 use eframe::egui;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -87,11 +88,50 @@ struct PendingImport {
     source: PathBuf,
 }
 
+#[derive(Debug)]
+enum LayoutRequestKind {
+    Refresh,
+    Save(Layout),
+    Duplicate(Layout),
+    Rename {
+        from: String,
+        to: String,
+        select: bool,
+    },
+    ImportNew(Layout),
+    ReadImport(PathBuf),
+    Export {
+        path: PathBuf,
+        layout: Layout,
+    },
+}
+
+#[derive(Debug)]
+struct LayoutRequest {
+    generation: u64,
+    cfg: LayoutsConfig,
+    path: PathBuf,
+    kind: LayoutRequestKind,
+}
+
+#[derive(Debug)]
+struct LayoutResult {
+    generation: u64,
+    data: Option<LayoutsData>,
+    selected: Option<Layout>,
+    imported: Option<PendingImport>,
+    message: Option<String>,
+    error: Option<String>,
+}
+
 pub struct LayoutsWidget {
     cfg: LayoutsConfig,
     cache: TimedCache<LayoutsData>,
     error: Option<String>,
-    loader: BackgroundLoader<LayoutsConfig, (LayoutsData, Option<String>)>,
+    loader: BackgroundLoader<LayoutRequest, LayoutResult>,
+    pending_requests: VecDeque<LayoutRequest>,
+    next_generation: u64,
+    applied_generation: u64,
     refresh_pending: bool,
     rename_target: Option<String>,
     rename_value: String,
@@ -117,7 +157,10 @@ impl LayoutsWidget {
                 interval,
             ),
             error: None,
-            loader: BackgroundLoader::new(|cfg: LayoutsConfig| Self::load_layouts(&cfg)),
+            loader: BackgroundLoader::new(Self::execute_request),
+            pending_requests: VecDeque::new(),
+            next_generation: 0,
+            applied_generation: 0,
             refresh_pending: false,
             rename_target: None,
             rename_value: String::new(),
@@ -174,6 +217,16 @@ impl LayoutsWidget {
         self.dirty = self.active_layout != self.last_saved_layout;
     }
 
+    fn enqueue(&mut self, kind: LayoutRequestKind) {
+        self.next_generation += 1;
+        self.pending_requests.push_back(LayoutRequest {
+            generation: self.next_generation,
+            cfg: self.cfg.clone(),
+            path: layouts_config_path().to_path_buf(),
+            kind,
+        });
+    }
+
     fn load_active_layout(&mut self, name: &str) -> Result<(), String> {
         let layout = layouts_storage::get_layout(&self.cache.data.store, name)
             .ok_or_else(|| "Layout not found.".to_string())?
@@ -186,17 +239,7 @@ impl LayoutsWidget {
     }
 
     fn save_layout(&mut self, layout: Layout) -> Result<(), String> {
-        let mut store = self.cache.data.store.clone();
-        layouts_storage::upsert_layout(&mut store, layout.clone());
-        layouts_storage::save_layouts(layouts_config_path(), &store)
-            .map_err(|err| format!("Failed to save layouts: {err}"))?;
-        self.cache.data.store = store;
-        self.active_layout_name = Some(layout.name.clone());
-        self.active_layout = Some(layout.clone());
-        self.last_saved_layout = Some(layout);
-        self.dirty = false;
-        self.refresh_pending = true;
-        self.cache.invalidate();
+        self.enqueue(LayoutRequestKind::Save(layout));
         Ok(())
     }
 
@@ -233,22 +276,9 @@ impl LayoutsWidget {
         let Some(layout) = self.active_layout.clone() else {
             return Err("No active layout selected.".to_string());
         };
-        let mut store = self.cache.data.store.clone();
-        let new_name = Self::unique_layout_name(&layout.name, &store, " (copy)");
-        let mut cloned = layout.clone();
-        cloned.name = new_name.clone();
-        cloned.created_at = Some(Utc::now().to_rfc3339());
-        layouts_storage::upsert_layout(&mut store, cloned.clone());
-        layouts_storage::save_layouts(layouts_config_path(), &store)
-            .map_err(|err| format!("Failed to save layouts: {err}"))?;
-        self.cache.data.store = store;
-        self.active_layout_name = Some(new_name.clone());
-        self.active_layout = Some(cloned.clone());
-        self.last_saved_layout = Some(cloned);
-        self.dirty = false;
-        self.refresh_pending = true;
-        self.cache.invalidate();
-        Ok(new_name)
+        let display_name = format!("{} (copy)", layout.name);
+        self.enqueue(LayoutRequestKind::Duplicate(layout));
+        Ok(display_name)
     }
 
     fn revert_active_layout(&mut self) -> Result<(), String> {
@@ -269,9 +299,7 @@ impl LayoutsWidget {
         else {
             return Ok(());
         };
-        let json = serde_json::to_string_pretty(&layout)
-            .map_err(|err| format!("Serialize failed: {err}"))?;
-        std::fs::write(&path, json).map_err(|err| format!("Failed to write layout: {err}"))?;
+        self.enqueue(LayoutRequestKind::Export { path, layout });
         Ok(())
     }
 
@@ -288,13 +316,7 @@ impl LayoutsWidget {
     }
 
     fn begin_import(&mut self, path: PathBuf) -> Result<(), String> {
-        let contents =
-            std::fs::read_to_string(&path).map_err(|err| format!("Failed to read file: {err}"))?;
-        let layout = Self::parse_layout_json(&contents)?;
-        self.pending_import = Some(PendingImport {
-            layout,
-            source: path,
-        });
+        self.enqueue(LayoutRequestKind::ReadImport(path));
         Ok(())
     }
 
@@ -308,9 +330,8 @@ impl LayoutsWidget {
             return;
         }
         self.update_interval();
-        if let Some((data, error)) = self.loader.poll() {
-            self.error = error;
-            self.cache.refresh(|cache| *cache = data);
+        if let Some(result) = self.loader.poll() {
+            self.apply_result(result);
         }
         let schedule = refresh_schedule(
             self.refresh_interval(),
@@ -324,19 +345,52 @@ impl LayoutsWidget {
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
         ) {
-            submit_background_refresh(
-                &mut self.loader,
-                self.cfg.clone(),
-                repaint,
-                &mut self.refresh_pending,
-                &mut self.cache.last_refresh,
-            );
+            if !self
+                .pending_requests
+                .iter()
+                .any(|request| matches!(request.kind, LayoutRequestKind::Refresh))
+            {
+                self.enqueue(LayoutRequestKind::Refresh);
+            }
+        }
+        if !self.loader.is_in_flight()
+            && let Some(request) = self.pending_requests.pop_front()
+        {
+            if self.loader.request(request, repaint) {
+                self.cache.last_refresh = std::time::Instant::now();
+            }
         }
     }
 
-    fn load_layouts(cfg: &LayoutsConfig) -> (LayoutsData, Option<String>) {
-        let config_exists = layouts_config_path().exists();
-        let store = match layouts_storage::load_layouts(layouts_config_path()) {
+    fn apply_result(&mut self, result: LayoutResult) {
+        if result.generation < self.applied_generation {
+            return;
+        }
+        self.applied_generation = result.generation;
+        self.error = result.error;
+        if let Some(data) = result.data {
+            self.cache.refresh(|cache| *cache = data);
+        }
+        if let Some(layout) = result.selected {
+            self.active_layout_name = Some(layout.name.clone());
+            self.active_layout = Some(layout.clone());
+            self.last_saved_layout = Some(layout);
+            self.dirty = false;
+        }
+        if let Some(imported) = result.imported {
+            self.pending_import = Some(imported);
+        }
+        if let Some(message) = result.message {
+            self.set_status(message, egui::Color32::GREEN);
+        }
+    }
+
+    fn load_layouts_at(
+        cfg: &LayoutsConfig,
+        path: &std::path::Path,
+    ) -> (LayoutsData, Option<String>) {
+        let config_exists = path.exists();
+        let store = match layouts_storage::load_layouts(path) {
             Ok(store) => store,
             Err(err) => {
                 return (
@@ -349,6 +403,14 @@ impl LayoutsWidget {
                 );
             }
         };
+        (Self::data_from_store(cfg, store, config_exists), None)
+    }
+
+    fn data_from_store(
+        cfg: &LayoutsConfig,
+        store: LayoutStore,
+        config_exists: bool,
+    ) -> LayoutsData {
         let health = if cfg.show_health_indicator {
             Self::collect_health(&store.layouts)
         } else {
@@ -369,14 +431,96 @@ impl LayoutsWidget {
                 health,
             })
             .collect();
-        (
-            LayoutsData {
-                layouts,
-                store,
-                config_exists,
+        LayoutsData {
+            layouts,
+            store,
+            config_exists,
+        }
+    }
+
+    fn execute_request(request: LayoutRequest) -> LayoutResult {
+        let generation = request.generation;
+        let result = (|| -> Result<(Option<LayoutsData>, Option<Layout>, Option<PendingImport>, Option<String>), String> {
+            match request.kind {
+                LayoutRequestKind::Refresh => {
+                    let (data, error) = Self::load_layouts_at(&request.cfg, &request.path);
+                    if let Some(error) = error {
+                        return Err(error);
+                    }
+                    Ok((Some(data), None, None, None))
+                }
+                LayoutRequestKind::ReadImport(path) => {
+                    let contents = std::fs::read_to_string(&path)
+                        .map_err(|err| format!("Failed to read file: {err}"))?;
+                    let layout = Self::parse_layout_json(&contents)?;
+                    Ok((None, None, Some(PendingImport { layout, source: path }), Some("Layout loaded. Choose how to import.".into())))
+                }
+                LayoutRequestKind::Export { path, layout } => {
+                    let json = serde_json::to_string_pretty(&layout)
+                        .map_err(|err| format!("Serialize failed: {err}"))?;
+                    std::fs::write(path, json)
+                        .map_err(|err| format!("Failed to write layout: {err}"))?;
+                    Ok((None, None, None, Some("Exported layout.".into())))
+                }
+                kind => {
+                    let mut store = layouts_storage::load_layouts(&request.path)
+                        .map_err(|err| format!("Failed to load layouts: {err}"))?;
+                    let (selected, message) = match kind {
+                        LayoutRequestKind::Save(layout) => {
+                            layouts_storage::upsert_layout(&mut store, layout.clone());
+                            (Some(layout), "Layout updated.".to_string())
+                        }
+                        LayoutRequestKind::Duplicate(mut layout) => {
+                            layout.name = Self::unique_layout_name(&layout.name, &store, " (copy)");
+                            layout.created_at = Some(Utc::now().to_rfc3339());
+                            layouts_storage::upsert_layout(&mut store, layout.clone());
+                            let message = format!("Duplicated layout as '{}'.", layout.name);
+                            (Some(layout), message)
+                        }
+                        LayoutRequestKind::Rename { from, to, select } => {
+                            if store.layouts.iter().any(|layout| layout.name == to) {
+                                return Err("A layout with that name already exists.".into());
+                            }
+                            let layout = store.layouts.iter_mut().find(|layout| layout.name == from)
+                                .ok_or_else(|| "Layout not found.".to_string())?;
+                            layout.name = to;
+                            (
+                                select.then(|| layout.clone()),
+                                "Layout renamed.".to_string(),
+                            )
+                        }
+                        LayoutRequestKind::ImportNew(mut layout) => {
+                            layout.name = Self::unique_layout_name(&layout.name, &store, " (imported)");
+                            layouts_storage::upsert_layout(&mut store, layout.clone());
+                            (Some(layout), "Layout imported.".to_string())
+                        }
+                        _ => unreachable!(),
+                    };
+                    layouts_storage::save_layouts(&request.path, &store)
+                        .map_err(|err| format!("Failed to save layouts: {err}"))?;
+                    let data = Self::data_from_store(&request.cfg, store, true);
+                    Ok((Some(data), selected, None, Some(message)))
+                }
+            }
+        })();
+        match result {
+            Ok((data, selected, imported, message)) => LayoutResult {
+                generation,
+                data,
+                selected,
+                imported,
+                message,
+                error: None,
             },
-            None,
-        )
+            Err(error) => LayoutResult {
+                generation,
+                data: None,
+                selected: None,
+                imported: None,
+                message: None,
+                error: Some(error),
+            },
+        }
     }
 
     fn collect_health(layouts: &[Layout]) -> Vec<Option<LayoutHealth>> {
@@ -431,26 +575,11 @@ impl LayoutsWidget {
         if new_name == from {
             return Ok(());
         }
-        let mut store = self.cache.data.store.clone();
-        if store.layouts.iter().any(|layout| layout.name == new_name) {
-            return Err("A layout with that name already exists.".to_string());
-        }
-        let Some(layout) = store.layouts.iter_mut().find(|layout| layout.name == from) else {
-            return Err("Layout not found.".to_string());
-        };
-        layout.name = new_name.to_string();
-        layouts_storage::save_layouts(layouts_config_path(), &store)
-            .map_err(|err| format!("Failed to save layouts: {err}"))?;
-        self.cache.data.store = store;
-        if self.active_layout_name.as_deref() == Some(from) {
-            if let Some(active) = self.active_layout.as_mut() {
-                active.name = new_name.to_string();
-            }
-            if let Some(saved) = self.last_saved_layout.as_mut() {
-                saved.name = new_name.to_string();
-            }
-            self.active_layout_name = Some(new_name.to_string());
-        }
+        self.enqueue(LayoutRequestKind::Rename {
+            from: from.to_string(),
+            to: new_name.to_string(),
+            select: self.active_layout_name.as_deref() == Some(from),
+        });
         Ok(())
     }
 
@@ -625,29 +754,8 @@ impl Widget for LayoutsWidget {
                         self.pending_import = None;
                     }
                     if ui.button("Import as new").clicked() {
-                        let mut store = self.cache.data.store.clone();
-                        let mut imported = pending.layout.clone();
-                        let new_name =
-                            Self::unique_layout_name(&imported.name, &store, " (imported)");
-                        imported.name = new_name.clone();
-                        layouts_storage::upsert_layout(&mut store, imported.clone());
-                        if let Err(err) =
-                            layouts_storage::save_layouts(layouts_config_path(), &store)
-                        {
-                            self.set_status(
-                                format!("Failed to save layouts: {err}"),
-                                egui::Color32::YELLOW,
-                            );
-                        } else {
-                            self.cache.data.store = store;
-                            self.active_layout_name = Some(imported.name.clone());
-                            self.active_layout = Some(imported.clone());
-                            self.last_saved_layout = Some(imported);
-                            self.dirty = false;
-                            self.refresh_pending = true;
-                            self.cache.invalidate();
-                            self.set_status("Layout imported.", egui::Color32::GREEN);
-                        }
+                        self.enqueue(LayoutRequestKind::ImportNew(pending.layout.clone()));
+                        self.set_status("Import queued.", egui::Color32::YELLOW);
                         self.pending_import = None;
                     }
                     if ui.button("Cancel").clicked() {
@@ -852,17 +960,21 @@ fn is_rule_match(rule: &LayoutMatch, candidate: &LayoutMatch) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn active_layout_is_selected_from_worker_snapshot() {
-        let layout = Layout {
-            name: "Snapshot layout".into(),
+    fn layout(name: &str) -> Layout {
+        Layout {
+            name: name.into(),
             windows: Vec::new(),
             launches: Vec::new(),
             created_at: None,
             notes: String::new(),
             options: Default::default(),
             ignore: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn active_layout_is_selected_from_worker_snapshot() {
+        let layout = layout("Snapshot layout");
         let mut widget = LayoutsWidget::default();
         widget.cache.data.store.layouts.push(layout.clone());
 
@@ -871,6 +983,75 @@ mod tests {
         assert_eq!(widget.active_layout, Some(layout.clone()));
         assert_eq!(widget.last_saved_layout, Some(layout));
         assert!(!widget.dirty);
+    }
+
+    #[test]
+    fn mutation_merges_external_edit_and_stale_refresh_cannot_replace_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layouts.json");
+        layouts_storage::save_layouts(
+            &path,
+            &LayoutStore {
+                layouts: vec![layout("initial")],
+                ..LayoutStore::default()
+            },
+        )
+        .unwrap();
+        let cfg = LayoutsConfig {
+            show_health_indicator: false,
+            ..LayoutsConfig::default()
+        };
+        let stale = LayoutsWidget::execute_request(LayoutRequest {
+            generation: 1,
+            cfg: cfg.clone(),
+            path: path.clone(),
+            kind: LayoutRequestKind::Refresh,
+        });
+        layouts_storage::save_layouts(
+            &path,
+            &LayoutStore {
+                layouts: vec![layout("initial"), layout("external")],
+                ..LayoutStore::default()
+            },
+        )
+        .unwrap();
+        let mutation = LayoutsWidget::execute_request(LayoutRequest {
+            generation: 2,
+            cfg,
+            path: path.clone(),
+            kind: LayoutRequestKind::Save(layout("widget")),
+        });
+        let disk = layouts_storage::load_layouts(&path).unwrap();
+        assert_eq!(
+            disk.layouts
+                .iter()
+                .map(|layout| layout.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["initial", "external", "widget"]
+        );
+
+        let mut widget = LayoutsWidget::default();
+        widget.apply_result(mutation);
+        widget.apply_result(stale);
+        assert_eq!(widget.applied_generation, 2);
+        assert!(
+            widget
+                .cache
+                .data
+                .store
+                .layouts
+                .iter()
+                .any(|layout| layout.name == "external")
+        );
+        assert!(
+            widget
+                .cache
+                .data
+                .store
+                .layouts
+                .iter()
+                .any(|layout| layout.name == "widget")
+        );
     }
 }
 

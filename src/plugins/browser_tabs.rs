@@ -20,14 +20,14 @@ use crate::actions::Action;
 use crate::plugin::{Plugin, PluginSearchUpdates};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub struct BrowserTabsPlugin {
     recalc_each_query: bool,
     cache: imp::BrowserTabsCache,
-    forced_filters: Mutex<VecDeque<String>>,
+    last_forced_refresh: Mutex<Option<Instant>>,
 }
 
 mod imp {
@@ -83,12 +83,13 @@ mod imp {
         in_flight: bool,
         refresh_disabled: bool,
         messages: Vec<String>,
+        shutting_down: bool,
     }
 
     struct Shared {
         state: Mutex<CacheState>,
+        publication: Mutex<()>,
         wake: SyncSender<()>,
-        shutting_down: AtomicBool,
         updates: Arc<PluginSearchUpdates>,
     }
 
@@ -115,10 +116,11 @@ mod imp {
                     last_refresh: Instant::now() - Duration::from_secs(60),
                     in_flight: false,
                     refresh_disabled: false,
+                    shutting_down: false,
                     messages: Vec::new(),
                 }),
+                publication: Mutex::new(()),
                 wake,
-                shutting_down: AtomicBool::new(false),
                 updates,
             });
             let worker_shared = Arc::clone(&shared);
@@ -175,6 +177,7 @@ mod imp {
         }
 
         pub(super) fn install_snapshot(&self, tabs: Vec<TabInfo>) {
+            let _publication = self.shared.publication.lock().ok();
             if let Ok(mut state) = self.shared.state.lock() {
                 state.tabs = Arc::new(tabs);
                 state.last_refresh = Instant::now();
@@ -186,7 +189,12 @@ mod imp {
 
     impl Drop for BrowserTabsCache {
         fn drop(&mut self) {
-            self.shared.shutting_down.store(true, Ordering::Release);
+            {
+                let _publication = self.shared.publication.lock().ok();
+                if let Ok(mut state) = self.shared.state.lock() {
+                    state.shutting_down = true;
+                }
+            }
             let _ = self.shared.wake.try_send(());
             if let Ok(worker) = self.worker.get_mut()
                 && let Some(worker) = worker.take()
@@ -210,20 +218,33 @@ mod imp {
 
     fn run_worker(receiver: Receiver<()>, shared: Arc<Shared>, mut provider: impl TabProvider) {
         while receiver.recv().is_ok() {
-            if shared.shutting_down.load(Ordering::Acquire) {
+            if shared
+                .state
+                .lock()
+                .map(|state| state.shutting_down)
+                .unwrap_or(true)
+            {
                 break;
             }
             let tabs = provider.enumerate();
-            if shared.shutting_down.load(Ordering::Acquire) {
+            let Ok(_publication) = shared.publication.lock() else {
                 break;
-            }
-            if let Ok(mut state) = shared.state.lock() {
+            };
+            let published = if let Ok(mut state) = shared.state.lock() {
+                if state.shutting_down {
+                    break;
+                }
                 state.tabs = Arc::new(tabs);
                 state.last_refresh = Instant::now();
                 state.in_flight = false;
                 state.messages.push("Tab cache refreshed".into());
+                true
+            } else {
+                false
+            };
+            if published {
+                shared.updates.notify("browser_tabs");
             }
-            shared.updates.notify("browser_tabs");
         }
     }
 
@@ -537,7 +558,7 @@ mod imp {
         }
 
         #[test]
-        fn recalc_each_query_forces_once_per_distinct_filter_across_requery() {
+        fn recalc_each_query_coalesces_many_consumer_filters_per_cache_epoch() {
             let (started_tx, started_rx) = channel();
             let (release_tx, release_rx) = channel();
             let updates = Arc::new(PluginSearchUpdates::default());
@@ -550,7 +571,7 @@ mod imp {
                     },
                     Arc::clone(&updates),
                 ),
-                forced_filters: Mutex::new(VecDeque::new()),
+                last_forced_refresh: Mutex::new(None),
             };
 
             assert!(plugin.search("tab docs").is_empty());
@@ -576,19 +597,8 @@ mod imp {
             );
             assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
 
-            assert!(plugin.search("tab other").is_empty());
-            started_rx.recv().unwrap();
-            release_tx.send(Vec::new()).unwrap();
-            while updates.generation() < 2 {
-                std::thread::yield_now();
-            }
-
-            for _ in 0..8 {
-                let _ = plugin.search("tab docs");
-                let _ = crate::dashboard::widgets::plugin_home::search_plugin_actions(
-                    &plugin,
-                    "tab other",
-                );
+            for index in 0..40 {
+                let _ = plugin.search(&format!("tab consumer-{index}"));
             }
             assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
         }
@@ -600,7 +610,7 @@ impl BrowserTabsPlugin {
         Self {
             recalc_each_query: false,
             cache: imp::BrowserTabsCache::start(updates),
-            forced_filters: Mutex::new(VecDeque::new()),
+            last_forced_refresh: Mutex::new(None),
         }
     }
 
@@ -658,19 +668,15 @@ impl Plugin for BrowserTabsPlugin {
 
         let force = self.recalc_each_query
             && self
-                .forced_filters
+                .last_forced_refresh
                 .lock()
-                .map(|mut filters| {
-                    if filters.iter().any(|previous| previous == &filter) {
-                        false
-                    } else {
-                        const REMEMBERED_FILTERS: usize = 32;
-                        if filters.len() == REMEMBERED_FILTERS {
-                            filters.pop_front();
-                        }
-                        filters.push_back(filter.clone());
-                        true
+                .map(|mut last| {
+                    const FORCE_COOLDOWN: Duration = Duration::from_secs(2);
+                    let due = last.is_none_or(|instant| instant.elapsed() >= FORCE_COOLDOWN);
+                    if due {
+                        *last = Some(Instant::now());
                     }
+                    due
                 })
                 .unwrap_or(false);
         self.cache.cached_actions(&filter, force)
@@ -721,8 +727,8 @@ impl Plugin for BrowserTabsPlugin {
     fn apply_settings(&mut self, value: &serde_json::Value) {
         if let Ok(cfg) = serde_json::from_value::<BrowserTabsPluginSettings>(value.clone()) {
             self.recalc_each_query = cfg.recalc_each_query;
-            if let Ok(filters) = self.forced_filters.get_mut() {
-                filters.clear();
+            if let Ok(last) = self.last_forced_refresh.get_mut() {
+                *last = None;
             }
         }
     }

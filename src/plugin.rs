@@ -66,7 +66,7 @@ use libloading::Library;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub const CAP_GRID_RESULTS_COMPATIBLE: &str = "grid_results_compatible";
 pub const CAP_FORCE_LIST_RESULTS: &str = "force_list_results";
@@ -166,10 +166,26 @@ pub struct PluginInternalServices {
 }
 
 pub struct PluginManager {
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<Arc<RwLock<Box<dyn Plugin>>>>,
     services: PluginInternalServices,
     #[allow(dead_code)]
-    libs: Vec<libloading::Library>,
+    libs: Vec<Arc<libloading::Library>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct OwnedPluginHandle {
+    pub(crate) plugin: Arc<RwLock<Box<dyn Plugin>>>,
+    _libraries: Vec<Arc<libloading::Library>>,
+}
+
+impl OwnedPluginHandle {
+    #[cfg(test)]
+    pub(crate) fn for_test(plugin: Box<dyn Plugin>) -> Self {
+        Self {
+            plugin: Arc::new(RwLock::new(plugin)),
+            _libraries: Vec::new(),
+        }
+    }
 }
 
 impl Default for PluginManager {
@@ -388,7 +404,7 @@ impl PluginManager {
 
     pub fn register(&mut self, plugin: Box<dyn Plugin>) {
         tracing::debug!("registered plugin {}", plugin.name());
-        self.plugins.push(plugin);
+        self.plugins.push(Arc::new(RwLock::new(plugin)));
     }
 
     fn register_with_settings<P: Plugin + 'static>(
@@ -404,13 +420,12 @@ impl PluginManager {
 
     /// Return a list of registered plugin names.
     pub fn plugin_names(&self) -> Vec<String> {
-        self.plugins.iter().map(|p| p.name().to_string()).collect()
+        self.iter().map(|p| p.name().to_string()).collect()
     }
 
     /// Return names, descriptions and capabilities for all plugins.
     pub fn plugin_infos(&self) -> Vec<(String, String, Vec<String>)> {
-        self.plugins
-            .iter()
+        self.iter()
             .map(|p| {
                 (
                     p.name().to_string(),
@@ -424,7 +439,7 @@ impl PluginManager {
     /// Collect command shortcuts from plugins filtered by `enabled_plugins`.
     pub fn commands_filtered(&self, enabled_plugins: Option<&HashSet<String>>) -> Vec<Action> {
         let mut out = Vec::new();
-        for p in &self.plugins {
+        for p in self.iter() {
             if let Some(set) = enabled_plugins
                 && !set.contains(p.name())
             {
@@ -440,12 +455,25 @@ impl PluginManager {
         self.commands_filtered(None)
     }
 
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Box<dyn Plugin>> {
-        self.plugins.iter_mut()
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = RwLockWriteGuard<'_, Box<dyn Plugin>>> {
+        self.plugins.iter().filter_map(|plugin| plugin.write().ok())
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn Plugin>> {
-        self.plugins.iter()
+    pub fn iter(&self) -> impl Iterator<Item = RwLockReadGuard<'_, Box<dyn Plugin>>> {
+        self.plugins.iter().filter_map(|plugin| plugin.read().ok())
+    }
+
+    pub(crate) fn owned_plugin(&self, name: &str) -> Option<OwnedPluginHandle> {
+        self.plugins.iter().find_map(|plugin| {
+            let matches = plugin
+                .read()
+                .ok()
+                .is_some_and(|plugin| plugin.name() == name);
+            matches.then(|| OwnedPluginHandle {
+                plugin: Arc::clone(plugin),
+                _libraries: self.libs.clone(),
+            })
+        })
     }
 
     pub fn load_dir(
@@ -468,7 +496,7 @@ impl PluginManager {
             }
 
             unsafe {
-                let lib = Library::new(entry.path())?;
+                let lib = Arc::new(Library::new(entry.path())?);
                 let constructor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn Plugin>> =
                     lib.get(b"create_plugin")?;
                 let mut plugin = constructor();
@@ -476,7 +504,7 @@ impl PluginManager {
                     plugin.apply_settings(val);
                 }
                 let name = plugin.name().to_string();
-                self.plugins.push(plugin);
+                self.plugins.push(Arc::new(RwLock::new(plugin)));
                 self.libs.push(lib);
                 tracing::debug!("loaded plugin {name}");
             }
@@ -498,7 +526,7 @@ impl PluginManager {
             .map(str::to_ascii_lowercase);
         let mut actions = Vec::new();
         let perf_enabled = crate::performance::enabled();
-        for p in &self.plugins {
+        for p in self.iter() {
             let name = p.name();
             if let Some(list) = enabled_plugins
                 && !list.contains(name)

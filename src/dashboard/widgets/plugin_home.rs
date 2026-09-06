@@ -1,11 +1,13 @@
 use super::{
-    Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
+    BackgroundLoader, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
+    edit_typed_settings,
 };
 use crate::actions::Action;
 use crate::common::query::{apply_action_filters, split_action_filters};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -51,11 +53,13 @@ pub(crate) fn search_plugin_actions(
     apply_action_filters(actions, &filters)
 }
 
-#[derive(Default)]
 pub struct PluginHomeWidget {
     cfg: PluginHomeConfig,
     cached_source: Option<PluginHomeSource>,
     cached_actions: Vec<Action>,
+    cached_at: Option<Instant>,
+    requested_source: Option<PluginHomeSource>,
+    loader: BackgroundLoader<PluginHomeRequest, PluginHomeResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,20 +70,46 @@ struct PluginHomeSource {
     generation: u64,
 }
 
+struct PluginHomeRequest {
+    source: PluginHomeSource,
+    plugin: crate::plugin::OwnedPluginHandle,
+}
+
+struct PluginHomeResult {
+    source: PluginHomeSource,
+    actions: Vec<Action>,
+}
+
 impl PluginHomeWidget {
     pub fn new(cfg: PluginHomeConfig) -> Self {
         Self {
             cfg,
             cached_source: None,
             cached_actions: Vec::new(),
+            cached_at: None,
+            requested_source: None,
+            loader: BackgroundLoader::new(|request: PluginHomeRequest| {
+                let actions = request
+                    .plugin
+                    .plugin
+                    .read()
+                    .ok()
+                    .map(|plugin| match request.source.mode {
+                        PluginHomeMode::Commands => plugin.commands(),
+                        PluginHomeMode::Search if request.source.query.trim().is_empty() => {
+                            Vec::new()
+                        }
+                        PluginHomeMode::Search => {
+                            search_plugin_actions(&**plugin, &request.source.query)
+                        }
+                    })
+                    .unwrap_or_default();
+                PluginHomeResult {
+                    source: request.source,
+                    actions,
+                }
+            }),
         }
-    }
-
-    fn plugin<'a>(&self, ctx: &'a DashboardContext<'a>) -> Option<&'a dyn crate::plugin::Plugin> {
-        let name = self.plugin_name(ctx)?;
-        ctx.plugins
-            .iter()
-            .find_map(|p| if p.name() == name { Some(&**p) } else { None })
     }
 
     fn plugin_name<'a>(&'a self, ctx: &'a DashboardContext<'_>) -> Option<String> {
@@ -111,30 +141,34 @@ impl PluginHomeWidget {
         clicked
     }
 
-    fn actions_for(
+    fn update_actions(
         &mut self,
-        plugin_name: &str,
-        plugin: &dyn crate::plugin::Plugin,
-        generation: u64,
+        source: PluginHomeSource,
+        plugin: crate::plugin::OwnedPluginHandle,
+        repaint: &egui::Context,
     ) -> &[Action] {
-        let query = self.cfg.query_seed.clone().unwrap_or_default();
-        let source = PluginHomeSource {
-            plugin: plugin_name.to_string(),
-            mode: self.cfg.mode,
-            query: query.clone(),
-            generation: if self.cfg.mode == PluginHomeMode::Search {
-                generation
-            } else {
-                0
-            },
-        };
-        if self.cached_source.as_ref() != Some(&source) {
-            self.cached_actions = match self.cfg.mode {
-                PluginHomeMode::Commands => plugin.commands(),
-                PluginHomeMode::Search if query.trim().is_empty() => Vec::new(),
-                PluginHomeMode::Search => search_plugin_actions(plugin, &query),
-            };
-            self.cached_source = Some(source);
+        if let Some(result) = self.loader.poll() {
+            self.requested_source = None;
+            if result.source == source {
+                self.cached_source = Some(result.source);
+                self.cached_actions = result.actions;
+                self.cached_at = Some(Instant::now());
+            }
+        }
+        let stale = self.cached_source.as_ref() != Some(&source)
+            || self
+                .cached_at
+                .is_none_or(|cached_at| cached_at.elapsed() >= Duration::from_secs(2));
+        if stale && self.requested_source.as_ref() != Some(&source) {
+            if self.loader.request(
+                PluginHomeRequest {
+                    source: source.clone(),
+                    plugin,
+                },
+                repaint,
+            ) {
+                self.requested_source = Some(source);
+            }
         }
         &self.cached_actions
     }
@@ -213,7 +247,7 @@ impl Widget for PluginHomeWidget {
             return None;
         };
 
-        let Some(plugin) = self.plugin(ctx) else {
+        let Some(plugin) = ctx.plugins.owned_plugin(&plugin_name) else {
             ui.colored_label(
                 egui::Color32::YELLOW,
                 format!("Plugin '{plugin_name}' not found."),
@@ -233,7 +267,17 @@ impl Widget for PluginHomeWidget {
             ui.label("Set a query to preview search results.");
         }
         let generation = Self::source_generation(ctx, &plugin_name);
-        let actions = self.actions_for(&plugin_name, plugin, generation).to_vec();
+        let source = PluginHomeSource {
+            plugin: plugin_name,
+            mode: self.cfg.mode,
+            query: self.cfg.query_seed.clone().unwrap_or_default(),
+            generation: if self.cfg.mode == PluginHomeMode::Search {
+                generation
+            } else {
+                0
+            },
+        };
+        let actions = self.update_actions(source, plugin, ui.ctx()).to_vec();
 
         if actions.is_empty() {
             ui.label("No actions available for this plugin.");
@@ -248,21 +292,32 @@ impl Widget for PluginHomeWidget {
             self.cfg = cfg;
             self.cached_source = None;
             self.cached_actions.clear();
+            self.cached_at = None;
+            self.requested_source = None;
         }
+    }
+}
+
+impl Default for PluginHomeWidget {
+    fn default() -> Self {
+        Self::new(PluginHomeConfig::default())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::{TryRecvError, channel};
+    use std::sync::mpsc::channel;
 
-    struct BlockedPlugin(std::sync::mpsc::Sender<()>);
+    struct BlockedPlugin {
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
 
     impl crate::plugin::Plugin for BlockedPlugin {
         fn search(&self, _query: &str) -> Vec<Action> {
-            self.0.send(()).unwrap();
-            std::thread::park();
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
             Vec::new()
         }
         fn name(&self) -> &str {
@@ -295,36 +350,41 @@ mod tests {
     }
 
     #[test]
-    fn cached_render_source_does_not_reenter_blocked_provider() {
+    fn cold_render_boundary_returns_before_blocked_provider() {
         let (started_tx, started_rx) = channel();
-        let plugin = BlockedPlugin(started_tx);
+        let (release_tx, release_rx) = channel();
+        let plugin = crate::plugin::OwnedPluginHandle::for_test(Box::new(BlockedPlugin {
+            started: started_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }));
         let mut widget = PluginHomeWidget::new(PluginHomeConfig {
             plugin: Some("blocked".into()),
             mode: PluginHomeMode::Search,
             query_seed: Some("blocked query".into()),
             limit: 5,
         });
-        widget.cached_source = Some(PluginHomeSource {
+        let source = PluginHomeSource {
             plugin: "blocked".into(),
             mode: PluginHomeMode::Search,
             query: "blocked query".into(),
             generation: 7,
-        });
-        widget.cached_actions = vec![Action {
-            label: "cached".into(),
-            desc: "cached".into(),
-            action: "cached".into(),
-            args: None,
-        }];
+        };
 
-        assert_eq!(widget.actions_for("blocked", &plugin, 7).len(), 1);
-        assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            widget
+                .update_actions(source, plugin, &egui::Context::default())
+                .is_empty()
+        );
+        started_rx.recv().unwrap();
+        release_tx.send(()).unwrap();
     }
 
     #[test]
     fn source_generation_invalidates_cached_results_once() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let plugin = CountingPlugin(std::sync::Arc::clone(&calls));
+        let plugin = crate::plugin::OwnedPluginHandle::for_test(Box::new(CountingPlugin(
+            std::sync::Arc::clone(&calls),
+        )));
         let mut widget = PluginHomeWidget::new(PluginHomeConfig {
             plugin: Some("counting".into()),
             mode: PluginHomeMode::Search,
@@ -332,10 +392,30 @@ mod tests {
             limit: 5,
         });
 
-        widget.actions_for("counting", &plugin, 3);
-        widget.actions_for("counting", &plugin, 3);
+        let source = PluginHomeSource {
+            plugin: "counting".into(),
+            mode: PluginHomeMode::Search,
+            query: "query".into(),
+            generation: 3,
+        };
+        widget.update_actions(source.clone(), plugin.clone(), &egui::Context::default());
+        while calls.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            std::thread::yield_now();
+        }
+        while widget.cached_source.as_ref() != Some(&source) {
+            widget.update_actions(source.clone(), plugin.clone(), &egui::Context::default());
+            std::thread::yield_now();
+        }
+        widget.update_actions(source.clone(), plugin.clone(), &egui::Context::default());
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-        widget.actions_for("counting", &plugin, 4);
+        let changed = PluginHomeSource {
+            generation: 4,
+            ..source
+        };
+        widget.update_actions(changed, plugin, &egui::Context::default());
+        while calls.load(std::sync::atomic::Ordering::Relaxed) < 2 {
+            std::thread::yield_now();
+        }
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

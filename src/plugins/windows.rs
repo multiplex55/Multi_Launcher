@@ -46,13 +46,14 @@ struct CacheState {
     windows: Arc<Vec<WindowInfo>>,
     fresh_until: Option<Instant>,
     in_flight: bool,
+    shutting_down: bool,
 }
 
 struct WindowCache {
     state: Arc<Mutex<CacheState>>,
     wake: SyncSender<()>,
-    shutting_down: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    publication: Arc<Mutex<()>>,
 }
 
 impl WindowCache {
@@ -61,20 +62,23 @@ impl WindowCache {
             windows: Arc::new(Vec::new()),
             fresh_until: None,
             in_flight: false,
+            shutting_down: false,
         }));
-        let shutting_down = Arc::new(AtomicBool::new(false));
         let (wake, receiver) = sync_channel(1);
+        let publication = Arc::new(Mutex::new(()));
         let worker_state = Arc::clone(&state);
-        let worker_shutdown = Arc::clone(&shutting_down);
         let worker = thread::Builder::new()
             .name("window-enumeration-refresh".into())
-            .spawn(move || run_worker(receiver, worker_state, worker_shutdown, provider, updates))
+            .spawn({
+                let publication = Arc::clone(&publication);
+                move || run_worker(receiver, worker_state, publication, provider, updates)
+            })
             .expect("start window enumeration worker");
         Self {
             state,
             wake,
-            shutting_down,
             worker: Mutex::new(Some(worker)),
+            publication,
         }
     }
 
@@ -98,7 +102,12 @@ impl WindowCache {
 
 impl Drop for WindowCache {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::Release);
+        {
+            let _publication = self.publication.lock().ok();
+            if let Ok(mut state) = self.state.lock() {
+                state.shutting_down = true;
+            }
+        }
         let _ = self.wake.try_send(());
         if let Ok(worker) = self.worker.get_mut()
             && let Some(worker) = worker.take()
@@ -121,24 +130,36 @@ impl Drop for WindowCache {
 fn run_worker(
     receiver: Receiver<()>,
     state: Arc<Mutex<CacheState>>,
-    shutting_down: Arc<AtomicBool>,
+    publication: Arc<Mutex<()>>,
     mut provider: impl WindowProvider,
     updates: Arc<PluginSearchUpdates>,
 ) {
     while receiver.recv().is_ok() {
-        if shutting_down.load(Ordering::Acquire) {
+        if state
+            .lock()
+            .map(|state| state.shutting_down)
+            .unwrap_or(true)
+        {
             break;
         }
         let windows = provider.enumerate();
-        if shutting_down.load(Ordering::Acquire) {
+        let Ok(_publication) = publication.lock() else {
             break;
-        }
-        if let Ok(mut state) = state.lock() {
+        };
+        let published = if let Ok(mut state) = state.lock() {
+            if state.shutting_down {
+                break;
+            }
             state.windows = Arc::new(windows);
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
+            true
+        } else {
+            false
+        };
+        if published {
+            updates.notify("windows");
         }
-        updates.notify("windows");
     }
 }
 

@@ -1782,7 +1782,7 @@ impl LauncherApp {
                 .iter()
                 .any(|prefix| prefix.eq_ignore_ascii_case(head))
             {
-                prefixed_matches.push(plugin.as_ref());
+                prefixed_matches.push(plugin);
             }
         }
 
@@ -1796,7 +1796,7 @@ impl LauncherApp {
             return false;
         }
 
-        let plugin = prefixed_matches[0];
+        let plugin = &**prefixed_matches[0];
         if self
             .query_results_layout
             .plugin_opt_out

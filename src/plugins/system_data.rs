@@ -71,6 +71,7 @@ struct CacheState {
     snapshot: Option<Arc<SystemDataSnapshot>>,
     fresh_until: Option<Instant>,
     in_flight: bool,
+    shutting_down: bool,
 }
 
 #[derive(Clone)]
@@ -88,6 +89,7 @@ impl SystemDataCache {
                 snapshot: Some(Arc::new(snapshot)),
                 fresh_until: Some(Instant::now() + REFRESH_TTL),
                 in_flight: false,
+                shutting_down: false,
             })),
             wake,
         }
@@ -109,7 +111,7 @@ impl SystemDataCache {
 
 pub(crate) struct SystemDataRuntime {
     cache: SystemDataCache,
-    shutting_down: Arc<AtomicBool>,
+    publication: Arc<Mutex<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -124,16 +126,18 @@ impl SystemDataRuntime {
     ) -> Self {
         let (wake, receiver) = sync_channel(1);
         let state = Arc::new(Mutex::new(CacheState::default()));
-        let shutting_down = Arc::new(AtomicBool::new(false));
         let worker_state = Arc::clone(&state);
-        let worker_shutdown = Arc::clone(&shutting_down);
+        let publication = Arc::new(Mutex::new(()));
         let worker = thread::Builder::new()
             .name("plugin-system-data-refresh".into())
-            .spawn(move || run_worker(receiver, worker_state, worker_shutdown, provider, updates))
+            .spawn({
+                let publication = Arc::clone(&publication);
+                move || run_worker(receiver, worker_state, publication, provider, updates)
+            })
             .expect("start plugin system-data worker");
         let runtime = Self {
             cache: SystemDataCache { state, wake },
-            shutting_down,
+            publication,
             worker: Some(worker),
         };
         runtime
@@ -146,7 +150,12 @@ impl SystemDataRuntime {
 
 impl Drop for SystemDataRuntime {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::Release);
+        {
+            let _publication = self.publication.lock().ok();
+            if let Ok(mut state) = self.cache.state.lock() {
+                state.shutting_down = true;
+            }
+        }
         let _ = self.cache.wake.try_send(());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -157,24 +166,36 @@ impl Drop for SystemDataRuntime {
 fn run_worker(
     receiver: Receiver<()>,
     state: Arc<Mutex<CacheState>>,
-    shutting_down: Arc<AtomicBool>,
+    publication: Arc<Mutex<()>>,
     mut provider: impl SystemDataProvider,
     updates: Arc<PluginSearchUpdates>,
 ) {
     while receiver.recv().is_ok() {
-        if shutting_down.load(Ordering::Acquire) {
+        if state
+            .lock()
+            .map(|state| state.shutting_down)
+            .unwrap_or(true)
+        {
             break;
         }
         let snapshot = provider.refresh();
-        if shutting_down.load(Ordering::Acquire) {
+        let Ok(_publication) = publication.lock() else {
             break;
-        }
-        if let Ok(mut state) = state.lock() {
+        };
+        let published = if let Ok(mut state) = state.lock() {
+            if state.shutting_down {
+                break;
+            }
             state.snapshot = Some(Arc::new(snapshot));
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
+            true
+        } else {
+            false
+        };
+        if published {
+            updates.notify("system_data");
         }
-        updates.notify("system_data");
     }
 }
 
@@ -256,5 +277,37 @@ mod tests {
         release_tx.send(()).unwrap();
         repaint_rx.recv().unwrap();
         drop(runtime);
+    }
+
+    #[test]
+    fn drop_during_active_refresh_suppresses_publication_and_repaint() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let runtime = SystemDataRuntime::start_with_provider(
+            ControlledProvider {
+                started: started_tx,
+                release: release_rx,
+                snapshot: SystemDataSnapshot::default(),
+            },
+            Arc::clone(&updates),
+        );
+        let state = Arc::clone(&runtime.cache.state);
+        runtime.cache().snapshot_and_refresh();
+        started_rx.recv().unwrap();
+        let (dropped_tx, dropped_rx) = channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            dropped_tx.send(()).unwrap();
+        });
+        while !state.lock().unwrap().shutting_down {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+        dropped_rx.recv().unwrap();
+        assert_eq!(updates.generation(), 0);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

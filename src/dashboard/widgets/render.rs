@@ -60,6 +60,10 @@ impl<R: Send + 'static, T: Send + 'static> BackgroundLoader<R, T> {
         }
     }
 
+    pub(crate) fn is_in_flight(&self) -> bool {
+        self.in_flight
+    }
+
     pub(crate) fn poll(&mut self) -> Option<T> {
         match self.results.try_recv() {
             Ok(result) => {
@@ -122,6 +126,28 @@ pub(crate) fn observe_search_generation(
     true
 }
 
+pub(crate) fn observe_owned_search_publication(
+    mode: RefreshMode,
+    generation: u64,
+    last_generation: &mut u64,
+    awaiting_generation: &mut Option<u64>,
+    refresh_pending: &mut bool,
+) -> bool {
+    if mode != RefreshMode::Manual {
+        return observe_search_generation(generation, last_generation, refresh_pending);
+    }
+    let Some(request_generation) = *awaiting_generation else {
+        return false;
+    };
+    if generation <= request_generation {
+        return false;
+    }
+    *awaiting_generation = None;
+    *last_generation = generation;
+    *refresh_pending = true;
+    true
+}
+
 pub(crate) fn merge_json(base: &Value, updates: &Value) -> Value {
     match (base, updates) {
         (Value::Object(a), Value::Object(b)) => {
@@ -165,10 +191,8 @@ pub(crate) fn plugin_names(ctx: &WidgetSettingsContext<'_>) -> Vec<String> {
 pub(crate) fn find_plugin<'a>(
     ctx: &'a DashboardContext<'a>,
     name: &str,
-) -> Option<&'a dyn crate::plugin::Plugin> {
-    ctx.plugins
-        .iter()
-        .find_map(|p| if p.name() == name { Some(&**p) } else { None })
+) -> Option<std::sync::RwLockReadGuard<'a, Box<dyn crate::plugin::Plugin>>> {
+    ctx.plugins.iter().find(|plugin| plugin.name() == name)
 }
 
 pub(crate) fn gesture_focus_action(
@@ -440,8 +464,8 @@ pub(crate) fn refresh_settings_ui(
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundLoader, TimedCache, merge_json, observe_search_generation,
-        submit_background_refresh,
+        BackgroundLoader, RefreshMode, TimedCache, merge_json, observe_owned_search_publication,
+        observe_search_generation, submit_background_refresh,
     };
     use crate::plugin::PluginSearchUpdates;
     use serde_json::json;
@@ -572,5 +596,37 @@ mod tests {
             &mut manual_refresh_pending,
         ));
         assert!(!manual_refresh_pending);
+    }
+
+    #[test]
+    fn manual_request_consumes_own_later_publication_exactly_once() {
+        let mut observed = 3;
+        let mut awaiting = Some(3);
+        let mut pending = false;
+        assert!(!observe_owned_search_publication(
+            RefreshMode::Manual,
+            3,
+            &mut observed,
+            &mut awaiting,
+            &mut pending,
+        ));
+        assert!(observe_owned_search_publication(
+            RefreshMode::Manual,
+            4,
+            &mut observed,
+            &mut awaiting,
+            &mut pending,
+        ));
+        assert!(pending);
+        assert_eq!(awaiting, None);
+        pending = false;
+        assert!(!observe_owned_search_publication(
+            RefreshMode::Manual,
+            5,
+            &mut observed,
+            &mut awaiting,
+            &mut pending,
+        ));
+        assert!(!pending);
     }
 }

@@ -187,11 +187,12 @@ impl MacroDialog {
                 });
                 // Collect plugin names matching the fuzzy category filter,
                 // including the special `app` category.
+                let available_plugin_names = app.plugins.plugin_names();
                 let plugin_names = MacroDialog::matching_plugins(
                     &self.category_filter,
-                    app.plugins
+                    available_plugin_names
                         .iter()
-                        .map(|p| p.name())
+                        .map(String::as_str)
                         .chain(std::iter::once("app")),
                 );
                 egui::ScrollArea::vertical()

@@ -1,7 +1,8 @@
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
-    default_refresh_throttle_secs, edit_typed_settings, find_plugin, observe_search_generation,
-    plugin_names, query_suggestions, refresh_schedule, refresh_settings_ui, run_refresh_schedule,
+    default_refresh_throttle_secs, edit_typed_settings, find_plugin,
+    observe_owned_search_publication, plugin_names, query_suggestions, refresh_schedule,
+    refresh_settings_ui, run_refresh_schedule,
 };
 use crate::actions::Action;
 use crate::common::query::{apply_action_filters, split_action_filters};
@@ -76,6 +77,7 @@ pub struct PinnedQueryResultsWidget {
     error: Option<String>,
     refresh_pending: bool,
     last_search_generation: u64,
+    awaiting_generation: Option<u64>,
 }
 
 impl PinnedQueryResultsWidget {
@@ -87,6 +89,7 @@ impl PinnedQueryResultsWidget {
             error: None,
             refresh_pending: false,
             last_search_generation: 0,
+            awaiting_generation: None,
         }
     }
 
@@ -266,16 +269,19 @@ impl PinnedQueryResultsWidget {
 
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
-        observe_search_generation(
-            ctx.plugins.search_generation_for(self.cfg.engine.trim()),
-            &mut self.last_search_generation,
-            &mut self.refresh_pending,
-        );
+        let generation = ctx.plugins.search_generation_for(self.cfg.engine.trim());
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
+        );
+        observe_owned_search_publication(
+            schedule.mode,
+            generation,
+            &mut self.last_search_generation,
+            &mut self.awaiting_generation,
+            &mut self.refresh_pending,
         );
         if run_refresh_schedule(
             ctx,
@@ -284,6 +290,9 @@ impl PinnedQueryResultsWidget {
             &mut self.cache.last_refresh,
         ) {
             self.refresh(ctx);
+            if schedule.mode == RefreshMode::Manual {
+                self.awaiting_generation = Some(generation);
+            }
         }
     }
 
