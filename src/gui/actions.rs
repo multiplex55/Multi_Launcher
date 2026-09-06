@@ -1535,6 +1535,37 @@ mod tests {
         assert!(!app.usage.contains_key("mg:toggle"));
         std::env::set_current_dir(original_dir).unwrap();
     }
+
+    #[test]
+    fn mouse_gesture_toggle_rejects_corrupt_store_without_replacing_bytes() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(directory.path()).unwrap();
+        let original = b"{broken";
+        std::fs::write(crate::mouse_gestures::db::GESTURES_FILE, original).unwrap();
+
+        let context = egui::Context::default();
+        let mut app = new_app(&context);
+        let args = crate::mouse_gestures::selection::GestureToggleArgs {
+            label: "Back".into(),
+            tokens: "L".into(),
+            dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+            enabled: false,
+        };
+        app.activate_action(
+            mouse_gesture_action("mg:toggle", Some(serde_json::to_string(&args).unwrap())),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert_eq!(
+            std::fs::read(crate::mouse_gestures::db::GESTURES_FILE).unwrap(),
+            original
+        );
+        assert!(!app.usage.contains_key("mg:toggle"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
 }
 
 #[cfg(test)]

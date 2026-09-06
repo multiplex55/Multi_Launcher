@@ -272,6 +272,23 @@ fn publish_loaded_or_retain<T>(
     }
 }
 
+fn publish_gesture_db_or_retain(
+    current: &Arc<GestureDb>,
+    loaded: anyhow::Result<GestureDb>,
+) -> Arc<GestureDb> {
+    match loaded {
+        Ok(db) if db == **current => Arc::clone(current),
+        Ok(db) => Arc::new(db),
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                "failed to refresh gestures; retaining last-good data"
+            );
+            Arc::clone(current)
+        }
+    }
+}
+
 impl ProductionDashboardBackend {
     fn system_status(&mut self, system: &mut System) -> SystemStatusSnapshot {
         system.refresh_cpu_usage();
@@ -376,8 +393,9 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             publish_loaded_or_retain(&mut next.favorites, load_favs(FAV_FILE), "favorites");
         }
         if batch.contains(DashboardRefreshRequest::Gestures) {
+            let db = publish_gesture_db_or_retain(&next.gestures.db, load_gestures(GESTURES_FILE));
             next.gestures = Arc::new(GestureSnapshot {
-                db: Arc::new(load_gestures(GESTURES_FILE).unwrap_or_default()),
+                db,
                 usage: Arc::new(load_usage(GESTURES_USAGE_FILE)),
             });
         }
@@ -554,6 +572,32 @@ mod tests {
         }];
         publish_loaded_or_retain(&mut current, Ok(recovered.clone()), "snippets");
         assert_eq!(current.as_ref(), &recovered);
+    }
+
+    #[test]
+    fn gesture_refresh_retains_last_good_recovers_and_deduplicates_self_write() {
+        let initial = Arc::new(GestureDb::default());
+        let retained =
+            publish_gesture_db_or_retain(&initial, Err(anyhow::anyhow!("malformed gestures")));
+        assert!(Arc::ptr_eq(&retained, &initial));
+
+        let duplicate = publish_gesture_db_or_retain(&retained, Ok(GestureDb::default()));
+        assert!(Arc::ptr_eq(&duplicate, &initial));
+
+        let mut recovered_db = GestureDb::default();
+        recovered_db
+            .gestures
+            .push(crate::mouse_gestures::db::GestureEntry {
+                label: "recovered".into(),
+                tokens: "L".into(),
+                dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: Vec::new(),
+            });
+        let recovered = publish_gesture_db_or_retain(&duplicate, Ok(recovered_db.clone()));
+        assert!(!Arc::ptr_eq(&recovered, &initial));
+        assert_eq!(*recovered, recovered_db);
     }
 
     #[test]

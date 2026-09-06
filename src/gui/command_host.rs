@@ -199,19 +199,25 @@ impl MouseGestureCommandHost for LauncherApp {
         &mut self,
         args: &crate::mouse_gestures::selection::GestureToggleArgs,
     ) -> Result<(), String> {
-        let mut db =
-            crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
-                .unwrap_or_default();
-        let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
-            gesture.label == args.label
-                && gesture.tokens == args.tokens
-                && gesture.dir_mode == args.dir_mode
-        }) else {
-            return Ok(());
-        };
-        gesture.enabled = args.enabled;
-        crate::mouse_gestures::db::save_gestures(crate::mouse_gestures::db::GESTURES_FILE, &db)
-            .map_err(|error| error.to_string())?;
+        let committed = crate::mouse_gestures::db::update_gestures(
+            crate::mouse_gestures::db::GESTURES_FILE,
+            |db| {
+                let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
+                    gesture.label == args.label
+                        && gesture.tokens == args.tokens
+                        && gesture.dir_mode == args.dir_mode
+                }) else {
+                    return Ok(false);
+                };
+                if gesture.enabled == args.enabled {
+                    return Ok(false);
+                }
+                gesture.enabled = args.enabled;
+                Ok(true)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        crate::plugins::mouse_gestures::publish_committed_gesture_db(committed);
         self.dashboard_data_cache
             .request_refresh(DashboardRefreshRequest::Gestures);
         Ok(())

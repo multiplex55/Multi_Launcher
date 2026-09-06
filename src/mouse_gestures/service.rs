@@ -224,9 +224,16 @@ impl MouseGestureService {
         right_click_backend: Arc<dyn RightClickBackend>,
         cursor_provider: Arc<dyn CursorPositionProvider>,
     ) -> Self {
-        let db = load_gestures(GESTURES_FILE)
-            .map(|db| Arc::new(Mutex::new(db)))
-            .ok();
+        let db = match load_gestures(GESTURES_FILE) {
+            Ok(db) => Some(Arc::new(Mutex::new(db))),
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "failed to load mouse gestures; service starts without definitions"
+                );
+                None
+            }
+        };
         Self {
             config: MouseGestureConfig::default(),
             db,

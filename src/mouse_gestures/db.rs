@@ -1,12 +1,16 @@
 use crate::actions::Action;
+use crate::common::persistence::{LoadState, PersistenceError, read_bytes, save_json_atomic};
 use crate::mouse_gestures::engine::DirMode;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const GESTURES_FILE: &str = "mouse_gestures.json";
 pub const SCHEMA_VERSION: u32 = 2;
 const LEGACY_SCHEMA_VERSION: u32 = 1;
+static GESTURES_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -480,19 +484,48 @@ impl BindingEntry {
     }
 }
 
-pub fn load_gestures(path: &str) -> anyhow::Result<GestureDb> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(GestureDb::default());
+pub fn load_gestures(path: impl AsRef<Path>) -> anyhow::Result<GestureDb> {
+    let _transaction = gestures_transaction_guard();
+    load_gestures_plan(path.as_ref()).map(|(db, _)| db)
+}
+
+pub fn load_gestures_typed(path: impl AsRef<Path>) -> anyhow::Result<LoadState<GestureDb>> {
+    let path = path.as_ref();
+    match read_bytes(path)? {
+        LoadState::Missing => Ok(LoadState::Missing),
+        LoadState::Empty => Ok(LoadState::Empty),
+        LoadState::Loaded(bytes) => decode_gestures(path, &bytes).map(LoadState::Loaded),
     }
-    let raw: serde_json::Value = serde_json::from_str(&content)?;
+}
+
+fn load_gestures_plan(path: &Path) -> anyhow::Result<(GestureDb, bool)> {
+    match read_bytes(path)? {
+        LoadState::Missing | LoadState::Empty => Ok((GestureDb::default(), false)),
+        LoadState::Loaded(bytes) => decode_gestures_plan(path, &bytes),
+    }
+}
+
+fn decode_gestures(path: &Path, bytes: &[u8]) -> anyhow::Result<GestureDb> {
+    decode_gestures_plan(path, bytes).map(|(db, _)| db)
+}
+
+fn decode_gestures_plan(path: &Path, bytes: &[u8]) -> anyhow::Result<(GestureDb, bool)> {
+    let raw: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|source| PersistenceError::MalformedJson {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let version = raw
         .get("schema_version")
         .and_then(|v| v.as_u64())
         .unwrap_or(LEGACY_SCHEMA_VERSION as u64) as u32;
     if version == SCHEMA_VERSION {
-        let db: GestureDb = serde_json::from_value(raw)?;
-        return Ok(db);
+        let db: GestureDb =
+            serde_json::from_value(raw).map_err(|source| PersistenceError::MalformedJson {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        return Ok((db, false));
     }
     if version != LEGACY_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
@@ -501,7 +534,11 @@ pub fn load_gestures(path: &str) -> anyhow::Result<GestureDb> {
         ));
     }
 
-    let legacy: LegacyGestureDb = serde_json::from_value(raw)?;
+    let legacy: LegacyGestureDb =
+        serde_json::from_value(raw).map_err(|source| PersistenceError::MalformedJson {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let gestures = legacy
         .gestures
         .into_iter()
@@ -518,18 +555,57 @@ pub fn load_gestures(path: &str) -> anyhow::Result<GestureDb> {
                 .collect(),
         })
         .collect();
-    Ok(GestureDb {
-        schema_version: SCHEMA_VERSION,
-        gestures,
+    Ok((
+        GestureDb {
+            schema_version: SCHEMA_VERSION,
+            gestures,
+        },
+        true,
+    ))
+}
+
+pub fn save_gestures(path: impl AsRef<Path>, db: &GestureDb) -> anyhow::Result<()> {
+    replace_gestures(path, db.clone()).map(|_| ())
+}
+
+pub fn replace_gestures(
+    path: impl AsRef<Path>,
+    replacement: GestureDb,
+) -> anyhow::Result<GestureDb> {
+    update_gestures(path, move |db| {
+        *db = replacement;
+        Ok(true)
     })
 }
 
-pub fn save_gestures(path: &str, db: &GestureDb) -> anyhow::Result<()> {
-    let mut db = db.clone();
+pub fn update_gestures(
+    path: impl AsRef<Path>,
+    mutate: impl FnOnce(&mut GestureDb) -> anyhow::Result<bool>,
+) -> anyhow::Result<GestureDb> {
+    update_gestures_with_save(path.as_ref(), mutate, |path, db| {
+        save_json_atomic(path, db).map_err(Into::into)
+    })
+}
+
+fn update_gestures_with_save(
+    path: &Path,
+    mutate: impl FnOnce(&mut GestureDb) -> anyhow::Result<bool>,
+    save: impl FnOnce(&Path, &GestureDb) -> anyhow::Result<()>,
+) -> anyhow::Result<GestureDb> {
+    let _transaction = gestures_transaction_guard();
+    let (mut db, migrated) = load_gestures_plan(path)?;
+    let changed = mutate(&mut db)?;
     db.schema_version = SCHEMA_VERSION;
-    let json = serde_json::to_string_pretty(&db)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    if changed || migrated {
+        save(path, &db)?;
+    }
+    Ok(db)
+}
+
+fn gestures_transaction_guard() -> MutexGuard<'static, ()> {
+    GESTURES_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn format_gesture_label(gesture: &GestureEntry) -> String {
@@ -631,6 +707,137 @@ struct LegacyBindingEntry {
     enabled: bool,
     #[serde(default)]
     use_query: bool,
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn gesture(label: &str, tokens: &str) -> GestureEntry {
+        GestureEntry {
+            label: label.into(),
+            tokens: tokens.into(),
+            dir_mode: DirMode::Four,
+            stroke: Vec::new(),
+            enabled: true,
+            bindings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn typed_states_and_missing_empty_defaults_are_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert!(matches!(
+            load_gestures_typed(&missing).unwrap(),
+            LoadState::Missing
+        ));
+        assert_eq!(load_gestures(&missing).unwrap(), GestureDb::default());
+
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, " \r\n\t").unwrap();
+        assert!(matches!(
+            load_gestures_typed(&empty).unwrap(),
+            LoadState::Empty
+        ));
+        assert_eq!(load_gestures(&empty).unwrap(), GestureDb::default());
+
+        let valid = directory.path().join("valid.json");
+        save_json_atomic(&valid, &GestureDb::default()).unwrap();
+        assert!(matches!(
+            load_gestures_typed(&valid).unwrap(),
+            LoadState::Loaded(_)
+        ));
+
+        let malformed = directory.path().join("malformed.json");
+        std::fs::write(&malformed, b"{broken").unwrap();
+        let error = load_gestures_typed(&malformed).unwrap_err();
+        assert!(error.downcast_ref::<PersistenceError>().is_some());
+        assert!(load_gestures_typed(directory.path()).is_err());
+    }
+
+    #[test]
+    fn corrupt_and_unreadable_documents_reject_replacement_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gestures.json");
+        let original = b"{broken";
+        std::fs::write(&path, original).unwrap();
+        assert!(save_gestures(&path, &GestureDb::default()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        assert!(save_gestures(directory.path(), &GestureDb::default()).is_err());
+        assert!(directory.path().is_dir());
+    }
+
+    #[test]
+    fn v1_migration_persists_only_after_successful_transaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gestures.json");
+        std::fs::write(&path, br#"{"schema_version":1,"gestures":[]}"#).unwrap();
+        let loaded = load_gestures(&path).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["schema_version"],
+            1
+        );
+
+        let committed = update_gestures(&path, |_| Ok(false)).unwrap();
+        assert_eq!(committed.schema_version, SCHEMA_VERSION);
+        assert_eq!(load_gestures(&path).unwrap(), committed);
+    }
+
+    #[test]
+    fn failed_save_retains_disk_and_concurrent_updates_both_survive() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gestures.json");
+        save_json_atomic(&path, &GestureDb::default()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let failed = update_gestures_with_save(
+            &path,
+            |db| {
+                db.gestures.push(gesture("failed", "L"));
+                Ok(true)
+            },
+            |_path, _db| anyhow::bail!("injected save failure"),
+        );
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let path = Arc::new(directory.path().join("nested").join("gestures.json"));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut threads = Vec::new();
+        for (label, tokens) in [("left", "L"), ("right", "R")] {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                update_gestures(path.as_path(), |db| {
+                    db.gestures.push(gesture(label, tokens));
+                    Ok(true)
+                })
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        let loaded = load_gestures(path.as_path()).unwrap();
+        assert!(
+            loaded
+                .gestures
+                .iter()
+                .any(|gesture| gesture.label == "left")
+        );
+        assert!(
+            loaded
+                .gestures
+                .iter()
+                .any(|gesture| gesture.label == "right")
+        );
+        let json = std::fs::read_to_string(path.as_path()).unwrap();
+        assert!(json.contains("\n  \"schema_version\""));
+    }
 }
 
 impl LegacyBindingEntry {

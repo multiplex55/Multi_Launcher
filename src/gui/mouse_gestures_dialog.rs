@@ -2,7 +2,7 @@ use crate::gui::LauncherApp;
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mouse_gestures::db::{
     BindingEntry, BindingKind, GESTURES_FILE, GestureDb, GestureEntry, format_gesture_label,
-    load_gestures, save_gestures,
+    load_gestures,
 };
 use crate::mouse_gestures::engine::{DirMode, GestureTracker};
 use crate::mouse_gestures::service::MouseGestureConfig;
@@ -418,6 +418,8 @@ impl BindingDialog {
 pub struct MgGesturesDialog {
     pub open: bool,
     db: GestureDb,
+    committed_db: GestureDb,
+    load_error: Option<String>,
     selected_idx: Option<usize>,
     rename_idx: Option<usize>,
     rename_label: String,
@@ -441,6 +443,8 @@ impl Default for MgGesturesDialog {
         Self {
             open: false,
             db: GestureDb::default(),
+            committed_db: GestureDb::default(),
+            load_error: None,
             selected_idx: None,
             rename_idx: None,
             rename_label: String::new(),
@@ -462,7 +466,7 @@ impl MgGesturesDialog {
     }
 
     pub fn open(&mut self) {
-        self.db = load_gestures(GESTURES_FILE).unwrap_or_default();
+        self.reload_from(GESTURES_FILE);
         self.open = true;
         self.selected_idx = self.sorted_gesture_indices().into_iter().next();
         self.rename_idx = None;
@@ -470,6 +474,20 @@ impl MgGesturesDialog {
         self.token_buffer.clear();
         self.binding_dialog.open = false;
         self.ensure_selection();
+    }
+
+    fn reload_from(&mut self, path: impl AsRef<std::path::Path>) {
+        match load_gestures(path) {
+            Ok(db) => {
+                self.committed_db = db.clone();
+                self.db = db;
+                self.load_error = None;
+            }
+            Err(error) => {
+                self.db = self.committed_db.clone();
+                self.load_error = Some(format!("Failed to load mouse gestures: {error}"));
+            }
+        }
     }
 
     pub fn open_focus(&mut self, label: &str, tokens: &str, dir_mode: DirMode) {
@@ -487,11 +505,16 @@ impl MgGesturesDialog {
 
     pub fn open_add(&mut self) {
         self.open();
-        self.add_gesture();
+        if self.load_error.is_none() {
+            self.add_gesture();
+        }
     }
 
     pub fn open_binding_editor(&mut self) {
         self.open();
+        if self.load_error.is_some() {
+            return;
+        }
         if self.db.gestures.is_empty() {
             self.add_gesture();
         } else {
@@ -600,14 +623,42 @@ impl MgGesturesDialog {
     }
 
     fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_gestures(GESTURES_FILE, &self.db) {
-            app.report_error_message(
-                "ui operation",
-                format!("Failed to save mouse gestures: {e}"),
-            );
-        } else {
-            app.search();
-            app.focus_input();
+        match self.commit_candidate_with(|candidate| {
+            crate::mouse_gestures::db::replace_gestures(GESTURES_FILE, candidate)
+        }) {
+            Ok(committed) => {
+                crate::plugins::mouse_gestures::publish_committed_gesture_db(committed);
+                app.dashboard_data_cache.request_refresh(
+                    crate::dashboard::data_cache::DashboardRefreshRequest::Gestures,
+                );
+                app.search();
+                app.focus_input();
+            }
+            Err(e) => {
+                app.report_error_message(
+                    "ui operation",
+                    format!("Failed to save mouse gestures: {e}"),
+                );
+            }
+        }
+    }
+
+    fn commit_candidate_with(
+        &mut self,
+        commit: impl FnOnce(GestureDb) -> anyhow::Result<GestureDb>,
+    ) -> anyhow::Result<GestureDb> {
+        match commit(self.db.clone()) {
+            Ok(committed) => {
+                self.committed_db = committed.clone();
+                self.db = committed.clone();
+                self.load_error = None;
+                Ok(committed)
+            }
+            Err(error) => {
+                self.db = self.committed_db.clone();
+                self.load_error = Some(format!("Failed to save mouse gestures: {error}"));
+                Err(error)
+            }
         }
     }
 
@@ -942,6 +993,19 @@ impl MgGesturesDialog {
             .resizable(true)
             .open(&mut open)
             .show(ctx, |ui| {
+                if let Some(error) = self.load_error.clone() {
+                    ui.colored_label(egui::Color32::RED, error);
+                    ui.label("The existing gesture file is read-only until it loads successfully.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Retry").clicked() {
+                            self.open();
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                    return;
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Add Gesture").clicked() {
                         self.add_gesture();
@@ -1223,18 +1287,20 @@ impl MgGesturesDialog {
                         });
                 });
             });
-        self.binding_dialog_ui(ctx, app, &mut save_now);
-        match self.delete_confirm_modal.ui(ctx) {
-            ConfirmationResult::Confirmed => {
-                if self.apply_pending_gesture_delete() {
-                    save_now = true;
+        if self.load_error.is_none() {
+            self.binding_dialog_ui(ctx, app, &mut save_now);
+            match self.delete_confirm_modal.ui(ctx) {
+                ConfirmationResult::Confirmed => {
+                    if self.apply_pending_gesture_delete() {
+                        save_now = true;
+                    }
                 }
+                ConfirmationResult::Cancelled => self.cancel_pending_gesture_delete(),
+                ConfirmationResult::None => {}
             }
-            ConfirmationResult::Cancelled => self.cancel_pending_gesture_delete(),
-            ConfirmationResult::None => {}
-        }
-        if save_now {
-            self.save(app);
+            if save_now {
+                self.save(app);
+            }
         }
         if close {
             self.open = false;
@@ -1298,6 +1364,68 @@ mod tests {
         assert_eq!(dlg.db.gestures.len(), 2);
         assert_eq!(dlg.selected_idx, Some(1));
         assert_eq!(dlg.rename_idx, Some(1));
+    }
+
+    #[test]
+    fn load_failure_keeps_last_good_document_read_only_until_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mouse_gestures.json");
+        let mut dlg = MgGesturesDialog::default();
+        crate::common::persistence::save_json_atomic(
+            &path,
+            &GestureDb {
+                schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+                gestures: vec![gesture("last-good", "L")],
+            },
+        )
+        .unwrap();
+        dlg.reload_from(&path);
+        std::fs::write(&path, b"{broken").unwrap();
+
+        dlg.reload_from(&path);
+        assert!(dlg.load_error.is_some());
+        assert_eq!(dlg.db.gestures[0].label, "last-good");
+
+        crate::common::persistence::save_json_atomic(
+            &path,
+            &GestureDb {
+                schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+                gestures: vec![gesture("recovered", "R")],
+            },
+        )
+        .unwrap();
+        dlg.reload_from(&path);
+        assert!(dlg.load_error.is_none());
+        assert_eq!(dlg.db.gestures[0].label, "recovered");
+    }
+
+    #[test]
+    fn save_failure_restores_committed_dialog_snapshot_and_retains_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mouse_gestures.json");
+        let committed = GestureDb {
+            schema_version: crate::mouse_gestures::db::SCHEMA_VERSION,
+            gestures: vec![gesture("committed", "L")],
+        };
+        crate::common::persistence::save_json_atomic(&path, &committed).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let mut dialog = MgGesturesDialog::default();
+        dialog.reload_from(&path);
+        dialog.db.gestures[0].label = "uncommitted".into();
+
+        let result = dialog.commit_candidate_with(|_| anyhow::bail!("injected save failure"));
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(dialog.db, committed);
+        assert_eq!(dialog.committed_db, committed);
+        assert!(
+            dialog
+                .load_error
+                .as_deref()
+                .unwrap()
+                .contains("injected save failure")
+        );
     }
 
     use std::collections::HashMap;
