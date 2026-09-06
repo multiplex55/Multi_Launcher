@@ -107,7 +107,7 @@ impl WindowsWidget {
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.update_interval();
         observe_search_generation(
-            ctx.plugins.search_generation(),
+            ctx.plugins.search_generation_for("windows"),
             &mut self.last_search_generation,
             &mut self.refresh_pending,
         );

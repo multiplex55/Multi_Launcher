@@ -4,7 +4,7 @@ use eframe::egui;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const SHELL_CMDS_FILE: &str = "shell_cmds.json";
 
@@ -25,6 +25,11 @@ pub struct ShellPluginSettings {
 }
 
 static USE_WEZTERM: AtomicBool = AtomicBool::new(false);
+static SHELL_VERSION: AtomicU64 = AtomicU64::new(0);
+
+pub fn shell_version() -> u64 {
+    SHELL_VERSION.load(Ordering::Acquire)
+}
 
 pub fn use_wezterm() -> bool {
     USE_WEZTERM.load(Ordering::Relaxed)
@@ -48,6 +53,7 @@ pub fn load_shell_cmds(path: &str) -> anyhow::Result<Vec<ShellCmdEntry>> {
 pub fn save_shell_cmds(path: &str, cmds: &[ShellCmdEntry]) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(cmds)?;
     std::fs::write(path, json)?;
+    SHELL_VERSION.fetch_add(1, Ordering::Release);
     Ok(())
 }
 

@@ -148,6 +148,9 @@ fn run_worker(
             break;
         }
         let result = provider.lookup();
+        if shutting_down.load(Ordering::Acquire) {
+            break;
+        }
         let now = clock.now();
         if let Ok(mut state) = state.lock() {
             state.in_flight = false;
@@ -163,7 +166,7 @@ fn run_worker(
                 }
             }
         }
-        updates.notify();
+        updates.notify("ip");
     }
 }
 

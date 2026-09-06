@@ -71,6 +71,8 @@ struct LayoutSummary {
 #[derive(Debug, Clone)]
 struct LayoutsData {
     layouts: Vec<LayoutSummary>,
+    store: LayoutStore,
+    config_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +111,8 @@ impl LayoutsWidget {
             cache: TimedCache::new(
                 LayoutsData {
                     layouts: Vec::new(),
+                    store: LayoutStore::default(),
+                    config_exists: false,
                 },
                 interval,
             ),
@@ -171,9 +175,7 @@ impl LayoutsWidget {
     }
 
     fn load_active_layout(&mut self, name: &str) -> Result<(), String> {
-        let store = layouts_storage::load_layouts(layouts_config_path())
-            .map_err(|err| format!("Failed to load layouts: {err}"))?;
-        let layout = layouts_storage::get_layout(&store, name)
+        let layout = layouts_storage::get_layout(&self.cache.data.store, name)
             .ok_or_else(|| "Layout not found.".to_string())?
             .clone();
         self.active_layout_name = Some(name.to_string());
@@ -184,11 +186,11 @@ impl LayoutsWidget {
     }
 
     fn save_layout(&mut self, layout: Layout) -> Result<(), String> {
-        let mut store = layouts_storage::load_layouts(layouts_config_path())
-            .map_err(|err| format!("Failed to load layouts: {err}"))?;
+        let mut store = self.cache.data.store.clone();
         layouts_storage::upsert_layout(&mut store, layout.clone());
         layouts_storage::save_layouts(layouts_config_path(), &store)
             .map_err(|err| format!("Failed to save layouts: {err}"))?;
+        self.cache.data.store = store;
         self.active_layout_name = Some(layout.name.clone());
         self.active_layout = Some(layout.clone());
         self.last_saved_layout = Some(layout);
@@ -231,8 +233,7 @@ impl LayoutsWidget {
         let Some(layout) = self.active_layout.clone() else {
             return Err("No active layout selected.".to_string());
         };
-        let mut store = layouts_storage::load_layouts(layouts_config_path())
-            .map_err(|err| format!("Failed to load layouts: {err}"))?;
+        let mut store = self.cache.data.store.clone();
         let new_name = Self::unique_layout_name(&layout.name, &store, " (copy)");
         let mut cloned = layout.clone();
         cloned.name = new_name.clone();
@@ -240,6 +241,7 @@ impl LayoutsWidget {
         layouts_storage::upsert_layout(&mut store, cloned.clone());
         layouts_storage::save_layouts(layouts_config_path(), &store)
             .map_err(|err| format!("Failed to save layouts: {err}"))?;
+        self.cache.data.store = store;
         self.active_layout_name = Some(new_name.clone());
         self.active_layout = Some(cloned.clone());
         self.last_saved_layout = Some(cloned);
@@ -333,12 +335,15 @@ impl LayoutsWidget {
     }
 
     fn load_layouts(cfg: &LayoutsConfig) -> (LayoutsData, Option<String>) {
+        let config_exists = layouts_config_path().exists();
         let store = match layouts_storage::load_layouts(layouts_config_path()) {
             Ok(store) => store,
             Err(err) => {
                 return (
                     LayoutsData {
                         layouts: Vec::new(),
+                        store: LayoutStore::default(),
+                        config_exists,
                     },
                     Some(format!("Failed to load layouts: {err}")),
                 );
@@ -364,7 +369,14 @@ impl LayoutsWidget {
                 health,
             })
             .collect();
-        (LayoutsData { layouts }, None)
+        (
+            LayoutsData {
+                layouts,
+                store,
+                config_exists,
+            },
+            None,
+        )
     }
 
     fn collect_health(layouts: &[Layout]) -> Vec<Option<LayoutHealth>> {
@@ -419,8 +431,7 @@ impl LayoutsWidget {
         if new_name == from {
             return Ok(());
         }
-        let mut store = layouts_storage::load_layouts(layouts_config_path())
-            .map_err(|err| format!("Failed to load layouts: {err}"))?;
+        let mut store = self.cache.data.store.clone();
         if store.layouts.iter().any(|layout| layout.name == new_name) {
             return Err("A layout with that name already exists.".to_string());
         }
@@ -430,6 +441,7 @@ impl LayoutsWidget {
         layout.name = new_name.to_string();
         layouts_storage::save_layouts(layouts_config_path(), &store)
             .map_err(|err| format!("Failed to save layouts: {err}"))?;
+        self.cache.data.store = store;
         if self.active_layout_name.as_deref() == Some(from) {
             if let Some(active) = self.active_layout.as_mut() {
                 active.name = new_name.to_string();
@@ -613,17 +625,7 @@ impl Widget for LayoutsWidget {
                         self.pending_import = None;
                     }
                     if ui.button("Import as new").clicked() {
-                        let mut store = match layouts_storage::load_layouts(layouts_config_path()) {
-                            Ok(store) => store,
-                            Err(err) => {
-                                self.set_status(
-                                    format!("Failed to load layouts: {err}"),
-                                    egui::Color32::YELLOW,
-                                );
-                                self.pending_import = None;
-                                return;
-                            }
-                        };
+                        let mut store = self.cache.data.store.clone();
                         let mut imported = pending.layout.clone();
                         let new_name =
                             Self::unique_layout_name(&imported.name, &store, " (imported)");
@@ -637,6 +639,7 @@ impl Widget for LayoutsWidget {
                                 egui::Color32::YELLOW,
                             );
                         } else {
+                            self.cache.data.store = store;
                             self.active_layout_name = Some(imported.name.clone());
                             self.active_layout = Some(imported.clone());
                             self.last_saved_layout = Some(imported);
@@ -684,7 +687,7 @@ impl Widget for LayoutsWidget {
                                 ui.close_menu();
                             }
                             let layouts_path = layouts_config_path();
-                            let layouts_exists = layouts_path.exists();
+                            let layouts_exists = self.cache.data.config_exists;
                             let layouts_label = if layouts_exists {
                                 "Edit layouts.json"
                             } else {
@@ -843,6 +846,32 @@ fn is_rule_match(rule: &LayoutMatch, candidate: &LayoutMatch) -> bool {
         (None, _) => true,
     };
     app_ok && process_ok && class_ok && title_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_layout_is_selected_from_worker_snapshot() {
+        let layout = Layout {
+            name: "Snapshot layout".into(),
+            windows: Vec::new(),
+            launches: Vec::new(),
+            created_at: None,
+            notes: String::new(),
+            options: Default::default(),
+            ignore: Vec::new(),
+        };
+        let mut widget = LayoutsWidget::default();
+        widget.cache.data.store.layouts.push(layout.clone());
+
+        widget.load_active_layout("Snapshot layout").unwrap();
+
+        assert_eq!(widget.active_layout, Some(layout.clone()));
+        assert_eq!(widget.last_saved_layout, Some(layout));
+        assert!(!widget.dirty);
+    }
 }
 
 #[cfg(windows)]

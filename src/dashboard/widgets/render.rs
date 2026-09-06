@@ -443,6 +443,7 @@ mod tests {
         BackgroundLoader, TimedCache, merge_json, observe_search_generation,
         submit_background_refresh,
     };
+    use crate::plugin::PluginSearchUpdates;
     use serde_json::json;
     use std::sync::mpsc::{TryRecvError, channel};
 
@@ -557,5 +558,19 @@ mod tests {
         pending = false;
         assert!(!observe_search_generation(5, &mut observed, &mut pending));
         assert!(!pending);
+    }
+
+    #[test]
+    fn unrelated_publication_does_not_arm_manual_provider_refresh() {
+        let updates = PluginSearchUpdates::default();
+        updates.notify("windows");
+        let mut observed_browser_generation = 0;
+        let mut manual_refresh_pending = false;
+        assert!(!observe_search_generation(
+            updates.source_generation("browser_tabs"),
+            &mut observed_browser_generation,
+            &mut manual_refresh_pending,
+        ));
+        assert!(!manual_refresh_pending);
     }
 }

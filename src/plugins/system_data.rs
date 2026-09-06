@@ -166,12 +166,15 @@ fn run_worker(
             break;
         }
         let snapshot = provider.refresh();
+        if shutting_down.load(Ordering::Acquire) {
+            break;
+        }
         if let Ok(mut state) = state.lock() {
             state.snapshot = Some(Arc::new(snapshot));
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
         }
-        updates.notify();
+        updates.notify("system_data");
     }
 }
 

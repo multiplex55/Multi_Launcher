@@ -7,6 +7,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const REFRESH_TTL: Duration = Duration::from_secs(2);
+static PRODUCTION_ENUMERATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct ProductionEnumerationGuard(&'static AtomicBool);
+
+impl Drop for ProductionEnumerationGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 #[derive(Clone, Debug)]
 struct WindowInfo {
@@ -22,6 +31,13 @@ struct ProductionWindowProvider;
 
 impl WindowProvider for ProductionWindowProvider {
     fn enumerate(&mut self) -> Vec<WindowInfo> {
+        if PRODUCTION_ENUMERATION_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let _guard = ProductionEnumerationGuard(&PRODUCTION_ENUMERATION_ACTIVE);
         enumerate_windows()
     }
 }
@@ -114,12 +130,15 @@ fn run_worker(
             break;
         }
         let windows = provider.enumerate();
+        if shutting_down.load(Ordering::Acquire) {
+            break;
+        }
         if let Ok(mut state) = state.lock() {
             state.windows = Arc::new(windows);
             state.fresh_until = Some(Instant::now() + REFRESH_TTL);
             state.in_flight = false;
         }
-        updates.notify();
+        updates.notify("windows");
     }
 }
 
@@ -240,6 +259,21 @@ mod tests {
         release: Receiver<Vec<WindowInfo>>,
     }
 
+    struct DropControlledProvider {
+        started: Sender<()>,
+        release: Receiver<Vec<WindowInfo>>,
+        finished: Sender<()>,
+    }
+
+    impl WindowProvider for DropControlledProvider {
+        fn enumerate(&mut self) -> Vec<WindowInfo> {
+            self.started.send(()).unwrap();
+            let windows = self.release.recv().unwrap();
+            self.finished.send(()).unwrap();
+            windows
+        }
+    }
+
     impl WindowProvider for ControlledProvider {
         fn enumerate(&mut self) -> Vec<WindowInfo> {
             self.started.send(()).unwrap();
@@ -276,5 +310,40 @@ mod tests {
         repaint_rx.recv().unwrap();
         assert_eq!(updates.generation(), 1);
         assert_eq!(plugin.search("win editor").len(), 2);
+    }
+
+    #[test]
+    fn drop_while_blocked_suppresses_stale_snapshot_and_notification() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let (finished_tx, finished_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let updates = Arc::new(PluginSearchUpdates::default());
+        updates.set_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
+        let plugin = WindowsPlugin {
+            cache: WindowCache::start(
+                DropControlledProvider {
+                    started: started_tx,
+                    release: release_rx,
+                    finished: finished_tx,
+                },
+                Arc::clone(&updates),
+            ),
+        };
+        assert!(plugin.search("win").is_empty());
+        started_rx.recv().unwrap();
+        drop(plugin);
+        release_tx
+            .send(vec![WindowInfo {
+                title: "stale".into(),
+                hwnd: 9,
+            }])
+            .unwrap();
+        finished_rx.recv().unwrap();
+        while Arc::strong_count(&updates) > 1 {
+            std::thread::yield_now();
+        }
+        assert_eq!(updates.generation(), 0);
+        assert!(matches!(repaint_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

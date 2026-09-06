@@ -54,11 +54,25 @@ pub(crate) fn search_plugin_actions(
 #[derive(Default)]
 pub struct PluginHomeWidget {
     cfg: PluginHomeConfig,
+    cached_source: Option<PluginHomeSource>,
+    cached_actions: Vec<Action>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginHomeSource {
+    plugin: String,
+    mode: PluginHomeMode,
+    query: String,
+    generation: u64,
 }
 
 impl PluginHomeWidget {
     pub fn new(cfg: PluginHomeConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            cached_source: None,
+            cached_actions: Vec::new(),
+        }
     }
 
     fn plugin<'a>(&self, ctx: &'a DashboardContext<'a>) -> Option<&'a dyn crate::plugin::Plugin> {
@@ -75,6 +89,15 @@ impl PluginHomeWidget {
             .or_else(|| ctx.plugins.plugin_names().into_iter().next())
     }
 
+    fn source_generation(ctx: &DashboardContext<'_>, plugin_name: &str) -> u64 {
+        match plugin_name {
+            "clipboard" => ctx.clipboard_version,
+            "layout" => crate::plugins::layouts_storage::layouts_version(),
+            "shell" => crate::plugins::shell::shell_version(),
+            _ => ctx.plugins.search_generation_for(plugin_name),
+        }
+    }
+
     fn render_actions(&self, ui: &mut egui::Ui, actions: &[Action]) -> Option<WidgetAction> {
         let mut clicked = None;
         for action in actions.iter().take(self.cfg.limit.max(1)) {
@@ -86,6 +109,34 @@ impl PluginHomeWidget {
             }
         }
         clicked
+    }
+
+    fn actions_for(
+        &mut self,
+        plugin_name: &str,
+        plugin: &dyn crate::plugin::Plugin,
+        generation: u64,
+    ) -> &[Action] {
+        let query = self.cfg.query_seed.clone().unwrap_or_default();
+        let source = PluginHomeSource {
+            plugin: plugin_name.to_string(),
+            mode: self.cfg.mode,
+            query: query.clone(),
+            generation: if self.cfg.mode == PluginHomeMode::Search {
+                generation
+            } else {
+                0
+            },
+        };
+        if self.cached_source.as_ref() != Some(&source) {
+            self.cached_actions = match self.cfg.mode {
+                PluginHomeMode::Commands => plugin.commands(),
+                PluginHomeMode::Search if query.trim().is_empty() => Vec::new(),
+                PluginHomeMode::Search => search_plugin_actions(plugin, &query),
+            };
+            self.cached_source = Some(source);
+        }
+        &self.cached_actions
     }
 
     pub fn settings_ui(
@@ -170,18 +221,19 @@ impl Widget for PluginHomeWidget {
             return None;
         };
 
-        let actions = match self.cfg.mode {
-            PluginHomeMode::Commands => plugin.commands(),
-            PluginHomeMode::Search => {
-                let query = self.cfg.query_seed.clone().unwrap_or_default();
-                if query.trim().is_empty() {
-                    ui.label("Set a query to preview search results.");
-                    Vec::new()
-                } else {
-                    search_plugin_actions(plugin, &query)
-                }
-            }
-        };
+        if self.cfg.mode == PluginHomeMode::Search
+            && self
+                .cfg
+                .query_seed
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            ui.label("Set a query to preview search results.");
+        }
+        let generation = Self::source_generation(ctx, &plugin_name);
+        let actions = self.actions_for(&plugin_name, plugin, generation).to_vec();
 
         if actions.is_empty() {
             ui.label("No actions available for this plugin.");
@@ -189,5 +241,101 @@ impl Widget for PluginHomeWidget {
         }
 
         self.render_actions(ui, &actions)
+    }
+
+    fn on_config_updated(&mut self, settings: &serde_json::Value) {
+        if let Ok(cfg) = serde_json::from_value::<PluginHomeConfig>(settings.clone()) {
+            self.cfg = cfg;
+            self.cached_source = None;
+            self.cached_actions.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{TryRecvError, channel};
+
+    struct BlockedPlugin(std::sync::mpsc::Sender<()>);
+
+    impl crate::plugin::Plugin for BlockedPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.0.send(()).unwrap();
+            std::thread::park();
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "blocked"
+        }
+        fn description(&self) -> &str {
+            "blocked"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    struct CountingPlugin(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::plugin::Plugin for CountingPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "counting"
+        }
+        fn description(&self) -> &str {
+            "counting"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    #[test]
+    fn cached_render_source_does_not_reenter_blocked_provider() {
+        let (started_tx, started_rx) = channel();
+        let plugin = BlockedPlugin(started_tx);
+        let mut widget = PluginHomeWidget::new(PluginHomeConfig {
+            plugin: Some("blocked".into()),
+            mode: PluginHomeMode::Search,
+            query_seed: Some("blocked query".into()),
+            limit: 5,
+        });
+        widget.cached_source = Some(PluginHomeSource {
+            plugin: "blocked".into(),
+            mode: PluginHomeMode::Search,
+            query: "blocked query".into(),
+            generation: 7,
+        });
+        widget.cached_actions = vec![Action {
+            label: "cached".into(),
+            desc: "cached".into(),
+            action: "cached".into(),
+            args: None,
+        }];
+
+        assert_eq!(widget.actions_for("blocked", &plugin, 7).len(), 1);
+        assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn source_generation_invalidates_cached_results_once() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plugin = CountingPlugin(std::sync::Arc::clone(&calls));
+        let mut widget = PluginHomeWidget::new(PluginHomeConfig {
+            plugin: Some("counting".into()),
+            mode: PluginHomeMode::Search,
+            query_seed: Some("query".into()),
+            limit: 5,
+        });
+
+        widget.actions_for("counting", &plugin, 3);
+        widget.actions_for("counting", &plugin, 3);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        widget.actions_for("counting", &plugin, 4);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

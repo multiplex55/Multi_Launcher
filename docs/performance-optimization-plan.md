@@ -536,6 +536,42 @@ registration at 17.111 ms, `LauncherApp` construction at 36.685 ms, first usable
 352.856 ms, and dashboard initial publication at 517.348 ms. This single warm-host sample supersedes
 the earlier remediation sample for final-HEAD regression evidence; it is not a cold-start claim.
 
+### Third independent-review remediation
+
+**Status:** `complete`
+
+Browser Tabs now remembers a bounded set of distinct forced filters instead of toggling one last
+filter. Launcher requery and alternating Plugin Home/dashboard consumers therefore stabilize after
+each filter's first discovery rather than creating a notification loop. Plugin search publications
+also carry a provider source generation. Browser Tabs, Windows, pinned engine widgets, and shared
+system-data consumers observe only their own source; manual Query List mode ignores unrelated global
+publications. Plugin Home caches materialized results by plugin, mode, query, and source generation,
+with clipboard/layout/shell mutation versions used for their file-backed sources.
+
+The Layouts worker snapshot now includes the complete `LayoutStore` and config-file existence state.
+Automatic active-layout selection and all subsequent widget mutations use that published store;
+`layouts.json` is opened only by the background load operation rather than during rendering.
+
+Browser Tabs and Windows workers recheck shutdown after the provider returns and before mutating a
+snapshot or notifying consumers. Channel-controlled drop-while-blocked tests release the provider
+after UI ownership is gone and prove no generation or repaint is published. Production Browser UIA
+and Windows enumeration also use process-wide single-flight guards, preventing plugin reloads from
+accumulating concurrent OS enumerations. UIA remains unpreemptible when an individual Windows call
+itself hangs; the guard deliberately prevents replacement instances from starting another call.
+
+Final verification passed: `cargo fmt --all --check`; `cargo check`; focused notifier, manual
+refresh, Plugin Home, Layouts, Browser Tabs, Windows, Shell, and Windows integration tests;
+`cargo nextest list` (2,997 tests across 70 binaries); `cargo nextest run --no-fail-fast`
+(2,990 passed, 7 skipped in 43.703 s); corrected Browser Tabs Criterion workloads; `cargo build
+--release` (2m00s); stale render-I/O/reference searches; and `git diff --check`. Criterion measured
+the populated 1,000-tab cached filter/materialization path at 206.35 us and the separate static clear
+command at 1.0965 us.
+
+The final isolated warm release sample measured plugin manager construction at 56.529 ms, plugin
+registration at 16.617 ms, `LauncherApp` construction at 60.327 ms, first usable frame at
+372.122 ms, and dashboard initial publication at 549.592 ms. This is a single warm-host regression
+sample, not a cold-start or maximum-frame-time claim.
+
 ### Rejected milestone 5 optimizations
 
 - One giant integration target or consolidation of stateful tests: rejected because ordinary
@@ -567,3 +603,5 @@ the earlier remediation sample for final-HEAD regression evidence; it is not a c
 | 3 | `544c4c6` | `perf(search): remove blocking dynamic work from query handling` |
 | 4 | `9885f20` | `perf(runtime): reduce unnecessary idle and repaint work` |
 | 5 | `707459e` | `perf(dev): improve cargo and nextest iteration time` |
+| Review remediation 1 | `e6f8baf` | `fix(perf): resolve final review findings` |
+| Review remediation 2 | `4596f72` | `fix(perf): harden async refresh lifecycles` |

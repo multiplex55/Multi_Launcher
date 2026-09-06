@@ -1,3 +1,4 @@
+use super::render::RefreshSchedule;
 use super::{
     RefreshMode, TimedCache, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     default_refresh_throttle_secs, edit_typed_settings, observe_search_generation,
@@ -123,23 +124,29 @@ impl QueryListWidget {
         self.cache.refresh(|data| *data = actions);
     }
 
+    fn observe_search_updates(&mut self, schedule: RefreshSchedule, generation: u64) {
+        if schedule.mode != RefreshMode::Manual {
+            observe_search_generation(
+                generation,
+                &mut self.last_search_generation,
+                &mut self.refresh_pending,
+            );
+        }
+    }
+
     fn maybe_refresh(&mut self, ctx: &DashboardContext<'_>) {
         self.cache.set_interval(self.refresh_interval());
-        observe_search_generation(
-            ctx.plugins.search_generation(),
-            &mut self.last_search_generation,
-            &mut self.refresh_pending,
-        );
-        if self.last_query != self.cfg.query {
-            self.last_query = self.cfg.query.clone();
-            self.refresh_pending = true;
-        }
         let schedule = refresh_schedule(
             self.refresh_interval(),
             self.cfg.refresh_mode,
             self.cfg.manual_refresh_only,
             self.cfg.refresh_throttle_secs,
         );
+        self.observe_search_updates(schedule, ctx.plugins.search_generation());
+        if self.last_query != self.cfg.query {
+            self.last_query = self.cfg.query.clone();
+            self.refresh_pending = true;
+        }
         if run_refresh_schedule(
             ctx,
             schedule,
@@ -148,6 +155,33 @@ impl QueryListWidget {
         ) {
             self.refresh(ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::PluginSearchUpdates;
+
+    #[test]
+    fn unrelated_publication_does_not_arm_manual_query_refresh() {
+        let mut cfg = QueryListConfig::default();
+        cfg.refresh_mode = RefreshMode::Manual;
+        cfg.query = "stable query".into();
+        let mut widget = QueryListWidget::new(cfg);
+        let updates = PluginSearchUpdates::default();
+        updates.notify("windows");
+        let schedule = refresh_schedule(
+            widget.refresh_interval(),
+            widget.cfg.refresh_mode,
+            widget.cfg.manual_refresh_only,
+            widget.cfg.refresh_throttle_secs,
+        );
+
+        widget.observe_search_updates(schedule, updates.generation());
+
+        assert!(!widget.refresh_pending);
+        assert_eq!(widget.last_search_generation, 0);
     }
 }
 

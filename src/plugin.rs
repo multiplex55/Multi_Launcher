@@ -64,7 +64,7 @@ use crate::settings::NetUnit;
 use eframe::egui;
 use libloading::Library;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -115,12 +115,16 @@ pub trait Plugin: Send + Sync {
 #[derive(Default)]
 pub(crate) struct PluginSearchUpdates {
     generation: AtomicU64,
+    source_generations: Mutex<HashMap<&'static str, u64>>,
     repaint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl PluginSearchUpdates {
-    pub(crate) fn notify(&self) {
+    pub(crate) fn notify(&self, source: &'static str) {
         self.generation.fetch_add(1, Ordering::Release);
+        if let Ok(mut generations) = self.source_generations.lock() {
+            *generations.entry(source).or_default() += 1;
+        }
         let callback = self
             .repaint
             .lock()
@@ -133,6 +137,18 @@ impl PluginSearchUpdates {
 
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn source_generation(&self, source: &str) -> u64 {
+        let source = match source {
+            "processes" | "sysinfo" | "volume" => "system_data",
+            source => source,
+        };
+        self.source_generations
+            .lock()
+            .ok()
+            .and_then(|generations| generations.get(source).copied())
+            .unwrap_or(0)
     }
 
     pub(crate) fn set_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
@@ -208,6 +224,10 @@ impl PluginManager {
 
     pub fn search_generation(&self) -> u64 {
         self.services.search_updates.generation()
+    }
+
+    pub fn search_generation_for(&self, source: &str) -> u64 {
+        self.services.search_updates.source_generation(source)
     }
 
     pub fn set_search_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
@@ -535,9 +555,12 @@ mod tests {
         let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
         manager.set_search_repaint_callback(Arc::new(move || repaint_tx.send(()).unwrap()));
         let before = manager.search_generation();
-        manager.services.search_updates.notify();
+        let source_before = manager.search_generation_for("test");
+        manager.services.search_updates.notify("test");
         repaint_rx.recv().unwrap();
         assert_eq!(manager.search_generation(), before + 1);
+        assert_eq!(manager.search_generation_for("test"), source_before + 1);
+        assert_eq!(manager.search_generation_for("unrelated"), 0);
     }
     #[test]
     fn shared_catalog_handle_preserved_across_reload() {
