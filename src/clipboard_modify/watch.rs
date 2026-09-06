@@ -1,4 +1,3 @@
-use super::config::{LoadError, load_current_or_migrate};
 use super::store::ClipboardModifierStore;
 use crate::gui::ClipboardModifyGuiEvent;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -72,19 +71,10 @@ impl ClipboardModifyWatcher {
             return Vec::new();
         }
         self.reload_deadline = None;
-        let event = match load_current_or_migrate(&self.path) {
-            Ok((_model, catalog)) => {
-                self.store.replace_valid(catalog);
-                ClipboardModifyGuiEvent::ConfigurationReloadSuccess
-            }
-            Err(LoadError::Future(version)) => {
-                let error = format!("unsupported future schema {version}");
-                self.store.retain_with_error(error.clone());
-                ClipboardModifyGuiEvent::ConfigurationReloadFailure(error)
-            }
+        let event = match self.store.reload_now() {
+            Ok(_) => ClipboardModifyGuiEvent::ConfigurationReloadSuccess,
             Err(error) => {
                 let error = error.to_string();
-                self.store.retain_with_error(error.clone());
                 ClipboardModifyGuiEvent::ConfigurationReloadFailure(error)
             }
         };

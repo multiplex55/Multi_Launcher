@@ -1,9 +1,11 @@
 use super::config::{self, LoadedConfig, VersionedClipboardModifiersFile};
 use super::model::{ClipboardModifierCatalog, ClipboardTemplate, SavedPipeline};
+use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 pub type SharedClipboardModifierCatalog = Arc<RwLock<Arc<ClipboardModifierCatalog>>>;
+static CONFIG_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Clone)]
 pub struct ClipboardModifierStore {
@@ -32,10 +34,23 @@ impl ClipboardModifierStore {
         *self.diagnostic.write().unwrap() = Some(msg);
     }
     pub fn save(&self, model: &VersionedClipboardModifiersFile) -> anyhow::Result<()> {
+        let _transaction = CONFIG_TRANSACTION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.path.exists() {
+            config::load_current_or_migrate(&self.path)
+                .map_err(anyhow::Error::new)
+                .map_err(|err| {
+                    anyhow::anyhow!("refusing to replace invalid Clipboard Modify config: {err}")
+                })?;
+        }
         config::save_model_atomic(&self.path, model)
     }
 
     pub fn reload_now(&self) -> anyhow::Result<ClipboardModifierCatalog> {
+        let _transaction = CONFIG_TRANSACTION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match config::load_current_or_migrate(&self.path) {
             Ok((_model, catalog)) => {
                 self.replace_valid(catalog.clone());
@@ -50,6 +65,9 @@ impl ClipboardModifierStore {
     }
 
     pub fn reset_to_factory_defaults(&self) -> anyhow::Result<ClipboardModifierCatalog> {
+        let _transaction = CONFIG_TRANSACTION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let model = config::reset_to_defaults_with_backup(&self.path)?;
         let catalog = config::validate_model(&model)?;
         self.replace_valid(catalog.clone());
@@ -61,10 +79,13 @@ impl ClipboardModifierStore {
         base: &ClipboardModifierCatalog,
         templates: Vec<ClipboardTemplate>,
     ) -> anyhow::Result<ClipboardModifierCatalog> {
-        let mut model = config::model_from_catalog(base);
+        let _transaction = CONFIG_TRANSACTION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut model = self.latest_model_or(base)?;
         model.templates = templates;
         let catalog = config::validate_model(&model)?;
-        self.save(&model)?;
+        config::save_model_atomic(&self.path, &model)?;
         self.replace_valid(catalog.clone());
         Ok(catalog)
     }
@@ -74,12 +95,28 @@ impl ClipboardModifierStore {
         base: &ClipboardModifierCatalog,
         pipelines: Vec<SavedPipeline>,
     ) -> anyhow::Result<ClipboardModifierCatalog> {
-        let mut model = config::model_from_catalog(base);
+        let _transaction = CONFIG_TRANSACTION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut model = self.latest_model_or(base)?;
         model.pipelines = pipelines;
         let catalog = config::validate_model(&model)?;
-        self.save(&model)?;
+        config::save_model_atomic(&self.path, &model)?;
         self.replace_valid(catalog.clone());
         Ok(catalog)
+    }
+
+    fn latest_model_or(
+        &self,
+        base: &ClipboardModifierCatalog,
+    ) -> anyhow::Result<VersionedClipboardModifiersFile> {
+        if self.path.exists() {
+            config::load_current_or_migrate(&self.path)
+                .map(|(model, _)| model)
+                .map_err(anyhow::Error::new)
+        } else {
+            Ok(config::model_from_catalog(base))
+        }
     }
 }
 
@@ -138,5 +175,44 @@ mod tests {
                 .to_string_lossy()
                 .contains("factory-reset")
         }));
+    }
+
+    #[test]
+    fn concurrent_template_and_pipeline_editor_saves_preserve_both_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let (store, loaded) = ClipboardModifierStore::new(&settings);
+        let base = loaded.catalog;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let template_thread = {
+            let store = store.clone();
+            let base = base.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut templates = base.templates.clone();
+                templates[0].label = "Concurrent Template".into();
+                barrier.wait();
+                store.save_templates(&base, templates).unwrap();
+            })
+        };
+        let pipeline_thread = {
+            let store = store.clone();
+            let base = base.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut pipelines = base.pipelines.clone();
+                pipelines[0].label = "Concurrent Pipeline".into();
+                barrier.wait();
+                store.save_pipelines(&base, pipelines).unwrap();
+            })
+        };
+        barrier.wait();
+        template_thread.join().unwrap();
+        pipeline_thread.join().unwrap();
+
+        let (_, catalog) = config::load_current_or_migrate(&store.path).unwrap();
+        assert_eq!(catalog.templates[0].label, "Concurrent Template");
+        assert_eq!(catalog.pipelines[0].label, "Concurrent Pipeline");
     }
 }
