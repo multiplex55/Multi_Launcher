@@ -181,21 +181,10 @@ impl LauncherApp {
     }
 
     fn update_completion_index(&mut self) {
-        let mut entries: Vec<String> = Vec::new();
-        entries.extend(self.command_cache.iter().map(|a| a.label.to_lowercase()));
-        for a in self.actions.iter() {
-            entries.push(format!("app {}", a.label.to_lowercase()));
-        }
-        entries.sort();
-        entries.dedup();
-        let mut builder = MapBuilder::memory();
-        for (i, k) in entries.iter().enumerate() {
-            if let Err(e) = builder.insert(k, i as u64) {
-                tracing::warn!(key = %k, ?e, "failed to insert key into completion index");
-            }
-        }
-        let map = Map::new(builder.into_inner().unwrap()).unwrap();
-        self.completion_index = Some(map);
+        self.completion_index = Some(crate::completion::build_index(
+            &self.command_cache,
+            self.actions.as_ref(),
+        ));
         self.update_suggestions();
     }
 
@@ -209,20 +198,7 @@ impl LauncherApp {
             return;
         }
         if let Some(ref index) = self.completion_index {
-            let q = self.query.to_lowercase();
-            let mut stream = index.range().ge(q.as_str()).into_stream();
-            while let Some((k, _)) = stream.next() {
-                let key = std::str::from_utf8(k).unwrap();
-                if !key.starts_with(&q) {
-                    break;
-                }
-                if key != q {
-                    self.suggestions.push(key.to_string());
-                }
-                if self.suggestions.len() >= 5 {
-                    break;
-                }
-            }
+            self.suggestions = crate::completion::suggestions(index, &self.query, 5);
         }
     }
 
@@ -261,11 +237,16 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
+        let perf_enabled = crate::performance::enabled();
+        let total_started = crate::performance::started_if(perf_enabled);
         if self.last_results_valid && self.query == self.last_search_query {
             self.clear_selected_after_results_replaced();
+            crate::performance::log_elapsed("search.cached", total_started);
+            crate::performance::log_elapsed("search.total", total_started);
             return;
         }
 
+        let normalization_started = crate::performance::started_if(perf_enabled);
         let trimmed = self.query.trim();
         let trimmed_lc = trimmed.to_lowercase();
         self.last_timer_query =
@@ -286,6 +267,8 @@ impl LauncherApp {
             self.results = res;
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
+            crate::performance::log_elapsed("search.normalize", normalization_started);
+            crate::performance::log_elapsed("search.total", total_started);
             return;
         }
 
@@ -307,26 +290,44 @@ impl LauncherApp {
             String::new()
         };
         let action_query_lc = action_query.to_lowercase();
+        crate::performance::log_elapsed("search.normalize", normalization_started);
 
         if trimmed_lc.starts_with("g ") {
+            let plugins_started = crate::performance::started_if(perf_enabled);
             res.extend(self.search_plugins(trimmed, &trimmed_lc));
+            crate::performance::log_elapsed("search.plugins", plugins_started);
         } else {
             if search_actions {
+                let static_started = crate::performance::started_if(perf_enabled);
                 res.extend(self.search_actions(&action_query, &action_query_lc));
+                crate::performance::log_elapsed("search.static_candidates", static_started);
             }
+            let plugins_started = crate::performance::started_if(perf_enabled);
             res.extend(self.search_plugins(trimmed, &trimmed_lc));
+            crate::performance::log_elapsed("search.plugins", plugins_started);
         }
 
+        let usage_started = crate::performance::started_if(perf_enabled);
         self.apply_usage_weight(&mut res);
+        crate::performance::log_elapsed("search.usage_weight", usage_started);
 
+        let sort_started = crate::performance::started_if(perf_enabled);
         res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        crate::performance::log_elapsed("search.sort", sort_started);
 
+        let materialize_started = crate::performance::started_if(perf_enabled);
         self.results = res.into_iter().map(|(a, _)| a).collect();
+        crate::performance::log_elapsed("search.materialize", materialize_started);
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
         self.last_results_valid = true;
+        let completion_started = crate::performance::started_if(perf_enabled);
         self.update_suggestions();
+        crate::performance::log_elapsed("search.completion", completion_started);
+        let layout_started = crate::performance::started_if(perf_enabled);
         self.recompute_query_results_layout();
+        crate::performance::log_elapsed("search.layout", layout_started);
+        crate::performance::log_elapsed("search.total", total_started);
     }
 
     fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {

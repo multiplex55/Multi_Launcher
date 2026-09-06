@@ -131,7 +131,7 @@ use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveActio
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
-use fst::{IntoStreamer, Map, MapBuilder, Streamer};
+use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -1108,6 +1108,7 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         use std::path::Path;
 
+        let dashboard_timer = crate::performance::Timer::start();
         let dashboard_path = DashboardConfig::path_for(
             settings
                 .dashboard
@@ -1128,6 +1129,8 @@ impl LauncherApp {
             Some(dashboard_event_cb),
         );
         dashboard.attach_watcher();
+        dashboard_timer.finish("startup.dashboard_construction");
+        let watcher_timer = crate::performance::Timer::start();
 
         let (folder_aliases, folder_aliases_lc) = Self::folder_alias_maps();
         let (bookmark_aliases, bookmark_aliases_lc) = Self::bookmark_alias_maps();
@@ -1382,6 +1385,7 @@ impl LauncherApp {
             .and_then(|v| serde_json::from_value::<ClipboardModifyPluginSettings>(v.clone()).ok())
             .unwrap_or_default();
 
+        watcher_timer.finish("startup.watcher_initialization");
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let multi_manager =
             MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
@@ -1391,7 +1395,10 @@ impl LauncherApp {
             .map(|a| (a.action.clone(), a.clone()))
             .collect::<HashMap<_, _>>();
         let dashboard_data_cache = DashboardDataCache::new();
+        let dashboard_refresh_timer = crate::performance::Timer::start();
         dashboard_data_cache.refresh_all(&plugins);
+        dashboard_refresh_timer.finish("startup.dashboard_initial_refresh_complete");
+        let mkmacro_timer = crate::performance::Timer::start();
         let mut mkmacro_dialog = MkMacroDialog::new_with_authoring_context(
             Arc::clone(&plugins.internal_services().mkmacro_store),
             mkmacro_dialog::MkMacroAuthoringContext {
@@ -1403,6 +1410,7 @@ impl LauncherApp {
             Arc::clone(&plugins.internal_services().mkmacro_store),
         );
         install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
+        mkmacro_timer.finish("startup.mkmacro");
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
@@ -1649,9 +1657,15 @@ impl LauncherApp {
             }
         }
 
+        let action_cache_timer = crate::performance::Timer::start();
         app.update_action_cache();
+        action_cache_timer.finish("startup.action_filter_metadata");
+        let command_cache_timer = crate::performance::Timer::start();
         app.update_command_cache();
+        command_cache_timer.finish("startup.command_search_cache");
+        let completion_timer = crate::performance::Timer::start();
         app.rebuild_completion_index_now();
+        completion_timer.finish("startup.completion_index");
         app.search();
         let repaint_context = ctx.clone();
         app.clipboard_modify_immediate

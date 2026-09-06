@@ -410,6 +410,7 @@ impl PluginManager {
             .next()
             .map(str::to_ascii_lowercase);
         let mut actions = Vec::new();
+        let perf_enabled = crate::performance::enabled();
         for p in &self.plugins {
             let name = p.name();
             if let Some(list) = enabled_plugins
@@ -439,7 +440,10 @@ impl PluginManager {
                 }
             }
 
-            actions.extend(p.search(&filtered_query));
+            let timer = crate::performance::Timer::start_if(perf_enabled);
+            let plugin_actions = p.search(&filtered_query);
+            timer.finish_plugin(name);
+            actions.extend(plugin_actions);
         }
         if filters.include_kinds.is_empty()
             && filters.exclude_kinds.is_empty()

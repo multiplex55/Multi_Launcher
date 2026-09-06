@@ -869,6 +869,12 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
+        crate::performance::record_frame(
+            self.visible_flag.load(Ordering::Relaxed),
+            ctx.input(|input| input.viewport().focused).unwrap_or(true),
+            self.should_show_dashboard(self.query.as_str()),
+        );
+
         if self
             .mkmacro_dialog
             .action_editor
@@ -1283,6 +1289,7 @@ impl eframe::App for LauncherApp {
                     diagnostics,
                     show_diagnostics_widget,
                 };
+                crate::performance::record_dashboard_repaint_request();
                 ctx.request_repaint_after(Duration::from_millis(250));
                 if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click) {
                     self.activate_action(action.action, action.query_override, ActivationSource::Dashboard);
