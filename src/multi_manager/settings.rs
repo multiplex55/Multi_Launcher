@@ -3,9 +3,11 @@ pub fn save_multi_manager_settings(
     settings_path: &str,
     multi_manager: crate::settings::MultiManagerSettings,
 ) -> anyhow::Result<()> {
-    let mut settings = crate::settings::Settings::load(settings_path)?;
-    settings.multi_manager = multi_manager;
-    settings.save(settings_path)
+    crate::settings::Settings::update(settings_path, |settings| {
+        settings.multi_manager = multi_manager;
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 #[cfg(test)]

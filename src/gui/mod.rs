@@ -457,6 +457,9 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
+    /// Persistence failure captured before GUI startup. A later recovery UI can
+    /// consume this without re-reading or replacing the damaged settings file.
+    pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
     pub multi_manager: MultiManagerState,
     pub multi_manager_settings: MultiManagerSettings,
     pub launcher_hwnd: Option<usize>,
@@ -818,71 +821,75 @@ impl LauncherApp {
     pub(crate) fn handle_file_search_ui_command(&mut self, command: FileSearchUiCommand) {
         match command {
             FileSearchUiCommand::PersistPreferences(preferences) => {
-                self.file_search_dialog.settings.ui_preferences = preferences.clone();
-                self.file_search_dialog.set_ui_preferences(preferences);
-                match crate::settings::Settings::load(&self.settings_path) {
-                    Ok(mut settings) => {
-                        let mut cfg = settings
-                            .plugin_settings
-                            .get("file_search")
-                            .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            .unwrap_or_else(
-                                crate::file_search::settings::FileSearchSettings::default,
-                            );
-                        cfg.ui_preferences = self.file_search_dialog.ui_preferences.clone();
-                        if let Ok(value) = serde_json::to_value(&cfg) {
-                            settings
-                                .plugin_settings
-                                .insert("file_search".to_owned(), value.clone());
-                            self.settings_editor
-                                .set_plugin_setting_value("file_search", value);
-                            if let Err(error) = settings.save(&self.settings_path) {
-                                self.report_error_message(
-                                    "file_search.preferences.save",
-                                    format!("Failed to save file-search preferences: {error}"),
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => self.report_error_message(
-                        "file_search.preferences.load",
-                        format!("Failed to load settings: {error}"),
-                    ),
-                }
-            }
-            FileSearchUiCommand::ConfigureRipgrep(path) => {
-                match crate::settings::Settings::load(&self.settings_path) {
-                    Ok(mut settings) => {
-                        let mut cfg = settings
-                            .plugin_settings
-                            .get("file_search")
-                            .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            .unwrap_or_else(
-                                crate::file_search::settings::FileSearchSettings::default,
-                            );
-                        cfg.ripgrep_executable_path = path;
-                        if let Ok(value) = serde_json::to_value(&cfg) {
-                            settings
-                                .plugin_settings
-                                .insert("file_search".to_owned(), value.clone());
-                            self.settings_editor
-                                .set_plugin_setting_value("file_search", value);
-                            match settings.save(&self.settings_path) {
-                                Ok(()) => {
-                                    self.apply_file_search_settings(cfg);
-                                    self.file_search_dialog.warning_error_message =
-                                        Some("ripgrep path saved for future searches.".to_owned());
+                match crate::settings::Settings::update(&self.settings_path, |settings| {
+                    let mut cfg = settings
+                        .plugin_settings
+                        .get("file_search")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                    cfg.ui_preferences = preferences;
+                    let value = serde_json::to_value(&cfg)?;
+                    settings
+                        .plugin_settings
+                        .insert("file_search".to_owned(), value);
+                    Ok(())
+                }) {
+                    Ok(settings) => {
+                        if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
+                            match serde_json::from_value(value.clone()) {
+                                Ok(committed) => {
+                                    self.file_search_dialog.ui_preferences_dirty = false;
+                                    self.apply_file_search_settings(committed);
+                                    self.settings_editor
+                                        .set_plugin_setting_value("file_search", value);
                                 }
                                 Err(error) => self.report_error_message(
-                                    "file_search.ripgrep.save",
-                                    format!("Failed to save ripgrep path: {error}"),
+                                    "file_search.preferences.publish",
+                                    format!(
+                                        "Failed to publish saved file-search preferences: {error}"
+                                    ),
                                 ),
                             }
                         }
                     }
+                    Err(error) => {
+                        let persisted = self.file_search_dialog.settings.ui_preferences.clone();
+                        self.file_search_dialog.set_ui_preferences(persisted);
+                        self.report_error_message(
+                            "file_search.preferences.save",
+                            format!("Failed to save file-search preferences: {error}"),
+                        );
+                    }
+                }
+            }
+            FileSearchUiCommand::ConfigureRipgrep(path) => {
+                match crate::settings::Settings::update(&self.settings_path, |settings| {
+                    let mut cfg = settings
+                        .plugin_settings
+                        .get("file_search")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                    cfg.ripgrep_executable_path = path;
+                    let value = serde_json::to_value(&cfg)?;
+                    settings
+                        .plugin_settings
+                        .insert("file_search".to_owned(), value);
+                    Ok(())
+                }) {
+                    Ok(settings) => {
+                        if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
+                            self.settings_editor
+                                .set_plugin_setting_value("file_search", value.clone());
+                            if let Ok(cfg) = serde_json::from_value(value) {
+                                self.apply_file_search_settings(cfg);
+                                self.file_search_dialog.warning_error_message =
+                                    Some("ripgrep path saved for future searches.".to_owned());
+                            }
+                        }
+                    }
                     Err(error) => self.report_error_message(
-                        "file_search.ripgrep.load",
-                        format!("Failed to load settings: {error}"),
+                        "file_search.ripgrep.save",
+                        format!("Failed to save ripgrep path: {error}"),
                     ),
                 }
             }
@@ -1440,6 +1447,7 @@ impl LauncherApp {
             settings_editor,
             plugin_editor,
             settings_path,
+            startup_settings_diagnostic: None,
             multi_manager,
             multi_manager_settings: settings.multi_manager.clone(),
             launcher_hwnd: None,
@@ -2687,11 +2695,12 @@ impl LauncherApp {
     }
 
     fn save_pinned_panels(&mut self) {
-        if let Ok(mut s) = Settings::load(&self.settings_path) {
-            s.pinned_panels = self.pinned_panels.clone();
-            if let Err(e) = s.save(&self.settings_path) {
-                self.report_error_message("launcher", format!("Failed to save: {e}"));
-            }
+        let pinned_panels = self.pinned_panels.clone();
+        if let Err(e) = Settings::update(&self.settings_path, |settings| {
+            settings.pinned_panels = pinned_panels;
+            Ok(())
+        }) {
+            self.report_error_message("launcher", format!("Failed to save: {e}"));
         }
     }
 
@@ -3150,6 +3159,57 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn failed_file_search_preferences_save_restores_committed_runtime_state() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let committed_preferences = app.file_search_dialog.settings.ui_preferences.clone();
+        let committed_runtime_preferences = app
+            .file_search_coordinator
+            .production_settings()
+            .unwrap()
+            .ui_preferences
+            .clone();
+        let committed_editor_value = app
+            .settings_editor
+            .get_plugin_setting_value("file_search")
+            .cloned();
+
+        let mut candidate = committed_preferences.clone();
+        candidate.whole_word = !candidate.whole_word;
+        app.file_search_dialog.ui_preferences = candidate.clone();
+        app.file_search_dialog.ui_preferences_dirty = true;
+
+        let directory = tempdir().unwrap();
+        let blocker = directory.path().join("not-a-directory");
+        std::fs::write(&blocker, "unchanged").unwrap();
+        app.settings_path = blocker.join("settings.json").to_string_lossy().into_owned();
+
+        app.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(candidate));
+
+        assert_eq!(app.file_search_dialog.ui_preferences, committed_preferences);
+        assert_eq!(
+            app.file_search_dialog.settings.ui_preferences,
+            committed_preferences
+        );
+        assert!(!app.file_search_dialog.ui_preferences_dirty);
+        assert_eq!(
+            app.file_search_coordinator
+                .production_settings()
+                .unwrap()
+                .ui_preferences,
+            committed_runtime_preferences
+        );
+        assert_eq!(
+            app.settings_editor
+                .get_plugin_setting_value("file_search")
+                .cloned(),
+            committed_editor_value
+        );
+        assert_eq!(std::fs::read_to_string(blocker).unwrap(), "unchanged");
     }
 
     #[derive(Clone)]

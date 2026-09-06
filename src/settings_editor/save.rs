@@ -16,22 +16,21 @@ impl SettingsEditor {
         }
 
         self.sync_from_plugin_settings();
-        match Settings::load(&app.settings_path) {
-            Ok(current) => {
-                let mut new_settings = self.to_settings(&current);
-                app.merge_file_search_ui_preferences_into_settings(&mut new_settings);
-                if let Err(e) = new_settings.save(&app.settings_path) {
-                    app.report_ui_error(UiErrorEvent::new(
-                        "settings_editor.save",
-                        format!("Failed to save: {e}"),
-                    ));
-                } else {
-                    self.apply_saved_settings(ctx, app, new_settings);
-                }
+        let settings_path = app.settings_path.clone();
+        match Settings::update(&settings_path, |current| {
+            let mut new_settings = self.to_settings(current);
+            app.merge_file_search_ui_preferences_into_settings(&mut new_settings);
+            *current = new_settings;
+            Ok(())
+        }) {
+            Ok(new_settings) => {
+                self.apply_saved_settings(ctx, app, new_settings);
             }
             Err(e) => {
-                let msg = format!("Failed to read settings: {e}");
-                app.report_error_message("settings_editor.read", msg);
+                app.report_ui_error(UiErrorEvent::new(
+                    "settings_editor.save",
+                    format!("Failed to save settings: {e}"),
+                ));
             }
         }
     }

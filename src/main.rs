@@ -10,6 +10,7 @@ use multi_launcher::platform::{
 };
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
+use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_settings};
 use multi_launcher::visibility::handle_visibility_trigger;
 use multi_launcher::{indexer, logging};
 
@@ -106,6 +107,7 @@ fn spawn_gui(
     custom_len: usize,
     settings: Settings,
     settings_path: String,
+    startup_settings_diagnostic: Option<SettingsStartupDiagnostic>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     event_tx: Sender<()>,
 ) -> (
@@ -116,12 +118,6 @@ fn spawn_gui(
     Arc<Mutex<Option<egui::Context>>>,
 ) {
     let custom_len_for_window = custom_len;
-    let mut settings = settings;
-    if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings)
-        && let Err(err) = settings.save(&settings_path)
-    {
-        tracing::warn!(?err, "failed to save clipboard modify enablement migration");
-    }
     let reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
     let reserved_launcher_hotkey_refs = reserved_launcher_hotkeys
         .iter()
@@ -198,7 +194,7 @@ fn spawn_gui(
                 }
                 tracing::debug!("egui context stored");
                 let launcher_timer = multi_launcher::performance::Timer::start();
-                let app = LauncherApp::new(
+                let mut app = LauncherApp::new(
                     &cc.egui_ctx,
                     actions_for_window,
                     custom_len_for_window,
@@ -214,6 +210,7 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.startup_settings_diagnostic = startup_settings_diagnostic;
                 launcher_timer.finish("startup.launcher_app");
                 Box::new(app)
             }),
@@ -234,14 +231,19 @@ fn main() -> anyhow::Result<()> {
         SingleInstanceAcquire::AlreadyRunning => return Ok(()),
     };
     let settings_timer = multi_launcher::performance::Timer::start();
-    let mut settings = Settings::load("settings.json").unwrap_or_default();
+    let startup_settings = load_startup_settings("settings.json");
+    let mut settings = startup_settings.settings;
+    let startup_settings_diagnostic = startup_settings.diagnostic;
     multi_launcher::settings::set_settings_path("settings.json");
-    if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings) {
-        let _ = settings.save("settings.json");
-    }
     let _logging_guard = logging::init(settings.debug_logging, settings.log_file_path());
     settings_timer.finish("startup.settings_load");
     tracing::debug!(?settings, "settings loaded");
+    if let Some(diagnostic) = startup_settings_diagnostic.as_ref() {
+        tracing::error!(
+            error = %diagnostic.error(),
+            "settings startup used temporary defaults without replacing the persisted file"
+        );
+    }
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
         settings.enabled_plugins.as_ref(),
     );
@@ -307,6 +309,7 @@ fn main() -> anyhow::Result<()> {
         custom_len,
         settings.clone(),
         "settings.json".to_string(),
+        startup_settings_diagnostic,
         settings.enabled_capabilities.clone(),
         event_tx.clone(),
     );

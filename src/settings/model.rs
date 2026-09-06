@@ -645,18 +645,6 @@ impl Default for Settings {
     }
 }
 impl Settings {
-    pub fn load(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path).unwrap_or_default();
-        if content.is_empty() {
-            return Ok(Self::default());
-        }
-        Ok(serde_json::from_str(&content)?)
-    }
-    pub fn save(&self, path: &str) -> anyhow::Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
-    }
     pub fn hotkey(&self) -> Hotkey {
         if let Some(hotkey) = &self.hotkey {
             match parse_hotkey(hotkey) {

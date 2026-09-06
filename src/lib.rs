@@ -50,6 +50,7 @@ pub mod process;
 pub mod settings;
 pub mod settings_editor;
 pub mod sound;
+pub mod startup;
 pub mod text_transform;
 pub mod toast_log;
 pub mod usage;

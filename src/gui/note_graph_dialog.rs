@@ -345,22 +345,17 @@ impl NoteGraphDialog {
         if self.last_saved_settings.as_ref() == Some(&value) {
             return;
         }
-        match Settings::load(&app.settings_path) {
-            Ok(mut settings) => {
-                settings.note_graph = value.clone();
-                if let Err(err) = settings.save(&app.settings_path) {
-                    app.report_error_message(
-                        "ui operation",
-                        format!("Failed to save note graph settings: {err}"),
-                    );
-                    return;
-                }
+        match Settings::update(&app.settings_path, |settings| {
+            settings.note_graph = value.clone();
+            Ok(())
+        }) {
+            Ok(_) => {
                 self.last_saved_settings = Some(value);
             }
             Err(err) => {
                 app.report_error_message(
                     "ui operation",
-                    format!("Failed to load settings for note graph: {err}"),
+                    format!("Failed to save note graph settings: {err}"),
                 );
             }
         }

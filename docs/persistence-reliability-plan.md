@@ -137,18 +137,18 @@ Unless a milestone states otherwise, verification means: focused unit/integratio
 - **Design/invariants:** preserve `save_atomic`; contextual operation/store/path errors; decoding/validation separated from migration writes; explicit durable policy; no ORM/global path-lock manager/schema change.
 - **Acceptance/tests:** missing/empty/valid/malformed/unreadable are distinct; atomic successful output parses; replacement failure preserves destination and cleans temp; expected parents created; existing atomic retry/backup behavior retained.
 - **Risks:** generic API complexity, accidental serialization differences, Windows replacement edge cases, unnecessary `sync_all` on hot paths.
-- **Files/results/commit:** `src/common/persistence.rs`, `src/common/mod.rs`, this ledger / `cargo test common::persistence --lib` 8 passed; `cargo test common::atomic_file --lib` 2 passed; `cargo nextest run -E 'test(/common::(persistence|atomic_file)/)'` 10 passed; `cargo fmt --all -- --check` passed; `cargo check` passed; `git diff --check` passed; API/serialization diff inspected and existing atomic failure seam retained unchanged / _pending orchestrator commit_.
+- **Files/results/commit:** `src/common/persistence.rs`, `src/common/mod.rs`, this ledger / `cargo test common::persistence --lib` 8 passed; `cargo test common::atomic_file --lib` 2 passed; `cargo nextest run -E 'test(/common::(persistence|atomic_file)/)'` 10 passed; `cargo fmt --all -- --check` passed; `cargo check` passed; `git diff --check` passed; API/serialization diff inspected and existing atomic failure seam retained unchanged / `be9ab29 refactor(storage): add typed atomic JSON persistence primitives`.
 
 ### 3. Settings startup corruption safety and transactions
 
-- **Status:** `pending`; **depends on:** 2.
+- **Status:** `complete`; **depends on:** 2.
 - **Objective:** make settings the first typed transactional store and eliminate malformed-settings overwrite during startup migration.
 - **Repository finding:** `Settings::load` collapses read errors; `main` also defaults load errors and then may persist the Clipboard Modify migration.
 - **Likely files:** `src/settings/*`, `src/main.rs`, settings editor/GUI save paths, startup tests.
 - **Design/invariants:** explicit missing/empty/loaded/invalid startup state; malformed/unreadable bytes retained; a settings-owned transaction serializes read/modify/write; migrations run only after valid/default-missing load and persist before publish/restart.
 - **Acceptance/tests:** missing and intended empty compatibility initialize; valid loads; malformed returns diagnostic and remains byte-for-byte unchanged through startup; valid Clipboard Modify migration persists; failed save does not publish; existing serde contract preserved.
 - **Risks:** startup behavior and hotkey/plugin settings regression, duplicate migration ownership, editor callers bypassing store.
-- **Files/results/commit:** _pending / pending / pending_.
+- **Files/results/commit:** `src/settings/store.rs`, `src/settings/model.rs`, `src/settings/mod.rs`, `src/startup.rs`, `src/lib.rs`, `src/main.rs`, `src/gui/{mod,render,theme_settings_dialog,mouse_gesture_settings_dialog,note_graph_dialog,note_panel}.rs`, `src/settings_editor/save.rs`, `src/plugin_editor.rs`, `src/help_window.rs`, `src/multi_manager/settings.rs`, `tests/domain_cases/theme_settings_dialog.rs`, this ledger / `cargo test settings::store --lib` 6 passed; `cargo test startup::tests --lib` 7 passed; `cargo test settings --lib` 95 passed; theme failed-save publication test and file-search failed-preferences-save runtime rollback test passed; targeted Nextest settings/startup/migration/GUI/MultiManager subset 140 passed across 70 binaries; `cargo check` passed; `cargo fmt --all -- --check` and `git diff --check` passed; settings load/save/migration callers and serialization/API diff inspected. Broad `cargo test clipboard_modify --lib` had 163 pass and one parallel shared-history assertion failure; its exact isolated rerun passed. / _pending orchestrator commit_.
 
 ### 4A. Actions
 

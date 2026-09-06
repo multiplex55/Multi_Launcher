@@ -1691,9 +1691,13 @@ impl eframe::App for LauncherApp {
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
         self.save_file_search_ui_preferences_if_dirty();
-        if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
-            settings.window_size = Some(self.window_size);
-            settings.pinned_panels = self.pinned_panels.clone();
+        let window_size = self.window_size;
+        let pinned_panels = self.pinned_panels.clone();
+        let dialog_width = self.clipboard_modify_dialog.persisted_window_size.x;
+        let dialog_height = self.clipboard_modify_dialog.persisted_window_size.y;
+        let _ = crate::settings::Settings::update(&self.settings_path, |settings| {
+            settings.window_size = Some(window_size);
+            settings.pinned_panels = pinned_panels;
             // Persist only the explicitly approved, non-sensitive Clipboard
             // Modify UI geometry. Runtime source/preview/undo data is held only
             // by the dialog/service and is never serialized into Settings.
@@ -1704,21 +1708,18 @@ impl eframe::App for LauncherApp {
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default();
             let hide_launcher_after_apply = clipboard_modify_preferences.hide_launcher_after_apply;
-            clipboard_modify_preferences.dialog_width =
-                self.clipboard_modify_dialog.persisted_window_size.x;
-            clipboard_modify_preferences.dialog_height =
-                self.clipboard_modify_dialog.persisted_window_size.y;
+            clipboard_modify_preferences.dialog_width = dialog_width;
+            clipboard_modify_preferences.dialog_height = dialog_height;
             debug_assert_eq!(
                 clipboard_modify_preferences.hide_launcher_after_apply, hide_launcher_after_apply,
                 "persisting dialog geometry must not reset the live visibility preference"
             );
-            if let Ok(value) = serde_json::to_value(clipboard_modify_preferences) {
-                settings
-                    .plugin_settings
-                    .insert("clipboard_modify".into(), value);
-            }
-            let _ = settings.save(&self.settings_path);
-        }
+            let value = serde_json::to_value(clipboard_modify_preferences)?;
+            settings
+                .plugin_settings
+                .insert("clipboard_modify".into(), value);
+            Ok(())
+        });
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
         #[cfg(not(test))]
         std::process::exit(0);

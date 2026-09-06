@@ -43,12 +43,12 @@ impl ThemeSettingsDialogState {
 
     pub fn save_to_path(&mut self, settings_path: &str) -> Result<(), String> {
         self.last_error = None;
-        let mut settings = Settings::load(settings_path)
-            .map_err(|err| format!("Failed to load settings: {err}"))?;
-        settings.theme = self.draft.clone();
-        settings
-            .save(settings_path)
-            .map_err(|err| format!("Failed to save settings: {err}"))?;
+        let draft = self.draft.clone();
+        Settings::update(settings_path, |settings| {
+            settings.theme = draft;
+            Ok(())
+        })
+        .map_err(|err| format!("Failed to save settings: {err}"))?;
         self.dirty = false;
         Ok(())
     }

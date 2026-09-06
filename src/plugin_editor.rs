@@ -60,107 +60,105 @@ impl PluginEditor {
 
     fn save_settings(&mut self, app: &mut LauncherApp) {
         tracing::debug!(?self.enabled_plugins, "saving plugin settings");
-        match Settings::load(&app.settings_path) {
-            Ok(mut s) => {
-                let all_plugins_enabled = self.enabled_plugins.len() == self.available.len()
-                    && self
-                        .available
-                        .iter()
-                        .all(|(name, _, _)| self.enabled_plugins.contains(name));
-                s.enabled_plugins = if all_plugins_enabled {
-                    None
-                } else {
-                    Some(self.enabled_plugins.iter().cloned().collect())
-                };
+        match Settings::update(&app.settings_path, |s| {
+            let all_plugins_enabled = self.enabled_plugins.len() == self.available.len()
+                && self
+                    .available
+                    .iter()
+                    .all(|(name, _, _)| self.enabled_plugins.contains(name));
+            s.enabled_plugins = if all_plugins_enabled {
+                None
+            } else {
+                Some(self.enabled_plugins.iter().cloned().collect())
+            };
 
-                let mut default_caps = true;
-                for (name, _, caps) in &self.available {
-                    if !self.enabled_plugins.contains(name) {
-                        continue;
-                    }
-                    match self.enabled_capabilities.get(name) {
-                        Some(en) => {
-                            if en.len() != caps.len() || !caps.iter().all(|c| en.contains(c)) {
-                                default_caps = false;
-                                break;
-                            }
-                        }
-                        None => {
-                            if !caps.is_empty() {
-                                default_caps = false;
-                                break;
-                            }
+            let mut default_caps = true;
+            for (name, _, caps) in &self.available {
+                if !self.enabled_plugins.contains(name) {
+                    continue;
+                }
+                match self.enabled_capabilities.get(name) {
+                    Some(en) => {
+                        if en.len() != caps.len() || !caps.iter().all(|c| en.contains(c)) {
+                            default_caps = false;
+                            break;
                         }
                     }
-                }
-                if default_caps && self.enabled_capabilities.len() == self.enabled_plugins.len() {
-                    s.enabled_capabilities = None;
-                } else {
-                    s.enabled_capabilities = Some(self.enabled_capabilities.clone());
-                }
-                if let Err(e) = s.save(&app.settings_path) {
-                    app.report_error("ui operation", format!("Failed to save: {e}"));
-                } else {
-                    app.update_paths(
-                        s.plugin_dirs.clone(),
-                        s.index_paths.clone(),
-                        s.enabled_plugins.clone(),
-                        s.enabled_capabilities.clone(),
-                        s.offscreen_pos,
-                        Some(s.enable_toasts),
-                        Some(s.show_inline_errors),
-                        Some(s.show_error_toasts),
-                        Some(s.toast_duration),
-                        Some(s.fuzzy_weight),
-                        Some(s.usage_weight),
-                        Some(s.match_exact),
-                        Some(s.follow_mouse),
-                        Some(s.static_location_enabled),
-                        s.static_pos,
-                        s.static_size,
-                        Some(s.hide_after_run),
-                        Some(s.clear_query_after_run),
-                        Some(s.require_confirm_destructive),
-                        Some(s.timer_refresh),
-                        Some(s.disable_timer_updates),
-                        Some(s.preserve_command),
-                        Some(s.query_autocomplete),
-                        Some(s.net_refresh),
-                        Some(s.net_unit),
-                        s.screenshot_dir.clone(),
-                        Some(s.screenshot_save_file),
-                        Some(s.screenshot_use_editor),
-                        Some(s.screenshot_auto_save),
-                        Some(s.always_on_top),
-                        Some(s.page_jump),
-                        Some(s.note.clone()),
-                        Some(s.note_panel_default_size),
-                        Some(s.note_save_on_close),
-                        Some(s.note_confirm_discard_unsaved_changes),
-                        Some(s.note_always_overwrite),
-                        Some(s.note_images_as_links),
-                        Some(s.note_show_details),
-                        Some(s.note_more_limit),
-                        Some(s.show_dashboard_diagnostics),
-                    );
-                    let dirs = s.plugin_dirs.clone().unwrap_or_default();
-                    let actions_arc = Arc::clone(&app.actions);
-                    app.plugins.reload_from_dirs(
-                        &dirs,
-                        app.clipboard_limit,
-                        app.net_unit,
-                        false,
-                        &s.plugin_settings,
-                        actions_arc,
-                    );
-                    tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
-                    self.available = Self::gather_available(&dirs);
-                    app.search();
-
-                    crate::request_hotkey_restart(s);
+                    None => {
+                        if !caps.is_empty() {
+                            default_caps = false;
+                            break;
+                        }
+                    }
                 }
             }
-            Err(e) => app.report_error("ui operation", format!("Failed to read settings: {e}")),
+            if default_caps && self.enabled_capabilities.len() == self.enabled_plugins.len() {
+                s.enabled_capabilities = None;
+            } else {
+                s.enabled_capabilities = Some(self.enabled_capabilities.clone());
+            }
+            Ok(())
+        }) {
+            Ok(s) => {
+                app.update_paths(
+                    s.plugin_dirs.clone(),
+                    s.index_paths.clone(),
+                    s.enabled_plugins.clone(),
+                    s.enabled_capabilities.clone(),
+                    s.offscreen_pos,
+                    Some(s.enable_toasts),
+                    Some(s.show_inline_errors),
+                    Some(s.show_error_toasts),
+                    Some(s.toast_duration),
+                    Some(s.fuzzy_weight),
+                    Some(s.usage_weight),
+                    Some(s.match_exact),
+                    Some(s.follow_mouse),
+                    Some(s.static_location_enabled),
+                    s.static_pos,
+                    s.static_size,
+                    Some(s.hide_after_run),
+                    Some(s.clear_query_after_run),
+                    Some(s.require_confirm_destructive),
+                    Some(s.timer_refresh),
+                    Some(s.disable_timer_updates),
+                    Some(s.preserve_command),
+                    Some(s.query_autocomplete),
+                    Some(s.net_refresh),
+                    Some(s.net_unit),
+                    s.screenshot_dir.clone(),
+                    Some(s.screenshot_save_file),
+                    Some(s.screenshot_use_editor),
+                    Some(s.screenshot_auto_save),
+                    Some(s.always_on_top),
+                    Some(s.page_jump),
+                    Some(s.note.clone()),
+                    Some(s.note_panel_default_size),
+                    Some(s.note_save_on_close),
+                    Some(s.note_confirm_discard_unsaved_changes),
+                    Some(s.note_always_overwrite),
+                    Some(s.note_images_as_links),
+                    Some(s.note_show_details),
+                    Some(s.note_more_limit),
+                    Some(s.show_dashboard_diagnostics),
+                );
+                let dirs = s.plugin_dirs.clone().unwrap_or_default();
+                let actions_arc = Arc::clone(&app.actions);
+                app.plugins.reload_from_dirs(
+                    &dirs,
+                    app.clipboard_limit,
+                    app.net_unit,
+                    false,
+                    &s.plugin_settings,
+                    actions_arc,
+                );
+                tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
+                self.available = Self::gather_available(&dirs);
+                app.search();
+
+                crate::request_hotkey_restart(s);
+            }
+            Err(e) => app.report_error("ui operation", format!("Failed to save settings: {e}")),
         }
     }
 

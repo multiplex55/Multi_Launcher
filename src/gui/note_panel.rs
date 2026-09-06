@@ -911,25 +911,15 @@ impl NotePanel {
     }
 
     fn persist_details_visibility(&self, app: &mut LauncherApp) {
-        match crate::settings::Settings::load(&app.settings_path) {
-            Ok(mut settings) => {
-                if settings.note_show_details == self.show_metadata {
-                    return;
-                }
-                settings.note_show_details = self.show_metadata;
-                if let Err(err) = settings.save(&app.settings_path) {
-                    app.report_error(
-                        "ui operation",
-                        format!("Failed to save note detail visibility setting: {err}"),
-                    );
-                } else {
-                    app.note_show_details = self.show_metadata;
-                }
-            }
+        match crate::settings::Settings::update(&app.settings_path, |settings| {
+            settings.note_show_details = self.show_metadata;
+            Ok(())
+        }) {
+            Ok(_) => app.note_show_details = self.show_metadata,
             Err(err) => {
                 app.report_error(
                     "ui operation",
-                    format!("Failed to load settings for note detail visibility: {err}"),
+                    format!("Failed to save note detail visibility setting: {err}"),
                 );
             }
         }
