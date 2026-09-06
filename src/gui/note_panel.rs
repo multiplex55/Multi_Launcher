@@ -15,7 +15,7 @@ use crate::plugins::note::{
     note_cache_snapshot, note_link_menu_targets_snapshot, note_version, resolve_note_query,
     save_note, save_note_image_asset,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good, todo_version};
 use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
 use chrono::{DateTime, Local, TimeZone};
@@ -664,7 +664,7 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
 }
 
 fn open_todo_reference(app: &mut LauncherApp, todo_id: &str) {
-    let todos = load_todos(TODO_FILE).unwrap_or_default();
+    let todos = load_todos_or_last_good(TODO_FILE);
     if let Some((idx, _)) = todos.iter().enumerate().find(|(_, t)| t.id == todo_id) {
         app.todo_view_dialog.open_edit(idx);
     } else {
@@ -1242,7 +1242,7 @@ impl NotePanel {
             return;
         }
 
-        let todos = load_todos(TODO_FILE).unwrap_or_default();
+        let todos = load_todos_or_last_good(TODO_FILE);
         self.derived.todo_label_map = todos
             .iter()
             .filter(|t| !t.id.is_empty())
@@ -2594,7 +2594,7 @@ impl NotePanel {
                         if let Some(slug) = &row.note_slug {
                             app.open_note_panel(slug, None);
                         } else if let Some(todo_id) = &row.todo_id {
-                            let todos = load_todos(TODO_FILE).unwrap_or_default();
+                            let todos = load_todos_or_last_good(TODO_FILE);
                             if let Some((todo_idx, _)) =
                                 todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
                             {
@@ -2620,7 +2620,7 @@ impl NotePanel {
                         if let Some(slug) = &row.note_slug {
                             app.open_note_panel(slug, None);
                         } else if let Some(todo_id) = &row.todo_id {
-                            let todos = load_todos(TODO_FILE).unwrap_or_default();
+                            let todos = load_todos_or_last_good(TODO_FILE);
                             if let Some((todo_idx, _)) =
                                 todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
                             {
@@ -3834,11 +3834,7 @@ impl NotePanel {
 
         ui.menu_button("Link todo", |ui| {
             ui.label("Select existing todo");
-            for todo in load_todos(TODO_FILE)
-                .unwrap_or_default()
-                .into_iter()
-                .take(12)
-            {
+            for todo in load_todos_or_last_good(TODO_FILE).into_iter().take(12) {
                 let todo_id = if todo.id.is_empty() {
                     todo.text.clone()
                 } else {

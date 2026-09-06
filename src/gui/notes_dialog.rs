@@ -5,7 +5,7 @@ use crate::plugins::note::{
     note_cache_snapshot, reload_templates, save_notes, save_template, template_path,
     validate_template_name,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos};
+use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good};
 use chrono::{DateTime, Local};
 use eframe::egui;
 
@@ -574,10 +574,8 @@ impl NotesDialog {
                                         }
                                         ui.separator();
                                         ui.label("Link to todo");
-                                        for todo in load_todos(TODO_FILE)
-                                            .unwrap_or_default()
-                                            .into_iter()
-                                            .take(8)
+                                        for todo in
+                                            load_todos_or_last_good(TODO_FILE).into_iter().take(8)
                                         {
                                             let todo_id = if todo.id.is_empty() {
                                                 todo.text.clone()

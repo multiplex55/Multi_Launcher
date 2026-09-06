@@ -350,7 +350,7 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             next.notes = Arc::new(load_notes().unwrap_or_default());
         }
         if batch.contains(DashboardRefreshRequest::Todos) {
-            next.todos = Arc::new(load_todos(TODO_FILE).unwrap_or_default());
+            publish_loaded_or_retain(&mut next.todos, load_todos(TODO_FILE), "todos");
         }
         if batch.contains(DashboardRefreshRequest::Calendar) {
             let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
