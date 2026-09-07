@@ -1,5 +1,8 @@
-model = "gpt-5.6-sol"
-model_reasoning_effort = "medium"
+# model = "gpt-5.6-sol"
+# Astra high alternative:
+model = "gpt-6-astra"
+# model_reasoning_effort = "medium"
+model_reasoning_effort = "high"
 
 # When explicitly operating in plan mode, spend more reasoning.
 plan_mode_reasoning_effort = "high"
@@ -8,4 +11,7 @@ plan_mode_reasoning_effort = "high"
 enabled = true
 max_concurrent_threads_per_session = 4
 default_subagent_model = "gpt-5.6-sol"
+# Astra high alternative for all default subagents:
+# default_subagent_model = "gpt-6-astra"
 default_subagent_reasoning_effort = "medium"
+# default_subagent_reasoning_effort = "high"
