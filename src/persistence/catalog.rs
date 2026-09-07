@@ -41,6 +41,7 @@ pub enum PersistentStoreId {
     MultiManagerWorkspaces,
     Notes,
     NotesAssets,
+    NoteTemplates,
     Scratchpad,
     QueryHistory,
     ClipboardHistory,
@@ -57,7 +58,7 @@ pub enum PersistentStoreId {
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -78,6 +79,7 @@ impl PersistentStoreId {
         Self::MultiManagerWorkspaces,
         Self::Notes,
         Self::NotesAssets,
+        Self::NoteTemplates,
         Self::Scratchpad,
         Self::QueryHistory,
         Self::ClipboardHistory,
@@ -117,6 +119,7 @@ pub enum StoreOwnership {
 pub enum BackupPolicy {
     Include,
     ExcludeExternal,
+    ExcludeCoveredByParent,
     ExcludeReplaceable,
     ExcludeRuntime,
 }
@@ -243,6 +246,9 @@ impl PersistenceCatalog {
             .clone()
             .unwrap_or_else(crate::plugins::note::notes_dir);
         let notes_path = absolute_from(&current_dir, &notes_source);
+        let (template_source, templates_configured) =
+            crate::plugins::note::template_dir_configuration();
+        let templates_path = absolute_from(&current_dir, &template_source);
 
         let stores = PersistentStoreId::ALL
             .into_iter()
@@ -256,6 +262,8 @@ impl PersistenceCatalog {
                     dashboard_setting.is_some(),
                     &notes_path,
                     notes_setting.is_some(),
+                    &templates_path,
+                    templates_configured,
                     scratchpad_setting.as_deref(),
                 )
             })
@@ -479,6 +487,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             false,
             ProbeKind::AssetsDirectory,
         ),
+        Id::NoteTemplates => s(
+            "Note templates",
+            Directory,
+            Critical,
+            Sensitive,
+            Low,
+            true,
+            ProbeKind::NotesDirectory,
+        ),
         Id::Scratchpad => s(
             "Scratchpad",
             File,
@@ -549,7 +566,7 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             SystemMetadata,
             Session,
             true,
-            json_value,
+            ProbeKind::Json(probe_gesture_state),
         ),
         Id::NoteUiState => s(
             "Note UI state",
@@ -629,6 +646,8 @@ fn descriptor_for(
     dashboard_configured: bool,
     notes_path: &Path,
     notes_configured: bool,
+    templates_path: &Path,
+    templates_configured: bool,
     scratchpad_setting: Option<&Path>,
 ) -> StoreDescriptor {
     use PersistentStoreId as Id;
@@ -664,6 +683,7 @@ fn descriptor_for(
         ),
         Id::Notes => (notes_path.to_path_buf(), notes_configured),
         Id::NotesAssets => (notes_path.join("assets"), notes_configured),
+        Id::NoteTemplates => (templates_path.to_path_buf(), templates_configured),
         Id::Scratchpad => (
             absolute_from(
                 current_dir,
@@ -693,7 +713,10 @@ fn descriptor_for(
             current_dir,
             crate::mouse_gestures::usage::GESTURES_USAGE_FILE,
         ),
-        Id::MouseGestureState => cwd(current_dir, "mouse_gestures_state.json"),
+        Id::MouseGestureState => cwd(
+            current_dir,
+            crate::mouse_gestures::service::GESTURES_STATE_FILE,
+        ),
         Id::Alarms => cwd(current_dir, crate::plugins::timer::ALARMS_FILE),
         Id::LauncherLog => {
             let configured = matches!(
@@ -714,11 +737,12 @@ fn descriptor_for(
         StoreOwnership::External
     };
     let spec = spec(id);
-    let backup_policy = match (spec.criticality, ownership) {
-        (StoreCriticality::Critical, StoreOwnership::ApplicationOwned) => BackupPolicy::Include,
-        (StoreCriticality::Critical, StoreOwnership::External) => BackupPolicy::ExcludeExternal,
-        (StoreCriticality::Replaceable, _) => BackupPolicy::ExcludeReplaceable,
-        (StoreCriticality::Runtime, _) => BackupPolicy::ExcludeRuntime,
+    let backup_policy = match (id, spec.criticality, ownership) {
+        (Id::NotesAssets, _, _) => BackupPolicy::ExcludeCoveredByParent,
+        (_, StoreCriticality::Critical, StoreOwnership::ApplicationOwned) => BackupPolicy::Include,
+        (_, StoreCriticality::Critical, StoreOwnership::External) => BackupPolicy::ExcludeExternal,
+        (_, StoreCriticality::Replaceable, _) => BackupPolicy::ExcludeReplaceable,
+        (_, StoreCriticality::Runtime, _) => BackupPolicy::ExcludeRuntime,
     };
     let restore_eligible = backup_policy == BackupPolicy::Include;
     StoreDescriptor {
@@ -730,7 +754,9 @@ fn descriptor_for(
         ownership,
         backup_policy,
         restore_eligible,
-        reset_eligible: spec.reset && ownership == StoreOwnership::ApplicationOwned,
+        reset_eligible: spec.reset
+            && ownership == StoreOwnership::ApplicationOwned
+            && id != Id::NotesAssets,
         privacy: spec.privacy,
         frequency: spec.frequency,
         externally_configured,
@@ -884,6 +910,12 @@ fn probe_gestures(path: &Path, bytes: &[u8]) -> ProbeResult {
         .unwrap_or(ProbeResult::Malformed)
 }
 
+fn probe_gesture_state(_: &Path, bytes: &[u8]) -> ProbeResult {
+    crate::mouse_gestures::service::decode_selection_state(bytes)
+        .map(|_| ProbeResult::Healthy)
+        .unwrap_or(ProbeResult::Malformed)
+}
+
 fn probe_mkmacro(_: &Path, bytes: &[u8]) -> ProbeResult {
     match crate::mkmacro::store::probe_document(bytes) {
         Ok(crate::mkmacro::store::DocumentProbe::Supported) => ProbeResult::Healthy,
@@ -964,12 +996,14 @@ mod tests {
         let current = root_path;
         let dashboard = root_path.join("dashboard.json");
         let notes = root_path.join("notes");
+        let templates = root_path.join("templates");
         PersistenceCatalog {
             stores: PersistentStoreId::ALL
                 .into_iter()
                 .map(|id| {
                     descriptor_for(
-                        id, &root, settings, current, &dashboard, false, &notes, false, None,
+                        id, &root, settings, current, &dashboard, false, &notes, false, &templates,
+                        true, None,
                     )
                 })
                 .collect(),
@@ -1016,6 +1050,10 @@ mod tests {
             .map(|store| store.path.clone())
             .collect::<BTreeSet<_>>();
         assert_eq!(paths.len(), catalog.stores().len());
+        assert_eq!(
+            serde_json::from_str::<PersistentStoreId>(r#""NotesAssets""#).unwrap(),
+            PersistentStoreId::NotesAssets
+        );
     }
 
     #[test]
@@ -1034,6 +1072,8 @@ mod tests {
             false,
             &directory.path().join("notes"),
             false,
+            &directory.path().join("templates"),
+            true,
             None,
         );
         assert_eq!(
@@ -1053,6 +1093,8 @@ mod tests {
             false,
             &directory.path().join("notes"),
             false,
+            &directory.path().join("templates"),
+            true,
             None,
         );
         assert_eq!(escaped.ownership, StoreOwnership::External);
@@ -1075,6 +1117,8 @@ mod tests {
             false,
             &directory.path().join("notes"),
             false,
+            &directory.path().join("templates"),
+            true,
             None,
         );
         assert_eq!(absolute.ownership, StoreOwnership::External);
@@ -1088,6 +1132,8 @@ mod tests {
             true,
             &directory.path().join("notes"),
             false,
+            &directory.path().join("templates"),
+            true,
             None,
         );
         assert_eq!(dashboard.ownership, StoreOwnership::ApplicationOwned);
@@ -1102,10 +1148,68 @@ mod tests {
             false,
             &external_root.path().join("notes"),
             true,
+            &directory.path().join("templates"),
+            true,
             Some(&external_root.path().join("scratchpad.json")),
         );
         assert_eq!(notes.ownership, StoreOwnership::External);
         assert!(notes.externally_configured);
+    }
+
+    #[test]
+    fn note_template_ownership_follows_path_containment_independent_of_configuration_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let root = root(directory.path());
+        let settings = Settings::default();
+        let descriptor = |path: &Path, configured| {
+            descriptor_for(
+                PersistentStoreId::NoteTemplates,
+                &root,
+                &settings,
+                directory.path(),
+                &directory.path().join("dashboard.json"),
+                false,
+                &directory.path().join("notes"),
+                false,
+                path,
+                configured,
+                None,
+            )
+        };
+
+        let default_outside = descriptor(&external.path().join("templates"), false);
+        assert_eq!(default_outside.ownership, StoreOwnership::External);
+        assert_eq!(default_outside.backup_policy, BackupPolicy::ExcludeExternal);
+        assert!(!default_outside.restore_eligible);
+        assert!(!default_outside.reset_eligible);
+        assert!(!default_outside.externally_configured);
+
+        let default_inside = descriptor(&directory.path().join("templates"), false);
+        assert_eq!(default_inside.ownership, StoreOwnership::ApplicationOwned);
+        assert_eq!(default_inside.backup_policy, BackupPolicy::Include);
+        assert!(default_inside.restore_eligible);
+        assert!(default_inside.reset_eligible);
+        assert!(!default_inside.externally_configured);
+
+        let configured_internal = descriptor(&directory.path().join("templates"), true);
+        assert_eq!(
+            configured_internal.ownership,
+            StoreOwnership::ApplicationOwned
+        );
+        assert_eq!(configured_internal.backup_policy, BackupPolicy::Include);
+        assert!(configured_internal.restore_eligible);
+        assert!(configured_internal.reset_eligible);
+        assert!(configured_internal.externally_configured);
+
+        let configured_external = descriptor(&external.path().join("templates"), true);
+        assert_eq!(configured_external.ownership, StoreOwnership::External);
+        assert_eq!(
+            configured_external.backup_policy,
+            BackupPolicy::ExcludeExternal
+        );
+        assert!(!configured_external.restore_eligible);
+        assert!(!configured_external.reset_eligible);
     }
 
     #[test]
@@ -1207,6 +1311,20 @@ mod tests {
                 version: (crate::mouse_gestures::db::SCHEMA_VERSION + 1).to_string()
             }
         );
+
+        std::fs::write(&path, "{}").unwrap();
+        let gesture_state = json_descriptor(&path, probe_gesture_state);
+        assert!(matches!(
+            gesture_state.probe(),
+            StoreHealth::Malformed { .. }
+        ));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&crate::mouse_gestures::service::GestureSelectionState::default())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gesture_state.probe(), StoreHealth::Healthy);
     }
 
     #[test]
@@ -1280,6 +1398,12 @@ mod tests {
         settings.multi_manager.workspaces_path = "owned/workspaces.json".into();
         let catalog = test_catalog(directory.path(), &settings);
         for store in catalog.stores() {
+            if store.id == PersistentStoreId::NotesAssets {
+                assert_eq!(store.backup_policy, BackupPolicy::ExcludeCoveredByParent);
+                assert!(!store.restore_eligible);
+                assert!(!store.reset_eligible);
+                continue;
+            }
             match store.criticality {
                 StoreCriticality::Critical => {
                     let expected = if store.ownership == StoreOwnership::ApplicationOwned {
@@ -1313,10 +1437,75 @@ mod tests {
     }
 
     #[test]
+    fn backup_and_restore_ownership_has_no_overlapping_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = test_catalog(directory.path(), &Settings::default());
+        let owned = catalog
+            .stores()
+            .iter()
+            .filter(|store| store.backup_policy == BackupPolicy::Include || store.restore_eligible)
+            .collect::<Vec<_>>();
+
+        for (index, store) in owned.iter().enumerate() {
+            for other in &owned[index + 1..] {
+                assert!(
+                    !path_is_within(&store.path, &other.path)
+                        && !path_is_within(&other.path, &store.path),
+                    "overlapping recovery owners: {:?} and {:?}",
+                    store.id,
+                    other.id
+                );
+            }
+        }
+
+        let notes = catalog.get(PersistentStoreId::Notes);
+        let assets = catalog.get(PersistentStoreId::NotesAssets);
+        assert!(path_is_within(&notes.path, &assets.path));
+        assert_eq!(assets.backup_policy, BackupPolicy::ExcludeCoveredByParent);
+        assert!(!assets.restore_eligible);
+        assert!(!assets.reset_eligible);
+        assert_eq!(
+            owned
+                .iter()
+                .filter(|store| path_is_within(&store.path, &assets.path))
+                .map(|store| store.id)
+                .collect::<Vec<_>>(),
+            vec![PersistentStoreId::Notes]
+        );
+    }
+
+    #[test]
     fn notes_directory_probe_does_not_create_missing_paths() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("missing-notes");
         assert_eq!(probe_directory(&path, Some("md")), StoreHealth::Missing);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn note_template_directory_probe_validates_markdown_entries_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("templates");
+        let root = root(directory.path());
+        let descriptor = descriptor_for(
+            PersistentStoreId::NoteTemplates,
+            &root,
+            &Settings::default(),
+            directory.path(),
+            &directory.path().join("dashboard.json"),
+            false,
+            &directory.path().join("notes"),
+            false,
+            &path,
+            true,
+            None,
+        );
+
+        assert_eq!(descriptor.probe(), StoreHealth::Missing);
+        assert!(!path.exists());
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(descriptor.probe(), StoreHealth::Empty);
+        std::fs::write(path.join("daily.md"), "# Daily").unwrap();
+        assert_eq!(descriptor.probe(), StoreHealth::Healthy);
     }
 }

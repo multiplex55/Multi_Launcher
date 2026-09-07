@@ -531,6 +531,7 @@ fn policy_reason(policy: BackupPolicy) -> &'static str {
     match policy {
         BackupPolicy::Include => "included",
         BackupPolicy::ExcludeExternal => "external source excluded",
+        BackupPolicy::ExcludeCoveredByParent => "covered by parent store",
         BackupPolicy::ExcludeReplaceable => "replaceable or private data excluded",
         BackupPolicy::ExcludeRuntime => "runtime data excluded",
     }
@@ -874,6 +875,11 @@ mod tests {
                 BackupPolicy::ExcludeExternal,
                 "external",
             ),
+            (
+                PersistentStoreId::NotesAssets,
+                BackupPolicy::ExcludeCoveredByParent,
+                "covered",
+            ),
         ] {
             let path = outside.path().join(name);
             fs::write(&path, name).unwrap();
@@ -891,7 +897,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.manifest.external.len(), 1);
-        assert_eq!(result.manifest.skipped.len(), 2);
+        assert_eq!(result.manifest.skipped.len(), 3);
         assert!(
             !fs::read_dir(&result.path)
                 .unwrap()
@@ -900,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn mkmacro_and_internal_notes_assets_are_copied() {
+    fn mkmacro_assets_and_the_complete_notes_tree_are_copied() {
         let (dir, root, catalog) = fixture();
         fs::write(dir.path().join("settings.json"), b"settings").unwrap();
         let assets = dir.path().join("mkmacro_assets");
@@ -919,8 +925,8 @@ mod tests {
             ),
             derived_store(
                 base,
-                PersistentStoreId::NotesAssets,
-                notes_assets,
+                PersistentStoreId::Notes,
+                dir.path().join("notes"),
                 StoreKind::Directory,
             ),
         ];
@@ -936,7 +942,7 @@ mod tests {
             b"macro image"
         );
         assert_eq!(
-            fs::read(result.path.join("stores/NotesAssets/note.png")).unwrap(),
+            fs::read(result.path.join("stores/Notes/assets/note.png")).unwrap(),
             b"note image"
         );
     }

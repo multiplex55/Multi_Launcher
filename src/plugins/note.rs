@@ -659,13 +659,20 @@ fn normalize_note_aliases(note: &mut Note) {
 }
 
 pub fn template_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ML_NOTE_TEMPLATES_DIR") {
-        return PathBuf::from(dir);
+    template_dir_configuration().0
+}
+
+pub(crate) fn template_dir_configuration() -> (PathBuf, bool) {
+    match std::env::var("ML_NOTE_TEMPLATES_DIR") {
+        Ok(dir) => (PathBuf::from(dir), true),
+        Err(_) => (
+            dirs_next::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".multi_launcher")
+                .join("templates"),
+            false,
+        ),
     }
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".multi_launcher")
-        .join("templates")
 }
 
 pub fn validate_template_name(name: &str) -> anyhow::Result<&str> {

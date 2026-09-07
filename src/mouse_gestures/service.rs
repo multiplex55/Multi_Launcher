@@ -1127,10 +1127,10 @@ fn format_cheatsheet_text(db: &Option<SharedGestureDb>, limit: usize) -> Option<
     Some(lines.join("\n"))
 }
 
-const GESTURES_STATE_FILE: &str = "mouse_gestures_state.json";
+pub(crate) const GESTURES_STATE_FILE: &str = "mouse_gestures_state.json";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct GestureSelectionState {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct GestureSelectionState {
     selections: HashMap<String, usize>,
     #[serde(skip, default = "default_true")]
     persistence_valid: bool,
@@ -1145,6 +1145,32 @@ impl Default for GestureSelectionState {
     }
 }
 
+pub(crate) fn decode_selection_state(
+    bytes: &[u8],
+) -> Result<GestureSelectionState, serde_json::Error> {
+    serde_json::from_slice(bytes)
+}
+
+fn load_selection_state_typed(
+    path: &str,
+) -> Result<
+    crate::common::persistence::LoadState<GestureSelectionState>,
+    crate::common::persistence::PersistenceError,
+> {
+    use crate::common::persistence::{LoadState, PersistenceError, read_bytes};
+
+    match read_bytes(path)? {
+        LoadState::Missing => Ok(LoadState::Missing),
+        LoadState::Empty => Ok(LoadState::Empty),
+        LoadState::Loaded(bytes) => decode_selection_state(&bytes)
+            .map(LoadState::Loaded)
+            .map_err(|source| PersistenceError::MalformedJson {
+                path: path.into(),
+                source,
+            }),
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1153,8 +1179,8 @@ fn selection_key(label: &str, tokens: &str) -> String {
     format!("{label}::{tokens}")
 }
 
-fn load_selection_state(path: &str) -> GestureSelectionState {
-    match crate::common::persistence::load_json(path) {
+pub(crate) fn load_selection_state(path: &str) -> GestureSelectionState {
+    match load_selection_state_typed(path) {
         Ok(crate::common::persistence::LoadState::Missing)
         | Ok(crate::common::persistence::LoadState::Empty) => GestureSelectionState::default(),
         Ok(crate::common::persistence::LoadState::Loaded(state)) => state,

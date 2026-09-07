@@ -16,7 +16,7 @@ use crate::plugins::bookmarks::BookmarkEntry;
 use crate::plugins::calc_history::CalcHistoryEntry;
 use crate::plugins::calendar::{CalendarEvent, CalendarState};
 use crate::plugins::fav::FavEntry;
-use crate::plugins::folders::FolderEntry;
+use crate::plugins::folders::default_folders;
 use crate::plugins::layouts_storage::LayoutStore;
 use crate::plugins::macros::MacroEntry;
 use crate::plugins::shell::ShellCmdEntry;
@@ -618,7 +618,9 @@ fn cleanup_created_directory(parent: &Path, path: &Path) {
 fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandidate> {
     if kind == StoreKind::Directory {
         return match id {
-            PersistentStoreId::Notes => Ok(ResetCandidate::EmptyDirectory),
+            PersistentStoreId::Notes | PersistentStoreId::NoteTemplates => {
+                Ok(ResetCandidate::EmptyDirectory)
+            }
             _ => bail!("store has no canonical directory reset form"),
         };
     }
@@ -630,7 +632,7 @@ fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandid
         Id::Settings => json!(Settings::default()),
         Id::Actions => json!(Vec::<Action>::new()),
         Id::Bookmarks => json!(Vec::<BookmarkEntry>::new()),
-        Id::Folders => json!(Vec::<FolderEntry>::new()),
+        Id::Folders => json!(default_folders()),
         Id::Snippets => json!(Vec::<SnippetEntry>::new()),
         Id::Favorites => json!(Vec::<FavEntry>::new()),
         Id::Todos => json!(Vec::<TodoEntry>::new()),
@@ -651,7 +653,9 @@ fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandid
         Id::Usage => json!(Vec::<UsageEntry>::new()),
         Id::CalendarState => json!(CalendarState::default()),
         Id::MouseGestureUsage => json!(Vec::<GestureUsageEntry>::new()),
-        Id::MouseGestureState => json!(serde_json::json!({})),
+        Id::MouseGestureState => {
+            json!(crate::mouse_gestures::service::GestureSelectionState::default())
+        }
         Id::NoteUiState => json!(NoteUiState::default()),
         Id::MultiManagerBindings => json!(Vec::<WorkspaceBindingSnapshot>::new()),
         Id::Alarms => json!(Vec::<serde_json::Value>::new()),
@@ -1297,7 +1301,10 @@ mod tests {
             ) {
                 continue;
             }
-            let kind = if id == PersistentStoreId::Notes {
+            let kind = if matches!(
+                id,
+                PersistentStoreId::Notes | PersistentStoreId::NoteTemplates
+            ) {
                 StoreKind::Directory
             } else {
                 StoreKind::File
@@ -1315,6 +1322,17 @@ mod tests {
                 ),
                 "reset candidate for {id:?} failed its probe"
             );
+            match id {
+                PersistentStoreId::Folders => assert_eq!(
+                    crate::plugins::folders::load_folders(path.to_str().unwrap()).unwrap(),
+                    default_folders()
+                ),
+                PersistentStoreId::MouseGestureState => assert_eq!(
+                    crate::mouse_gestures::service::load_selection_state(path.to_str().unwrap()),
+                    crate::mouse_gestures::service::GestureSelectionState::default()
+                ),
+                _ => {}
+            }
         }
     }
 }
