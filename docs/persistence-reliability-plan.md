@@ -471,10 +471,25 @@ Unless a milestone states otherwise, verification means: focused unit/integratio
 
 ### 15. Final integration gate
 
-- **Status:** `in_progress`; **depends on:** all milestones complete and review clear.
+- **Status:** `complete`; **depends on:** all milestones complete and review clear.
 - **Objective:** prove the cumulative feature meets the original definition of done and leave the feature branch clean.
 - **Repository finding:** the baseline full Nextest run has eight unrelated environmental file-search failures that must be distinguished from feature regressions and resolved for the final all-green gate.
 - **Acceptance:** inspect cumulative diff and stale references; all migrations complete; no duplicate/bypass path; milestone ledger/commits complete; working tree clean.
 - **Required verification:** `cargo fmt --all -- --check`; `cargo check`; `cargo nextest run --no-fail-fast`; `cargo build --release`; `git diff --check`; existing performance commands including `cargo bench --bench search` when still standard. Record actual counts/measurements; no estimated PASS.
 - **Compatibility/performance gate:** JSON schemas, legacy formats, Typed Command Bus, plugin ABI, commands, hotkeys/visibility, watcher behavior, startup/first-frame/idle performance remain compatible except explicitly documented changes.
-- **Files/results/commit:** _pending / pending / pending_.
+- **Files/results/commit:** cumulative `e0697f9..HEAD` diff, repository persistence/recovery
+  searches, this ledger, and the complete build/test graph / the 106-file initiative diff was inspected;
+  stale pending-commit markers and legacy typed-recovery forms are absent, configured directory ownership
+  and parent-covered exclusions are explicit, and direct-write search results are limited to tests, atomic
+  primitives, documented append/config paths, or policies reviewed in earlier milestones. `cargo fmt --all
+  -- --check` passed; `cargo check` passed in 6.47s; the exact previously timing-sensitive MkMacro control
+  test passed 1/1 in 1.386s; `cargo nextest run --no-fail-fast` passed 3,272/3,272 tests with 7 skipped
+  across 70 binaries in 46.318s; `cargo build --release` passed in 3m25s; `git diff --check` passed.
+  `cargo bench --bench search` passed twice. The confirmation run measured representative 500-entry
+  queries at 145.71/390.77/88.615 us, the 10,000-entry real query cycle at 2.9090 ms, cached repeat at
+  9.3579 ns, 250-entry command-cache lookup at 102.42 us, 1,000-tab cached filtering at 192.94 us,
+  10,000-entry completion-index construction at 3.5979 ms, and suggestion lookup at 1.1838 us. Primary
+  scale-sensitive paths were stable or improved; mixed deltas moved between sub-5-us dynamic cases across
+  the two runs and were treated as measurement variance rather than a consistent regression. Milestones
+  9-13 now record their landed hashes, the independent review is clear, and the final working-tree check is
+  performed after this ledger commit. / final Goal 15 ledger commit.
