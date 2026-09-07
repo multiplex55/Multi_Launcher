@@ -121,6 +121,24 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             let result = dialog.save();
             report(dialog, result);
         }
+        ui.add_enabled_ui(dialog.action_editor.draft.is_none() && !super::step_table::table_modal_open(dialog), |ui| {
+            ui.menu_button("Edit steps", |ui| {
+                use super::editor_operations::{self, ClipboardCommand};
+                let selected = dialog.selected_macro().is_some() && !dialog.selection.ids.is_empty();
+                for (label, command, enabled) in [
+                    ("Copy  Ctrl+C", ClipboardCommand::Copy, selected),
+                    ("Cut  Ctrl+X", ClipboardCommand::Cut, selected),
+                    ("Paste  Ctrl+V", ClipboardCommand::Paste, dialog.selected_macro().is_some() && !dialog.editor_state.clipboard.is_empty()),
+                    ("Duplicate  Ctrl+D", ClipboardCommand::Duplicate, selected),
+                ] {
+                    if ui.add_enabled(enabled, eframe::egui::Button::new(label)).clicked() {
+                        let result = editor_operations::clipboard(dialog, command);
+                        report(dialog, result);
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
         if ui
             .add_enabled(
                 dialog.selected_macro().is_some(),

@@ -7,7 +7,7 @@
 - Branch: `mkmacro-editor-enhancements`.
 - Clean baseline: `2dc9204d6a797884381646cd89ad9883b6e3f506` (verified by planner; parent independently confirmed).
 - Baseline `cargo check`: passed, reported by orchestrator (27.37 seconds). Planner did not execute tests.
-- Resume note: during the user pause, `.codex/config.toml` and `.codex/agents/{implementer,planner,reviewer}.toml` were edited from high to xhigh reasoning. User explicitly authorized committing these settings separately at the end; preserve them outside feature commits until then. M02 resumed from its existing implementation after interruption; no source work discarded.
+- Resume note: during the user pause, `.codex/config.toml` and `.codex/agents/{implementer,planner,reviewer}.toml` were edited from high to xhigh reasoning. User explicitly authorized committing these settings separately at the end. An external commit `74f06216 update config` subsequently committed exactly those four files; preserve that commit and do not create a duplicate settings commit. M02 resumed from its existing implementation after interruption; no source work discarded.
 - Nextest installed: 0.9.135, reported by orchestrator. No repository Clippy requirement discovered.
 - Planning agent changed only this ledger. Parent owns plan acceptance, source-writer sequencing, verification, commits, and status updates.
 
@@ -24,8 +24,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | ID | Milestone | Depends on | Status | Commit / verification |
 | --- | --- | --- | --- | --- |
 | M01 | Persisted model and schema 12 | baseline | complete | 89fdb753; construction gates passed, behavioral execution tracked in M13/M14 |
-| M02 | Shared identity/mutation operations and analysis invalidation | M01 | in_progress | |
-| M03 | Clipboard, drag/drop, folding and step annotations | M02 | pending | |
+| M02 | Shared identity/mutation operations and analysis invalidation | M01 | complete | 875466b8; construction gates passed; behavioral execution M13 |
+| M03 | Clipboard, drag/drop, folding and step annotations | M02 | complete | construction gates passed; commit being recorded; behavioral execution M13 |
 | M04 | Typed field visitors and navigation/search/replace/outline | M03 | pending | |
 | M05 | Central reusable/static validation and program compilation | M01, M04 | pending | |
 | M06 | Executor frame ownership with existing behavior parity | M05 | pending | |
@@ -359,3 +359,13 @@ Construction/targeted/full verification and review findings are appended by the 
 - Implementer final commands: `cargo check --tests` passed (17.17 seconds), `cargo check` passed (8.10 seconds), `cargo fmt --all --check` passed, `git diff --check -- src` passed. Parent `git diff --check` passed and inspected final mutation/cache/selection/widget-context diffs.
 - Nine focused tests added for structural normalization/atomic failures, overflow metadata cloning, pixel references, complete duplication, drop legality, stable selection, cache reuse and revision/save/reload/external-sync lifecycle. Behavioral execution remains explicitly deferred to M13; existing movement/deletion tests retained.
 - Parent review found no unresolved substantive M02 defect. No production dependency added. User reasoning-setting edits excluded from this milestone commit.
+- Commit: `875466b8 refactor(mkmacro): centralize structured editor mutations`. Only the four authorized-for-final-commit user `.codex` changes remained immediately afterward. M03 started after commit success.
+
+### M03 construction verification
+
+- Added process-local structured Copy/Cut/Paste/Duplicate through the canonical mutation owner. Cut prepares both clipboard and deletion before publishing; invalid mutations preserve source, selection, clipboard and revision. Macro switches reset selection/drag/scroll while retaining the clipboard and macro-scoped folds.
+- Added stable-ID drag previews and insertion feedback with atomic validated drop; session-only nested folding retains hidden selection and a visible primary. Labels, comments, bookmarks and a fixed accent palette use the existing transactional action editor and compact row indicators.
+- Keyboard routing honors text/modal/popup/pointer ownership, consumes egui clipboard events without writing the Windows clipboard, and accounts for the eframe 0.27 empty-clipboard V-release event. Removed per-frame selection reconciliation; drag preview is revision/anchor cached.
+- Parent final `cargo check --tests` passed (16.83 seconds), `cargo check` passed (16.28 seconds), `cargo fmt --all --check` passed after formatting corrections, and `git diff --check` passed. Parent took over final gates after interrupting the unresumed implementer (`pending_init`); no source changes were discarded.
+- Added tests for cross-macro clipboard/metadata, invalid Cut atomicity, macro-switch state, Duplicate, drag preview/failure/primary preservation, nested folding/selection, exact-marker annotation Apply/Cancel, and clipboard event/release routing. Existing context-menu expectations migrated. Behavioral execution remains deferred to M13.
+- Parent inspected the final source/mutation/input gates/tests. No unresolved substantive M03 finding; no production dependency or worker added. Native GUI smoke remains pending final integration.

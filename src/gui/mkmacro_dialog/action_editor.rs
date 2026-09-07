@@ -3971,6 +3971,61 @@ fn matcher_at_path<'a>(
     }
 }
 
+pub(super) fn accent_color(accent: crate::mkmacro::MkStepAccent) -> Option<egui::Color32> {
+    use crate::mkmacro::MkStepAccent::*;
+    Some(match accent {
+        Default => return None,
+        Red => egui::Color32::from_rgb(239, 83, 80),
+        Orange => egui::Color32::from_rgb(255, 152, 0),
+        Yellow => egui::Color32::from_rgb(240, 200, 50),
+        Green => egui::Color32::from_rgb(76, 175, 80),
+        Blue => egui::Color32::from_rgb(66, 165, 245),
+        Purple => egui::Color32::from_rgb(171, 110, 220),
+        Gray => egui::Color32::GRAY,
+    })
+}
+
+fn annotations_ui(ui: &mut egui::Ui, metadata: &mut crate::mkmacro::MkStepMetadata) {
+    ui.heading("Annotations");
+    ui.horizontal(|ui| {
+        ui.label("Label");
+        ui.text_edit_singleline(&mut metadata.label);
+        ui.checkbox(&mut metadata.bookmarked, "Bookmark");
+    });
+    ui.label("Comment");
+    ui.add(
+        egui::TextEdit::multiline(&mut metadata.comment)
+            .desired_rows(3)
+            .desired_width(f32::INFINITY),
+    );
+    use crate::mkmacro::MkStepAccent::*;
+    let palette = [
+        (Default, "Default"),
+        (Red, "Red"),
+        (Orange, "Orange"),
+        (Yellow, "Yellow"),
+        (Green, "Green"),
+        (Blue, "Blue"),
+        (Purple, "Purple"),
+        (Gray, "Gray"),
+    ];
+    egui::ComboBox::from_label("Accent")
+        .selected_text(
+            palette
+                .iter()
+                .find(|(accent, _)| *accent == metadata.accent)
+                .map_or("Default", |(_, label)| *label),
+        )
+        .show_ui(ui, |ui| {
+            for (accent, label) in palette {
+                let text = egui::RichText::new(label);
+                let text = accent_color(accent)
+                    .map_or_else(|| text.clone(), |color| text.clone().color(color));
+                ui.selectable_value(&mut metadata.accent, accent, text);
+            }
+        });
+}
+
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     reduce_image_search_test_completion(d);
     if d.action_editor.draft.is_none() {
@@ -4350,6 +4405,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     }
                 }
             }
+            ui.separator();
+            annotations_ui(ui, &mut step.metadata);
             ui.separator();
             ui.heading("Step settings");
             ui.horizontal(|ui| {

@@ -2,6 +2,8 @@ pub mod action_catalog;
 pub mod action_editor;
 mod analysis_cache;
 pub mod condition_editor;
+mod editor_operations;
+mod folding;
 pub mod image_asset_picker;
 pub mod image_authoring;
 pub mod image_authoring_destination;
@@ -84,6 +86,7 @@ pub struct MkMacroDialog {
     pub conflict: bool,
     pub selected_macro_id: Option<u64>,
     pub selection: Selection,
+    editor_state: editor_operations::EditorState,
     pub search: String,
     /// Process-local presentation state; never participates in draft dirty tracking.
     pub collapsed_folders: HashSet<u64>,
@@ -3753,6 +3756,7 @@ impl MkMacroDialog {
             conflict: false,
             selected_macro_id: None,
             selection: Default::default(),
+            editor_state: Default::default(),
             search: String::new(),
             collapsed_folders: HashSet::new(),
             pending_folder_rename: None,
@@ -3847,6 +3851,7 @@ impl MkMacroDialog {
         }
         self.draft_revision = self.draft_revision.wrapping_add(1);
         self.revision_document = self.draft.clone();
+        self.editor_state.folds.retain_document(&self.draft);
         if let Some(m) = self.selected_macro() {
             let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
             self.selection.reconcile(&rows);
@@ -4195,6 +4200,11 @@ impl MkMacroDialog {
         self.draft.macros.iter().find(|m| m.id == id)
     }
     pub fn set_selected_macro(&mut self, id: Option<u64>) {
+        if self.selected_macro_id != id {
+            self.selection.clear();
+            self.editor_state.drag = None;
+            self.editor_state.scroll_to = None;
+        }
         self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
         crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
     }
