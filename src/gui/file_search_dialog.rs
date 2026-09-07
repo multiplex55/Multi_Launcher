@@ -1982,6 +1982,19 @@ mod tests {
         }
     }
 
+    fn searchable_state() -> (tempfile::TempDir, FileSearchDialogState) {
+        let root = tempfile::tempdir().unwrap();
+        let state = FileSearchDialogState {
+            search_text: "foo".into(),
+            settings: FileSearchSettings {
+                global_search_roots: vec![root.path().to_path_buf()],
+                ..FileSearchSettings::default()
+            },
+            ..FileSearchDialogState::default()
+        };
+        (root, state)
+    }
+
     #[test]
     fn opening_with_mode_preselected() {
         let mut state = FileSearchDialogState::default();
@@ -2184,10 +2197,7 @@ mod tests {
 
     #[test]
     fn starting_search_sets_immediate_repaint_request() {
-        let mut state = FileSearchDialogState {
-            search_text: "foo".into(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
         let mut coordinator = SearchCoordinator::new();
 
         let id = state.start_search(&mut coordinator);
@@ -2237,10 +2247,7 @@ mod tests {
 
     #[test]
     fn starting_search_sets_active_state() {
-        let mut state = FileSearchDialogState {
-            search_text: "foo".into(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
         let mut coordinator = SearchCoordinator::new();
         let id = state.start_search(&mut coordinator);
         assert!(id.is_some());
@@ -2250,17 +2257,11 @@ mod tests {
 
     #[test]
     fn global_filename_search_uses_walkdir_backend_when_everything_is_disabled() {
-        let settings = FileSearchSettings {
-            everything_enabled: false,
-            ..FileSearchSettings::default()
-        };
-        let mut state = FileSearchDialogState {
-            search_text: "foo".into(),
-            selected_mode: FileSearchMode::Filename,
-            selected_scope: FileSearchScopeMode::Global,
-            settings: settings.clone(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
+        state.settings.everything_enabled = false;
+        state.selected_mode = FileSearchMode::Filename;
+        state.selected_scope = FileSearchScopeMode::Global;
+        let settings = state.settings.clone();
         let mut coordinator = SearchCoordinator::with_settings(settings);
 
         state.start_search(&mut coordinator);
@@ -2271,11 +2272,8 @@ mod tests {
 
     #[test]
     fn enter_in_file_search_field_starts_exactly_one_search() {
-        let mut state = FileSearchDialogState {
-            open: true,
-            search_text: "foo".into(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
+        state.open = true;
         let mut coordinator = SearchCoordinator::new();
 
         let id = state.start_search(&mut coordinator);
@@ -2286,10 +2284,7 @@ mod tests {
 
     #[test]
     fn cancelling_search_updates_status() {
-        let mut state = FileSearchDialogState {
-            search_text: "foo".into(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
         let mut coordinator = SearchCoordinator::new();
         state.start_search(&mut coordinator);
         state.cancel_search(&mut coordinator);
@@ -2298,11 +2293,8 @@ mod tests {
 
     #[test]
     fn escape_while_running_cancels_and_leaves_dialog_open() {
-        let mut state = FileSearchDialogState {
-            open: true,
-            search_text: "foo".into(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
+        state.open = true;
         let mut coordinator = SearchCoordinator::new();
         state.start_search(&mut coordinator);
 
@@ -2330,11 +2322,8 @@ mod tests {
 
     #[test]
     fn second_escape_after_cancellation_closes_now_idle_dialog() {
-        let mut state = FileSearchDialogState {
-            open: true,
-            search_text: "foo".into(),
-            ..Default::default()
-        };
+        let (_root, mut state) = searchable_state();
+        state.open = true;
         let mut coordinator = SearchCoordinator::new();
         state.start_search(&mut coordinator);
 
@@ -3667,8 +3656,10 @@ mod tests {
 
     #[test]
     fn starting_a_search_clears_selection() {
+        let root = tempfile::tempdir().unwrap();
         let mut state = state_with_selected_filename("/tmp/a.txt");
         state.search_text = "needle".into();
+        state.settings.global_search_roots = vec![root.path().to_path_buf()];
         let mut coordinator = SearchCoordinator::new();
 
         state.start_search(&mut coordinator);

@@ -362,14 +362,29 @@ Unless a milestone states otherwise, verification means: focused unit/integratio
 
 ### 12. Comprehensive regression matrix and documentation
 
-- **Status:** `pending`; **depends on:** 1-11.
+- **Status:** `complete`; **depends on:** 1-11.
 - **Objective:** make persistence failures first-class regression behavior and finalize user/developer guarantees without expanding test binary count casually.
 - **Repository finding:** broad behavior coverage exists across 70 binaries and grouped suites, but corruption/recovery/concurrency cases are incomplete and the prior initiative intentionally reduced binary count.
 - **Likely files:** existing grouped suites (`tests/suites/domain.rs` or appropriate group), focused module tests, README/help, this ledger.
 - **Acceptance/tests:** settings missing/empty/valid/malformed/startup migration; every critical catalog malformed mutation; atomic preservation/cleanup/parse/parents; committed-only caches/generations; watcher retain/recover; concurrent mutations; backup manifest/inclusion/privacy/retention; recovery validation/order/preservation; isolated named mutex. Existing behavioral tests remain represented.
 - **Verification:** targeted subsets followed by `cargo nextest run --no-fail-fast`; format, check, diff check. Plain `cargo test` is insufficient.
 - **Risks:** Nextest global-state races, excessive new binaries, weakening old assertions, environmental file-search baseline.
-- **Files/results/commit:** _pending / pending / pending_.
+- **Regression matrix:**
+
+  | Guarantee | Deterministic coverage |
+  |---|---|
+  | Settings Missing/Empty/Loaded/Malformed/Unreadable and startup migration ordering | `settings::store::tests`; `startup::tests`, including malformed byte retention and failed migration publication |
+  | Every critical catalog rejects invalid mutation without destructive fallback | Store-owned tests in `actions`; bookmarks/folders/snippets/favorites/todo/shell/legacy macros; history pins; calendar events; layouts/dashboard; gesture definitions; MultiManager workspaces; MkMacro; Clipboard Modify; Notes; and dashboard scratchpad |
+  | Atomic replacement preserves the destination, cleans temporary files, creates parents, and emits parseable compatible JSON | `common::atomic_file::tests`; `common::persistence::tests`; store round-trip/schema tests |
+  | Caches, indexes, versions, generations, and dirty flags represent committed state only | Actions/bookmark/snippet/favorite/todo/calendar/layout/dashboard/gesture/MultiManager/Clipboard Modify focused tests |
+  | Invalid watcher events retain last-good data and a later valid event recovers | `common::json_watch::tests`; store watcher tests; `tests/watchers.rs`; `tests/watcher_failures.rs` |
+  | Concurrent logical mutations survive store serialization | Settings, actions, bookmarks, folders, snippets, favorites, todos, shell commands, legacy macros, pins, calendar, layouts, dashboard, gestures, MultiManager, and Clipboard Modify tests |
+  | Backup manifest, application-owned inclusion, privacy/external exclusion, safe traversal, partial status, and five-snapshot retention | `persistence::backup::tests`; `persistence::catalog::tests` |
+  | Recovery validation, staging read-only behavior, startup ordering, source/destination preservation, backups, reset, and pending retry/clear semantics | `persistence::recovery::tests`; `startup::tests` |
+  | Named mutex identities are isolated and release permits reacquisition | `platform::single_instance::tests`, especially `different_names_and_roots_do_not_conflict` and `dropping_guard_allows_reacquisition` |
+  | Environmental file-search behavior is tested without assuming that the process account has a discoverable home directory | `gui::file_search_dialog::tests` supplies an owned valid global root only to tests that exercise successful search startup; explicit empty-root validation remains unchanged |
+
+- **Files/results/commit:** `src/dashboard/widgets/scratchpad.rs`, `src/gui/file_search_dialog.rs`, `README.md`, and this ledger / audit found that prior milestones already supplied the matrix without adding a new test binary. One genuine critical-store gap was closed: scratchpad load/save is now serialized, strictly validates an existing document, and durably atomically replaces only Missing/Empty/Loaded state while preserving its background worker, debounce, schema, and configured-path behavior. The eight baseline file-search failures were corrected at the test harness boundary by giving success-path tests an owned temporary global root; production default-root resolution and the explicit empty-root rejection test are unchanged. README now documents commands, single-instance ownership, corruption/last-good guarantees, on-demand diagnostics, bounded five-snapshot retention and exclusions, and confirmed next-launch recovery/reset behavior. Focused Cargo tests passed 89/89 for the file-search dialog and 5/5 for scratchpad. Targeted Nextest passed 13/13 across the unchanged 70 binaries (3220 skipped). The first full `cargo nextest run --no-fail-fast` passed 3225 tests and exposed one unrelated timing-sensitive `gui::mkmacro_dialog::tests::folder_collapse_changes_only_presentation_state` failure; the exact isolated test passed 1/1, and the required full rerun passed 3226/3226 with 7 skipped across 70 binaries in 38.821s. `cargo fmt --all -- --check`, `cargo check`, and `git diff --check` passed. / _pending orchestrator commit_.
 
 ### 13. Performance regression verification
 
