@@ -148,6 +148,8 @@ struct ProductionBackend {
     root: AppDataRoot,
     catalog: Option<PersistenceCatalog>,
     catalog_factory: Option<Box<dyn CatalogFactory>>,
+    #[cfg(test)]
+    recovery_started: Option<Box<dyn Fn(&AtomicBool) + Send>>,
 }
 
 trait CatalogFactory: Send + 'static {
@@ -186,6 +188,12 @@ impl DataServiceBackend for ProductionBackend {
         if cancel.load(Ordering::Acquire) {
             return Err("operation cancelled".into());
         }
+        #[cfg(test)]
+        if matches!(request, DataServiceRequest::StageRecovery(_)) {
+            if let Some(hook) = &self.recovery_started {
+                hook(cancel);
+            }
+        }
         let root = self.root.clone();
         let catalog = self.catalog();
         match request {
@@ -218,7 +226,7 @@ impl DataServiceBackend for ProductionBackend {
                 .map(DataServiceResult::Snapshot)
                 .map_err(|error| error.to_string()),
             DataServiceRequest::ListSnapshots => BackupEngine::new(&root, catalog)
-                .list_snapshots()
+                .list_snapshots_cancellable(&|| cancel.load(Ordering::Acquire))
                 .map(DataServiceResult::Snapshots)
                 .map_err(|error| error.to_string()),
             DataServiceRequest::StageRecovery(action) => {
@@ -227,8 +235,11 @@ impl DataServiceBackend for ProductionBackend {
                     StagedRecoveryAction::Restore {
                         store_id,
                         snapshot_id,
-                    } => manager.stage_restore(store_id, &snapshot_id),
-                    StagedRecoveryAction::Reset { store_id } => manager.stage_reset(store_id),
+                    } => manager.stage_restore_cancellable(store_id, &snapshot_id, &|| {
+                        cancel.load(Ordering::Acquire)
+                    }),
+                    StagedRecoveryAction::Reset { store_id } => manager
+                        .stage_reset_cancellable(store_id, &|| cancel.load(Ordering::Acquire)),
                 }
                 .map(DataServiceResult::RecoveryStaged)
                 .map_err(|error| error.to_string())
@@ -256,6 +267,8 @@ impl DataService {
                 root,
                 catalog: Some(catalog),
                 catalog_factory: None,
+                #[cfg(test)]
+                recovery_started: None,
             },
             repaint,
         )
@@ -274,6 +287,8 @@ impl DataService {
                 catalog_factory: Some(Box::new(move || {
                     PersistenceCatalog::new(&factory_root, &settings)
                 })),
+                #[cfg(test)]
+                recovery_started: None,
             },
             repaint,
         )
@@ -601,6 +616,7 @@ mod tests {
                         .push(thread::current().name().unwrap_or("unnamed").to_owned());
                     PersistenceCatalog::new(&factory_root, &Settings::default())
                 })),
+                recovery_started: None,
             },
             || {},
         )
@@ -835,6 +851,42 @@ mod tests {
             service.submit(DataServiceRequest::ScanHealth),
             Err(DataServiceSubmitError::ShuttingDown)
         );
+        assert!(service.drain_results().is_empty());
+    }
+
+    #[test]
+    fn shutdown_promptly_cancels_real_backend_recovery_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path());
+        let catalog = PersistenceCatalog::new(&root, &Settings::default());
+        let (started_tx, started_rx) = channel();
+        let backend = ProductionBackend {
+            root: root.clone(),
+            catalog: Some(catalog),
+            catalog_factory: None,
+            recovery_started: Some(Box::new(move |cancel| {
+                started_tx.send(()).unwrap();
+                while !cancel.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            })),
+        };
+        let mut service = DataService::start_with_backend(backend, || {}).unwrap();
+        service
+            .submit(DataServiceRequest::StageRecovery(
+                StagedRecoveryAction::Reset {
+                    store_id: PersistentStoreId::Settings,
+                },
+            ))
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let before = Instant::now();
+        service.shutdown();
+
+        assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(service.worker.is_none());
+        assert!(!root.path().join("recovery/pending.json").exists());
         assert!(service.drain_results().is_empty());
     }
 

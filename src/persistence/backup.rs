@@ -1,7 +1,7 @@
 use super::{BackupPolicy, PersistenceCatalog, PersistentStoreId, StoreDescriptor, StoreKind};
 use crate::common::persistence::save_json_atomic;
 use crate::platform::app_data::AppDataRoot;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, Metadata};
 use std::path::{Component, Path, PathBuf};
@@ -120,6 +120,14 @@ impl<'a> BackupEngine<'a> {
     /// same validation used for retention. This inspection never creates the
     /// application data or backup directories.
     pub fn list_snapshots(&self) -> Result<Vec<SnapshotRecord>> {
+        self.list_snapshots_cancellable(&|| false)
+    }
+
+    pub fn list_snapshots_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<SnapshotRecord>> {
+        ensure!(!cancelled(), "operation cancelled");
         let backup_root = self.root.path().join(BACKUP_DIRECTORY);
         if !backup_root.exists() {
             return Ok(Vec::new());
@@ -133,11 +141,13 @@ impl<'a> BackupEngine<'a> {
         if !canonical_backup.starts_with(&canonical_root) {
             bail!("backup directory escapes application data root");
         }
-        Ok(recognized_snapshots(&canonical_backup)?
-            .into_iter()
-            .take(SNAPSHOT_RETENTION_LIMIT)
-            .map(|(_, _, path, manifest)| SnapshotRecord { path, manifest })
-            .collect())
+        Ok(
+            recognized_snapshots_cancellable(&canonical_backup, cancelled)?
+                .into_iter()
+                .take(SNAPSHOT_RETENTION_LIMIT)
+                .map(|(_, _, path, manifest)| SnapshotRecord { path, manifest })
+                .collect(),
+        )
     }
 
     fn create_snapshot_with(
@@ -588,8 +598,16 @@ fn prune_recognized_snapshots(backup_root: &Path) -> Result<()> {
 fn recognized_snapshots(
     backup_root: &Path,
 ) -> Result<Vec<(u128, String, PathBuf, SnapshotManifest)>> {
+    recognized_snapshots_cancellable(backup_root, &|| false)
+}
+
+fn recognized_snapshots_cancellable(
+    backup_root: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<(u128, String, PathBuf, SnapshotManifest)>> {
     let mut recognized = Vec::new();
     for item in fs::read_dir(backup_root).context("enumerate backup retention directory")? {
+        ensure!(!cancelled(), "operation cancelled");
         let item = item?;
         let path = item.path();
         let name = item.file_name().to_string_lossy().into_owned();
@@ -606,7 +624,7 @@ fn recognized_snapshots(
             && manifest.format_version == BACKUP_FORMAT_VERSION
             && manifest.snapshot_id == name
             && validate_id(&name).is_ok()
-            && tree_is_reparse_free(&path)
+            && tree_is_reparse_free_cancellable(&path, cancelled)?
             && fs::canonicalize(&path).is_ok_and(|resolved| resolved.starts_with(backup_root))
         {
             recognized.push((manifest.created_unix_millis, name, path, manifest));
@@ -632,24 +650,30 @@ fn cleanup_owned_staging(backup_root: &Path, staging: &Path) {
 }
 
 fn tree_is_reparse_free(path: &Path) -> bool {
+    tree_is_reparse_free_cancellable(path, &|| false).unwrap_or(false)
+}
+
+fn tree_is_reparse_free_cancellable(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<bool> {
+    ensure!(!cancelled(), "operation cancelled");
     let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
+        return Ok(false);
     };
     if is_reparse(&metadata) {
-        return false;
+        return Ok(false);
     }
     if metadata.is_dir() {
         let Ok(entries) = fs::read_dir(path) else {
-            return false;
+            return Ok(false);
         };
         for entry in entries {
-            let Ok(entry) = entry else { return false };
-            if !tree_is_reparse_free(&entry.path()) {
-                return false;
+            ensure!(!cancelled(), "operation cancelled");
+            let Ok(entry) = entry else { return Ok(false) };
+            if !tree_is_reparse_free_cancellable(&entry.path(), cancelled)? {
+                return Ok(false);
             }
         }
     }
-    true
+    Ok(true)
 }
 
 fn reject_lexical_traversal(path: &Path) -> Result<()> {
