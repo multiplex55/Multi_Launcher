@@ -24,8 +24,8 @@ succeeded.
 | Milestone | Status | Dependency | Commit |
 | --- | --- | --- | --- |
 | 0. Persist this execution ledger | `complete` | None | `bef14309` |
-| 1. Preserve launcher geometry during restore | `complete` | Milestone 0 complete | `fix(gui): preserve launcher geometry during restore` |
-| 2. Add launcher query-history navigation | `pending` | Milestone 1 complete | Pending |
+| 1. Preserve launcher geometry during restore | `complete` | Milestone 0 complete | `8c8bc31d` |
+| 2. Add launcher query-history navigation | `complete` | Milestone 1 complete | `feat(gui): add launcher query history navigation` |
 | Integration verification | `pending` | Milestones 1 and 2 complete | Not applicable |
 | Independent review and remediation | `pending` | Integration verification passes | Pending if remediation is required |
 | Final verification | `pending` | Review has no unresolved substantive findings | Not applicable |
@@ -330,7 +330,7 @@ at every visibility boundary without changing lifecycle ownership.
 
 ## Milestone 2 — Add launcher query-history navigation
 
-**Status:** `pending`
+**Status:** `complete`
 
 **Planned commit:** `feat(gui): add launcher query history navigation`
 
@@ -368,34 +368,34 @@ independently testable state machine, without changing ordinary navigation.
 
 **Required behavior and acceptance criteria:**
 
-- [ ] First Ctrl+Up recalls the newest usable executed query.
-- [ ] Repeated Ctrl+Up moves newest-to-oldest through unique entries and stops
+- [x] First Ctrl+Up recalls the newest usable executed query.
+- [x] Repeated Ctrl+Up moves newest-to-oldest through unique entries and stops
   at the oldest without wrapping.
-- [ ] Ctrl+Down moves newer; crossing past the newest recalled entry restores
+- [x] Ctrl+Down moves newer; crossing past the newest recalled entry restores
   the exact original draft and ends traversal.
-- [ ] Empty drafts restore correctly; Ctrl+Down while inactive is a no-op.
-- [ ] Empty and whitespace-only history entries are skipped.
-- [ ] Exact duplicate query strings are collapsed, preserving only the newest
+- [x] Empty drafts restore correctly; Ctrl+Down while inactive is a no-op.
+- [x] Empty and whitespace-only history entries are skipped.
+- [x] Exact duplicate query strings are collapsed, preserving only the newest
   occurrence and preserving the original text/case.
-- [ ] An empty/unusable snapshot does not mutate the query or leave invalid
+- [x] An empty/unusable snapshot does not mutate the query or leave invalid
   active state.
-- [ ] Manual editing abandons traversal; the edited query becomes the next
+- [x] Manual editing abandons traversal; the edited query becomes the next
   traversal's draft.
-- [ ] Action execution resets traversal and forces the next traversal to take a
+- [x] Action execution resets traversal and forces the next traversal to take a
   fresh snapshot that can include newly recorded history.
-- [ ] Autocomplete, pending query replacement, macro query injection, and other
+- [x] Autocomplete, pending query replacement, macro query injection, and other
   observable programmatic divergence invalidate traversal.
-- [ ] Shortcuts activate only with the main query focused and exact Ctrl-only
+- [x] Shortcuts activate only with the main query focused and exact Ctrl-only
   Up/Down; they do not fire in child dialogs or unrelated text fields.
-- [ ] Handled history shortcuts do not also move normal result selection.
-- [ ] Bare Up/Down and existing PageUp/PageDown, left/right, numeric, Enter,
+- [x] Handled history shortcuts do not also move normal result selection.
+- [x] Bare Up/Down and existing PageUp/PageDown, left/right, numeric, Enter,
   Tab, and Escape behavior remain unchanged.
-- [ ] Applying recalled text clears result selection and autocomplete state,
+- [x] Applying recalled text clears result selection and autocomplete state,
   preserves/focuses the main input, places the cursor at the end, and refreshes
   results through the existing search path.
-- [ ] Note-search recall preserves the existing debounce policy.
-- [ ] Quick Help documents Ctrl+Up and Ctrl+Down query-history navigation.
-- [ ] No history file read, persistence/schema, background worker/task/watcher,
+- [x] Note-search recall preserves the existing debounce policy.
+- [x] Quick Help documents Ctrl+Up and Ctrl+Down query-history navigation.
+- [x] No history file read, persistence/schema, background worker/task/watcher,
   additional cache, per-frame history clone/deduplication, or new top-level
   integration test binary is introduced.
 
@@ -430,12 +430,36 @@ independently testable state machine, without changing ordinary navigation.
 
 **Actual verification:**
 
-- Targeted tests: pending
-- `cargo fmt --all --check`: pending
-- `cargo check`: pending
-- `git diff --check`: pending
-- Routing/performance/architecture audits: pending
-- Commit hash/subject: pending
+- `cargo nextest run query_history`: passed; 12 tests run, 12 passed,
+  3,282 skipped. This includes seven pure navigator tests, four new GUI
+  routing/application tests, and the existing typed Todo history test.
+- `cargo nextest run --test history --test query_autocomplete`: passed; 6
+  tests run, 6 passed, 0 skipped.
+- `cargo nextest run handle_key`: passed; 2 tests run, 2 passed, 3,292
+  skipped, covering existing list/grid arrow and numpad navigation.
+- `cargo nextest run launcher_query`: passed; 9 tests run, 9 passed, 3,285
+  skipped.
+- `cargo nextest run query_focus`: passed; 3 tests run, 3 passed, 3,291
+  skipped.
+- `cargo nextest run tab_cycles_through_suggestions`: passed; 1 test run, 1
+  passed, 3,293 skipped.
+- `cargo nextest run note_search_debounce`: passed; 2 tests run, 2 passed,
+  3,292 skipped.
+- `cargo fmt --all --check`: passed.
+- `cargo check`: passed.
+- `git diff --check`: passed with only the repository's normal LF-to-CRLF
+  checkout warnings. `git diff --no-index --check -- NUL
+  src/gui/query_history.rs` likewise reported no whitespace errors; exit 1 is
+  the expected no-index result for the new file.
+- Routing/performance/architecture audits: passed for Milestone 2 scope. The
+  navigator is transient and centralized; its newest-first snapshot is created
+  lazily through the sole GUI `history::with_history` call on first Ctrl+Up.
+  Inactive synchronization performs only an `Option` check. No disk access,
+  persistence/schema change, cache, worker, watcher, polling path, or new
+  integration-test binary was added. Ctrl-only history routing gates ordinary
+  result arrows and remains tied to main-query focus.
+- Commit subject: `feat(gui): add launcher query history navigation` (hash to
+  be recorded in the final closeout update)
 
 ## Integration verification gate
 
@@ -549,7 +573,7 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
 | Milestone/purpose | Hash | Subject | Verification summary |
 | --- | --- | --- | --- |
 | 0. Execution ledger | `bef14309` | `docs(gui): plan launcher geometry and history navigation` | Ledger inspection and whitespace checks passed |
-| 1. Geometry-preserving restore | Pending | `fix(gui): preserve launcher geometry during restore` | Pending |
+| 1. Geometry-preserving restore | `8c8bc31d` | `fix(gui): preserve launcher geometry during restore` | Focused geometry, visibility, lifecycle, format, check, and diff checks passed |
 | 2. Query-history navigation | Pending | `feat(gui): add launcher query history navigation` | Pending |
 | Review remediation, if needed | Not applicable yet | Pending | Pending |
 
