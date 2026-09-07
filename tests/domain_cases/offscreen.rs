@@ -1,5 +1,6 @@
 use eframe::egui;
-use multi_launcher::visibility::apply_visibility;
+use multi_launcher::visibility::{VisiblePlacementPolicy, apply_visibility};
+use std::sync::atomic::Ordering;
 
 #[path = "../support/mock_ctx.rs"]
 mod mock_ctx;
@@ -10,6 +11,7 @@ fn offscreen_position_when_hidden() {
     let ctx = MockCtx::default();
     apply_visibility(
         false,
+        VisiblePlacementPolicy::PreserveCurrentGeometry,
         &ctx,
         (42.0, 84.0),
         true,
@@ -27,4 +29,5 @@ fn offscreen_position_when_hidden() {
         }
         _ => panic!("unexpected command"),
     }
+    assert_eq!(ctx.repaint_requests.load(Ordering::SeqCst), 1);
 }

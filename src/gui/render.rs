@@ -1014,6 +1014,7 @@ impl eframe::App for LauncherApp {
             tracing::debug!("Restoring window on restore_flag");
             apply_visibility(
                 true,
+                VisiblePlacementPolicy::PreserveCurrentGeometry,
                 ctx,
                 self.offscreen_pos,
                 self.follow_mouse,
@@ -1033,6 +1034,7 @@ impl eframe::App for LauncherApp {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
             apply_visibility(
                 should_be_visible,
+                VisiblePlacementPolicy::ApplyConfiguredPlacement,
                 ctx,
                 self.offscreen_pos,
                 self.follow_mouse,

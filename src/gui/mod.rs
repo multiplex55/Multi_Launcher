@@ -130,7 +130,7 @@ use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSett
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
-use crate::visibility::apply_visibility;
+use crate::visibility::{VisiblePlacementPolicy, apply_visibility};
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use dashboard_editor_dialog::DashboardEditorDialog;
@@ -1760,6 +1760,7 @@ impl LauncherApp {
         tracing::debug!("initial viewport visible: {}", initial_visible);
         apply_visibility(
             initial_visible,
+            VisiblePlacementPolicy::ApplyConfiguredPlacement,
             ctx,
             offscreen_pos,
             follow_mouse,

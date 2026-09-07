@@ -23,8 +23,8 @@ succeeded.
 
 | Milestone | Status | Dependency | Commit |
 | --- | --- | --- | --- |
-| 0. Persist this execution ledger | `complete` | None | `docs(gui): plan launcher geometry and history navigation` |
-| 1. Preserve launcher geometry during restore | `pending` | Milestone 0 complete | Pending |
+| 0. Persist this execution ledger | `complete` | None | `bef14309` |
+| 1. Preserve launcher geometry during restore | `complete` | Milestone 0 complete | `fix(gui): preserve launcher geometry during restore` |
 | 2. Add launcher query-history navigation | `pending` | Milestone 1 complete | Pending |
 | Integration verification | `pending` | Milestones 1 and 2 complete | Not applicable |
 | Independent review and remediation | `pending` | Integration verification passes | Pending if remediation is required |
@@ -211,7 +211,7 @@ and remediation can proceed without reconstructing context.
 
 ## Milestone 1 — Preserve launcher geometry during restore
 
-**Status:** `pending`
+**Status:** `complete`
 
 **Planned commit:** `fix(gui): preserve launcher geometry during restore`
 
@@ -251,29 +251,29 @@ at every visibility boundary without changing lifecycle ownership.
 
 **Required behavior and acceptance criteria:**
 
-- [ ] `VisiblePlacementPolicy` makes placement versus restoration explicit.
-- [ ] All seven baseline `apply_visibility` call sites pass an intentional
+- [x] `VisiblePlacementPolicy` makes placement versus restoration explicit.
+- [x] All seven baseline `apply_visibility` call sites pass an intentional
   policy; a post-change `rg` audit finds no ambiguous caller.
-- [ ] `PreserveCurrentGeometry` emits no `OuterPosition` or `InnerSize` even
+- [x] `PreserveCurrentGeometry` emits no `OuterPosition` or `InnerSize` even
   when Static Position, Static Size, and/or Follow Mouse are configured.
-- [ ] Geometry-preserving restore still emits `Visible(true)`,
+- [x] Geometry-preserving restore still emits `Visible(true)`,
   `Minimized(false)`, `Focus`, and repaint behavior.
-- [ ] Startup and genuine hidden-to-visible show continue to apply Static
+- [x] Startup and genuine hidden-to-visible show continue to apply Static
   Position and Static Size.
-- [ ] Real-show Follow Mouse placement remains correct.
-- [ ] Cursor lookup failure remains safe: no move and no panic.
-- [ ] Immediate hotkey and previously queued shows use configured placement.
-- [ ] Render `last_visible` true transitions use configured placement.
-- [ ] The `restore_flag` path preserves geometry and retains
+- [x] Real-show Follow Mouse placement remains correct.
+- [x] Cursor lookup failure remains safe: no move and no panic.
+- [x] Immediate hotkey and previously queued shows use configured placement.
+- [x] Render `last_visible` true transitions use configured placement.
+- [x] The `restore_flag` path preserves geometry and retains
   `force_restore_and_foreground`.
-- [ ] `restore_flag`, `LauncherInteractionSnapshot`, and
+- [x] `restore_flag`, `LauncherInteractionSnapshot`, and
   `restore_for_new_launcher_interaction` retain their lifecycle roles.
-- [ ] Offscreen hide behavior remains unchanged.
-- [ ] Typed-dialog lifecycle tests continue to prove restoration is requested;
+- [x] Offscreen hide behavior remains unchanged.
+- [x] Typed-dialog lifecycle tests continue to prove restoration is requested;
   they are not changed merely to expect `restore_flag == false`.
-- [ ] No plugin-specific exceptions, polling, background work, persistence, or
+- [x] No plugin-specific exceptions, polling, background work, persistence, or
   duplicate visibility implementation is added.
-- [ ] Existing legitimate visibility, focus, trigger, and interaction behavior
+- [x] Existing legitimate visibility, focus, trigger, and interaction behavior
   remains covered and passing.
 
 **Focused test additions/migrations:**
@@ -303,12 +303,30 @@ at every visibility boundary without changing lifecycle ownership.
 
 **Actual verification:**
 
-- Targeted tests: pending
-- `cargo fmt --all --check`: pending
-- `cargo check`: pending
-- `git diff --check`: pending
-- Call-site and architecture audits: pending
-- Commit hash/subject: pending
+- `cargo nextest run --test follow_mouse --test gui_visibility --test
+  trigger_visibility --test focus_visibility`: passed; 9 tests run, 9 passed,
+  0 skipped.
+- `cargo nextest run offscreen_position_when_hidden`: passed; 1 test run,
+  1 passed, 3,282 filtered/skipped.
+- `cargo nextest run
+  typed_dialog_preserves_query_launcher_interactivity_restore_and_history_exemption`:
+  passed; 1 test run, 1 passed, 3,282 filtered/skipped.
+- `cargo nextest run typed_simple_dialogs_preserve_interactive_lifecycle`:
+  passed; 1 test run, 1 passed, 3,282 filtered/skipped.
+- `cargo fmt --all --check`: passed.
+- `cargo check`: passed.
+- `git diff --check`: passed with only the repository's normal LF-to-CRLF
+  checkout warnings.
+- `rg -n "apply_visibility\\(" src tests`: inspected; all production and test
+  callers pass an explicit `VisiblePlacementPolicy`. Startup, immediate and
+  queued hotkey handling, and render-loop visibility transitions apply
+  configured placement; `restore_flag` preserves current geometry.
+- Architecture/diff audit: passed for Milestone 1 scope; no plugin-specific
+  handling, polling, background work, persistence, or duplicate visibility
+  path was added. `restore_flag`, interaction snapshots, native foreground
+  restoration, focus/unminimize/repaint, and offscreen hiding remain intact.
+- Commit subject: `fix(gui): preserve launcher geometry during restore` (hash
+  to be recorded in the final closeout update)
 
 ## Milestone 2 — Add launcher query-history navigation
 
@@ -530,7 +548,7 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
 
 | Milestone/purpose | Hash | Subject | Verification summary |
 | --- | --- | --- | --- |
-| 0. Execution ledger | Pending | Pending | Pending |
+| 0. Execution ledger | `bef14309` | `docs(gui): plan launcher geometry and history navigation` | Ledger inspection and whitespace checks passed |
 | 1. Geometry-preserving restore | Pending | `fix(gui): preserve launcher geometry during restore` | Pending |
 | 2. Query-history navigation | Pending | `feat(gui): add launcher query history navigation` | Pending |
 | Review remediation, if needed | Not applicable yet | Pending | Pending |
