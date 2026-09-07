@@ -7,6 +7,7 @@
 - Branch: `mkmacro-editor-enhancements`.
 - Clean baseline: `2dc9204d6a797884381646cd89ad9883b6e3f506` (verified by planner; parent independently confirmed).
 - Baseline `cargo check`: passed, reported by orchestrator (27.37 seconds). Planner did not execute tests.
+- Resume note: during the user pause, `.codex/config.toml` and `.codex/agents/{implementer,planner,reviewer}.toml` were edited from high to xhigh reasoning. User explicitly authorized committing these settings separately at the end; preserve them outside feature commits until then. M02 resumed from its existing implementation after interruption; no source work discarded.
 - Nextest installed: 0.9.135, reported by orchestrator. No repository Clippy requirement discovered.
 - Planning agent changed only this ledger. Parent owns plan acceptance, source-writer sequencing, verification, commits, and status updates.
 
@@ -22,8 +23,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 
 | ID | Milestone | Depends on | Status | Commit / verification |
 | --- | --- | --- | --- | --- |
-| M01 | Persisted model and schema 12 | baseline | in_progress | |
-| M02 | Shared identity/mutation operations and analysis invalidation | M01 | pending | |
+| M01 | Persisted model and schema 12 | baseline | complete | 89fdb753; construction gates passed, behavioral execution tracked in M13/M14 |
+| M02 | Shared identity/mutation operations and analysis invalidation | M01 | in_progress | |
 | M03 | Clipboard, drag/drop, folding and step annotations | M02 | pending | |
 | M04 | Typed field visitors and navigation/search/replace/outline | M03 | pending | |
 | M05 | Central reusable/static validation and program compilation | M01, M04 | pending | |
@@ -256,7 +257,7 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 **Acceptance/gates:** `cargo fmt --all --check`, `cargo check`, `cargo check --tests` if not already proven since API changes, `git diff --check`; then focused commands using actual discovered names:
 
 ```text
-cargo nextest run --lib -E 'test(mkmacro::model::) | test(mkmacro::variables::) | test(mkmacro::structure::) | test(mkmacro::validation::) | test(mkmacro::compiler::)'
+cargo nextest run --lib -E 'test(mkmacro::model::) | test(mkmacro::variables::) | test(mkmacro::structure::) | test(mkmacro::editor_mutation::) | test(mkmacro::validation::) | test(mkmacro::compiler::)'
 cargo nextest run --lib -E 'test(gui::mkmacro_dialog::) | test(mkmacro::store::) | test(mkmacro::package::) | test(mkmacro::templates::)'
 cargo nextest run --test mkmacro_authoring --test mkmacro_compiler --test mkmacro_store
 ```
@@ -337,6 +338,8 @@ Construction/targeted/full verification and review findings are appended by the 
 - Independent review: pending.
 - Authoritative full Nextest: pending.
 - Final clean Git status: pending.
+- GUI smoke capability: parent read computer-use SKILL.md and its guidance/API/confirmation docs; initialized `@oai/sky` through available `mcp__node_repl__js`. `sky.list_windows()` succeeded; no Multi Launcher window currently open. Native smoke testing is available in principle after the final build; no manual test has run yet.
+- Smoke isolation: `main.rs` derives `AppDataRoot` from relative `settings.json`; `platform/app_data.rs` preserves process current-directory resolution and the single-instance guard is data-root-specific. Launch the final executable with an explicit task scratch working directory to isolate smoke data, then select its actual returned window through `sky.list_windows()`; do not use the repository/user data directory.
 
 ### M01 construction verification
 
@@ -346,3 +349,13 @@ Construction/targeted/full verification and review findings are appended by the 
 - Parent inspected model/type/migration/health/catalog/executor changes and test expectations; two minor test naming/assertion corrections resolved. No unresolved M01 finding.
 - Focused tests added for metadata/signature/action roundtrips, type compatibility, signature identity preservation/dangling allocation/overflow, schema 11 preservation, and health probes. Execution deferred to M13/M14 per user preference.
 - M07 must remove temporary `unsupported_reusable_action` diagnostics, capability gates and associated temporary test assertion when Call/Return runtime support is delivered.
+- Commit: `89fdb753 feat(mkmacro): add reusable macro authoring model`. Working tree was clean immediately after commit; M02 started after commit success.
+
+### M02 construction verification
+
+- Centralized structural normalization, fragment cloning/insertion, ID-preserving move/drop, deletion and unwrap in `editor_mutation`; GUI/public legacy functions now forward to one owner. Stable selection primary/anchor survives moves and resets on explicit replacement selection.
+- Added revision-cached semantic diagnostics/structure, variable inventory, and shared image inventories through nested coordinate/condition/image widgets. Explicit/open/asset-authoring/save/run refresh handles environment checks; changed references visibly await refresh. No new workers or polling.
+- Canonical cloning uses checked fresh step IDs while retaining pixel producer/consumer result-slot semantics. Recorder append and macro duplicate use the same identity helper. Direct public draft mutations must call `mark_dirty` before cached reads.
+- Implementer final commands: `cargo check --tests` passed (17.17 seconds), `cargo check` passed (8.10 seconds), `cargo fmt --all --check` passed, `git diff --check -- src` passed. Parent `git diff --check` passed and inspected final mutation/cache/selection/widget-context diffs.
+- Nine focused tests added for structural normalization/atomic failures, overflow metadata cloning, pixel references, complete duplication, drop legality, stable selection, cache reuse and revision/save/reload/external-sync lifecycle. Behavioral execution remains explicitly deferred to M13; existing movement/deletion tests retained.
+- Parent review found no unresolved substantive M02 defect. No production dependency added. User reasoning-setting edits excluded from this milestone commit.

@@ -2,6 +2,7 @@
 pub mod asset_authoring;
 pub mod compiler;
 pub mod coordinates;
+pub mod editor_mutation;
 pub mod executor;
 pub mod hotkeys;
 pub mod image_search;

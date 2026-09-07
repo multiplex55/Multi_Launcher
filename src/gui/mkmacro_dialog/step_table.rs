@@ -1,23 +1,30 @@
 use super::MkMacroDialog;
 use crate::mkmacro::{
-    MkDelayPayload, MkStep, MonitorValidation, RuntimePauseReason, RuntimeSnapshot, RuntimeState,
-    StepState, ValidationContext, validate_document_with_context,
+    MkDelayPayload, MkStep, RuntimePauseReason, RuntimeSnapshot, RuntimeState, StepState,
 };
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Default, Debug, Clone)]
 pub struct Selection {
     pub ids: BTreeSet<u64>,
-    anchor: Option<usize>,
+    pub anchor: Option<u64>,
+    pub primary: Option<u64>,
 }
 impl Selection {
     pub fn clear(&mut self) {
         self.ids.clear();
         self.anchor = None;
+        self.primary = None;
     }
     pub fn click(&mut self, rows: &[u64], index: usize, ctrl: bool, shift: bool) {
+        let Some(&clicked) = rows.get(index) else {
+            return;
+        };
         if shift {
-            let a = self.anchor.unwrap_or(index);
+            let a = self
+                .anchor
+                .and_then(|id| rows.iter().position(|row| *row == id))
+                .unwrap_or(index);
             if !ctrl {
                 self.ids.clear();
             }
@@ -33,67 +40,42 @@ impl Selection {
             } else {
                 self.ids.insert(rows[index]);
             }
-            self.anchor = Some(index);
+            self.anchor = Some(clicked);
+        }
+        self.primary = self.ids.contains(&clicked).then_some(clicked);
+        self.reconcile(rows);
+    }
+    /// Retain stable anchors across reordering, with deterministic source-order fallback.
+    pub fn reconcile(&mut self, rows: &[u64]) {
+        self.ids.retain(|id| rows.contains(id));
+        if self.primary.is_none_or(|id| !self.ids.contains(&id)) {
+            self.primary = rows.iter().find(|id| self.ids.contains(id)).copied();
+        }
+        if self.anchor.is_none_or(|id| !rows.contains(&id)) {
+            self.anchor = self.primary;
         }
     }
-}
-pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> BTreeSet<u64> {
-    let mut copies: Vec<_> = steps
-        .iter()
-        .filter(|s| ids.contains(&s.id))
-        .cloned()
-        .collect();
-    for s in &mut copies {
-        s.id = 0;
+    pub fn replace(&mut self, ids: impl IntoIterator<Item = u64>) {
+        let ids: Vec<_> = ids.into_iter().collect();
+        self.primary = ids.first().copied();
+        self.anchor = self.primary;
+        self.ids = ids.into_iter().collect();
     }
-    let insert_at = steps
-        .iter()
-        .rposition(|s| ids.contains(&s.id))
-        .map_or(steps.len(), |i| i + 1);
-    steps.splice(insert_at..insert_at, copies);
-    let mut d = crate::mkmacro::MkMacroDocument {
-        settings: Default::default(),
-        schema_version: crate::mkmacro::SCHEMA_VERSION,
-        macros: vec![crate::mkmacro::MkMacro {
-            signature: Default::default(),
-            id: 1,
-            name: "draft".into(),
-            description: String::new(),
-            enabled: true,
-            hotkey: None,
-            hotkey_scope: Default::default(),
-            folder_id: None,
-            playback: Default::default(),
-            steps: steps.clone(),
-        }],
-        folders: vec![],
-    };
-    crate::mkmacro::repair_ids(&mut d);
-    *steps = d.macros.remove(0).steps;
-    steps[insert_at..]
-        .iter()
-        .take(ids.len())
-        .map(|s| s.id)
-        .collect()
+}
+// Compatibility forwards for existing public callers. UI commands use the
+// fallible domain API directly so invalid drafts receive a useful error.
+pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> BTreeSet<u64> {
+    crate::mkmacro::editor_mutation::duplicate_selection(steps, ids).unwrap_or_default()
 }
 pub fn duplicate_steps(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) {
     let _ = duplicate_steps_with_ids(steps, ids);
 }
 pub fn move_steps(steps: &mut [MkStep], ids: &BTreeSet<u64>, down: bool) {
-    if down {
-        for i in (0..steps.len().saturating_sub(1)).rev() {
-            if ids.contains(&steps[i].id) && !ids.contains(&steps[i + 1].id) {
-                steps.swap(i, i + 1);
-            }
-        }
-    } else {
-        for i in 1..steps.len() {
-            if ids.contains(&steps[i].id) && !ids.contains(&steps[i - 1].id) {
-                steps.swap(i, i - 1);
-            }
-        }
-    }
+    let _ = crate::mkmacro::editor_mutation::move_selection(steps, ids, down);
 }
+use crate::mkmacro::editor_mutation::{
+    delete_selection, move_selection as move_selection_structurally,
+};
 
 const BREAKPOINT_COLUMN_WIDTH: f32 = 26.0;
 const BREAKPOINT_HOVER_TEXT: &str = "Breakpoint\nPauses before this step during Debug runs.\nNormal Run and macro hotkeys ignore breakpoints.";
@@ -379,19 +361,12 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         ui.label("Select a macro");
         return;
     };
-    let monitor_result = crate::mkmacro::monitor_descriptors();
-    let monitor_validation = match &monitor_result {
-        Ok(descriptors) => MonitorValidation::Available(descriptors),
-        Err(_) => MonitorValidation::EnumerationFailed,
-    };
-    let asset_root = d.store.asset_root();
-    let diagnostics = validate_document_with_context(
-        &d.draft,
-        ValidationContext {
-            asset_root: Some(&asset_root),
-            monitors: monitor_validation,
-        },
-    );
+    let diagnostics = d.cached_diagnostics();
+    if d.analysis_cache.borrow().environment_pending {
+        ui.weak(
+            "External image and monitor checks need refresh. Save and Run refresh automatically.",
+        );
+    }
     let mut row_diagnostics = HashMap::<u64, Vec<_>>::new();
     for diagnostic in diagnostics.iter().filter(|x| x.macro_id == mid) {
         if let Some(step_id) = diagnostic.step_id {
@@ -415,8 +390,10 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         return;
     };
     let rows: Vec<u64> = m.steps.iter().map(|s| s.id).collect();
-    let depths = super::action_catalog::action_depths(m);
-    let structure = crate::mkmacro::analyze_structure(&m.steps);
+    let Some(structure) = d.cached_structure(mid) else {
+        return;
+    };
+    let depths: Vec<_> = structure.steps.iter().map(|s| s.depth).collect();
     let mut clicked = None;
     let mut changed = false;
     let mut updates = Vec::new();
@@ -665,6 +642,7 @@ fn debug_this_step(d: &mut MkMacroDialog, id: u64) -> anyhow::Result<()> {
     d.selection = Selection {
         ids: BTreeSet::from([id]),
         anchor: None,
+        primary: Some(id),
     };
     let result = d.debug_selected_steps();
     d.selection = selection_before_debug;
@@ -687,8 +665,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     }
     if let Command::DeleteBlock(id) | Command::DeleteRow(id) | Command::UnwrapBlock(id) = c {
         if !d.selection.ids.contains(&id) {
-            d.selection.ids = BTreeSet::from([id]);
-            d.selection.anchor = None;
+            d.selection.replace([id]);
         }
     }
     if let Command::Edit(id) = c {
@@ -777,7 +754,10 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     if let Some(m) = d.selected_macro_mut() {
         match c {
             Command::Duplicate => {
-                new_selection = Some(duplicate_steps_with_ids(&mut m.steps, &ids))
+                match crate::mkmacro::editor_mutation::duplicate_selection(&mut m.steps, &ids) {
+                    Ok(selection) => new_selection = Some(selection),
+                    Err(error) => mutation_error = Some(error),
+                }
             }
             Command::Toggle => {
                 for s in &mut m.steps {
@@ -828,13 +808,22 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
         }
     }
     if let Some(error) = mutation_error {
-        d.command_error = Some(error);
+        d.selection = selection_before_command;
+        d.command_error = Some(error.to_string());
         return;
     }
     crate::mkmacro::repair_ids(&mut d.draft);
     if let Some(s) = new_selection {
-        d.selection.ids = s;
-        d.selection.anchor = None;
+        if let Some(m) = d.selected_macro() {
+            let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
+            if matches!(c, Command::Up | Command::Down) {
+                d.selection.ids = s;
+                d.selection.reconcile(&rows);
+            } else {
+                d.selection
+                    .replace(rows.into_iter().filter(|id| s.contains(id)));
+            }
+        }
     }
     if movement_before
         .as_ref()
@@ -842,122 +831,6 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     {
         d.mark_dirty();
     }
-}
-
-fn delete_selection(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
-    if ids.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let analysis = crate::mkmacro::analyze_structure(steps);
-    let mut remove = BTreeSet::new();
-    for id in ids {
-        let Some((i, s)) = steps.iter().enumerate().find(|(_, s)| s.id == *id) else {
-            continue;
-        };
-        if s.action.is_block_marker() {
-            let b = analysis
-                .block_for_marker(*id)
-                .ok_or_else(|| format!("Step {id} is not part of a complete block"))?;
-            remove.extend(b.range.clone());
-        } else {
-            remove.insert(i);
-        }
-    }
-    if remove.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let first = *remove.first().unwrap();
-    let last = *remove.last().unwrap();
-    let next = (last + 1..steps.len())
-        .find(|i| !remove.contains(i))
-        .map(|i| steps[i].id);
-    let prev = (0..first)
-        .rev()
-        .find(|i| !remove.contains(i))
-        .map(|i| steps[i].id);
-    let mut i = 0;
-    steps.retain(|_| {
-        let keep = !remove.contains(&i);
-        i += 1;
-        keep
-    });
-    Ok(next
-        .or(prev)
-        .map(|id| BTreeSet::from([id]))
-        .unwrap_or_default())
-}
-
-fn expanded_move_ids(steps: &[MkStep], ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
-    let a = crate::mkmacro::analyze_structure(steps);
-    let mut out = ids.clone();
-    for id in ids {
-        if let Some(s) = steps.iter().find(|s| s.id == *id)
-            && s.action.is_block_marker()
-        {
-            let b = a
-                .block_for_marker(*id)
-                .ok_or_else(|| format!("Step {id} is not part of a complete block"))?;
-            out.extend(steps[b.range.clone()].iter().map(|s| s.id));
-        }
-    }
-    Ok(out)
-}
-fn move_selection_structurally(
-    steps: &mut [MkStep],
-    ids: &BTreeSet<u64>,
-    down: bool,
-) -> Result<BTreeSet<u64>, String> {
-    let expanded = expanded_move_ids(steps, ids)?;
-    let analysis = crate::mkmacro::analyze_structure(steps);
-    let before = analysis.diagnostics.len();
-    let structural_context: Vec<_> = ids
-        .iter()
-        .filter_map(|id| {
-            let step = steps.iter().find(|step| step.id == *id)?;
-            if !step.action.is_block_marker() {
-                return None;
-            }
-            let block = analysis.block_for_marker(*id)?;
-            Some((
-                *id,
-                block.opener_id,
-                analysis
-                    .containing_block(block.opener_id)
-                    .map(|parent| parent.opener_id),
-            ))
-        })
-        .collect();
-    let mut candidate = steps.to_vec();
-    loop {
-        let previous = candidate.clone();
-        move_steps(&mut candidate, &expanded, down);
-        if candidate == previous {
-            break;
-        }
-        let candidate_analysis = crate::mkmacro::analyze_structure(&candidate);
-        let crossed_neighbor = structural_context.iter().any(|(id, block_id, parent)| {
-            let Some(block) = candidate_analysis.block_for_marker(*id) else {
-                return true;
-            };
-            block.opener_id != *block_id
-                || candidate_analysis
-                    .containing_block(block.opener_id)
-                    .map(|candidate_parent| candidate_parent.opener_id)
-                    != *parent
-        });
-        if !crossed_neighbor {
-            break;
-        }
-    }
-    if crate::mkmacro::analyze_structure(&candidate)
-        .diagnostics
-        .len()
-        > before
-    {
-        return Err("The move would invalidate block nesting".into());
-    }
-    steps.clone_from_slice(&candidate);
-    Ok(expanded)
 }
 
 pub(super) fn apply_confirmed_unwrap(d: &mut MkMacroDialog, id: u64) {
@@ -972,8 +845,7 @@ pub(super) fn apply_confirmed_unwrap(d: &mut MkMacroDialog, id: u64) {
                 .first_preserved_body_id
                 .or(r.following_id)
                 .or(r.preceding_id);
-            d.selection.ids = selected.map(|x| BTreeSet::from([x])).unwrap_or_default();
-            d.selection.anchor = None;
+            d.selection.replace(selected);
             d.mark_dirty();
         }
         Err(e) => d.command_error = Some(e),
@@ -983,6 +855,21 @@ pub(super) fn apply_confirmed_unwrap(d: &mut MkMacroDialog, id: u64) {
 mod layout_tests {
     use super::*;
     use crate::mkmacro::{MkAction, MkCondition, MkErrorPolicy};
+
+    #[test]
+    fn selection_anchors_follow_stable_ids_after_reorder() {
+        let mut selection = Selection::default();
+        selection.click(&[40, 10, 30, 20], 1, false, false);
+        selection.reconcile(&[10, 40, 30, 20]);
+        selection.click(&[10, 40, 30, 20], 2, false, true);
+        assert_eq!(selection.ids, BTreeSet::from([10, 40, 30]));
+        assert_eq!(selection.anchor, Some(10));
+        assert_eq!(selection.primary, Some(30));
+        selection.reconcile(&[40, 20]);
+        assert_eq!(selection.ids, BTreeSet::from([40]));
+        assert_eq!(selection.anchor, Some(40));
+        assert_eq!(selection.primary, Some(40));
+    }
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -1565,6 +1452,7 @@ mod layout_tests {
         let selection = Selection {
             ids: BTreeSet::from([11, 33]),
             anchor: Some(2),
+            primary: Some(2),
         };
         let selection_before = selection.clone();
 

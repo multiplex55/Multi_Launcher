@@ -104,9 +104,11 @@ pub struct ActionEditorState {
     picker: NativePositionPicker,
     notification_preview: NotificationPreview,
     sound_preview: SoundPreview,
-    /// Rebuilt from the live document on every editor frame. The stable id is
-    /// resolved against that document, so row moves cannot leave a stale scope.
+    /// Rebuilt when the document revision or editor consumer changes. Stable
+    /// IDs resolve against that revision so row moves cannot leave stale scope.
     variable_catalog: VariableCatalog,
+    variable_catalog_key: Option<(u64, Option<u64>, u64)>,
+    pub(super) image_refs_cache: Option<(u64, Arc<Vec<MkImageRef>>)>,
     variable_consumer_index: usize,
     variable_consumer_id: Option<u64>,
 }
@@ -370,6 +372,8 @@ impl ActionEditorState {
             notification_preview: Arc::new(production_notification_preview),
             sound_preview: Arc::new(crate::sound::play_sound),
             variable_catalog: VariableCatalog::default(),
+            variable_catalog_key: None,
+            image_refs_cache: None,
             variable_consumer_index: 0,
             variable_consumer_id: None,
         }
@@ -1551,8 +1555,7 @@ impl ActionEditorState {
         };
         crate::mkmacro::repair_ids(&mut dialog.draft);
         let id = dialog.selected_macro()?.steps[index].id;
-        dialog.selection.ids.clear();
-        dialog.selection.ids.insert(id);
+        dialog.selection.replace([id]);
         dialog.mark_dirty();
         Some(id)
     }
@@ -2385,13 +2388,12 @@ fn change_target_kind_for_kind(
 #[derive(Clone, Copy)]
 pub(super) struct TargetEditorContext<'a> {
     pub store: &'a MkMacroStore,
+    pub assets: &'a [MkImageRef],
 }
 
 impl<'a> TargetEditorContext<'a> {
     pub(super) fn has_image(&self, image: &MkImageRef) -> bool {
-        self.store
-            .image_refs()
-            .map_or(false, |images| images.contains(image))
+        self.assets.contains(image)
     }
 }
 
@@ -2410,7 +2412,7 @@ fn target_ui_with_variables(
     context: &TargetEditorContext<'_>,
     options: TargetUiOptions<'_>,
 ) -> TargetUiOutcome {
-    let assets = context.store.image_refs().unwrap_or_default();
+    let assets = context.assets;
     let kind = coordinate_target_kind(target);
     let mut next = kind;
     egui::ComboBox::from_label("Target")
@@ -2505,7 +2507,7 @@ fn target_ui_with_variables(
                     .show_ui(ui, |ui| {
                         for asset in assets {
                             let label = image_asset_label(&asset, &[]);
-                            if ui.selectable_label(*image == asset, label).clicked() {
+                            if ui.selectable_label(*image == *asset, label).clicked() {
                                 select_image_asset(image, &asset);
                             }
                         }
@@ -2672,6 +2674,7 @@ fn action_ui(
 ) {
     let target_context = TargetEditorContext {
         store: image_context.store,
+        assets: image_context.assets,
     };
     let mut pick = None;
     let mut window_pick = None;
@@ -3704,9 +3707,13 @@ fn repair_and_report_change(dialog: &mut MkMacroDialog) {
 
 /// Non-egui completion reducer used by the frame loop and authoring tests.
 fn reduce_image_authoring_completion(dialog: &mut MkMacroDialog) {
-    let _ = dialog
+    if dialog
         .action_editor
-        .poll_image_authoring(dialog.selected_macro_id);
+        .poll_image_authoring(dialog.selected_macro_id)
+        .is_some()
+    {
+        dialog.refresh_environment();
+    }
 }
 
 fn reduce_image_search_test_completion(dialog: &mut MkMacroDialog) {
@@ -4167,12 +4174,42 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut identify_monitors_request = false;
     let mut related_action_notice = None;
     let mut related_action_request = None;
-    let image_refs = d.store.image_refs().unwrap_or_default();
-    let live_steps = d
-        .selected_macro()
-        .map(|macro_| macro_.steps.clone())
-        .unwrap_or_default();
-    d.action_editor.refresh_variable_catalog(&live_steps);
+    // Opening an editor or explicitly refreshing assets invalidates this list.
+    let generation = d.action_editor.draft_generation;
+    if d.action_editor
+        .image_refs_cache
+        .as_ref()
+        .is_some_and(|(key, _)| *key != generation)
+    {
+        d.action_editor.image_refs_cache = None;
+    }
+    let image_refs = d
+        .action_editor
+        .image_refs_cache
+        .get_or_insert_with(|| {
+            (
+                generation,
+                Arc::new(d.store.image_refs().unwrap_or_default()),
+            )
+        })
+        .1
+        .clone();
+    let catalog_key = (
+        d.draft_revision(),
+        d.selected_macro_id,
+        d.action_editor.draft_generation,
+    );
+    if d.action_editor.variable_catalog_key != Some(catalog_key) {
+        let steps = d
+            .draft
+            .macros
+            .iter()
+            .find(|m| Some(m.id) == d.selected_macro_id)
+            .map(|m| m.steps.as_slice())
+            .unwrap_or_default();
+        d.action_editor.refresh_variable_catalog(steps);
+        d.action_editor.variable_catalog_key = Some(catalog_key);
+    }
     egui::Window::new("Action Editor")
         .open(&mut open)
         .collapsible(false)
@@ -4190,6 +4227,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             let action_before = step.action.clone();
             let image_context = super::image_asset_picker::ImageAssetUiContext {
                 store: &d.store,
+                assets: &image_refs,
             };
             let (position, mut window, launcher, image, condition_image, preview, pick_point)=action_ui(
                 ui,
@@ -4257,7 +4295,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     &payload.image,
                     &image_refs,
                 );
-                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, (d.selected_macro_id.unwrap_or(0), draft_generation), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
+                let request = super::image_search_editor::show(ui, payload, state.image_search.as_mut().expect("image action requires image editor state"), &d.store, &image_refs, (d.selected_macro_id.unwrap_or(0), draft_generation), workflow_active || importing || crop_open, test_busy, find_action, valid_asset);
                 use super::image_search_editor::ImageEditorRequest::*;
                 match request {
                     Some(ImportPng) => image_request = Some(ImageAuthoringRequest::Import),
@@ -4931,7 +4969,10 @@ mod tests {
     fn target_context_resolves_only_existing_shared_references() {
         let directory = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();
-        let context = TargetEditorContext { store: &store };
+        let context = TargetEditorContext {
+            store: &store,
+            assets: &store.image_refs().unwrap(),
+        };
         assert!(!context.has_image(&MkImageRef::from_filename("14.png")));
         assert!(!context.has_image(&MkImageRef::from_filename("missing.png")));
     }

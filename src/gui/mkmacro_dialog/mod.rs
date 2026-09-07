@@ -1,5 +1,6 @@
 pub mod action_catalog;
 pub mod action_editor;
+mod analysis_cache;
 pub mod condition_editor;
 pub mod image_asset_picker;
 pub mod image_authoring;
@@ -73,7 +74,11 @@ pub struct MkMacroDialog {
     pub authoring_context: MkMacroAuthoringContext,
     /// Authoritative client keeping the dialog-wide native overlay service alive.
     pub(crate) visual_overlay: SharedVisualOverlayController,
+    /// Direct external edits must call mark_dirty before reading cached analysis.
     pub draft: MkMacroDocument,
+    draft_revision: u64,
+    revision_document: MkMacroDocument,
+    analysis_cache: std::cell::RefCell<analysis_cache::AnalysisCache>,
     baseline: Arc<MkMacroDocument>,
     pub dirty: bool,
     pub conflict: bool,
@@ -187,6 +192,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         (dir, MkMacroDialog::new(Arc::new(store)))
+    }
+
+    #[test]
+    fn analysis_revision_tracks_mutations_save_repair_reload_and_presentation() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        let initial = d.draft_revision();
+        let diagnostics = d.cached_diagnostics();
+        d.mark_dirty();
+        d.selection.clear();
+        d.toggle_folder_collapsed(123);
+        assert_eq!(d.draft_revision(), initial);
+        assert!(Arc::ptr_eq(&diagnostics, &d.cached_diagnostics()));
+        d.selected_macro_mut().unwrap().steps.push(MkStep {
+            id: 0,
+            action: MkAction::Delay(Default::default()),
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            metadata: Default::default(),
+        });
+        d.mark_dirty();
+        assert_eq!(d.draft_revision(), initial + 1);
+        assert!(!Arc::ptr_eq(&diagnostics, &d.cached_diagnostics()));
+        d.save().unwrap();
+        assert_eq!(d.draft_revision(), initial + 2);
+        assert!(!d.dirty);
+        assert_ne!(d.selected_macro().unwrap().steps[0].id, 0);
+        let saved = d.draft_revision();
+        d.selected_macro_mut().unwrap().steps[0].metadata.comment = "changed".into();
+        d.mark_dirty();
+        d.mark_dirty();
+        assert_eq!(d.draft_revision(), saved + 1);
+        assert!(d.dirty);
+        d.reload_with_decision(DirtyDecision::Discard);
+        assert_eq!(d.draft_revision(), saved + 2);
+        assert!(!d.dirty);
+        assert!(
+            d.selected_macro().unwrap().steps[0]
+                .metadata
+                .comment
+                .is_empty()
+        );
+        let mut external = d.draft.clone();
+        external.macros[0].name = "External".into();
+        d.store.save(external).unwrap();
+        d.sync_external();
+        assert_eq!(d.draft_revision(), saved + 3);
+        assert!(!d.dirty);
+        assert_eq!(d.selected_macro().unwrap().name, "External");
     }
 
     #[test]
@@ -3682,6 +3739,9 @@ impl MkMacroDialog {
         Self {
             open: false,
             draft: (*baseline).clone(),
+            draft_revision: 0,
+            revision_document: (*baseline).clone(),
+            analysis_cache: Default::default(),
             baseline,
             store,
             authoring_context,
@@ -3728,6 +3788,7 @@ impl MkMacroDialog {
     }
     pub fn open(&mut self) {
         self.sync_external();
+        self.refresh_environment();
         self.open = true;
         crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
         crate::mkmacro::runtime::set_recording_options(self.recorder_options.clone());
@@ -3755,6 +3816,7 @@ impl MkMacroDialog {
                 self.conflict = true;
             } else {
                 self.draft = (*current).clone();
+                self.record_draft_revision();
                 self.baseline = current;
                 self.cancel_folder_operations();
                 if self.selected_macro().is_none() {
@@ -3766,13 +3828,58 @@ impl MkMacroDialog {
     }
     pub fn save(&mut self) -> anyhow::Result<()> {
         repair_ids(&mut self.draft);
+        self.record_draft_revision();
+        self.refresh_environment();
         self.baseline = self.store.save(self.draft.clone())?;
         self.dirty = false;
         self.conflict = false;
         Ok(())
     }
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        if self.record_draft_revision() {
+            self.dirty = true;
+        }
+    }
+
+    fn record_draft_revision(&mut self) -> bool {
+        if self.revision_document == self.draft {
+            return false;
+        }
+        self.draft_revision = self.draft_revision.wrapping_add(1);
+        self.revision_document = self.draft.clone();
+        if let Some(m) = self.selected_macro() {
+            let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
+            self.selection.reconcile(&rows);
+        }
+        true
+    }
+
+    pub fn draft_revision(&self) -> u64 {
+        self.draft_revision
+    }
+
+    /// Refresh external image and monitor state without dirtying the document.
+    pub fn refresh_environment(&mut self) {
+        self.record_draft_revision();
+        self.action_editor.image_refs_cache = None;
+        self.analysis_cache
+            .borrow_mut()
+            .refresh_environment(&self.draft, &self.store.asset_root());
+    }
+
+    pub(super) fn cached_diagnostics(&self) -> Arc<Vec<crate::mkmacro::MkDiagnostic>> {
+        self.analysis_cache
+            .borrow_mut()
+            .diagnostics(&self.draft, self.draft_revision)
+    }
+
+    pub(super) fn cached_structure(
+        &self,
+        macro_id: u64,
+    ) -> Option<Arc<crate::mkmacro::StructureAnalysis>> {
+        self.analysis_cache
+            .borrow_mut()
+            .structure(&self.draft, self.draft_revision, macro_id)
     }
 
     pub fn create_folder(&mut self) -> u64 {
@@ -4033,6 +4140,7 @@ impl MkMacroDialog {
         if self.dirty {
             let current = self.store.snapshot();
             self.draft = (*current).clone();
+            self.record_draft_revision();
             self.baseline = current;
             self.dirty = false;
             self.conflict = false;
@@ -4051,6 +4159,7 @@ impl MkMacroDialog {
         }
         let current = self.store.snapshot();
         self.draft = (*current).clone();
+        self.record_draft_revision();
         self.baseline = current;
         self.dirty = false;
         self.conflict = false;
@@ -4064,25 +4173,20 @@ impl MkMacroDialog {
         macro_id: u64,
         recorded: &[RecordedStep],
     ) -> Result<Vec<u64>, String> {
-        let next = self
-            .draft
-            .macros
-            .iter()
-            .flat_map(|m| &m.steps)
-            .map(|s| s.id)
-            .max()
-            .unwrap_or(0);
-        let inserted = crate::mkmacro::to_macro_steps(recorded, next, true);
-        let ids = inserted.iter().map(|s| s.id).collect::<Vec<_>>();
         let m = self
             .draft
             .macros
             .iter_mut()
             .find(|m| m.id == macro_id)
             .ok_or("recording target no longer exists")?;
-        m.steps.extend(inserted);
-        repair_ids(&mut self.draft);
-        self.selection.ids = ids.iter().copied().collect();
+        // Recorder output gets temporary local IDs; the canonical allocator
+        // assigns checked destination IDs, including after u64::MAX.
+        let recorded_steps = crate::mkmacro::to_macro_steps(recorded, 0, true);
+        let inserted = crate::mkmacro::editor_mutation::clone_fragment(&recorded_steps, &m.steps)
+            .map_err(|error| error.to_string())?;
+        let ids = inserted.inserted_ids;
+        m.steps.extend(inserted.steps);
+        self.selection.replace(ids.iter().copied());
         self.mark_dirty();
         Ok(ids)
     }
@@ -4136,8 +4240,12 @@ impl MkMacroDialog {
         copy.id = 0;
         copy.name.push_str(" Copy");
         copy.hotkey = None;
-        for step in &mut copy.steps {
-            step.id = 0;
+        match crate::mkmacro::editor_mutation::clone_fragment(&source.steps, &[]) {
+            Ok(fragment) => copy.steps = fragment.steps,
+            Err(error) => {
+                self.command_error = Some(error.to_string());
+                return;
+            }
         }
         debug_assert_eq!(
             copy.folder_id, source.folder_id,
@@ -4195,7 +4303,7 @@ impl MkMacroDialog {
         }) {
             return Some("Another playback operation is active".into());
         }
-        let d = validate_document(&self.draft, None);
+        let d = self.cached_diagnostics();
         d.iter()
             .find(|x| x.severity == DiagnosticSeverity::Fatal)
             .map(|x| x.message.clone())
@@ -4210,6 +4318,7 @@ impl MkMacroDialog {
     }
 
     fn prepare_execution_checked(&mut self) -> anyhow::Result<u64> {
+        self.refresh_environment();
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
@@ -4241,6 +4350,7 @@ impl MkMacroDialog {
     }
 
     fn prepare_from_step(&mut self, original_step_id: u64) -> anyhow::Result<(u64, u64)> {
+        self.refresh_environment();
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
@@ -4268,6 +4378,7 @@ impl MkMacroDialog {
     }
 
     fn prepare_selected_steps(&mut self) -> anyhow::Result<(u64, Vec<u64>)> {
+        self.refresh_environment();
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }

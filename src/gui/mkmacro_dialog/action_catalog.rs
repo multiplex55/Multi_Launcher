@@ -2233,8 +2233,7 @@ fn insert_direct(d: &mut MkMacroDialog, action: MkAction) -> Result<u64, String>
     m.steps.insert(pos, step(action));
     repair_ids(&mut d.draft);
     let id = d.selected_macro().unwrap().steps[pos].id;
-    d.selection.ids.clear();
-    d.selection.ids.insert(id);
+    d.selection.replace([id]);
     d.command_error = None;
     d.mark_dirty();
     Ok(id)
@@ -2345,9 +2344,7 @@ pub fn apply_structural(
     let end_id = candidate.steps[last + 1].id;
     *d.selected_macro_mut().unwrap() = candidate;
     // Deterministically select both newly-created boundary rows.
-    d.selection.ids.clear();
-    d.selection.ids.insert(open_id);
-    d.selection.ids.insert(end_id);
+    d.selection.replace([open_id, end_id]);
     d.command_error = None;
     d.mark_dirty();
     Ok(open_id)

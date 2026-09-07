@@ -114,6 +114,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
     crate::mkmacro::runtime::set_recording_options(dialog.recorder_options.clone());
     let state = state(dialog);
     ui.horizontal(|ui| {
+        if ui.button("Refresh checks").on_hover_text("Check external image files and connected monitors").clicked() {
+            dialog.refresh_environment();
+        }
         if ui.button("Save").clicked() {
             let result = dialog.save();
             report(dialog, result);

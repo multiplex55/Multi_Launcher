@@ -60,6 +60,7 @@ pub(super) fn show(
     payload: &mut MkImagePayload,
     state: &mut ImageSearchEditorState,
     store: &crate::mkmacro::MkMacroStore,
+    assets: &[crate::mkmacro::MkImageRef],
     editor_id: (u64, u64),
     authoring_busy: bool,
     test_busy: bool,
@@ -128,7 +129,7 @@ pub(super) fn show(
         super::image_asset_picker::show_browser(
             ui,
             ("find-image-library-browser", editor_id),
-            super::image_asset_picker::ImageAssetUiContext { store },
+            super::image_asset_picker::ImageAssetUiContext { store, assets },
             &mut payload.image,
         );
     }
