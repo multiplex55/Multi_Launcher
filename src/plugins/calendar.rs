@@ -305,7 +305,13 @@ fn update_events_with_save(
 pub fn refresh_events_from_disk(path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
     Lazy::force(&CALENDAR_DATA);
     let _transaction = calendar_event_transaction_guard();
-    let events = load_events_unlocked(path)?;
+    let events = match load_events_typed(path)? {
+        LoadState::Missing => {
+            anyhow::bail!("calendar events file was removed; retaining last-good state")
+        }
+        LoadState::Empty => Vec::new(),
+        LoadState::Loaded(events) => events,
+    };
     let should_publish = CALENDAR_DATA
         .read()
         .map(|current| *current != events)
@@ -1640,6 +1646,11 @@ mod persistence_tests {
         assert_eq!(*CALENDAR_DATA.read().unwrap(), local);
         assert_eq!(calendar_version(), version);
         assert_eq!(std::fs::read(&path).unwrap(), invalid);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(refresh_events_from_disk(path.to_str().unwrap()).is_err());
+        assert_eq!(*CALENDAR_DATA.read().unwrap(), local);
+        assert_eq!(calendar_version(), version);
 
         let external = vec![event("external", "External")];
         std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();

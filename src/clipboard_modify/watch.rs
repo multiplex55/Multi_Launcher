@@ -54,8 +54,9 @@ impl ClipboardModifyWatcher {
                     if matches!(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    ) && (event.paths.is_empty()
-                        || event.paths.iter().any(|p| p == &self.path)) =>
+                    ) && crate::common::json_watch::event_targets_path(
+                        &event, &self.path, false,
+                    ) =>
                 {
                     self.reload_deadline = Some(now + self.debounce);
                 }

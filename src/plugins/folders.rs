@@ -1,9 +1,9 @@
 use crate::actions::Action;
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::plugin::Plugin;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -158,7 +158,7 @@ pub struct FoldersPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<FolderEntry>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl FoldersPlugin {
@@ -172,32 +172,15 @@ impl FoldersPlugin {
         )));
         let data_clone = data.clone();
         let path = FOLDERS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res
-                        && matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        )
-                    {
-                        if let Err(error) = reload_folder_snapshot(&path, &data_clone) {
-                            tracing::error!(%error, "invalid folder reload retained last-good state");
-                        }
-                    }
+        let watcher = watch_json(&path, {
+            let path = path.clone();
+            move || {
+                if let Err(error) = reload_folder_snapshot(&path, &data_clone) {
+                    tracing::error!(%error, "invalid folder reload retained last-good state");
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        })
+        .ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -234,9 +217,16 @@ impl FoldersPlugin {
 }
 
 fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> anyhow::Result<()> {
-    let folders = load_folders(path)?;
+    let _transaction = folders_transaction_guard();
+    let folders = match load_folders_typed(path)? {
+        LoadState::Missing => anyhow::bail!("folders file was removed; retaining last-good state"),
+        LoadState::Empty => default_folders(),
+        LoadState::Loaded(folders) => folders,
+    };
     if let Ok(mut current) = data.lock() {
-        *current = folders;
+        if *current != folders {
+            *current = folders;
+        }
     }
     Ok(())
 }
@@ -488,6 +478,10 @@ mod tests {
         let data = Arc::new(Mutex::new(initial.clone()));
         std::fs::write(&path, "invalid").unwrap();
 
+        assert!(reload_folder_snapshot(path.to_str().unwrap(), &data).is_err());
+        assert_eq!(*data.lock().unwrap(), initial);
+
+        std::fs::remove_file(&path).unwrap();
         assert!(reload_folder_snapshot(path.to_str().unwrap(), &data).is_err());
         assert_eq!(*data.lock().unwrap(), initial);
 

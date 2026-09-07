@@ -1,14 +1,15 @@
 use crate::actions::Action;
-use crate::mouse_gestures::db::{GESTURES_FILE, GestureDb, load_gestures};
+use crate::common::persistence::{LoadState, PersistenceError};
+use crate::mouse_gestures::db::{GESTURES_FILE, GestureDb, load_gestures_for_reload};
 use crate::mouse_gestures::usage::{GESTURES_USAGE_FILE, GestureUsageEntry, load_usage};
 use crate::plugins::calendar::{
     CALENDAR_EVENTS_FILE, CalendarSnapshot, build_snapshot, refresh_events_from_disk,
 };
 use crate::plugins::clipboard::{CLIPBOARD_FILE, load_history};
-use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs};
+use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs_for_reload};
 use crate::plugins::note::{Note, load_notes};
-use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets};
-use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos};
+use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets_for_reload};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos_for_reload};
 use crate::{launcher, launcher::RecycleBinInfo};
 use chrono::Local;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -272,6 +273,25 @@ fn publish_loaded_or_retain<T>(
     }
 }
 
+fn critical_list_for_dashboard<T>(
+    loaded: Result<LoadState<Vec<T>>, PersistenceError>,
+    store: &'static str,
+) -> anyhow::Result<Vec<T>> {
+    match loaded? {
+        LoadState::Missing => anyhow::bail!("{store} file was removed"),
+        LoadState::Empty => Ok(Vec::new()),
+        LoadState::Loaded(entries) => Ok(entries),
+    }
+}
+
+fn gesture_db_for_dashboard() -> anyhow::Result<GestureDb> {
+    match load_gestures_for_reload(GESTURES_FILE)? {
+        LoadState::Missing => anyhow::bail!("gesture definitions file was removed"),
+        LoadState::Empty => Ok(GestureDb::default()),
+        LoadState::Loaded(db) => Ok(db),
+    }
+}
+
 fn publish_gesture_db_or_retain(
     current: &Arc<GestureDb>,
     loaded: anyhow::Result<GestureDb>,
@@ -361,13 +381,21 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             );
         }
         if batch.contains(DashboardRefreshRequest::Snippets) {
-            publish_loaded_or_retain(&mut next.snippets, load_snippets(SNIPPETS_FILE), "snippets");
+            publish_loaded_or_retain(
+                &mut next.snippets,
+                critical_list_for_dashboard(load_snippets_for_reload(SNIPPETS_FILE), "snippets"),
+                "snippets",
+            );
         }
         if batch.contains(DashboardRefreshRequest::Notes) {
-            next.notes = Arc::new(load_notes().unwrap_or_default());
+            publish_loaded_or_retain(&mut next.notes, load_notes(), "notes");
         }
         if batch.contains(DashboardRefreshRequest::Todos) {
-            publish_loaded_or_retain(&mut next.todos, load_todos(TODO_FILE), "todos");
+            publish_loaded_or_retain(
+                &mut next.todos,
+                critical_list_for_dashboard(load_todos_for_reload(TODO_FILE), "todos"),
+                "todos",
+            );
         }
         if batch.contains(DashboardRefreshRequest::Calendar) {
             let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
@@ -390,10 +418,14 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             next.process_error = None;
         }
         if batch.contains(DashboardRefreshRequest::Favorites) {
-            publish_loaded_or_retain(&mut next.favorites, load_favs(FAV_FILE), "favorites");
+            publish_loaded_or_retain(
+                &mut next.favorites,
+                critical_list_for_dashboard(load_favs_for_reload(FAV_FILE), "favorites"),
+                "favorites",
+            );
         }
         if batch.contains(DashboardRefreshRequest::Gestures) {
-            let db = publish_gesture_db_or_retain(&next.gestures.db, load_gestures(GESTURES_FILE));
+            let db = publish_gesture_db_or_retain(&next.gestures.db, gesture_db_for_dashboard());
             next.gestures = Arc::new(GestureSnapshot {
                 db,
                 usage: Arc::new(load_usage(GESTURES_USAGE_FILE)),
@@ -572,6 +604,19 @@ mod tests {
         }];
         publish_loaded_or_retain(&mut current, Ok(recovered.clone()), "snippets");
         assert_eq!(current.as_ref(), &recovered);
+    }
+
+    #[test]
+    fn removed_critical_store_retains_dashboard_last_good() {
+        let initial = Arc::new(vec![42]);
+        let mut current = Arc::clone(&initial);
+        publish_loaded_or_retain(
+            &mut current,
+            critical_list_for_dashboard::<i32>(Ok(LoadState::Missing), "test store"),
+            "test store",
+        );
+
+        assert!(Arc::ptr_eq(&current, &initial));
     }
 
     #[test]

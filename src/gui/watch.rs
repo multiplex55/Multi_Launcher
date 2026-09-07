@@ -1,16 +1,23 @@
 use super::*;
+use std::path::{Path, PathBuf};
 
 pub(super) fn watch_file(
     path: &Path,
     tx: Sender<WatchEvent>,
     event: WatchEvent,
 ) -> notify::Result<RecommendedWatcher> {
+    let target = path.to_path_buf();
+    let target_is_directory = path.is_dir();
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| match res {
             Ok(ev) => {
                 if matches!(
                     ev.kind,
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) && crate::common::json_watch::event_targets_path(
+                    &ev,
+                    &target,
+                    target_is_directory,
                 ) {
                     let _ = tx.send(event.clone());
                 }
@@ -19,12 +26,12 @@ pub(super) fn watch_file(
         },
         Config::default(),
     )?;
-    watcher
-        .watch(path, RecursiveMode::NonRecursive)
-        .or_else(|_| {
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            watcher.watch(parent, RecursiveMode::NonRecursive)
-        })?;
+    let watch_root = if target_is_directory {
+        path
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("."))
+    };
+    watcher.watch(watch_root, RecursiveMode::NonRecursive)?;
     Ok(watcher)
 }
 
@@ -33,9 +40,24 @@ impl LauncherApp {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 WatchEvent::Actions => {
+                    let _transaction = crate::actions::transaction_guard();
                     let custom = match load_actions_typed(&self.actions_path) {
-                        Ok(crate::common::persistence::LoadState::Missing)
-                        | Ok(crate::common::persistence::LoadState::Empty) => Vec::new(),
+                        Ok(crate::common::persistence::LoadState::Missing) => {
+                            let error = crate::common::persistence::PersistenceError::Read {
+                                path: PathBuf::from(&self.actions_path),
+                                source: std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "actions file was removed; retaining last-good state",
+                                ),
+                            };
+                            self.report_error_message(
+                                "actions.reload",
+                                format!("Failed to reload actions: {error}"),
+                            );
+                            self.actions_persistence_diagnostic = Some(error);
+                            continue;
+                        }
+                        Ok(crate::common::persistence::LoadState::Empty) => Vec::new(),
                         Ok(crate::common::persistence::LoadState::Loaded(actions)) => actions,
                         Err(error) => {
                             self.report_error_message(
@@ -75,6 +97,14 @@ impl LauncherApp {
                     crate::actions::bump_actions_version();
                     tracing::info!("actions reloaded");
                 }
+                WatchEvent::Folders
+                    if !Path::new(crate::plugins::folders::FOLDERS_FILE).exists() =>
+                {
+                    self.report_error_message(
+                        "folders.reload",
+                        "Folders file was removed; retaining last-good aliases",
+                    );
+                }
                 WatchEvent::Folders => match Self::try_folder_alias_maps() {
                     Ok((aliases, aliases_lc)) => {
                         self.folder_aliases = aliases;
@@ -86,6 +116,14 @@ impl LauncherApp {
                         format!("Failed to reload folder aliases: {error}"),
                     ),
                 },
+                WatchEvent::Bookmarks
+                    if !Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE).exists() =>
+                {
+                    self.report_error_message(
+                        "bookmarks.reload",
+                        "Bookmarks file was removed; retaining last-good aliases",
+                    );
+                }
                 WatchEvent::Bookmarks => match Self::try_bookmark_alias_maps() {
                     Ok((aliases, aliases_lc)) => {
                         self.bookmark_aliases = aliases;
@@ -313,6 +351,20 @@ mod tests {
         assert_eq!(
             app.bookmark_aliases_lc.get("https://example.com"),
             Some(&Some("updated example alias".into()))
+        );
+
+        std::fs::remove_file(crate::plugins::folders::FOLDERS_FILE).unwrap();
+        std::fs::remove_file(crate::plugins::bookmarks::BOOKMARKS_FILE).unwrap();
+        send_event(WatchEvent::Folders);
+        send_event(WatchEvent::Bookmarks);
+        app.process_watch_events();
+        assert_eq!(
+            app.folder_aliases.get("C:/Docs"),
+            Some(&Some("Updated Docs Alias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("Updated Example Alias".into()))
         );
 
         std::env::set_current_dir(original_dir).unwrap();

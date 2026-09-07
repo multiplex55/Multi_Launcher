@@ -498,6 +498,13 @@ pub fn load_gestures_typed(path: impl AsRef<Path>) -> anyhow::Result<LoadState<G
     }
 }
 
+pub(crate) fn load_gestures_for_reload(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<LoadState<GestureDb>> {
+    let _transaction = gestures_transaction_guard();
+    load_gestures_typed(path)
+}
+
 fn load_gestures_plan(path: &Path) -> anyhow::Result<(GestureDb, bool)> {
     match read_bytes(path)? {
         LoadState::Missing | LoadState::Empty => Ok((GestureDb::default(), false)),
@@ -602,7 +609,7 @@ fn update_gestures_with_save(
     Ok(db)
 }
 
-fn gestures_transaction_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn gestures_transaction_guard() -> MutexGuard<'static, ()> {
     GESTURES_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

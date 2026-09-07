@@ -1,10 +1,10 @@
 use crate::actions::Action;
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::lru::LruCache;
 use crate::common::persistence::{LoadState, PersistenceError, read_bytes, save_json_atomic};
 use crate::plugin::Plugin;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -34,7 +34,7 @@ pub struct BookmarksPlugin {
     data: Arc<Mutex<Vec<BookmarkEntry>>>,
     cache: Arc<Mutex<LruCache<String, Vec<Action>>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl BookmarksPlugin {
@@ -49,33 +49,16 @@ impl BookmarksPlugin {
         let cache = BOOKMARK_CACHE.clone();
         let data_clone = data.clone();
         let path = BOOKMARKS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                let cache_clone = cache.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res
-                        && matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        )
-                        && let Err(error) =
-                            reload_bookmark_snapshot(&path, &data_clone, &cache_clone)
-                    {
-                        tracing::error!(%error, "invalid bookmark reload retained last-good state");
-                    }
+        let watcher = watch_json(&path, {
+            let path = path.clone();
+            let cache_clone = cache.clone();
+            move || {
+                if let Err(error) = reload_bookmark_snapshot(&path, &data_clone, &cache_clone) {
+                    tracing::error!(%error, "invalid bookmark reload retained last-good state");
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        })
+        .ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -368,8 +351,18 @@ fn reload_bookmark_snapshot(
     data: &Arc<Mutex<Vec<BookmarkEntry>>>,
     cache: &Arc<Mutex<LruCache<String, Vec<Action>>>>,
 ) -> anyhow::Result<()> {
-    let bookmarks = load_bookmarks(path)?;
+    let _transaction = bookmarks_transaction_guard();
+    let bookmarks = match load_bookmarks_typed(path)? {
+        LoadState::Missing => {
+            anyhow::bail!("bookmarks file was removed; retaining last-good state")
+        }
+        LoadState::Empty => Vec::new(),
+        LoadState::Loaded(bookmarks) => bookmarks,
+    };
     if let Ok(mut current) = data.lock() {
+        if *current == bookmarks {
+            return Ok(());
+        }
         *current = bookmarks;
     }
     if let Ok(mut cache) = cache.lock() {
@@ -624,6 +617,10 @@ mod tests {
         let cache = Arc::new(Mutex::new(LruCache::new(4)));
         std::fs::write(&path, "invalid").unwrap();
 
+        assert!(reload_bookmark_snapshot(path.to_str().unwrap(), &data, &cache).is_err());
+        assert_eq!(*data.lock().unwrap(), initial);
+
+        std::fs::remove_file(&path).unwrap();
         assert!(reload_bookmark_snapshot(path.to_str().unwrap(), &data, &cache).is_err());
         assert_eq!(*data.lock().unwrap(), initial);
 

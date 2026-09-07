@@ -343,7 +343,13 @@ fn reload_from_disk(i: &Inner) {
                 *i.last_external_error.write().unwrap() = None
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            *i.last_external_error.write().unwrap() = Some(if i.path.exists() {
+                "mkmacros.json is empty; retaining last-good document".to_string()
+            } else {
+                "mkmacros.json was removed; retaining last-good document".to_string()
+            });
+        }
         Err(e) => *i.last_external_error.write().unwrap() = Some(e.to_string()),
     }
 }
@@ -1747,6 +1753,26 @@ mod tests {
         let disk: MkMacroDocument = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(disk.schema_version, SCHEMA_VERSION);
         assert!(disk.macros.is_empty());
+    }
+
+    #[test]
+    fn watcher_removal_retains_snapshot_and_reports_diagnostic_until_recovery() {
+        let d = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(d.path()).unwrap();
+        let committed = store.save(document()).unwrap();
+        fs::remove_file(d.path().join(MKMACROS_FILE)).unwrap();
+
+        reload_from_disk(&store.inner);
+
+        assert_eq!(store.snapshot().as_ref(), committed.as_ref());
+        assert!(
+            store
+                .last_external_error()
+                .is_some_and(|error| error.contains("was removed"))
+        );
+        persist(&store.inner.path, committed.as_ref()).unwrap();
+        reload_from_disk(&store.inner);
+        assert!(store.last_external_error().is_none());
     }
 
     #[test]

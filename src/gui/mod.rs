@@ -3265,6 +3265,17 @@ mod tests {
         ));
         assert_eq!(crate::actions::actions_version(), version_before);
 
+        std::fs::remove_file(&path).unwrap();
+        send_event(WatchEvent::Actions);
+        app.process_watch_events();
+        assert_eq!(app.actions[0], custom_action("committed"));
+        assert!(matches!(
+            app.actions_persistence_diagnostic.as_ref(),
+            Some(crate::common::persistence::PersistenceError::Read { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert_eq!(crate::actions::actions_version(), version_before);
+
         let external = vec![custom_action("external")];
         std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
         send_event(WatchEvent::Actions);

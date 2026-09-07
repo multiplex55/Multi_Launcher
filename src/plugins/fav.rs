@@ -41,6 +41,13 @@ pub fn load_favs_typed(
     load_json(path)
 }
 
+pub(crate) fn load_favs_for_reload(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<FavEntry>>, PersistenceError> {
+    let _transaction = fav_transaction_guard();
+    load_favs_typed(path)
+}
+
 pub fn save_favs(path: &str, favs: &[FavEntry]) -> anyhow::Result<()> {
     replace_favs(path, favs.to_vec()).map(|_| ())
 }
@@ -255,7 +262,13 @@ impl FavPlugin {
 
 fn reload_fav_snapshot(path: &str, data: &Arc<Mutex<Vec<FavEntry>>>) -> anyhow::Result<()> {
     let _transaction = fav_transaction_guard();
-    let favs = load_favs(path)?;
+    let favs = match load_favs_typed(path)? {
+        LoadState::Missing => {
+            anyhow::bail!("favorites file was removed; retaining last-good state")
+        }
+        LoadState::Empty => Vec::new(),
+        LoadState::Loaded(favs) => favs,
+    };
     let mut current = data
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -575,6 +588,11 @@ mod persistence_tests {
         assert_eq!(fav_version(), after_local);
 
         std::fs::write(&path, "invalid").unwrap();
+        assert!(reload_fav_snapshot(path_text, &data).is_err());
+        assert_eq!(*data.lock().unwrap(), local);
+        assert_eq!(fav_version(), after_local);
+
+        std::fs::remove_file(&path).unwrap();
         assert!(reload_fav_snapshot(path_text, &data).is_err());
         assert_eq!(*data.lock().unwrap(), local);
         assert_eq!(fav_version(), after_local);

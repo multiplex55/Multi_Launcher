@@ -230,7 +230,14 @@ fn reload_shared_gesture_db(
     path: impl AsRef<std::path::Path>,
     shared: &SharedGestureDb,
 ) -> anyhow::Result<bool> {
-    let loaded = load_gestures(path)?;
+    let _transaction = crate::mouse_gestures::db::gestures_transaction_guard();
+    let loaded = match crate::mouse_gestures::db::load_gestures_typed(path.as_ref())? {
+        crate::common::persistence::LoadState::Missing => {
+            anyhow::bail!("mouse gesture definitions were removed; retaining last-good state")
+        }
+        crate::common::persistence::LoadState::Empty => GestureDb::default(),
+        crate::common::persistence::LoadState::Loaded(db) => db,
+    };
     let mut current = shared
         .lock()
         .map_err(|_| anyhow::anyhow!("mouse gesture database lock poisoned"))?;
@@ -817,6 +824,10 @@ mod persistence_tests {
         let shared = Arc::new(Mutex::new(initial.clone()));
 
         std::fs::write(&path, b"{broken").unwrap();
+        assert!(reload_shared_gesture_db(&path, &shared).is_err());
+        assert_eq!(*shared.lock().unwrap(), initial);
+
+        std::fs::remove_file(&path).unwrap();
         assert!(reload_shared_gesture_db(&path, &shared).is_err());
         assert_eq!(*shared.lock().unwrap(), initial);
 

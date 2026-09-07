@@ -190,6 +190,13 @@ impl Dashboard {
     }
 
     pub fn reload(&mut self) {
+        if !self.config_path.exists() {
+            self.warnings = vec![format!(
+                "dashboard config {} was removed; retaining last-good state",
+                self.config_path.display()
+            )];
+            return;
+        }
         match Self::load_internal(&self.config_path, &self.registry) {
             Ok((config, slots, warnings)) => {
                 let changed = self.config != config || self.slots != slots;
@@ -1067,6 +1074,14 @@ mod tests {
         assert_eq!(dashboard.config, config);
         assert_eq!(dashboard.slots.len(), 1);
         assert!(dashboard.warnings[0].contains("failed to load dashboard config"));
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
+
+        std::fs::remove_file(&path).unwrap();
+        dashboard.reload();
+        assert_eq!(dashboard.config, config);
+        assert_eq!(dashboard.slots.len(), 1);
+        assert!(dashboard.warnings[0].contains("was removed"));
         assert_eq!(CREATED.load(Ordering::SeqCst), 1);
         assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
 

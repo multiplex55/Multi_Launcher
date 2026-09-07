@@ -319,6 +319,13 @@ pub fn load_todos_typed(
     load_json(path)
 }
 
+pub(crate) fn load_todos_for_reload(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<TodoEntry>>, PersistenceError> {
+    let _transaction = todo_transaction_guard();
+    load_todos_typed(path)
+}
+
 /// Save `todos` to `path` as JSON.
 pub fn save_todos(path: &str, todos: &[TodoEntry]) -> anyhow::Result<()> {
     replace_todos(path, todos.to_vec()).map(|_| ())
@@ -1063,7 +1070,14 @@ impl TodoPlugin {
 
 fn reload_todo_snapshot(path: &str, data: &Arc<RwLock<Vec<TodoEntry>>>) -> anyhow::Result<()> {
     let _transaction = todo_transaction_guard();
-    let (todos, migrated) = load_todos_for_update(path)?;
+    let (todos, migrated) = match load_todos_typed(path)? {
+        LoadState::Missing => anyhow::bail!("todo file was removed; retaining last-good state"),
+        LoadState::Empty => (Vec::new(), false),
+        LoadState::Loaded(mut todos) => {
+            let migrated = ensure_todo_ids(&mut todos);
+            (todos, migrated)
+        }
+    };
     if migrated {
         save_json_atomic(path, &todos)?;
     }
@@ -1750,6 +1764,11 @@ mod tests {
         assert_eq!(todo_version(), version);
         assert_eq!(*TODO_DATA.read().unwrap(), local);
         assert_eq!(load_todos_or_last_good(path.to_str().unwrap()), local);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(reload_todo_snapshot(path.to_str().unwrap(), &TODO_DATA).is_err());
+        assert_eq!(todo_version(), version);
+        assert_eq!(*TODO_DATA.read().unwrap(), local);
 
         let external = vec![persistence_todo("external", "external")];
         std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();

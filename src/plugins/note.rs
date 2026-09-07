@@ -22,8 +22,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc::{SyncSender, TrySendError, sync_channel},
 };
+use std::thread::{self, JoinHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteExternalOpen {
@@ -90,7 +92,7 @@ impl Default for NotePluginSettings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     pub title: String,
     pub path: PathBuf,
@@ -278,8 +280,6 @@ static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwra
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
 static NOTE_VERSION: AtomicU64 = AtomicU64::new(0);
-static LAST_NOTE_REINDEX_MS: AtomicU64 = AtomicU64::new(0);
-const NOTE_REINDEX_DEBOUNCE_MS: u64 = 250;
 
 #[cfg(test)]
 type NoteSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync;
@@ -940,9 +940,12 @@ pub fn refresh_cache() -> anyhow::Result<()> {
     let notes = load_notes()?;
     let cache = NoteCache::from_notes(notes);
     if let Ok(mut guard) = CACHE.lock() {
+        if guard.notes == cache.notes {
+            return Ok(());
+        }
         *guard = cache;
+        bump_note_version();
     }
-    bump_note_version();
     Ok(())
 }
 
@@ -1129,6 +1132,73 @@ pub fn remove_note(index: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct NoteReloadCoordinator {
+    wake: SyncSender<()>,
+    shutting_down: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl NoteReloadCoordinator {
+    fn start(
+        mut reload: impl FnMut() -> anyhow::Result<()> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let (wake, receiver) = sync_channel(1);
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutting_down);
+        let worker = thread::Builder::new()
+            .name("notes-reload".into())
+            .spawn(move || {
+                while receiver.recv().is_ok() {
+                    if worker_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    while receiver.try_recv().is_ok() {}
+                    if let Err(error) = reload() {
+                        tracing::error!(%error, "notes watcher retained last-good cache");
+                    }
+                }
+            })?;
+        Ok(Self {
+            wake,
+            shutting_down,
+            worker: Some(worker),
+        })
+    }
+
+    fn requester(&self) -> SyncSender<()> {
+        self.wake.clone()
+    }
+
+    fn request(requester: &SyncSender<()>) {
+        match requester.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) | Err(TrySendError::Disconnected(())) => {}
+        }
+    }
+}
+
+impl Drop for NoteReloadCoordinator {
+    fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct NoteWatcher {
+    watcher: Option<RecommendedWatcher>,
+    coordinator: Option<NoteReloadCoordinator>,
+}
+
+impl Drop for NoteWatcher {
+    fn drop(&mut self) {
+        // Unregister native callbacks before stopping their owned consumer.
+        self.watcher.take();
+        self.coordinator.take();
+    }
+}
+
 pub struct NotePlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<NoteCache>>,
@@ -1138,7 +1208,7 @@ pub struct NotePlugin {
     aliases_enabled: bool,
     templates_enabled: bool,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<NoteWatcher>,
 }
 
 impl NotePlugin {
@@ -1149,24 +1219,25 @@ impl NotePlugin {
         let templates = TEMPLATE_CACHE.clone();
         let dir = notes_dir();
         let _ = std::fs::create_dir_all(&dir);
+        let watch_target = dir.clone();
+        let coordinator = NoteReloadCoordinator::start(refresh_cache).ok();
+        let requester = coordinator.as_ref().map(NoteReloadCoordinator::requester);
         let watcher = RecommendedWatcher::new(
-            move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res
-                    && matches!(
+            move |res: notify::Result<notify::Event>| match res {
+                Ok(event)
+                    if matches!(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    )
+                    ) && crate::common::json_watch::event_targets_path(
+                        &event,
+                        &watch_target,
+                        true,
+                    ) && let Some(requester) = &requester =>
                 {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let last = LAST_NOTE_REINDEX_MS.load(Ordering::SeqCst);
-                    if now.saturating_sub(last) >= NOTE_REINDEX_DEBOUNCE_MS {
-                        LAST_NOTE_REINDEX_MS.store(now, Ordering::SeqCst);
-                        let _ = refresh_cache();
-                    }
+                    NoteReloadCoordinator::request(requester);
                 }
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error, "notes watcher notification failed"),
             },
             Config::default(),
         )
@@ -1182,6 +1253,13 @@ impl NotePlugin {
                 .is_ok()
                 .then_some(watcher)
         });
+        let watcher = match (watcher, coordinator) {
+            (Some(watcher), Some(coordinator)) => Some(NoteWatcher {
+                watcher: Some(watcher),
+                coordinator: Some(coordinator),
+            }),
+            _ => None,
+        };
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -2176,6 +2254,97 @@ mod tests {
     }
 
     #[test]
+    fn note_reload_coordinator_coalesces_bursts_to_one_pending_reload() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let coordinator = NoteReloadCoordinator::start(move || {
+            worker_calls.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let requester = coordinator.requester();
+
+        NoteReloadCoordinator::request(&requester);
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        for _ in 0..100 {
+            NoteReloadCoordinator::request(&requester);
+        }
+        release_tx.send(()).unwrap();
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        drop(requester);
+        drop(coordinator);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn note_reload_coordinator_processes_recovery_after_failed_reload() {
+        let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
+        let attempt = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_attempt = Arc::clone(&attempt);
+        let coordinator = NoteReloadCoordinator::start(move || {
+            let attempt = worker_attempt.fetch_add(1, Ordering::SeqCst);
+            let success = attempt > 0;
+            outcome_tx.send(success).unwrap();
+            if success {
+                Ok(())
+            } else {
+                anyhow::bail!("injected unreadable notes directory")
+            }
+        })
+        .unwrap();
+        let requester = coordinator.requester();
+
+        NoteReloadCoordinator::request(&requester);
+        assert!(
+            !outcome_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        );
+        NoteReloadCoordinator::request(&requester);
+        assert!(
+            outcome_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        );
+        drop(requester);
+        drop(coordinator);
+        assert_eq!(attempt.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn note_reload_coordinator_shutdown_joins_and_drops_worker_state() {
+        struct DropSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let signal = DropSignal(dropped_tx);
+        let coordinator = NoteReloadCoordinator::start(move || {
+            let _ = &signal;
+            Ok(())
+        })
+        .unwrap();
+
+        drop(coordinator);
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("coordinator drop must join and release worker-owned state");
+    }
+
+    #[test]
     fn saves_png_assets_with_safe_names_and_collision_suffixes() {
         let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let notes = tempfile::tempdir().unwrap();
@@ -2861,9 +3030,9 @@ mod tests {
         use std::fs;
         use tempfile::tempdir;
 
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let dir = tempdir().unwrap();
-        let prev = std::env::var("ML_NOTES_DIR").ok();
-        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+        let _env = NotesDirEnvGuard::set(dir.path());
 
         fs::write(
             dir.path().join("one.md"),
@@ -2876,6 +3045,9 @@ Body",
         let first = note_cache_snapshot();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].slug, "one");
+        let first_version = note_version();
+        refresh_cache().unwrap();
+        assert_eq!(note_version(), first_version);
 
         fs::write(
             dir.path().join("two.md"),
@@ -2888,12 +3060,34 @@ Body",
         let second = note_cache_snapshot();
         assert_eq!(second.len(), 2);
         assert!(second.iter().any(|n| n.slug == "two"));
+    }
 
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
-        } else {
-            unsafe { std::env::remove_var("ML_NOTES_DIR") };
-        }
+    #[test]
+    fn note_cache_retains_unreadable_reload_then_recovers_without_duplicate_version() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let original = set_notes(Vec::new());
+        std::fs::write(dir.path().join("one.md"), "# One\n\nBody").unwrap();
+        refresh_cache().unwrap();
+        let committed = note_cache_snapshot();
+        let committed_version = note_version();
+
+        let unreadable = dir.path().join("broken.md");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(refresh_cache().is_err());
+        assert_eq!(note_cache_snapshot(), committed);
+        assert_eq!(note_version(), committed_version);
+
+        std::fs::remove_dir(unreadable).unwrap();
+        std::fs::write(dir.path().join("two.md"), "# Two\n\nBody").unwrap();
+        refresh_cache().unwrap();
+        assert_eq!(note_cache_snapshot().len(), 2);
+        assert_eq!(note_version(), committed_version + 1);
+        refresh_cache().unwrap();
+        assert_eq!(note_version(), committed_version + 1);
+
+        restore_cache(original);
     }
 
     #[test]

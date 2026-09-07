@@ -1,9 +1,9 @@
 use crate::actions::Action;
+use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::plugin::Plugin;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -37,6 +37,13 @@ pub fn load_snippets_typed(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<SnippetEntry>>, PersistenceError> {
     load_json(path)
+}
+
+pub(crate) fn load_snippets_for_reload(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<SnippetEntry>>, PersistenceError> {
+    let _transaction = snippets_transaction_guard();
+    load_snippets_typed(path)
 }
 
 /// Persist `snippets` to `path`.
@@ -148,7 +155,7 @@ pub struct SnippetsPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<SnippetEntry>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl SnippetsPlugin {
@@ -165,32 +172,15 @@ impl SnippetsPlugin {
             Some((PathBuf::from(SNIPPETS_FILE), startup));
         let data_clone = data.clone();
         let path = SNIPPETS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res
-                        && matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        )
-                    {
-                        if let Err(error) = reload_snippet_snapshot(&path, &data_clone) {
-                            tracing::error!(%error, "invalid snippet reload retained last-good state");
-                        }
-                    }
+        let watcher = watch_json(&path, {
+            let path = path.clone();
+            move || {
+                if let Err(error) = reload_snippet_snapshot(&path, &data_clone) {
+                    tracing::error!(%error, "invalid snippet reload retained last-good state");
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
             }
-        }
+        })
+        .ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -201,7 +191,11 @@ impl SnippetsPlugin {
 
 fn reload_snippet_snapshot(path: &str, data: &Arc<Mutex<Vec<SnippetEntry>>>) -> anyhow::Result<()> {
     let _transaction = snippets_transaction_guard();
-    let snippets = load_snippets(path)?;
+    let snippets = match load_snippets_typed(path)? {
+        LoadState::Missing => anyhow::bail!("snippets file was removed; retaining last-good state"),
+        LoadState::Empty => Vec::new(),
+        LoadState::Loaded(snippets) => snippets,
+    };
     let mut current = data
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -537,6 +531,11 @@ mod persistence_tests {
         assert_eq!(snippets_version(), after_local);
 
         std::fs::write(&path, "invalid").unwrap();
+        assert!(reload_snippet_snapshot(path_text, &data).is_err());
+        assert_eq!(*data.lock().unwrap(), local);
+        assert_eq!(snippets_version(), after_local);
+
+        std::fs::remove_file(&path).unwrap();
         assert!(reload_snippet_snapshot(path_text, &data).is_err());
         assert_eq!(*data.lock().unwrap(), local);
         assert_eq!(snippets_version(), after_local);

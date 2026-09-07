@@ -315,7 +315,11 @@ impl MacrosPlugin {
 
 fn reload_macro_snapshot(path: &str, data: &Arc<Mutex<Vec<MacroEntry>>>) -> anyhow::Result<()> {
     let _transaction = macros_transaction_guard();
-    let macros = load_macros(path)?;
+    let macros = match load_macros_typed(path)? {
+        LoadState::Missing => anyhow::bail!("macros file was removed; retaining last-good state"),
+        LoadState::Empty => Vec::new(),
+        LoadState::Loaded(macros) => macros,
+    };
     let mut current = data
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -557,6 +561,9 @@ mod persistence_tests {
         assert_eq!(load_macros(path.to_str().unwrap()).unwrap(), initial);
 
         std::fs::write(&path, "invalid").unwrap();
+        assert!(reload_macro_snapshot(path.to_str().unwrap(), &data).is_err());
+        assert_eq!(*data.lock().unwrap(), initial);
+        std::fs::remove_file(&path).unwrap();
         assert!(reload_macro_snapshot(path.to_str().unwrap(), &data).is_err());
         assert_eq!(*data.lock().unwrap(), initial);
         let recovered = vec![entry("recovered")];

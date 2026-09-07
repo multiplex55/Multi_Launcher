@@ -57,7 +57,7 @@ fn load_effective(path: impl AsRef<Path>) -> Result<Vec<Action>, PersistenceErro
     }
 }
 
-fn transaction_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn transaction_guard() -> MutexGuard<'static, ()> {
     ACTIONS_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
