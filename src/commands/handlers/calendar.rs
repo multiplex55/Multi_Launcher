@@ -389,6 +389,26 @@ mod tests {
         }
         fn report_clipboard_modify_action_error(&mut self, _: String) {}
     }
+    impl crate::commands::DataCommandHost for Host {
+        fn open_data_dialog(&mut self, _: crate::commands::DataDialogFocus) -> Result<(), String> {
+            Ok(())
+        }
+        fn request_data_backup(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn open_data_folder(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn stage_data_recovery(
+            &mut self,
+            _: &crate::commands::DataRecoveryCommand,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn data_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(
             &mut self,

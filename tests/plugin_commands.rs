@@ -112,6 +112,7 @@ fn disabled_plugin_commands_hidden() {
     app.query.clear();
     app.search();
     assert!(!app.results.iter().any(|a| a.label == "help"));
+    assert!(!app.results.iter().any(|a| a.label == "data"));
 }
 
 #[test]
@@ -198,6 +199,7 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
         "text_case",
         "file_search",
         "omni_search",
+        "data",
     ] {
         assert!(plugin_names.contains(name), "missing plugin {name}");
     }
@@ -213,6 +215,18 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
         ("case <text>", "Text Case", "query:case "),
         ("fs", "Open local file search", "query:fs"),
         ("o", "Omni", "query:o "),
+        ("data", "Open Data & Recovery", "data:dialog"),
+        (
+            "data health",
+            "Inspect persistent data health",
+            "data:health",
+        ),
+        ("data backup", "Create a data snapshot", "data:backup"),
+        (
+            "data folder",
+            "Open the application data folder",
+            "data:folder",
+        ),
     ] {
         assert!(
             commands.contains(&(expected.0.into(), expected.1.into(), expected.2.into())),

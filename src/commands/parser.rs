@@ -25,6 +25,10 @@ pub fn parse_command(
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
 
+    if s.starts_with("data:") {
+        return Ok(Command::Data(parse_data(action)));
+    }
+
     // These protocols bypass query-override application in the existing activation path.
     if let Some(command) = parse_clipboard_modify(action) {
         return Ok(Command::ClipboardModify(command));
@@ -113,6 +117,26 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         _ => return parse_prefixed(action),
     };
     Ok(command)
+}
+
+fn parse_data(action: &Action) -> DataCommand {
+    let raw = action.action.as_str();
+    if action.args.is_some() {
+        return DataCommand::Invalid {
+            raw: raw.to_owned(),
+            error: format!("{raw} does not accept action arguments"),
+        };
+    }
+    match raw {
+        "data:dialog" => DataCommand::Dialog,
+        "data:health" => DataCommand::Health,
+        "data:backup" => DataCommand::Backup,
+        "data:folder" => DataCommand::OpenFolder,
+        _ => DataCommand::Invalid {
+            raw: raw.to_owned(),
+            error: format!("invalid data action: {raw}"),
+        },
+    }
 }
 
 fn parse_prefixed(action: &Action) -> Result<Command, CommandError> {
@@ -827,6 +851,7 @@ mod tests {
     fn metadata_is_stable_across_every_command_domain() {
         let cases = [
             ("launcher:toggle", "launcher", "toggle"),
+            ("data:dialog", "data", "dialog"),
             ("query:abc", "query", "set"),
             ("help:show", "dialog", "help"),
             ("calendar:open", "calendar", "open"),
@@ -866,6 +891,51 @@ mod tests {
         .unwrap();
         let parsed = parse(&format!("diff:open:{diff}"));
         assert_eq!((parsed.domain(), parsed.kind_name()), ("diff", "open"));
+    }
+
+    #[test]
+    fn data_actions_parse_to_their_own_domain_and_preserve_invocation_metadata() {
+        for (raw, expected) in [
+            ("data:dialog", DataCommand::Dialog),
+            ("data:health", DataCommand::Health),
+            ("data:backup", DataCommand::Backup),
+            ("data:folder", DataCommand::OpenFolder),
+        ] {
+            assert_eq!(parse(raw).command, Command::Data(expected));
+        }
+
+        let invocation = parse_command(
+            action("data:health"),
+            Some("dashboard override".into()),
+            ActivationSource::Dashboard,
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.query_override.as_deref(),
+            Some("dashboard override")
+        );
+        assert_eq!(invocation.source, ActivationSource::Dashboard);
+        assert_eq!(invocation.domain(), "data");
+        assert_eq!(invocation.kind_name(), "health");
+    }
+
+    #[test]
+    fn data_namespace_rejects_arguments_and_has_no_raw_recovery_protocol() {
+        assert!(matches!(
+            parse_with_args("data:backup", "unexpected").command,
+            Command::Data(DataCommand::Invalid { raw, error })
+                if raw == "data:backup" && error.contains("does not accept")
+        ));
+        for raw in [
+            "data:restore:Settings:snapshot-1",
+            "data:reset:Settings",
+            "data:future",
+        ] {
+            assert!(matches!(
+                parse(raw).command,
+                Command::Data(DataCommand::Invalid { raw: parsed, .. }) if parsed == raw
+            ));
+        }
     }
 
     #[test]

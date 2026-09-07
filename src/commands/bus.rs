@@ -1,8 +1,9 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_clipboard_modify, handle_crop, handle_diff, handle_file_search,
-    handle_headless_gui, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
-    handle_note, handle_query, handle_screenshot, handle_simple_dialog, handle_todo,
+    handle_calendar, handle_clipboard_modify, handle_crop, handle_data, handle_diff,
+    handle_file_search, handle_headless_gui, handle_launcher, handle_link, handle_mouse_gesture,
+    handle_multi_manager, handle_note, handle_query, handle_screenshot, handle_simple_dialog,
+    handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -39,6 +40,7 @@ impl CommandBus {
             Command::ClipboardModify(command) => {
                 Ok(handle_clipboard_modify(host, command, invocation))
             }
+            Command::Data(command) => handle_data(host, command),
             Command::Shell(_)
             | Command::Clipboard(_)
             | Command::Calculator(_)
@@ -77,6 +79,7 @@ mod tests {
         diff_calls: usize,
         screenshot_calls: usize,
         clipboard_modify_calls: usize,
+        data_calls: Vec<&'static str>,
     }
 
     impl LauncherCommandHost for FakeHost {
@@ -289,6 +292,36 @@ mod tests {
             self.clipboard_modify_calls += 1;
         }
     }
+    impl crate::commands::DataCommandHost for FakeHost {
+        fn open_data_dialog(
+            &mut self,
+            focus: crate::commands::DataDialogFocus,
+        ) -> Result<(), String> {
+            self.data_calls.push(match focus {
+                crate::commands::DataDialogFocus::Overview => "dialog",
+                crate::commands::DataDialogFocus::Health => "health",
+            });
+            Ok(())
+        }
+        fn request_data_backup(&mut self) -> Result<(), String> {
+            self.data_calls.push("backup");
+            Ok(())
+        }
+        fn open_data_folder(&mut self) -> Result<(), String> {
+            self.data_calls.push("folder");
+            Ok(())
+        }
+        fn stage_data_recovery(
+            &mut self,
+            _: &crate::commands::DataRecoveryCommand,
+        ) -> Result<(), String> {
+            self.data_calls.push("recovery");
+            Ok(())
+        }
+        fn data_launcher_should_refocus(&self) -> bool {
+            false
+        }
+    }
     impl HeadlessCommandHost for FakeHost {
         fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
             self.headless_calls += 1;
@@ -469,6 +502,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.clipboard_modify_calls, 1);
+
+        CommandBus
+            .dispatch(
+                &invocation(Command::Data(crate::commands::DataCommand::Backup)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.data_calls, ["backup"]);
 
         CommandBus
             .dispatch(

@@ -47,6 +47,7 @@ fn execute_with_external(
         Command::Note(_) => execute_external(original_action),
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
+        Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
         Command::External(command) => external(&command.target, command.args.as_deref()),
 
         // These families require LauncherApp state. Before the typed parser
@@ -470,6 +471,20 @@ mod tests {
                 ("tool.exe".into(), Some("--flag value".into())),
             ]
         );
+    }
+
+    #[test]
+    fn data_commands_never_fall_back_to_raw_headless_execution() {
+        let original = action("data:backup");
+        let command = crate::commands::parse_action(&original).unwrap();
+        let mut calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("require the launcher interface"));
+        assert!(calls.is_empty());
     }
 
     #[test]

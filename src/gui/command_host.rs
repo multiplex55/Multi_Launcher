@@ -3,10 +3,10 @@ use std::sync::atomic::Ordering;
 
 use crate::commands::{
     CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
-    CommandOutcome, CropCommandHost, DialogCommandHost, DiffCommandHost, FavoriteLogPolicy,
-    FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
+    CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
+    FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
+    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
+    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
     ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
     VisibilityPolicy,
 };
@@ -436,6 +436,31 @@ impl ScreenshotCommandHost for LauncherApp {
         self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
     }
 }
+
+impl DataCommandHost for LauncherApp {
+    fn open_data_dialog(&mut self, _focus: crate::commands::DataDialogFocus) -> Result<(), String> {
+        Err("Data & Recovery interface is not initialized".into())
+    }
+
+    fn request_data_backup(&mut self) -> Result<(), String> {
+        Err("Data & Recovery interface is not initialized".into())
+    }
+
+    fn open_data_folder(&mut self) -> Result<(), String> {
+        Err("Data & Recovery interface is not initialized".into())
+    }
+
+    fn stage_data_recovery(
+        &mut self,
+        _command: &crate::commands::DataRecoveryCommand,
+    ) -> Result<(), String> {
+        Err("Data & Recovery interface is not initialized".into())
+    }
+
+    fn data_launcher_should_refocus(&self) -> bool {
+        self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
+    }
+}
 fn file_search_mode(kind: crate::file_search::model::SearchKind) -> super::FileSearchMode {
     match kind {
         crate::file_search::model::SearchKind::Filename => super::FileSearchMode::Filename,
@@ -642,6 +667,18 @@ mod tests {
             Command::Screenshot(crate::commands::ScreenshotCommand::UnknownMode {
                 raw: "future".into(),
             }),
+        ] {
+            assert!(command_accepts_query_override(&command));
+        }
+    }
+
+    #[test]
+    fn data_commands_keep_query_override_compatibility() {
+        for command in [
+            Command::Data(crate::commands::DataCommand::Dialog),
+            Command::Data(crate::commands::DataCommand::Health),
+            Command::Data(crate::commands::DataCommand::Backup),
+            Command::Data(crate::commands::DataCommand::OpenFolder),
         ] {
             assert!(command_accepts_query_override(&command));
         }
