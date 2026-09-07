@@ -27,8 +27,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | M02 | Shared identity/mutation operations and analysis invalidation | M01 | complete | 875466b8; construction gates passed; behavioral execution M13 |
 | M03 | Clipboard, drag/drop, folding and step annotations | M02 | complete | 401933ca; construction gates passed; behavioral execution M13 |
 | M04 | Typed field visitors and navigation/search/replace/outline | M03 | complete | cd9969db; construction gates passed; behavioral execution M13 |
-| M05 | Central reusable/static validation and program compilation | M01, M04 | complete | construction gates passed; behavioral execution M13/M14; commit recorded next milestone |
-| M06 | Executor frame ownership with existing behavior parity | M05 | pending | |
+| M05 | Central reusable/static validation and program compilation | M01, M04 | complete | 97d5fe22; construction gates passed; behavioral execution M13/M14 |
+| M06 | Executor frame ownership with existing behavior parity | M05 | complete | construction gates passed; behavioral execution M14; commit recorded next milestone |
 | M07 | Nested calls, typed invocation and Return execution | M06 | pending | |
 | M08 | Frame-aware debug events and Runtime Inspector | M07 | pending | |
 | M09 | Shared direct invocation preparation and parameter prompts | M07, M08 | pending | |
@@ -174,6 +174,8 @@ Diagnostic provenance: zero/duplicate macro IDs must form explicit document-glob
 
 **Late tests / migrations:** M14 spec 44 and invocation primitives from 46; regression Run/Debug From/Selection command pairs and save/remapped selection preparation. Test separate macros using same step ID. Risk: retry child repeats leaked state, partial outputs on failure, output-producing subset fallthrough, child cancellation swallowed by caller Continue, current builtin identity restoration.
 
+**Parent runtime handoff after M05:** current `runtime::run_one` owns the single snapshot/compile/root slice/publication boundary, but admission and operation release occur manually after the result closure; a backend panic skips them and kills the worker. M07 should keep root termination and release unwind-safe, with a structured panic failure and a reusable worker. Preserve existing root-only structural subset rejection and debugger retention semantics. The standalone executor currently initializes `macro.id` but lacks a macro name; M07's compiled metadata must supply real per-frame `macro.name`, never a synthetic fallback masquerading as the document name. M06 may eliminate private Normal-mode safe-variable copies because they are used only for Debug events; public event ordering remains unchanged. M14 must inject a backend panic after owned input acquisition and prove cleanup, terminal state, admission release and a subsequent harmless run.
+
 ## M08 — Debugger and Runtime Inspector call identity
 
 **Goal / spec:** 28-29. Suggested commit `feat(mkmacro): publish frame-aware debug snapshots`.
@@ -188,6 +190,8 @@ Diagnostic provenance: zero/duplicate macro IDs must form explicit document-glob
 
 **Late tests / migrations:** M14 spec 45 plus existing `breakpoint_*`, `debug_variable_*`, Runtime Inspector lifecycle and revision tests. Update event shape/compound-key assertions, preserving ordering/safe snapshot assertions. Risk: ambiguous root macro_id use in toolbar/editor, colliding step IDs, repeated breakpoint suppression from old `(run,step)` key, normal-run debug data leakage.
 
+**Parent GUI identity handoff after M05:** `step_table::active_breakpoint_status` gates on root `snapshot.macro_id`, and row failure lookup constructs the legacy `(run,step)` DiagnosticKey. `runtime_inspector::from_snapshot_with_retention` resolves both current and last step against the root, while `last_outcome` independently correlates legacy step/failure/outcome maps. Migrate all of these to authoritative compound identities, including last completed outcome after a frame pop; adding a stack display alone is insufficient. `MkMacroDialog::runtime_inspector_active_breakpoint` currently stores `(run,step)` and `observe_runtime_snapshot` handles retained-vs-current debug data; extend occurrence identity with macro/frame while retaining same-pause suppression and re-opening after resume/re-hit. Existing Inspector tests explicitly exercise these lifecycle distinctions.
+
 ## M09 — Direct invocation preparation and parameter prompts
 
 **Goal / spec:** 30. Suggested commit `feat(mkmacro): prompt for direct invocation parameters`.
@@ -201,6 +205,12 @@ Diagnostic provenance: zero/duplicate macro IDs must form explicit document-glob
 **Construction gate:** `cargo check`, formatting, read every direct `runtime::run` caller; no broad launcher parser refactor.
 
 **Late tests / migrations:** M14 spec 46 plus hotkey/launcher integration and admission tests; fake prompt request/submit/cancel/stale/busy/unavailable UI paths. Risk: command facade success means queued prompt (document result semantics), hidden GUI viewport, runtime starts between preparation and submit, draft save changes selection IDs.
+
+**Read-only M09 handoff during M06:** all six editor helpers already converge on the runtime facades, including Run This Step through Selected. Launcher parser/plugin keep `mkmacro:run:{id}` and `MacroCommand::MkRun`; no syntax expansion. Hotkey dispatch resolves scope and releases its state lock before `runtime::run`, but currently discards errors; expose unavailable/busy preparation feedback. Queued input counts as accepted preparation, and its child viewport must remain usable if ordinary launcher success hides the main window.
+
+Reuse M07's typed default/type preparation, with controller-side access to its authoritative store (currently moved into the worker). Request owns root ID, mode/subset intent, post-save stable subset IDs, prepared values/definitions, matching request token and runtime/store generation. Keep one broker slot occupied both queued and GUI-held; a second request returns busy. Cancel/close/Escape/GUI teardown/dropped request releases only its token. Explicit GUI registration should own availability/repaint lifetime (including app destruction in tests); cloned repaint callbacks and runtime submission happen outside broker locks. Existing blocking PromptInput remains separate. Poll the focused parameter prompt next to existing prompt/launcher brokers before ordinary visibility handling; use distinct viewport identity and share typed value controls with M10.
+
+Preserve editor preparation's positional capture before save and stable-ID remap afterward. Confirmation must submit stored intent, never re-run the editor's current Run helper. Values stay transient; Cancel submits nothing and need not undo the existing preparatory save. Confirm same runtime generation, enabled target, compatible stable parameter IDs/types, changed/new default/required assumptions, subset/program validity, and normal atomic admission; no playback reservation while prompting. Rename/reorder is ID-based. Never recheck hotkey foreground scope after prompt focus. M14 adds defaults/all six modes, cancellation/close/teardown, busy-after-take, unavailable GUI, stale signature/subset/runtime replacement and busy-at-confirmation tests, proving rejected paths submit zero runtime commands. Preserve `shared_execution_preparation_saves_and_remaps_targets_by_position`, normal/debug admission parity, facade mode mapping and hotkey scope tests. Planner performed read-only analysis; no tests ran.
 
 ## M10 — Signature, Call and Return authoring
 
@@ -401,3 +411,11 @@ Construction/targeted/full verification and review findings are appended by the 
 - Added revision-cached root admission and modal-safe diagnostic navigation. Parent reviewed domain/compiler/cache/UI changes and resolved eager-parser error precedence, ambiguous signature inference, Continue-Return flow and action-editor navigation ownership findings. Row markers prioritize Fatal over warnings. No unresolved substantive M05 finding.
 - Implementer final `cargo check --tests` passed (15.76 seconds), `cargo check` passed (7.53 seconds), `cargo fmt --all --check` passed, and `git diff --check` passed. Parent independently inspected the final diff and ran `git diff --check` successfully.
 - Fourteen focused tests added for contracts/graph/program/flow/catalog/cache/navigation/interpolation, with existing catalog tests and legitimate warning expectations migrated. Behavioral execution explicitly deferred to M13/M14; M13 includes the new shared-domain test module. No production dependency, worker or polling added.
+- Commit: `97d5fe22 feat(mkmacro): validate reusable signatures and compile dependencies`. Working tree clean immediately after commit; M06 started after commit success.
+
+### M06 construction verification
+
+- Extracted the single execution engine into private `executor/frame.rs`. Each frame owns its borrowed plan, PC, locals, loop counters, resumable instruction/repetition/attempt phase and Debug-only safe boundary. Root session owns input cleanup, activity, global transition budget, options/observer and borrowed executor resources; field order releases owned input before marking the run inactive.
+- Removed the original execution loop. Ordinary action effects, unscaled retry backoff, successful-repeat pacing, transition counting, disabled opener behavior, breakpoint timing, outcome/finish ordering and post-condition safe boundaries remain in one path. Normal execution no longer clones private safe-variable maps. Runtime wiring and unsupported Call/Return gates remain for M07.
+- Added four focused tests for resumable retries without repeated breakpoints, pacing cancellation retaining prior safe variables, transition/input ownership across frame completion, and cleanup order on success/panic. Existing executor tests retained. Behavioral execution is explicitly deferred to M14.
+- Implementer final `cargo check --tests` passed (16.00 seconds), `cargo check` passed (14.55 seconds), `cargo fmt --all --check` passed and `git diff --check` passed. Parent reviewed the full new engine and tests against the removed loop, and independently ran `git diff --check`. No unresolved substantive M06 finding; no new dependency or worker.
