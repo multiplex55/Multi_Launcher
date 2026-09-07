@@ -914,6 +914,7 @@ impl ActionEditorState {
             _ => None,
         };
         self.draft = Some(MkStep {
+            metadata: Default::default(),
             id: 0,
             enabled: true,
             breakpoint: false,
@@ -3630,6 +3631,7 @@ pub(crate) fn insert_smooth_move_after(
     macro_.steps.insert(
         index + 1,
         MkStep {
+            metadata: Default::default(),
             id: 0,
             enabled: true,
             breakpoint: false,
@@ -3678,6 +3680,7 @@ pub(crate) fn insert_activate_window_before(
     macro_.steps.insert(
         index,
         MkStep {
+            metadata: Default::default(),
             id: 0,
             enabled: true,
             breakpoint: false,
@@ -4645,6 +4648,7 @@ mod tests {
 
     fn variable_step(id: u64, name: &str, value: MkValue) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -4750,6 +4754,7 @@ mod tests {
     #[test]
     fn mouse_click_and_mouse_move_editors_use_the_same_catalog_point_filter() {
         let marker = |id, action| MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -4865,6 +4870,7 @@ mod tests {
     fn variable_picker_details_distinguish_nullable_and_structural_warnings() {
         use super::super::variable_catalog::{VariableAvailability, VariableUncertaintyReason};
         let marker = |id, action| MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -5492,6 +5498,7 @@ mod tests {
 
         let mut editor = test_editor();
         editor.begin_edit(&MkStep {
+            metadata: Default::default(),
             id: 808,
             enabled: false,
             breakpoint: false,
@@ -5705,6 +5712,7 @@ mod tests {
         for close_editor in [false, true] {
             let mut editor = test_editor();
             let step_a = MkStep {
+                metadata: Default::default(),
                 id: 1,
                 enabled: true,
                 breakpoint: false,
@@ -5733,6 +5741,7 @@ mod tests {
                 assert!(editor.draft.is_none());
             } else {
                 let step_b = MkStep {
+                    metadata: Default::default(),
                     id: 2,
                     action: MkAction::Delay(MkDelayPayload {
                         fixed_ms: 77,
@@ -5994,6 +6003,7 @@ mod tests {
             let _ = begin_owned_preview(&mut editor);
             if index == 2 {
                 editor.begin_edit(&MkStep {
+                    metadata: Default::default(),
                     id: 55,
                     enabled: true,
                     breakpoint: false,
@@ -6297,6 +6307,7 @@ mod tests {
     }
     fn step(a: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id: 7,
             enabled: true,
             breakpoint: false,
@@ -6901,6 +6912,7 @@ mod tests {
         });
         dialog.draft.macros = vec![
             MkMacro {
+                signature: Default::default(),
                 id: 4,
                 name: "Current".into(),
                 description: String::new(),
@@ -6912,6 +6924,7 @@ mod tests {
                 steps: vec![selected.clone()],
             },
             MkMacro {
+                signature: Default::default(),
                 id: 40,
                 name: "Other".into(),
                 description: String::new(),
@@ -8832,6 +8845,7 @@ mod tests {
         fn setup() -> (ActionEditorState, VisualPointRequest) {
             let mut editor = test_editor();
             let step = MkStep {
+                metadata: Default::default(),
                 id: 55,
                 enabled: true,
                 breakpoint: false,
@@ -9248,6 +9262,7 @@ mod tests {
     fn editing_virtual_desktop_preserves_one_based_number_without_conversion() {
         let mut editor = test_editor();
         let source = MkStep {
+            metadata: Default::default(),
             id: 42,
             enabled: true,
             breakpoint: false,

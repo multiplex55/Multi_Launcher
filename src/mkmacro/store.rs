@@ -417,6 +417,9 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(10) {
         migrate_v10_to_v11(&mut value, path)?;
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(11) {
+        migrate_v11_to_v12(&mut value);
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
@@ -442,7 +445,7 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
     if input_version > SCHEMA_VERSION {
         return Ok(DocumentProbe::Unsupported(input_version));
     }
-    if input_version == SCHEMA_VERSION {
+    if input_version >= 11 {
         serde_json::from_value::<MkMacroDocument>(value)?;
         return Ok(DocumentProbe::Supported);
     }
@@ -476,6 +479,12 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
         "schema 10 macros must be objects"
     );
     Ok(DocumentProbe::Supported)
+}
+
+/// Schema 12 additions are serde-defaulted. Preserve all existing data,
+/// including malformed signature identities for explicit authoring repair.
+fn migrate_v11_to_v12(value: &mut serde_json::Value) {
+    value["schema_version"] = serde_json::json!(12);
 }
 
 /// Filesystem-aware schema-10 migration. The JSON value is rewritten only after
@@ -1256,29 +1265,71 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
     changed
 }
 
-/// Returns the next unused positive ID and advances the cursor. Wrapping to 1
-/// after `u64::MAX` makes a saturated high-water mark safe when lower IDs are
-/// available, while the cycle check prevents an exhausted namespace from
-/// spinning forever.
-fn next_unused_id(used: &HashSet<u64>, next: &mut u64) -> Option<u64> {
-    let start = (*next).max(1);
-    let mut candidate = start;
-    loop {
-        if !used.contains(&candidate) {
-            *next = candidate.checked_add(1).unwrap_or(1);
-            return Some(candidate);
-        }
-        candidate = candidate.checked_add(1).unwrap_or(1);
-        if candidate == start {
-            return None;
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mkmacro::{AlphaPolicy, MkPoint, ReturnPoint, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn schema_eleven_migration_adds_defaults_and_preserves_historical_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let mut original = document();
+        original.schema_version = 11;
+        let m = &mut original.macros[0];
+        m.description = "Preserve this authoring state".into();
+        m.hotkey = Some(MkHotkey {
+            key: MkKey::Function(3),
+            modifiers: vec![MkKey::Alt],
+        });
+        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        });
+        m.folder_id = Some(7);
+        m.playback = MkPlayback {
+            speed_percent: 135,
+            random_delay_ms: 12,
+            random_offset_px: 3,
+        };
+        m.steps[0].breakpoint = true;
+        m.steps[0].enabled = false;
+        m.steps[0].repeat = 3;
+        m.steps[0].delay_after_ms = 77;
+        m.steps[0].on_error = MkErrorPolicy::Continue;
+        m.steps[0].action = MkAction::ImageFind(
+            serde_json::from_value(serde_json::json!({
+                "image": "preserved_button.png", "wait": {"timeout_ms": 20, "poll_interval_ms": 10}
+            }))
+            .unwrap(),
+        );
+        original.folders.push(MkMacroFolder {
+            id: 7,
+            name: "Tools".into(),
+        });
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        for m in legacy["macros"].as_array_mut().unwrap() {
+            m.as_object_mut().unwrap().remove("signature");
+            for s in m["steps"].as_array_mut().unwrap() {
+                s.as_object_mut().unwrap().remove("metadata");
+            }
+        }
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        assert_eq!(probe_document(&bytes).unwrap(), DocumentProbe::Supported);
+        fs::write(&path, &bytes).unwrap();
+        let (loaded, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        original.schema_version = 12;
+        assert_eq!(loaded, original);
+        persist(&path, &loaded).unwrap();
+        let persisted = fs::read(&path).unwrap();
+        let (again, changed) = read_document(&path).unwrap().unwrap();
+        assert!(!changed);
+        assert_eq!(again, loaded);
+        persist(&path, &again).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), persisted);
+    }
 
     fn png_bytes(color: [u8; 4]) -> Vec<u8> {
         let mut output = std::io::Cursor::new(Vec::new());
@@ -1324,6 +1375,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 7,
                 name: "x".into(),
                 description: String::new(),
@@ -1333,6 +1385,7 @@ mod tests {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 9,
                     enabled: true,
                     breakpoint: false,
@@ -1857,7 +1910,7 @@ mod tests {
         assert!(disk.macros.is_empty());
     }
     #[test]
-    fn old_migrates_and_schema_newer_than_ten_is_rejected() {
+    fn old_migrates_and_future_schema_is_rejected() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(MKMACROS_FILE);
         let mut v = serde_json::to_value(document()).unwrap();
@@ -1873,10 +1926,16 @@ mod tests {
         .unwrap();
         let (_, disposition) = MkMacroStore::open(d.path()).unwrap();
         let LoadDisposition::NeedsUserRecovery { error } = disposition else {
-            panic!("schema 12 should require user recovery")
+            panic!("future schema should require user recovery")
         };
-        assert!(error.contains("schema version 12"), "{error}");
-        assert!(error.contains("supported version 11"), "{error}");
+        assert!(
+            error.contains(&format!("schema version {}", SCHEMA_VERSION + 1)),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("supported version {SCHEMA_VERSION}")),
+            "{error}"
+        );
     }
     #[test]
     fn version_one_mouse_move_migrates_once_to_payload() {
@@ -2183,7 +2242,7 @@ mod tests {
         );
         let persisted: serde_json::Value =
             serde_json::from_slice(&fs::read(d.path().join(MKMACROS_FILE)).unwrap()).unwrap();
-        assert_eq!(persisted["schema_version"], 11);
+        assert_eq!(persisted["schema_version"], SCHEMA_VERSION);
         assert_eq!(persisted, json);
     }
 
@@ -2341,7 +2400,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_seven_load_runs_all_migrations_and_round_trips_as_ten() {
+    fn schema_seven_load_runs_all_migrations_and_round_trips_as_current() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MKMACROS_FILE);
         let value = schema_v7_document(vec![
@@ -2458,12 +2517,12 @@ mod tests {
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let loaded = store.snapshot();
-        assert_eq!(loaded.schema_version, 11);
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert!(loaded.macros[0].steps.iter().all(|step| !step.breakpoint));
 
         let rewritten: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(rewritten["schema_version"], 11);
+        assert_eq!(rewritten["schema_version"], SCHEMA_VERSION);
         for (index, original_step) in original_steps.iter().enumerate() {
             let loaded_step = &loaded.macros[0].steps[index];
             if index == 2 {

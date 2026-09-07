@@ -908,6 +908,7 @@ mod folder_tests {
     #[test]
     fn folder_metadata_does_not_change_runtime_lookup_or_manual_run_eligibility() {
         let target = MkMacro {
+            signature: Default::default(),
             id: 91,
             name: "Target".into(),
             description: String::new(),
@@ -923,6 +924,7 @@ mod folder_tests {
             folder_id: None,
             playback: Default::default(),
             steps: vec![MkStep {
+                metadata: Default::default(),
                 id: 11,
                 enabled: true,
                 breakpoint: false,
@@ -1015,6 +1017,7 @@ mod run_mode_tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -1027,6 +1030,7 @@ mod run_mode_tests {
 
     fn test_macro(id: u64, enabled: bool, steps: Vec<MkStep>) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id,
             name: format!("macro {id}"),
             description: String::new(),
@@ -2307,6 +2311,7 @@ mod facade_tests {
 
     fn step(id: u64, text: &str) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -2356,6 +2361,7 @@ mod facade_tests {
             .save(MkMacroDocument {
                 schema_version: SCHEMA_VERSION,
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 7301,
                     name: "debug facade target".into(),
                     description: String::new(),
@@ -2425,6 +2431,7 @@ mod recording_controller_tests {
                 macros: [1, 2]
                     .into_iter()
                     .map(|id| MkMacro {
+                        signature: Default::default(),
                         id,
                         name: format!("macro {id}"),
                         description: String::new(),
@@ -2510,6 +2517,7 @@ mod runtime_snapshot_tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -2522,6 +2530,7 @@ mod runtime_snapshot_tests {
 
     fn test_macro(steps: Vec<MkStep>) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id: 1,
             name: "runtime snapshot test".into(),
             description: String::new(),

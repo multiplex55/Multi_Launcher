@@ -10,6 +10,41 @@ pub enum MkValue {
     Point(MkPoint),
     Null,
 }
+
+/// Types that may be declared in reusable macro signatures. Null is a runtime sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkValueType {
+    String,
+    Number,
+    Boolean,
+    Point,
+}
+
+impl MkValue {
+    pub fn value_type(&self) -> Option<MkValueType> {
+        match self {
+            Self::String(_) => Some(MkValueType::String),
+            Self::Number(_) => Some(MkValueType::Number),
+            Self::Boolean(_) => Some(MkValueType::Boolean),
+            Self::Point(_) => Some(MkValueType::Point),
+            Self::Null => None,
+        }
+    }
+}
+
+impl MkValueType {
+    pub fn accepts(self, value: &MkValue) -> bool {
+        value.value_type() == Some(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum MkValueSource {
+    Literal(MkValue),
+    Variable { name: String },
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkPoint {
     pub x: i32,
@@ -67,6 +102,34 @@ pub fn validate_variable_name(name: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn declared_types_accept_only_matching_non_null_values() {
+        let values = [
+            MkValue::String("text".into()),
+            MkValue::Number(3.5),
+            MkValue::Boolean(true),
+            MkValue::Point(MkPoint { x: -1, y: 2 }),
+        ];
+        let types = [
+            MkValueType::String,
+            MkValueType::Number,
+            MkValueType::Boolean,
+            MkValueType::Point,
+        ];
+        for (type_index, value_type) in types.iter().copied().enumerate() {
+            assert!(!value_type.accepts(&MkValue::Null));
+            for (value_index, value) in values.iter().enumerate() {
+                assert_eq!(value_type.accepts(value), type_index == value_index);
+            }
+            assert_eq!(
+                serde_json::from_value::<MkValueType>(serde_json::to_value(value_type).unwrap())
+                    .unwrap(),
+                value_type
+            );
+        }
+        assert_eq!(MkValue::Null.value_type(), None);
+        assert!(serde_json::from_str::<MkValueType>("\"null\"").is_err());
+    }
     #[test]
     fn names() {
         assert!(validate_variable_name("valid_1").is_ok());

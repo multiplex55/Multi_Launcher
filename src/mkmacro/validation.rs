@@ -182,6 +182,26 @@ pub fn validate_document_with_context(
                 "Macro IDs must be non-zero and unique",
             )
         };
+        // Signature identities are never repaired implicitly: callers may already
+        // refer to an ambiguous or deleted definition by its persisted ID.
+        let mut signature_ids = HashSet::new();
+        for id in m
+            .signature
+            .parameters
+            .iter()
+            .map(|p| p.id)
+            .chain(m.signature.outputs.iter().map(|o| o.id))
+        {
+            if id.0 == 0 || !signature_ids.insert(id) {
+                push(
+                    &mut out,
+                    m.id,
+                    None,
+                    "invalid_signature_id",
+                    "Parameter and output IDs must be non-zero and unique within the macro",
+                );
+            }
+        }
         let mut ids = HashSet::new();
         let pixel_search_ids: HashSet<u64> = m
             .steps
@@ -234,6 +254,15 @@ pub fn validate_document_with_context(
                 )
             }
             match &s.action {
+                MkAction::CallMacro(_) | MkAction::Return(_) => {
+                    push(
+                        &mut out,
+                        m.id,
+                        sid,
+                        "unsupported_reusable_action",
+                        "Reusable macro actions cannot execute in this version",
+                    );
+                }
                 MkAction::LauncherCommand(payload) => {
                     if let Some(action) = &payload.legacy_resolved_action {
                         if action.action.trim().is_empty() {
@@ -860,6 +889,7 @@ mod delay_validation_tests {
         validate_document(
             &MkMacroDocument {
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 1,
                     name: "test".into(),
                     description: String::new(),
@@ -869,6 +899,7 @@ mod delay_validation_tests {
                     folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
+                        metadata: Default::default(),
                         id: 1,
                         enabled: true,
                         breakpoint: false,
@@ -1051,6 +1082,7 @@ mod optional_wait_validation_tests {
     fn visual_codes(payload: WaitForVisualChange) -> Vec<&'static str> {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 1,
                 name: "visual wait".into(),
                 description: String::new(),
@@ -1060,6 +1092,7 @@ mod optional_wait_validation_tests {
                 folder_id: None,
                 playback: MkPlayback::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 1,
                     enabled: true,
                     breakpoint: false,
@@ -1444,6 +1477,7 @@ mod coordinate_target_tests {
         validate_document(
             &MkMacroDocument {
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 1,
                     name: "test".into(),
                     description: String::new(),
@@ -1453,6 +1487,7 @@ mod coordinate_target_tests {
                     folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
+                        metadata: Default::default(),
                         id: 2,
                         enabled: true,
                         breakpoint: false,
@@ -1712,6 +1747,7 @@ mod notification_action_tests {
         validate_document(
             &MkMacroDocument {
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 1,
                     name: "test".into(),
                     description: String::new(),
@@ -1721,6 +1757,7 @@ mod notification_action_tests {
                     folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
+                        metadata: Default::default(),
                         id: 1,
                         enabled: true,
                         breakpoint: false,
@@ -1792,6 +1829,7 @@ mod launcher_command_action_tests {
         validate_document(
             &MkMacroDocument {
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 1,
                     name: "test".into(),
                     description: String::new(),
@@ -1801,6 +1839,7 @@ mod launcher_command_action_tests {
                     folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
+                        metadata: Default::default(),
                         id: 1,
                         enabled: true,
                         breakpoint: false,
@@ -1879,6 +1918,7 @@ mod click_within_region_validation_tests {
         validate_document(
             &MkMacroDocument {
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 1,
                     name: "test".into(),
                     description: String::new(),
@@ -1888,6 +1928,7 @@ mod click_within_region_validation_tests {
                     folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
+                        metadata: Default::default(),
                         id: 1,
                         enabled: true,
                         breakpoint: false,
@@ -2030,6 +2071,7 @@ mod virtual_desktop_validation_tests {
         validate_document(
             &MkMacroDocument {
                 macros: vec![MkMacro {
+                    signature: Default::default(),
                     id: 1,
                     name: "test".into(),
                     description: String::new(),
@@ -2039,6 +2081,7 @@ mod virtual_desktop_validation_tests {
                     folder_id: None,
                     playback: MkPlayback::default(),
                     steps: vec![MkStep {
+                        metadata: Default::default(),
                         id: 1,
                         enabled: true,
                         breakpoint: false,

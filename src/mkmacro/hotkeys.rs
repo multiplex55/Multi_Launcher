@@ -884,6 +884,7 @@ mod tests {
     };
     fn mac(id: u64, on: bool) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id,
             name: id.to_string(),
             description: String::new(),
@@ -2124,6 +2125,7 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         let mut macro_ = process_mac(9, "firefox.exe");
         macro_.steps = vec![MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,
@@ -2744,6 +2746,7 @@ mod tests {
     fn breakpoint_macro(id: u64) -> MkMacro {
         let mut macro_ = mac(id, true);
         macro_.steps = vec![MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: true,

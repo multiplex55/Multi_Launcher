@@ -562,6 +562,7 @@ mod tests {
         let mut editor = super::super::action_editor::ActionEditorState::new(overlay);
         editor.editing_id = Some(7);
         editor.draft = Some(crate::mkmacro::MkStep {
+            metadata: Default::default(),
             id: 7,
             enabled: true,
             breakpoint: false,

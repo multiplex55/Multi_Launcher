@@ -257,6 +257,26 @@ fn runtime_availability(action: &MkAction) -> RuntimeAvailability {
 pub fn descriptors() -> Vec<ActionDescriptor> {
     let entries = vec![
         d!(
+            hidden,
+            Logic,
+            "Call Macro",
+            "Call a reusable macro",
+            &["call"],
+            General,
+            "Reusable macro execution and editing are not yet available",
+            MkAction::CallMacro(MkCallMacroPayload::default())
+        ),
+        d!(
+            hidden,
+            Logic,
+            "Return",
+            "Return from the current macro",
+            &["return"],
+            General,
+            "Reusable macro execution and editing are not yet available",
+            MkAction::Return(MkReturnPayload::default())
+        ),
+        d!(
             KeyboardText,
             "Key Press",
             "Press and release a keyboard key",
@@ -840,6 +860,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
 /// compile-time maintenance point for action/editor coverage.
 pub fn editor_for_action(action: &MkAction) -> EditorKind {
     match action {
+        MkAction::CallMacro(_) | MkAction::Return(_) => EditorKind::General,
         MkAction::KeyDown(_) | MkAction::KeyUp(_) | MkAction::KeyPress(_) | MkAction::Hotkey(_) => {
             EditorKind::Keyboard
         }
@@ -1115,6 +1136,8 @@ pub fn matches(d: &ActionDescriptor, q: &str) -> bool {
 }
 pub fn action_name(a: &MkAction) -> &'static str {
     match a {
+        MkAction::CallMacro(_) => "Call Macro",
+        MkAction::Return(_) => "Return",
         MkAction::KeyDown(_) => "Key Down",
         MkAction::KeyUp(_) => "Key Up",
         MkAction::KeyPress(_) => "Key Press",
@@ -1207,6 +1230,8 @@ pub fn action_details_with_assets(a: &MkAction, assets: &[MkImageRef]) -> String
 }
 fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImageRef]) -> String {
     match a {
+        MkAction::CallMacro(call) => format!("Macro #{}", call.macro_id),
+        MkAction::Return(ret) => format!("{} outputs", ret.outputs.len()),
         MkAction::KeyDown(k) | MkAction::KeyUp(k) | MkAction::KeyPress(k) => {
             super::key_capture::key_name(k)
         }
@@ -2132,6 +2157,7 @@ pub fn action_depths(m: &MkMacro) -> Vec<usize> {
 }
 fn step(action: MkAction) -> MkStep {
     MkStep {
+        metadata: Default::default(),
         id: 0,
         enabled: true,
         breakpoint: false,

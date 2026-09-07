@@ -730,6 +730,7 @@ mod tests {
         s.regex = r"^Rust\sWorkspace$".into();
         let matcher = matcher_from_preview(&s).unwrap();
         let step = |id, action| MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -740,6 +741,7 @@ mod tests {
         };
         let document = MkMacroDocument {
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 1,
                 // Keep document metadata neutral so forbidden-field checks below only inspect
                 // serialized schema/values rather than matching prose in this fixture.

@@ -247,6 +247,7 @@ mod tests {
     use crate::mkmacro::{MkCondition, MkErrorPolicy};
     fn s(id: u64, a: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,

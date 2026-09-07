@@ -2,6 +2,7 @@ use multi_launcher::mkmacro::*;
 
 fn step(id: u64, action: MkAction) -> MkStep {
     MkStep {
+        metadata: Default::default(),
         id,
         enabled: true,
         breakpoint: false,
@@ -13,6 +14,7 @@ fn step(id: u64, action: MkAction) -> MkStep {
 }
 fn mac(steps: Vec<MkStep>) -> MkMacro {
     MkMacro {
+        signature: Default::default(),
         id: 9,
         name: "draft".into(),
         description: String::new(),

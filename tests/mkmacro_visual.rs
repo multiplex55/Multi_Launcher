@@ -6,6 +6,7 @@ use std::{
 };
 fn s(action: MkAction) -> MkStep {
     MkStep {
+        metadata: Default::default(),
         id: 1,
         enabled: true,
         breakpoint: false,
@@ -17,6 +18,7 @@ fn s(action: MkAction) -> MkStep {
 }
 fn plan(action: MkAction) -> MkExecutionPlan {
     compile(&MkMacro {
+        signature: Default::default(),
         id: 1,
         name: "visual".into(),
         description: String::new(),

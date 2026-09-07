@@ -1529,6 +1529,16 @@ mod tests {
                 probe_mkmacro,
             ),
             (
+                "mkmacros-v11.json",
+                br#"{"schema_version":11,"macros":[{"id":1,"name":"Legacy","steps":[]}]}"#,
+                probe_mkmacro,
+            ),
+            (
+                "mkmacros-v12.json",
+                br#"{"schema_version":12,"macros":[{"id":1,"name":"Current","signature":{"parameters":[],"outputs":[]},"steps":[]}]}"#,
+                probe_mkmacro,
+            ),
+            (
                 "clipboard_modifiers.json",
                 br#"{"schema_version":0}"#,
                 probe_clipboard_modifiers,
@@ -1561,6 +1571,20 @@ mod tests {
             StoreHealth::Malformed { .. }
         ));
         assert_eq!(std::fs::read(&invalid_mkmacro).unwrap(), invalid_bytes);
+        for version in [11, 12] {
+            let invalid_bytes = format!(
+                r#"{{"schema_version":{version},"macros":[{{"id":1,"name":"Bad","steps":[{{"action":{{"type":"unknown_action"}}}}]}}]}}"#
+            );
+            std::fs::write(&invalid_mkmacro, &invalid_bytes).unwrap();
+            assert!(matches!(
+                json_descriptor(&invalid_mkmacro, probe_mkmacro).probe(),
+                StoreHealth::Malformed { .. }
+            ));
+            assert_eq!(
+                std::fs::read(&invalid_mkmacro).unwrap(),
+                invalid_bytes.as_bytes()
+            );
+        }
     }
 
     #[test]

@@ -143,6 +143,7 @@ mod tests {
             folders: vec![],
             macros: (1..=5)
                 .map(|id| MkMacro {
+                    signature: Default::default(),
                     id,
                     name: format!("Macro {id}"),
                     description: String::new(),
@@ -213,6 +214,7 @@ mod tests {
 
         d.selected_macro_mut().unwrap().enabled = true;
         d.selected_macro_mut().unwrap().steps.push(MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,
@@ -249,6 +251,7 @@ mod tests {
         d.create_macro();
         d.selected_macro_mut().unwrap().steps = vec![
             MkStep {
+                metadata: Default::default(),
                 id: 11,
                 enabled: true,
                 breakpoint: false,
@@ -258,6 +261,7 @@ mod tests {
                 action: MkAction::Delay(MkDelayPayload::default()),
             },
             MkStep {
+                metadata: Default::default(),
                 id: 22,
                 enabled: true,
                 breakpoint: false,
@@ -267,6 +271,7 @@ mod tests {
                 action: MkAction::Delay(MkDelayPayload::default()),
             },
             MkStep {
+                metadata: Default::default(),
                 id: 33,
                 enabled: true,
                 breakpoint: false,
@@ -445,6 +450,7 @@ mod tests {
         d.draft.macros[2].folder_id = Some(42);
         d.draft.macros[2].description = "Preserve macro contents".into();
         d.draft.macros[2].steps.push(MkStep {
+            metadata: Default::default(),
             id: 11,
             enabled: true,
             breakpoint: false,
@@ -540,6 +546,7 @@ mod tests {
         });
         m.steps = (11..=13)
             .map(|id| MkStep {
+                metadata: Default::default(),
                 id,
                 enabled: true,
                 breakpoint: false,
@@ -726,6 +733,7 @@ mod tests {
             m.playback.random_offset_px = 7;
             m.steps = (1..=3)
                 .map(|offset| MkStep {
+                    metadata: Default::default(),
                     id: m.id * 10 + offset,
                     enabled: offset != 2,
                     breakpoint: false,
@@ -1170,6 +1178,7 @@ mod tests {
 
     fn picker_macro(id: u64, hotkey_scope: MkHotkeyScope) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id,
             name: format!("Macro {id}"),
             description: format!("Description {id}"),
@@ -1324,6 +1333,7 @@ mod tests {
         let steps = &mut d.selected_macro_mut().unwrap().steps;
         steps.extend([
             MkStep {
+                metadata: Default::default(),
                 id: 11,
                 enabled: true,
                 breakpoint: false,
@@ -1333,6 +1343,7 @@ mod tests {
                 action: MkAction::RepeatStart { count: 2 },
             },
             MkStep {
+                metadata: Default::default(),
                 id: 12,
                 enabled: true,
                 breakpoint: false,
@@ -1342,6 +1353,7 @@ mod tests {
                 action: MkAction::ImageFind(payload.clone()),
             },
             MkStep {
+                metadata: Default::default(),
                 id: 13,
                 enabled: true,
                 breakpoint: false,
@@ -1388,6 +1400,7 @@ mod tests {
         assert_eq!(
             created,
             &MkMacro {
+                signature: Default::default(),
                 id: created.id,
                 name: "New Macro".into(),
                 description: String::new(),
@@ -1481,6 +1494,7 @@ mod tests {
             source.steps = [17, 18]
                 .into_iter()
                 .map(|id| MkStep {
+                    metadata: Default::default(),
                     id,
                     enabled: true,
                     breakpoint: false,
@@ -1542,6 +1556,7 @@ mod tests {
             modifiers: vec![MkKey::Control],
         });
         d.selected_macro_mut().unwrap().steps.push(MkStep {
+            metadata: Default::default(),
             id: 0,
             enabled: true,
             breakpoint: false,
@@ -1748,6 +1763,7 @@ mod tests {
     fn expected_action_contract(action: &MkAction) -> (action_catalog::EditorKind, bool) {
         use action_catalog::EditorKind;
         match action {
+            MkAction::CallMacro(_) | MkAction::Return(_) => (EditorKind::General, false),
             MkAction::KeyDown(_)
             | MkAction::KeyUp(_)
             | MkAction::KeyPress(_)
@@ -1851,6 +1867,7 @@ mod tests {
         let mut document = five_macros();
         document.macros.truncate(1);
         document.macros[0].steps.push(MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,
@@ -2459,6 +2476,7 @@ mod tests {
             .iter()
             .cloned()
             .map(|action| MkStep {
+                metadata: Default::default(),
                 id: 0,
                 enabled: true,
                 breakpoint: false,
@@ -3267,6 +3285,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();
         let set_variable = |id: u64, name: &str, value: MkValue| MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -3283,6 +3302,7 @@ mod tests {
                 schema_version: SCHEMA_VERSION,
                 macros: vec![
                     MkMacro {
+                        signature: Default::default(),
                         id: 1,
                         name: "First debug run".into(),
                         description: String::new(),
@@ -3300,6 +3320,7 @@ mod tests {
                         ],
                     },
                     MkMacro {
+                        signature: Default::default(),
                         id: 2,
                         name: "Second debug run".into(),
                         description: String::new(),
@@ -4088,6 +4109,7 @@ impl MkMacroDialog {
             return false;
         }
         self.draft.macros.push(MkMacro {
+            signature: Default::default(),
             id: 0,
             name: "New Macro".into(),
             description: String::new(),

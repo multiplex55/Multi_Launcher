@@ -1505,6 +1505,7 @@ mod tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -1516,6 +1517,7 @@ mod tests {
     }
     fn plan(steps: Vec<MkStep>) -> MkExecutionPlan {
         compile(&MkMacro {
+            signature: Default::default(),
             id: 7,
             name: "test".into(),
             description: String::new(),
@@ -4427,6 +4429,8 @@ impl Executor {
         g: &mut InputCleanupGuard,
     ) -> ExecResult {
         match a {
+            MkAction::CallMacro(_) => unsupported_context("macro executor", "Call Macro"),
+            MkAction::Return(_) => unsupported_context("macro executor", "Return"),
             MkAction::KeyDown(k) => g.down_key(k),
             MkAction::KeyUp(k) => g.up_key(k),
             MkAction::KeyPress(k) => {
@@ -5229,6 +5233,7 @@ mod notification_sound_tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -5249,6 +5254,7 @@ mod notification_sound_tests {
 
     fn execute(steps: Vec<MkStep>, fake: Arc<FakeBackend>) -> ExecResult {
         let plan = compile(&MkMacro {
+            signature: Default::default(),
             id: 42,
             name: "notification and sound".into(),
             description: String::new(),
@@ -5456,6 +5462,7 @@ mod notification_sound_tests {
         let mut backends = fake.clone().backends();
         backends.sound = Arc::new(SchedulingSoundBackend(Mutex::new(scheduled_tx)));
         let plan = compile(&MkMacro {
+            signature: Default::default(),
             id: 43,
             name: "async sound".into(),
             description: String::new(),
@@ -5499,6 +5506,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
     // executor match. Mouse support includes the wired WindowsScreenBackend
     // coordinate resolver and SendInput paths (including drag).
     match action {
+        MkAction::CallMacro(_) | MkAction::Return(_) => false,
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -5552,6 +5560,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
 }
 fn action_name(a: &MkAction) -> &'static str {
     match a {
+        MkAction::CallMacro(_) | MkAction::Return(_) => "macro executor",
         MkAction::KeyDown(_)
         | MkAction::KeyUp(_)
         | MkAction::KeyPress(_)
@@ -6103,6 +6112,7 @@ mod phase_d_tests {
 
     fn s(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -6325,6 +6335,7 @@ mod phase_d_tests {
     }
     fn plan(steps: Vec<MkStep>) -> MkExecutionPlan {
         compile(&MkMacro {
+            signature: Default::default(),
             id: 9,
             name: "flow".into(),
             description: String::new(),

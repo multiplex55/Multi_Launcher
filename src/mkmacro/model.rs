@@ -2,14 +2,14 @@ use super::{
     image_search::{AlphaPolicy, ReturnPoint},
     screen::{ScreenRect, SearchRegion},
 };
-use crate::mkmacro::variables::{MkPoint, MkValue};
+use crate::mkmacro::variables::{MkPoint, MkValue, MkValueSource, MkValueType};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-// Schema 11 replaces macro-owned numeric image assets with shared flat-library
-// filename references while retaining schema 10's authoring/debug fields.
-pub const SCHEMA_VERSION: u32 = 11;
+// Schema 12 adds grouped authoring metadata and reusable macro signatures/actions,
+// retaining schema 11's shared flat-library image filename references.
+pub const SCHEMA_VERSION: u32 = 12;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -182,6 +182,8 @@ pub struct MkMacro {
     #[serde(default)]
     pub playback: MkPlayback,
     #[serde(default)]
+    pub signature: MkMacroSignature,
+    #[serde(default)]
     pub steps: Vec<MkStep>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -200,7 +202,166 @@ pub struct MkStep {
     pub delay_after_ms: u64,
     #[serde(default)]
     pub on_error: MkErrorPolicy,
+    #[serde(default)]
+    pub metadata: MkStepMetadata,
     pub action: MkAction,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkStepMetadata {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub accent: MkStepAccent,
+    #[serde(default)]
+    pub bookmarked: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkStepAccent {
+    #[default]
+    Default,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Blue,
+    Purple,
+    Gray,
+}
+
+/// Parameters and outputs share a namespace within their owning macro.
+/// Invalid IDs remain deserializable so authoring diagnostics can repair them
+/// explicitly without guessing which existing Call/Return bindings were intended.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct MkSignatureId(pub u64);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MkMacroSignature {
+    #[serde(default)]
+    pub parameters: Vec<MkMacroParameter>,
+    #[serde(default)]
+    pub outputs: Vec<MkMacroOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkMacroParameter {
+    #[serde(default)]
+    pub id: MkSignatureId,
+    pub name: String,
+    pub value_type: MkValueType,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub default_value: Option<MkValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkMacroOutput {
+    #[serde(default)]
+    pub id: MkSignatureId,
+    pub name: String,
+    pub value_type: MkValueType,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkCallArgumentBinding {
+    pub parameter_id: MkSignatureId,
+    pub source: MkValueSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkCallOutputBinding {
+    pub output_id: MkSignatureId,
+    pub caller_variable: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MkCallMacroPayload {
+    pub macro_id: u64,
+    #[serde(default)]
+    pub arguments: Vec<MkCallArgumentBinding>,
+    #[serde(default)]
+    pub outputs: Vec<MkCallOutputBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkReturnValueBinding {
+    pub output_id: MkSignatureId,
+    pub source: MkValueSource,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MkReturnPayload {
+    #[serde(default)]
+    pub outputs: Vec<MkReturnValueBinding>,
+}
+
+impl MkMacroDocument {
+    /// Allocate for authoring only. Reserve dangling references as well as live
+    /// definitions: deleting a definition must never retarget an existing binding.
+    /// The caller inserts the new definition before requesting another ID.
+    pub fn next_signature_id(&self, macro_id: u64) -> Option<MkSignatureId> {
+        let mut owners = self.macros.iter().filter(|m| m.id == macro_id);
+        let owner = owners.next()?;
+        if macro_id == 0 || owners.next().is_some() {
+            return None;
+        }
+        let mut used: HashSet<u64> = owner
+            .signature
+            .parameters
+            .iter()
+            .map(|p| p.id.0)
+            .chain(owner.signature.outputs.iter().map(|o| o.id.0))
+            .collect();
+        for m in &self.macros {
+            for step in &m.steps {
+                match &step.action {
+                    MkAction::CallMacro(call) if call.macro_id == macro_id => {
+                        used.extend(call.arguments.iter().map(|b| b.parameter_id.0));
+                        used.extend(call.outputs.iter().map(|b| b.output_id.0));
+                    }
+                    MkAction::Return(ret) if m.id == macro_id => {
+                        used.extend(ret.outputs.iter().map(|b| b.output_id.0));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut next = used
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .unwrap_or(1);
+        next_unused_id(&used, &mut next).map(MkSignatureId)
+    }
+}
+
+/// Returns the next unused positive ID and advances the cursor. Wrap after the
+/// high-water mark overflows, checking the complete namespace before reuse.
+pub(crate) fn next_unused_id(used: &HashSet<u64>, next: &mut u64) -> Option<u64> {
+    let start = (*next).max(1);
+    let mut candidate = start;
+    loop {
+        if !used.contains(&candidate) {
+            *next = candidate.checked_add(1).unwrap_or(1);
+            return Some(candidate);
+        }
+        candidate = candidate.checked_add(1).unwrap_or(1);
+        if candidate == start {
+            return None;
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkHotkey {
@@ -906,6 +1067,8 @@ impl WaitForVisualChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MkAction {
+    CallMacro(MkCallMacroPayload),
+    Return(MkReturnPayload),
     KeyDown(MkKey),
     KeyUp(MkKey),
     KeyPress(MkKey),
@@ -1055,6 +1218,117 @@ impl MkAction {
 }
 
 #[cfg(test)]
+mod reusable_model_tests {
+    use super::*;
+
+    fn document() -> MkMacroDocument {
+        serde_json::from_value(serde_json::json!({
+            "macros": [{"id": 1, "name": "callee", "signature": {
+                "parameters": [{"id": 1, "name": "input", "value_type": "number", "default_value": {"type": "number", "value": 2.5}}],
+                "outputs": [{"id": 2, "name": "result", "value_type": "point"}]
+            }, "steps": [{"id": 1, "breakpoint": true, "metadata": {
+                "label": "Finish", "comment": "Return the result", "accent": "purple", "bookmarked": true
+            }, "action": {"type": "return", "data": {"outputs": [{"output_id": 2, "source": {
+                "type": "literal", "data": {"type": "point", "value": {"x": -5, "y": 9}}
+            }}]}}}]}, {"id": 2, "name": "caller", "steps": [{"id": 1, "action": {
+                "type": "call_macro", "data": {"macro_id": 1,
+                    "arguments": [{"parameter_id": 1, "source": {"type": "variable", "data": {"name": "mouse.x"}}}],
+                    "outputs": [{"output_id": 2, "caller_variable": "point"}]
+                }
+            }}]}]
+        })).unwrap()
+    }
+
+    #[test]
+    fn metadata_signature_and_reusable_actions_round_trip() {
+        let original = document();
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["schema_version"], 12);
+        assert_eq!(json["macros"][0]["signature"]["parameters"][0]["id"], 1);
+        assert_eq!(
+            json["macros"][0]["steps"][0]["metadata"]["accent"],
+            "purple"
+        );
+        assert_eq!(
+            serde_json::from_value::<MkMacroDocument>(json).unwrap(),
+            original
+        );
+        assert_eq!(original.macros[1].signature, MkMacroSignature::default());
+        assert_eq!(
+            original.macros[1].steps[0].metadata,
+            MkStepMetadata::default()
+        );
+        for accent in [
+            MkStepAccent::Default,
+            MkStepAccent::Red,
+            MkStepAccent::Orange,
+            MkStepAccent::Yellow,
+            MkStepAccent::Green,
+            MkStepAccent::Blue,
+            MkStepAccent::Purple,
+            MkStepAccent::Gray,
+        ] {
+            assert_eq!(
+                serde_json::from_value::<MkStepAccent>(serde_json::to_value(accent).unwrap())
+                    .unwrap(),
+                accent
+            );
+        }
+        assert!(serde_json::from_str::<MkStepAccent>("\"#ff0000\"").is_err());
+    }
+
+    #[test]
+    fn signature_allocation_reserves_dangling_bindings_without_repair() {
+        let mut doc = document();
+        doc.macros[0].signature = MkMacroSignature::default();
+        let before = doc.clone();
+        assert!(!super::super::store::repair_ids(&mut doc));
+        assert_eq!(doc, before);
+        assert_eq!(doc.next_signature_id(1), Some(MkSignatureId(3)));
+        assert_eq!(doc.next_signature_id(2), Some(MkSignatureId(1)));
+        assert_eq!(doc.next_signature_id(99), None);
+
+        // A Return site with no corresponding caller still reserves its dangling ID.
+        if let MkAction::Return(ret) = &mut doc.macros[0].steps[0].action {
+            ret.outputs[0].output_id = MkSignatureId(u64::MAX);
+        }
+        assert_eq!(doc.next_signature_id(1), Some(MkSignatureId(3)));
+    }
+
+    #[test]
+    fn malformed_signature_identity_is_retained_and_diagnosed() {
+        let mut doc = document();
+        doc.macros[0].signature.outputs[0].id = MkSignatureId(1);
+        doc.macros[0].signature.parameters.push(MkMacroParameter {
+            id: MkSignatureId(0),
+            name: "broken".into(),
+            value_type: MkValueType::String,
+            description: String::new(),
+            default_value: None,
+        });
+        let original = doc.clone();
+        assert!(!super::super::store::repair_ids(&mut doc));
+        assert_eq!(doc, original);
+        let diagnostics = super::super::validation::validate_document(&doc, None);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == "invalid_signature_id")
+                .count(),
+            2
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == "unsupported_reusable_action")
+                .count(),
+            2
+        );
+        assert!(!super::super::validation::can_run(&diagnostics));
+    }
+}
+
+#[cfg(test)]
 mod launcher_command_payload_tests {
     use super::*;
     use crate::actions::Action;
@@ -1110,9 +1384,10 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_11_with_query_payload() {
+    fn current_document_round_trips_as_schema_12_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 1,
                 name: "launcher".into(),
                 description: String::new(),
@@ -1122,6 +1397,7 @@ mod launcher_command_payload_tests {
                 folder_id: None,
                 playback: MkPlayback::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 2,
                     enabled: true,
                     breakpoint: false,
@@ -1138,7 +1414,7 @@ mod launcher_command_payload_tests {
         };
 
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"schema_version\":11"));
+        assert!(json.contains("\"schema_version\":12"));
         assert!(json.contains(r#""data":{"query":"note list"}"#));
         assert_eq!(
             serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
@@ -1370,6 +1646,7 @@ mod screenshot_region_serialization_tests {
             .cloned()
             .enumerate()
             .map(|(id, region)| MkStep {
+                metadata: Default::default(),
                 id: id as u64 + 1,
                 enabled: true,
                 breakpoint: false,
@@ -1390,6 +1667,7 @@ mod screenshot_region_serialization_tests {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 7,
                 name: "screenshots".into(),
                 description: String::new(),
@@ -1538,6 +1816,7 @@ mod breakpoint_serialization_tests {
 
     fn step(breakpoint: bool) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id: 2,
             enabled: true,
             breakpoint,
@@ -1575,6 +1854,7 @@ mod breakpoint_serialization_tests {
     fn breakpoint_is_serialized_as_persisted_step_data() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 1,
                 name: "Debug authoring".into(),
                 description: String::new(),
@@ -1634,15 +1914,16 @@ mod schema_v10_serialization_tests {
     use super::*;
 
     #[test]
-    fn document_defaults_to_schema_eleven_and_no_folders() {
+    fn document_defaults_to_schema_twelve_and_no_folders() {
         let document: MkMacroDocument = serde_json::from_str("{}").unwrap();
-        assert_eq!(document.schema_version, 11);
+        assert_eq!(document.schema_version, SCHEMA_VERSION);
         assert!(document.folders.is_empty());
         assert!(MkMacroDocument::default().folders.is_empty());
     }
 
     fn sample_macro() -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id: 7,
             name: "Scoped".into(),
             description: String::new(),

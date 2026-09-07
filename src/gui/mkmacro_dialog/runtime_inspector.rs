@@ -624,6 +624,7 @@ mod tests {
             settings: Default::default(),
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 7,
                 name: "Demo".into(),
                 description: String::new(),
@@ -634,6 +635,7 @@ mod tests {
                 playback: Default::default(),
                 steps: vec![
                     MkStep {
+                        metadata: Default::default(),
                         id: 101,
                         enabled: true,
                         breakpoint: false,
@@ -643,6 +645,7 @@ mod tests {
                         action: MkAction::Delay(MkDelayPayload::default()),
                     },
                     MkStep {
+                        metadata: Default::default(),
                         id: 202,
                         enabled: true,
                         breakpoint: false,

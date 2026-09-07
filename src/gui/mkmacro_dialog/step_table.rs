@@ -55,6 +55,7 @@ pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) ->
         settings: Default::default(),
         schema_version: crate::mkmacro::SCHEMA_VERSION,
         macros: vec![crate::mkmacro::MkMacro {
+            signature: Default::default(),
             id: 1,
             name: "draft".into(),
             description: String::new(),
@@ -809,6 +810,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
                 m.steps.insert(
                     i,
                     MkStep {
+                        metadata: Default::default(),
                         id: 0,
                         enabled: true,
                         breakpoint: false,
@@ -984,6 +986,7 @@ mod layout_tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,

@@ -110,6 +110,7 @@ mod tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -121,6 +122,7 @@ mod tests {
     }
     fn mac(steps: Vec<MkStep>) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id: 1,
             name: "test".into(),
             description: String::new(),

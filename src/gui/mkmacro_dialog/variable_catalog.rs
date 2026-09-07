@@ -397,6 +397,7 @@ mod tests {
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
