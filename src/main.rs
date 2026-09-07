@@ -11,7 +11,7 @@ use multi_launcher::platform::{
 };
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
-use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_settings};
+use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::handle_visibility_trigger;
 use multi_launcher::{indexer, logging};
 
@@ -234,12 +234,19 @@ fn main() -> anyhow::Result<()> {
         SingleInstanceAcquire::AlreadyRunning => return Ok(()),
     };
     let settings_timer = multi_launcher::performance::Timer::start();
-    let startup_settings = load_startup_settings("settings.json");
+    let startup_preload = load_startup_preload(&app_data_root, "settings.json");
+    let startup_recovery = startup_preload.recovery;
+    let startup_settings = startup_preload.settings;
     let mut settings = startup_settings.settings;
     let startup_settings_diagnostic = startup_settings.diagnostic;
     multi_launcher::settings::set_settings_path("settings.json");
     let _logging_guard = logging::init(settings.debug_logging, settings.log_file_path());
     settings_timer.finish("startup.settings_load");
+    if let Some(diagnostic) = startup_recovery.diagnostic.as_ref() {
+        tracing::error!(error = %diagnostic, "startup recovery remains pending for retry");
+    } else if let Some(action) = startup_recovery.applied.as_ref() {
+        tracing::info!(?action, "applied staged startup recovery");
+    }
     tracing::debug!(?settings, "settings loaded");
     if let Some(diagnostic) = startup_settings_diagnostic.as_ref() {
         tracing::error!(

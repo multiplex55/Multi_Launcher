@@ -16,9 +16,10 @@ use crate::plugins::snippets::SnippetEntry;
 use crate::plugins::todo::TodoEntry;
 use crate::settings::Settings;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum PersistentStoreId {
     Settings,
     Actions,
@@ -191,11 +192,17 @@ impl std::fmt::Debug for StoreDescriptor {
 impl StoreDescriptor {
     /// Inspect this store on demand without invoking migrations or changing bytes.
     pub fn probe(&self) -> StoreHealth {
+        self.probe_path(&self.path)
+    }
+
+    /// Validate candidate bytes at a recovery staging path with this store's
+    /// existing domain-aware, legacy-compatible probe.
+    pub(crate) fn probe_path(&self, path: &Path) -> StoreHealth {
         match self.probe {
-            ProbeKind::Json(validate) => probe_file(&self.path, Some(validate)),
-            ProbeKind::OpaqueFile => probe_file(&self.path, None),
-            ProbeKind::NotesDirectory => probe_directory(&self.path, Some("md")),
-            ProbeKind::AssetsDirectory => probe_directory(&self.path, None),
+            ProbeKind::Json(validate) => probe_file(path, Some(validate)),
+            ProbeKind::OpaqueFile => probe_file(path, None),
+            ProbeKind::NotesDirectory => probe_directory(path, Some("md")),
+            ProbeKind::AssetsDirectory => probe_directory(path, None),
         }
     }
 }
@@ -208,6 +215,16 @@ pub struct PersistenceCatalog {
 impl PersistenceCatalog {
     /// Build path metadata only. Health inspection remains explicitly on demand.
     pub fn new(root: &AppDataRoot, settings: &Settings) -> Self {
+        Self::build(root, settings, true)
+    }
+
+    /// Build the settings-free startup mapping without inspecting any store.
+    /// Recovery uses this before normal settings/dashboard loads.
+    pub(crate) fn bootstrap(root: &AppDataRoot) -> Self {
+        Self::build(root, &Settings::default(), false)
+    }
+
+    fn build(root: &AppDataRoot, settings: &Settings, discover_dashboard: bool) -> Self {
         let current_dir = std::env::current_dir().unwrap_or_else(|_| root.path().to_path_buf());
         let dashboard_setting = settings
             .dashboard
@@ -218,7 +235,9 @@ impl PersistenceCatalog {
             &current_dir,
             &DashboardConfig::path_for(dashboard_setting.unwrap_or("dashboard.json")),
         );
-        let scratchpad_setting = discover_scratchpad_path(&dashboard_path);
+        let scratchpad_setting = discover_dashboard
+            .then(|| discover_scratchpad_path(&dashboard_path))
+            .flatten();
         let notes_setting = std::env::var_os("ML_NOTES_DIR").map(PathBuf::from);
         let notes_source = notes_setting
             .clone()

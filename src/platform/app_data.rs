@@ -9,6 +9,11 @@ pub struct AppDataRoot {
 }
 
 impl AppDataRoot {
+    #[cfg(test)]
+    pub(crate) fn from_path(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
     /// Derive the data root from the directory containing the settings file.
     ///
     /// Relative settings paths continue to resolve from the process current

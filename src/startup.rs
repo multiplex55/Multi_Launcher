@@ -1,4 +1,6 @@
 use crate::common::persistence::{LoadState, PersistenceError};
+use crate::persistence::{RecoveryStartupResult, apply_pending_recovery};
+use crate::platform::app_data::AppDataRoot;
 use crate::settings::Settings;
 use std::path::Path;
 
@@ -20,6 +22,31 @@ impl SettingsStartupDiagnostic {
 pub struct StartupSettings {
     pub settings: Settings,
     pub diagnostic: Option<SettingsStartupDiagnostic>,
+}
+
+#[derive(Debug)]
+pub struct StartupPreload {
+    pub recovery: RecoveryStartupResult,
+    pub settings: StartupSettings,
+}
+
+/// Run the only persistence work permitted immediately after single-instance
+/// acquisition. Recovery must precede the normal settings load so restored or
+/// reset settings are the bytes observed by the rest of startup.
+pub fn load_startup_preload(root: &AppDataRoot, settings_path: impl AsRef<Path>) -> StartupPreload {
+    preload_with(
+        || apply_pending_recovery(root),
+        || load_startup_settings(settings_path),
+    )
+}
+
+fn preload_with(
+    recovery: impl FnOnce() -> RecoveryStartupResult,
+    settings: impl FnOnce() -> StartupSettings,
+) -> StartupPreload {
+    let recovery = recovery();
+    let settings = settings();
+    StartupPreload { recovery, settings }
 }
 
 /// Load effective startup settings and own startup-only settings migration.
@@ -61,8 +88,9 @@ pub fn load_startup_settings(path: impl AsRef<Path>) -> StartupSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsStartupDiagnostic, load_startup_settings};
+    use super::{SettingsStartupDiagnostic, load_startup_settings, preload_with};
     use crate::common::persistence::PersistenceError;
+    use crate::persistence::RecoveryStartupResult;
     use crate::settings::Settings;
 
     fn has_clipboard_modify(settings: &Settings) -> bool {
@@ -182,5 +210,26 @@ mod tests {
         ));
         assert!(!has_clipboard_modify(&startup.settings));
         assert_eq!(std::fs::read_to_string(blocker).unwrap(), "unchanged");
+    }
+
+    #[test]
+    fn recovery_is_instrumented_before_settings_load() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let startup = preload_with(
+            || {
+                events.borrow_mut().push("recovery");
+                RecoveryStartupResult::default()
+            },
+            || {
+                events.borrow_mut().push("settings");
+                super::StartupSettings {
+                    settings: Settings::default(),
+                    diagnostic: None,
+                }
+            },
+        );
+
+        assert!(startup.recovery.diagnostic.is_none());
+        assert_eq!(&*events.borrow(), &["recovery", "settings"]);
     }
 }
