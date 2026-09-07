@@ -5,7 +5,7 @@ description = "Implementation agent for one approved pipeline milestone at a tim
 # Astra high alternative:
 model = "gpt-6-astra"
 # model_reasoning_effort = "medium"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 
 developer_instructions = """

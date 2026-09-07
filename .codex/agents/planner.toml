@@ -4,7 +4,7 @@ description = "Architecture and implementation planner for substantial Multi Lau
 # model = "gpt-5.6-sol"
 # Astra high alternative:
 model = "gpt-6-astra"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"
 # model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 
