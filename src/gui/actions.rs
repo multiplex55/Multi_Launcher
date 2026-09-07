@@ -25,6 +25,38 @@ fn format_wrap_links_toast(result: NoteMutationResult) -> String {
 }
 
 impl LauncherApp {
+    pub(crate) fn queue_data_recovery_confirmation(&mut self, intent: PendingRecoveryIntent) {
+        let store_id = match &intent {
+            PendingRecoveryIntent::Restore { store_id, .. }
+            | PendingRecoveryIntent::Reset { store_id } => *store_id,
+        };
+        let label = self.data_recovery_dialog.store_label(store_id);
+        let (description, warning) = intent.confirmation_copy(label);
+        self.pending_data_recovery = Some(intent);
+        self.confirm_modal.open_custom(description, warning);
+    }
+
+    pub(crate) fn resolve_data_recovery_confirmation(&mut self, confirmed: bool) {
+        if let Some(command) = data_recovery_dialog::resolve_confirmed_intent(
+            &mut self.pending_data_recovery,
+            confirmed,
+        ) {
+            self.dispatch_command_invocation(crate::commands::CommandInvocation {
+                command: crate::commands::Command::Data(crate::commands::DataCommand::Recovery(
+                    command,
+                )),
+                original_action: Action {
+                    label: "Data recovery".into(),
+                    desc: "Data & Recovery".into(),
+                    action: "data:ui-confirmed".into(),
+                    args: None,
+                },
+                query_override: None,
+                source: ActivationSource::Click,
+            });
+        }
+    }
+
     pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
         let pending = self.pending_confirm.take();
         if confirmed && let Some(pending) = pending {

@@ -15,6 +15,7 @@ mod convert_panel;
 mod cpu_list_dialog;
 pub mod crop_dialog;
 mod dashboard_editor_dialog;
+mod data_recovery_dialog;
 mod diff_dialog;
 mod fav_dialog;
 mod file_search_dialog;
@@ -63,6 +64,9 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
+pub(crate) use data_recovery_dialog::{
+    DataRecoveryDialog, DataRecoveryUiAction, PendingRecoveryIntent, SafeStartupDiagnostic,
+};
 pub use diff_dialog::DiffDialogState;
 pub use fav_dialog::FavDialog;
 pub use file_search_dialog::{
@@ -340,6 +344,7 @@ pub enum Panel {
     VolumeDialog,
     BrightnessDialog,
     CpuListDialog,
+    DataRecoveryDialog,
     ToastLogDialog,
     CalendarPopover,
     CalendarEventEditor,
@@ -386,6 +391,7 @@ struct PanelStates {
     volume_dialog: bool,
     brightness_dialog: bool,
     cpu_list_dialog: bool,
+    data_recovery_dialog: bool,
     toast_log_dialog: bool,
     calendar_popover: bool,
     calendar_event_editor: bool,
@@ -461,6 +467,7 @@ pub struct LauncherApp {
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
     pub actions_persistence_diagnostic: Option<crate::common::persistence::PersistenceError>,
+    pub startup_recovery: crate::persistence::RecoveryStartupResult,
     pub multi_manager: MultiManagerState,
     pub multi_manager_settings: MultiManagerSettings,
     pub launcher_hwnd: Option<usize>,
@@ -562,6 +569,7 @@ pub struct LauncherApp {
     volume_dialog: VolumeDialog,
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
+    data_recovery_dialog: DataRecoveryDialog,
     toast_log_dialog: ToastLogDialog,
     calendar_popover: CalendarPopover,
     calendar_event_editor: CalendarEventEditor,
@@ -630,6 +638,7 @@ pub struct LauncherApp {
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmCommand>,
+    pending_data_recovery: Option<PendingRecoveryIntent>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
     pub file_search_selected_kind: crate::file_search::model::SearchKind,
@@ -656,6 +665,44 @@ impl CachedSearchEntry {
 }
 
 impl LauncherApp {
+    pub fn set_startup_persistence_context(
+        &mut self,
+        recovery: crate::persistence::RecoveryStartupResult,
+    ) {
+        let mut diagnostics = Vec::new();
+        if let Some(diagnostic) = self.startup_settings_diagnostic.as_ref() {
+            let error = diagnostic.error();
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Settings startup".into(),
+                path: Some(error.path().to_path_buf()),
+                summary: format!("{} failed: {error}", error.operation()),
+            });
+        }
+        if let Some(error) = self.actions_persistence_diagnostic.as_ref() {
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Actions startup".into(),
+                path: Some(error.path().to_path_buf()),
+                summary: format!("{} failed: {error}", error.operation()),
+            });
+        }
+        if let Some(diagnostic) = recovery.diagnostic.as_ref() {
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Startup recovery".into(),
+                path: None,
+                summary: diagnostic.to_string(),
+            });
+        } else if let Some(action) = recovery.applied.as_ref() {
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Startup recovery applied".into(),
+                path: None,
+                summary: format!("Applied {action:?} before persistent stores loaded"),
+            });
+        }
+        self.startup_recovery = recovery;
+        self.data_recovery_dialog
+            .set_startup_diagnostics(diagnostics);
+    }
+
     pub(crate) fn update_custom_actions(
         &mut self,
         mutate: impl FnOnce(&mut Vec<Action>) -> anyhow::Result<()>,
@@ -1146,6 +1193,12 @@ impl LauncherApp {
         let show_inline_errors = settings.show_inline_errors;
         let show_error_toasts = settings.show_error_toasts;
         let toast_duration = settings.toast_duration;
+        let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
+            .expect("LauncherApp settings path must resolve an application data root");
+        let data_recovery_dialog = DataRecoveryDialog::new(data_root, settings.clone(), {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
         use std::path::Path;
 
         let dashboard_timer = crate::performance::Timer::start();
@@ -1486,6 +1539,7 @@ impl LauncherApp {
             settings_path,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
+            startup_recovery: Default::default(),
             multi_manager,
             multi_manager_settings: settings.multi_manager.clone(),
             launcher_hwnd: None,
@@ -1596,6 +1650,7 @@ impl LauncherApp {
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
+            data_recovery_dialog,
             toast_log_dialog: ToastLogDialog::default(),
             calendar_popover: CalendarPopover::default(),
             calendar_event_editor: CalendarEventEditor::default(),
@@ -1663,6 +1718,7 @@ impl LauncherApp {
             pending_query: None,
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
+            pending_data_recovery: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),
             actions_by_id,
@@ -2144,7 +2200,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 42] = [
+    const TRACKED_PANELS: [Panel; 43] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2178,6 +2234,7 @@ impl LauncherApp {
         Panel::VolumeDialog,
         Panel::BrightnessDialog,
         Panel::CpuListDialog,
+        Panel::DataRecoveryDialog,
         Panel::ToastLogDialog,
         Panel::CalendarPopover,
         Panel::CalendarEventEditor,
@@ -2224,6 +2281,7 @@ impl LauncherApp {
             Panel::VolumeDialog => self.volume_dialog.open,
             Panel::BrightnessDialog => self.brightness_dialog.open,
             Panel::CpuListDialog => self.cpu_list_dialog.open,
+            Panel::DataRecoveryDialog => self.data_recovery_dialog.open,
             Panel::ToastLogDialog => self.toast_log_dialog.open,
             Panel::CalendarPopover => self.calendar_popover_open,
             Panel::CalendarEventEditor => self.calendar_editor_open,
@@ -2431,6 +2489,10 @@ impl LauncherApp {
                 self.cpu_list_dialog.open = false;
                 self.panel_states.cpu_list_dialog = false;
             }
+            Panel::DataRecoveryDialog => {
+                self.data_recovery_dialog.open = false;
+                self.panel_states.data_recovery_dialog = false;
+            }
             Panel::ToastLogDialog => {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
@@ -2616,6 +2678,10 @@ impl LauncherApp {
                 self.cpu_list_dialog.open = false;
                 self.panel_states.cpu_list_dialog = false;
             }
+            Panel::DataRecoveryDialog => {
+                self.data_recovery_dialog.open = false;
+                self.panel_states.data_recovery_dialog = false;
+            }
             Panel::ToastLogDialog => {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
@@ -2693,6 +2759,11 @@ impl LauncherApp {
             Panel::VolumeDialog => self.volume_dialog.open = true,
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
             Panel::CpuListDialog => self.cpu_list_dialog.open = true,
+            Panel::DataRecoveryDialog => {
+                let _ = self
+                    .data_recovery_dialog
+                    .open(crate::commands::DataDialogFocus::Overview);
+            }
             Panel::ToastLogDialog => self.toast_log_dialog.open = true,
             Panel::CalendarPopover => self.calendar_popover_open = true,
             Panel::CalendarEventEditor => self.calendar_editor_open = true,
@@ -2793,6 +2864,7 @@ impl LauncherApp {
         check!(volume_dialog, Panel::VolumeDialog);
         check!(brightness_dialog, Panel::BrightnessDialog);
         check!(cpu_list_dialog, Panel::CpuListDialog);
+        check!(data_recovery_dialog, Panel::DataRecoveryDialog);
         check!(toast_log_dialog, Panel::ToastLogDialog);
         check!(calendar_popover, Panel::CalendarPopover);
         check!(calendar_event_editor, Panel::CalendarEventEditor);

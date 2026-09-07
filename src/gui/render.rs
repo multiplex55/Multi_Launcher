@@ -927,6 +927,15 @@ impl eframe::App for LauncherApp {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
         self.multi_manager.maybe_auto_save_bindings();
+        if let Some(message) = self.data_recovery_dialog.take_startup_notice()
+            && self.enable_toasts
+        {
+            self.add_toast(Toast {
+                text: message.into(),
+                kind: ToastKind::Warning,
+                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+            });
+        }
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
@@ -1651,6 +1660,34 @@ impl eframe::App for LauncherApp {
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(ctx, self);
         self.cpu_list_dialog = cpu_dlg;
+        let (data_actions, data_notices) = self.data_recovery_dialog.ui(ctx);
+        for notice in data_notices {
+            if notice.error {
+                self.report_error_message("data", notice.message);
+            } else if self.enable_toasts {
+                self.add_toast(Toast {
+                    text: notice.message.into(),
+                    kind: ToastKind::Success,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                });
+            }
+        }
+        for action in data_actions {
+            match action {
+                DataRecoveryUiAction::OpenPath(path) => {
+                    if let Err(error) = open::that(&path) {
+                        self.report_error_message(
+                            "data",
+                            format!("Failed to open {}: {error}", path.display()),
+                        );
+                    }
+                }
+                DataRecoveryUiAction::Confirm(intent) => {
+                    self.queue_data_recovery_confirmation(intent);
+                }
+            }
+        }
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(ctx, self);
         self.toast_log_dialog = toast_dlg;
@@ -1665,10 +1702,18 @@ impl eframe::App for LauncherApp {
         self.calendar_event_details = calendar_details;
         match self.confirm_modal.ui(ctx) {
             ConfirmationResult::Confirmed => {
-                self.resolve_pending_confirmation(true);
+                if self.pending_data_recovery.is_some() {
+                    self.resolve_data_recovery_confirmation(true);
+                } else {
+                    self.resolve_pending_confirmation(true);
+                }
             }
             ConfirmationResult::Cancelled => {
-                self.resolve_pending_confirmation(false);
+                if self.pending_data_recovery.is_some() {
+                    self.resolve_data_recovery_confirmation(false);
+                } else {
+                    self.resolve_pending_confirmation(false);
+                }
             }
             ConfirmationResult::None => {}
         }
@@ -1682,6 +1727,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
         self.clipboard_modify_immediate.cancel_pending();
         self.clipboard_modify_events.clear();

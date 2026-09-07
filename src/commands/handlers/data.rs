@@ -22,8 +22,8 @@ where
         }),
         DataCommand::OpenFolder => host.open_data_folder(),
         DataCommand::Recovery(recovery) => host.stage_data_recovery(recovery).map(|()| {
-            outcome.toasts.push(ToastPolicy::Success(
-                "Recovery staged; restart Multi Launcher to apply it".into(),
+            outcome.toasts.push(ToastPolicy::Info(
+                "Recovery staging requested; validation is running in Data & Recovery".into(),
             ));
         }),
         DataCommand::Invalid { error, .. } => Err(error.clone()),
@@ -117,8 +117,8 @@ mod tests {
         assert!(host.calls[0].contains("snapshot-1"));
         assert_eq!(
             outcome.toasts,
-            [ToastPolicy::Success(
-                "Recovery staged; restart Multi Launcher to apply it".into()
+            [ToastPolicy::Info(
+                "Recovery staging requested; validation is running in Data & Recovery".into()
             )]
         );
     }

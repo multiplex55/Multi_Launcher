@@ -1,8 +1,10 @@
 use super::{
-    BackupEngine, BackupPolicy, PersistenceCatalog, PersistentStoreId, SnapshotRecord,
-    SnapshotResult, StoreCriticality, StoreHealth, StoreOwnership, StorePrivacy,
+    BackupEngine, BackupPolicy, PendingRecoveryDescriptor, PersistenceCatalog, PersistentStoreId,
+    RecoveryManager, SnapshotRecord, SnapshotResult, StagedRecoveryAction, StoreCriticality,
+    StoreHealth, StoreKind, StoreOwnership, StorePrivacy,
 };
 use crate::platform::app_data::AppDataRoot;
+use crate::settings::Settings;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -16,19 +18,21 @@ const RESULT_CAPACITY: usize = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DataRequestId(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataServiceRequest {
     ScanHealth,
     CreateSnapshot,
     ListSnapshots,
+    StageRecovery(StagedRecoveryAction),
 }
 
 impl DataServiceRequest {
-    fn index(self) -> usize {
+    fn index(&self) -> usize {
         match self {
             Self::ScanHealth => 0,
             Self::CreateSnapshot => 1,
             Self::ListSnapshots => 2,
+            Self::StageRecovery(_) => 3,
         }
     }
 }
@@ -38,6 +42,10 @@ pub struct StoreHealthReport {
     pub id: PersistentStoreId,
     pub label: &'static str,
     pub path: PathBuf,
+    pub kind: StoreKind,
+    pub parent_exists: bool,
+    pub restore_eligible: bool,
+    pub reset_eligible: bool,
     pub criticality: StoreCriticality,
     pub ownership: StoreOwnership,
     pub backup_policy: BackupPolicy,
@@ -51,6 +59,7 @@ pub enum DataServiceResult {
     Health(Vec<StoreHealthReport>),
     Snapshot(SnapshotResult),
     Snapshots(Vec<SnapshotRecord>),
+    RecoveryStaged(PendingRecoveryDescriptor),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,7 +88,7 @@ pub struct DataServiceSubmission {
     pub disposition: SubmissionDisposition,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataServiceActivity {
     pub active: Option<(DataServiceRequest, DataRequestId)>,
     pub pending: Option<(DataServiceRequest, DataRequestId)>,
@@ -89,6 +98,7 @@ pub struct DataServiceActivity {
 pub enum DataServiceSubmitError {
     ShuttingDown,
     WorkerStopped,
+    RecoveryBusy,
 }
 
 #[derive(Clone)]
@@ -104,7 +114,7 @@ struct ActiveRequest {
 
 struct ServiceState {
     next_request_id: u64,
-    latest_by_kind: [DataRequestId; 3],
+    latest_by_kind: [DataRequestId; 4],
     pending: Option<PendingRequest>,
     active: Option<ActiveRequest>,
     results: VecDeque<DataServiceCompletion>,
@@ -116,7 +126,7 @@ impl Default for ServiceState {
     fn default() -> Self {
         Self {
             next_request_id: 0,
-            latest_by_kind: [DataRequestId(0); 3],
+            latest_by_kind: [DataRequestId(0); 4],
             pending: None,
             active: None,
             results: VecDeque::with_capacity(RESULT_CAPACITY),
@@ -136,7 +146,35 @@ trait DataServiceBackend: Send + 'static {
 
 struct ProductionBackend {
     root: AppDataRoot,
-    catalog: PersistenceCatalog,
+    catalog: Option<PersistenceCatalog>,
+    catalog_factory: Option<Box<dyn CatalogFactory>>,
+}
+
+trait CatalogFactory: Send + 'static {
+    fn build(&mut self) -> PersistenceCatalog;
+}
+
+impl<F> CatalogFactory for F
+where
+    F: FnMut() -> PersistenceCatalog + Send + 'static,
+{
+    fn build(&mut self) -> PersistenceCatalog {
+        self()
+    }
+}
+
+impl ProductionBackend {
+    fn catalog(&mut self) -> &PersistenceCatalog {
+        if self.catalog.is_none() {
+            self.catalog = Some(
+                self.catalog_factory
+                    .as_mut()
+                    .expect("lazy production backend has a catalog factory")
+                    .build(),
+            );
+        }
+        self.catalog.as_ref().expect("catalog initialized")
+    }
 }
 
 impl DataServiceBackend for ProductionBackend {
@@ -148,10 +186,12 @@ impl DataServiceBackend for ProductionBackend {
         if cancel.load(Ordering::Acquire) {
             return Err("operation cancelled".into());
         }
+        let root = self.root.clone();
+        let catalog = self.catalog();
         match request {
             DataServiceRequest::ScanHealth => {
-                let mut reports = Vec::with_capacity(self.catalog.stores().len());
-                for store in self.catalog.stores() {
+                let mut reports = Vec::with_capacity(catalog.stores().len());
+                for store in catalog.stores() {
                     if cancel.load(Ordering::Acquire) {
                         return Err("operation cancelled".into());
                     }
@@ -159,6 +199,10 @@ impl DataServiceBackend for ProductionBackend {
                         id: store.id,
                         label: store.label,
                         path: store.path.clone(),
+                        kind: store.kind,
+                        parent_exists: store.path.parent().is_some_and(|parent| parent.is_dir()),
+                        restore_eligible: store.restore_eligible,
+                        reset_eligible: store.reset_eligible,
                         criticality: store.criticality,
                         ownership: store.ownership,
                         backup_policy: store.backup_policy,
@@ -169,14 +213,26 @@ impl DataServiceBackend for ProductionBackend {
                 }
                 Ok(DataServiceResult::Health(reports))
             }
-            DataServiceRequest::CreateSnapshot => BackupEngine::new(&self.root, &self.catalog)
+            DataServiceRequest::CreateSnapshot => BackupEngine::new(&root, catalog)
                 .create_snapshot_cancellable(&|| cancel.load(Ordering::Acquire))
                 .map(DataServiceResult::Snapshot)
                 .map_err(|error| error.to_string()),
-            DataServiceRequest::ListSnapshots => BackupEngine::new(&self.root, &self.catalog)
+            DataServiceRequest::ListSnapshots => BackupEngine::new(&root, catalog)
                 .list_snapshots()
                 .map(DataServiceResult::Snapshots)
                 .map_err(|error| error.to_string()),
+            DataServiceRequest::StageRecovery(action) => {
+                let manager = RecoveryManager::new(&root, catalog);
+                match action {
+                    StagedRecoveryAction::Restore {
+                        store_id,
+                        snapshot_id,
+                    } => manager.stage_restore(store_id, &snapshot_id),
+                    StagedRecoveryAction::Reset { store_id } => manager.stage_reset(store_id),
+                }
+                .map(DataServiceResult::RecoveryStaged)
+                .map_err(|error| error.to_string())
+            }
         }
     }
 }
@@ -195,7 +251,32 @@ impl DataService {
         catalog: PersistenceCatalog,
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        Self::start_with_backend(ProductionBackend { root, catalog }, repaint)
+        Self::start_with_backend(
+            ProductionBackend {
+                root,
+                catalog: Some(catalog),
+                catalog_factory: None,
+            },
+            repaint,
+        )
+    }
+
+    pub fn start_lazy(
+        root: AppDataRoot,
+        settings: Settings,
+        repaint: impl Fn() + Send + Sync + 'static,
+    ) -> std::io::Result<Self> {
+        let factory_root = root.clone();
+        Self::start_with_backend(
+            ProductionBackend {
+                root,
+                catalog: None,
+                catalog_factory: Some(Box::new(move || {
+                    PersistenceCatalog::new(&factory_root, &settings)
+                })),
+            },
+            repaint,
+        )
     }
 
     fn start_with_backend(
@@ -233,6 +314,12 @@ impl DataService {
             if state.worker_stopped {
                 return Err(DataServiceSubmitError::WorkerStopped);
             }
+            if state.active.as_ref().is_some_and(|active| {
+                matches!(active.request, DataServiceRequest::StageRecovery(_))
+                    && active.request != request
+            }) {
+                return Err(DataServiceSubmitError::RecoveryBusy);
+            }
             state.next_request_id = state.next_request_id.saturating_add(1);
             request_id = DataRequestId(state.next_request_id);
             state.latest_by_kind[request.index()] = request_id;
@@ -252,7 +339,7 @@ impl DataService {
                 disposition = state
                     .pending
                     .replace(PendingRequest {
-                        request,
+                        request: request.clone(),
                         request_id,
                     })
                     .map_or(SubmissionDisposition::Queued, |replaced| {
@@ -292,14 +379,16 @@ impl DataService {
         self.state
             .lock()
             .map(|state| DataServiceActivity {
-                active: state
-                    .active
-                    .as_ref()
-                    .map(|active| (active.request, state.latest_by_kind[active.request.index()])),
+                active: state.active.as_ref().map(|active| {
+                    (
+                        active.request.clone(),
+                        state.latest_by_kind[active.request.index()],
+                    )
+                }),
                 pending: state
                     .pending
                     .as_ref()
-                    .map(|pending| (pending.request, pending.request_id)),
+                    .map(|pending| (pending.request.clone(), pending.request_id)),
             })
             .unwrap_or(DataServiceActivity {
                 active: None,
@@ -375,14 +464,14 @@ fn run_worker(
             };
             let cancel = Arc::new(AtomicBool::new(false));
             state.active = Some(ActiveRequest {
-                request: pending.request,
+                request: pending.request.clone(),
                 cancel: Arc::clone(&cancel),
             });
             (pending, cancel)
         };
 
         let executed = catch_unwind(AssertUnwindSafe(|| {
-            backend.execute(pending.request, &cancel)
+            backend.execute(pending.request.clone(), &cancel)
         }));
         let result = match executed {
             Ok(Ok(result)) => Ok(result),
@@ -489,6 +578,51 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for result");
             thread::yield_now();
         }
+    }
+
+    #[test]
+    fn lazy_catalog_factory_runs_once_on_named_worker_after_first_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path());
+        let factory_root = root.clone();
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory_threads = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::clone(&factory_calls);
+        let threads = Arc::clone(&factory_threads);
+        let mut service = DataService::start_with_backend(
+            ProductionBackend {
+                root,
+                catalog: None,
+                catalog_factory: Some(Box::new(move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    threads
+                        .lock()
+                        .unwrap()
+                        .push(thread::current().name().unwrap_or("unnamed").to_owned());
+                    PersistenceCatalog::new(&factory_root, &Settings::default())
+                })),
+            },
+            || {},
+        )
+        .unwrap();
+
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        service.submit(DataServiceRequest::ScanHealth).unwrap();
+        let _ = wait_for_results(&service, 1);
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            factory_threads.lock().unwrap().as_slice(),
+            &["persistence-data-service"]
+        );
+
+        service.submit(DataServiceRequest::ListSnapshots).unwrap();
+        let _ = wait_for_results(&service, 1);
+        assert_eq!(
+            factory_calls.load(Ordering::SeqCst),
+            1,
+            "the worker must reuse its canonical catalog"
+        );
+        service.shutdown();
     }
 
     #[test]
@@ -758,7 +892,7 @@ mod tests {
             DataServiceRequest::ListSnapshots,
             DataServiceRequest::ScanHealth,
         ] {
-            service.submit(request).unwrap();
+            service.submit(request.clone()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while service
                 .state
@@ -774,6 +908,78 @@ mod tests {
             }
         }
         assert_eq!(service.state.lock().unwrap().results.len(), RESULT_CAPACITY);
+        service.shutdown();
+    }
+
+    #[test]
+    fn typed_recovery_request_is_staged_by_the_owned_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path());
+        let catalog = PersistenceCatalog::new(&root, &crate::settings::Settings::default());
+        let repaints = Arc::new(AtomicUsize::new(0));
+        let callback_count = Arc::clone(&repaints);
+        let mut service = DataService::start(root.clone(), catalog, move || {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+
+        let submitted = service
+            .submit(DataServiceRequest::StageRecovery(
+                StagedRecoveryAction::Reset {
+                    store_id: PersistentStoreId::Settings,
+                },
+            ))
+            .unwrap();
+        let results = wait_for_results(&service, 1);
+        assert_eq!(results[0].request_id, submitted.request_id);
+        assert!(matches!(
+            &results[0].result,
+            Ok(DataServiceResult::RecoveryStaged(
+                PendingRecoveryDescriptor {
+                    action: StagedRecoveryAction::Reset {
+                        store_id: PersistentStoreId::Settings
+                    },
+                    ..
+                }
+            ))
+        ));
+        assert!(root.path().join("recovery/pending.json").exists());
+        assert_eq!(repaints.load(Ordering::SeqCst), 1);
+        service.shutdown();
+    }
+
+    #[test]
+    fn distinct_recovery_cannot_retarget_an_active_request_id() {
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let mut service = DataService::start_with_backend(
+            TestBackend {
+                behavior: Behavior::Controlled {
+                    started: started_tx,
+                    release: release_rx,
+                },
+                calls: Arc::new(Mutex::new(Vec::new())),
+            },
+            || {},
+        )
+        .unwrap();
+        let first_request = DataServiceRequest::StageRecovery(StagedRecoveryAction::Reset {
+            store_id: PersistentStoreId::Settings,
+        });
+        let first = service.submit(first_request.clone()).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            service.submit(DataServiceRequest::StageRecovery(
+                StagedRecoveryAction::Reset {
+                    store_id: PersistentStoreId::Actions,
+                },
+            )),
+            Err(DataServiceSubmitError::RecoveryBusy)
+        );
+        release_tx.send(()).unwrap();
+        let result = wait_for_results(&service, 1);
+        assert_eq!(result[0].request_id, first.request_id);
+        assert_eq!(result[0].request, first_request);
         service.shutdown();
     }
 }

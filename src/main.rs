@@ -110,6 +110,7 @@ fn spawn_gui(
     settings_path: String,
     startup_settings_diagnostic: Option<SettingsStartupDiagnostic>,
     startup_actions_diagnostic: Option<PersistenceError>,
+    startup_recovery: multi_launcher::persistence::RecoveryStartupResult,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     event_tx: Sender<()>,
 ) -> (
@@ -214,6 +215,7 @@ fn spawn_gui(
                 );
                 app.startup_settings_diagnostic = startup_settings_diagnostic;
                 app.actions_persistence_diagnostic = startup_actions_diagnostic;
+                app.set_startup_persistence_context(startup_recovery);
                 launcher_timer.finish("startup.launcher_app");
                 Box::new(app)
             }),
@@ -329,6 +331,7 @@ fn main() -> anyhow::Result<()> {
         "settings.json".to_string(),
         startup_settings_diagnostic,
         startup_actions_diagnostic,
+        startup_recovery,
         settings.enabled_capabilities.clone(),
         event_tx.clone(),
     );

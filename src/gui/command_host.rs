@@ -438,23 +438,26 @@ impl ScreenshotCommandHost for LauncherApp {
 }
 
 impl DataCommandHost for LauncherApp {
-    fn open_data_dialog(&mut self, _focus: crate::commands::DataDialogFocus) -> Result<(), String> {
-        Err("Data & Recovery interface is not initialized".into())
+    fn open_data_dialog(&mut self, focus: crate::commands::DataDialogFocus) -> Result<(), String> {
+        self.data_recovery_dialog.open(focus)?;
+        self.focus_panel(super::Panel::DataRecoveryDialog);
+        Ok(())
     }
 
     fn request_data_backup(&mut self) -> Result<(), String> {
-        Err("Data & Recovery interface is not initialized".into())
+        self.data_recovery_dialog.request_backup()
     }
 
     fn open_data_folder(&mut self) -> Result<(), String> {
-        Err("Data & Recovery interface is not initialized".into())
+        open::that(self.data_recovery_dialog.root())
+            .map_err(|error| format!("Failed to open the application data folder: {error}"))
     }
 
     fn stage_data_recovery(
         &mut self,
-        _command: &crate::commands::DataRecoveryCommand,
+        command: &crate::commands::DataRecoveryCommand,
     ) -> Result<(), String> {
-        Err("Data & Recovery interface is not initialized".into())
+        self.data_recovery_dialog.stage_recovery(command)
     }
 
     fn data_launcher_should_refocus(&self) -> bool {
