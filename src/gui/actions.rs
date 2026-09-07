@@ -1,5 +1,6 @@
 use super::*;
 use crate::gui::note_mutation::{NoteMutationOutcome, NoteMutationOutput, NoteMutationResult};
+use crate::persistence::{RecoveryGroupId, RecoveryTarget};
 
 /// A compact, testable description of Launcher-owned UI that can be opened by
 /// an action.  Comparing snapshots keeps macro dispatch independent of action
@@ -26,11 +27,19 @@ fn format_wrap_links_toast(result: NoteMutationResult) -> String {
 
 impl LauncherApp {
     pub(crate) fn queue_data_recovery_confirmation(&mut self, intent: PendingRecoveryIntent) {
-        let store_id = match &intent {
-            PendingRecoveryIntent::Restore { store_id, .. }
-            | PendingRecoveryIntent::Reset { store_id } => *store_id,
+        let label = match &intent {
+            PendingRecoveryIntent::Restore {
+                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
+                ..
+            } => "MkMacro document + assets",
+            PendingRecoveryIntent::Restore {
+                target: RecoveryTarget::Store(store_id),
+                ..
+            }
+            | PendingRecoveryIntent::Reset { store_id } => {
+                self.data_recovery_dialog.store_label(*store_id)
+            }
         };
-        let label = self.data_recovery_dialog.store_label(store_id);
         let (description, warning) = intent.confirmation_copy(label);
         self.pending_data_recovery = Some(intent);
         self.confirm_modal.open_custom(description, warning);

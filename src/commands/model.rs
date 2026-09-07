@@ -6,7 +6,7 @@ use crate::common::entity_ref::EntityRef;
 use crate::diff::query::DiffOpenPayload;
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
-use crate::persistence::PersistentStoreId;
+use crate::persistence::{PersistentStoreId, RecoveryTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationSource {
@@ -565,7 +565,7 @@ impl DataRecoveryConfirmation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataRecoveryCommand {
     Restore {
-        store_id: PersistentStoreId,
+        target: RecoveryTarget,
         snapshot_id: String,
         confirmation: DataRecoveryConfirmation,
     },

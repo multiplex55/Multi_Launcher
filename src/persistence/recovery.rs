@@ -30,35 +30,30 @@ use std::collections::BTreeSet;
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECOVERY_DIRECTORY: &str = "recovery";
 const PENDING_FILE: &str = "pending.json";
-const RECOVERY_FORMAT_VERSION: u32 = 2;
+const RECOVERY_FORMAT_VERSION: u32 = 3;
 const LEGACY_RECOVERY_FORMAT_VERSION: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryGroupId {
     MkMacro,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum RecoveryTarget {
     Store(PersistentStoreId),
     Group(RecoveryGroupId),
 }
 
 impl RecoveryTarget {
-    pub fn for_store(store_id: PersistentStoreId) -> Self {
-        match store_id {
-            PersistentStoreId::MkMacroDocument | PersistentStoreId::MkMacroAssets => {
-                Self::Group(RecoveryGroupId::MkMacro)
-            }
-            id => Self::Store(id),
-        }
-    }
-
-    fn members(self) -> Vec<PersistentStoreId> {
+    pub fn members(self) -> Vec<PersistentStoreId> {
         match self {
             Self::Store(id) => vec![id],
             Self::Group(RecoveryGroupId::MkMacro) => vec![
@@ -74,7 +69,7 @@ impl RecoveryTarget {
 #[serde(deny_unknown_fields)]
 pub enum StagedRecoveryAction {
     Restore {
-        store_id: PersistentStoreId,
+        target: RecoveryTarget,
         snapshot_id: String,
     },
     Reset {
@@ -83,9 +78,10 @@ pub enum StagedRecoveryAction {
 }
 
 impl StagedRecoveryAction {
-    pub fn store_id(&self) -> PersistentStoreId {
+    pub fn target(&self) -> RecoveryTarget {
         match self {
-            Self::Restore { store_id, .. } | Self::Reset { store_id } => *store_id,
+            Self::Restore { target, .. } => *target,
+            Self::Reset { store_id } => RecoveryTarget::Store(*store_id),
         }
     }
 }
@@ -98,6 +94,26 @@ pub struct PendingRecoveryDescriptor {
     /// Fingerprint of the fully validated candidate at staging time. Startup
     /// recomputes it before touching the live destination.
     pub candidate_fingerprint: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum LegacyStagedRecoveryAction {
+    Restore {
+        store_id: PersistentStoreId,
+        snapshot_id: String,
+    },
+    Reset {
+        store_id: PersistentStoreId,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPendingRecoveryDescriptor {
+    format_version: u32,
+    action: LegacyStagedRecoveryAction,
+    candidate_fingerprint: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,8 +133,12 @@ impl std::fmt::Display for RecoveryStartupDiagnostic {
             Self::InvalidPending { message } => {
                 write!(formatter, "invalid pending recovery: {message}")
             }
-            Self::ApplyFailed { message, .. } => {
-                write!(formatter, "pending recovery failed: {message}")
+            Self::ApplyFailed { action, message } => {
+                write!(
+                    formatter,
+                    "pending recovery for {:?} failed: {message}",
+                    action.as_ref().map(StagedRecoveryAction::target)
+                )
             }
         }
     }
@@ -146,32 +166,30 @@ impl<'a> RecoveryManager<'a> {
 
     pub fn stage_restore(
         &self,
-        store_id: PersistentStoreId,
+        target: RecoveryTarget,
         snapshot_id: &str,
     ) -> Result<PendingRecoveryDescriptor> {
-        self.stage_restore_cancellable(store_id, snapshot_id, &|| false)
+        self.stage_restore_cancellable(target, snapshot_id, &|| false)
     }
 
     pub fn stage_restore_cancellable(
         &self,
-        store_id: PersistentStoreId,
+        target: RecoveryTarget,
         snapshot_id: &str,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<PendingRecoveryDescriptor> {
         check_cancelled(cancelled)?;
-        let target = RecoveryTarget::for_store(store_id);
         let candidates = self.restore_candidates(target, snapshot_id, cancelled)?;
         let candidate_fingerprint = target_fingerprint(target, &candidates, cancelled)?;
         let pending = PendingRecoveryDescriptor {
             format_version: RECOVERY_FORMAT_VERSION,
             action: StagedRecoveryAction::Restore {
-                store_id,
+                target,
                 snapshot_id: snapshot_id.to_owned(),
             },
             candidate_fingerprint,
         };
-        check_cancelled(cancelled)?;
-        self.write_pending(&pending)?;
+        self.write_pending_cancellable(&pending, cancelled)?;
         Ok(pending)
     }
 
@@ -193,15 +211,31 @@ impl<'a> RecoveryManager<'a> {
             action: StagedRecoveryAction::Reset { store_id },
             candidate_fingerprint: candidate.fingerprint()?,
         };
-        check_cancelled(cancelled)?;
-        self.write_pending(&pending)?;
+        self.write_pending_cancellable(&pending, cancelled)?;
         Ok(pending)
     }
 
     fn write_pending(&self, pending: &PendingRecoveryDescriptor) -> Result<()> {
+        self.write_pending_cancellable(pending, &|| false)
+    }
+
+    fn write_pending_cancellable(
+        &self,
+        pending: &PendingRecoveryDescriptor,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(pending).context("serialize pending recovery")?;
         let path = validated_pending_path(self.root, true)?;
-        save_atomic(&path, &bytes).context("atomically stage pending recovery")
+        save_atomic(&path, &bytes).context("atomically stage pending recovery")?;
+        #[cfg(test)]
+        run_pending_commit_hook(self.root.path(), cancelled);
+        if cancelled() {
+            if fs::read(&path).is_ok_and(|current| current == bytes) {
+                fs::remove_file(&path).context("remove cancelled pending recovery")?;
+            }
+            bail!("operation cancelled");
+        }
+        Ok(())
     }
 
     fn eligible_store(&self, id: PersistentStoreId, restore: bool) -> Result<&StoreDescriptor> {
@@ -247,6 +281,15 @@ impl<'a> RecoveryManager<'a> {
         snapshot_id: &str,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<Candidate>> {
+        ensure!(
+            !matches!(
+                target,
+                RecoveryTarget::Store(
+                    PersistentStoreId::MkMacroDocument | PersistentStoreId::MkMacroAssets
+                )
+            ),
+            "MkMacro recovery must target the document and assets group"
+        );
         validate_snapshot_id(snapshot_id)?;
         check_cancelled(cancelled)?;
         let snapshot = BackupEngine::new(self.root, self.catalog)
@@ -258,6 +301,8 @@ impl<'a> RecoveryManager<'a> {
         let mut candidates = Vec::with_capacity(target.members().len());
         for store_id in target.members() {
             check_cancelled(cancelled)?;
+            #[cfg(test)]
+            run_traversal_hook(self.root.path(), cancelled);
             let store = self.eligible_store(store_id, true)?;
             self.ensure_bootstrap_target(store)?;
             let candidate =
@@ -309,25 +354,11 @@ pub fn apply_pending_recovery(root: &AppDataRoot) -> RecoveryStartupResult {
         }
     };
     let pending = match serde_json::from_slice::<PendingRecoveryDescriptor>(&bytes) {
+        Ok(pending) if pending.format_version == RECOVERY_FORMAT_VERSION => pending,
         Ok(pending)
-            if pending.format_version == RECOVERY_FORMAT_VERSION
-                || pending.format_version == LEGACY_RECOVERY_FORMAT_VERSION =>
-        {
             if pending.format_version == LEGACY_RECOVERY_FORMAT_VERSION
-                && matches!(
-                    RecoveryTarget::for_store(pending.action.store_id()),
-                    RecoveryTarget::Group(_)
-                )
-            {
-                return RecoveryStartupResult {
-                    diagnostic: Some(RecoveryStartupDiagnostic::InvalidPending {
-                        message:
-                            "legacy single-store descriptor cannot safely restore a recovery group"
-                                .into(),
-                    }),
-                    ..Default::default()
-                };
-            }
+                && matches!(pending.action, StagedRecoveryAction::Reset { .. }) =>
+        {
             pending
         }
         Ok(pending) => {
@@ -338,13 +369,50 @@ pub fn apply_pending_recovery(root: &AppDataRoot) -> RecoveryStartupResult {
                 ..Default::default()
             };
         }
-        Err(error) => {
-            return RecoveryStartupResult {
-                diagnostic: Some(RecoveryStartupDiagnostic::InvalidPending {
-                    message: error.to_string(),
-                }),
-                ..Default::default()
-            };
+        Err(current_error) => {
+            match serde_json::from_slice::<LegacyPendingRecoveryDescriptor>(&bytes) {
+                Ok(legacy) if legacy.format_version == LEGACY_RECOVERY_FORMAT_VERSION => {
+                    let action = match legacy.action {
+                        LegacyStagedRecoveryAction::Restore {
+                            store_id,
+                            snapshot_id,
+                        } => {
+                            if matches!(
+                                store_id,
+                                PersistentStoreId::MkMacroDocument
+                                    | PersistentStoreId::MkMacroAssets
+                            ) {
+                                return RecoveryStartupResult {
+                                diagnostic: Some(RecoveryStartupDiagnostic::InvalidPending {
+                                    message: "legacy single-store descriptor cannot safely restore the MkMacro document and assets group".into(),
+                                }),
+                                ..Default::default()
+                            };
+                            }
+                            StagedRecoveryAction::Restore {
+                                target: RecoveryTarget::Store(store_id),
+                                snapshot_id,
+                            }
+                        }
+                        LegacyStagedRecoveryAction::Reset { store_id } => {
+                            StagedRecoveryAction::Reset { store_id }
+                        }
+                    };
+                    PendingRecoveryDescriptor {
+                        format_version: LEGACY_RECOVERY_FORMAT_VERSION,
+                        action,
+                        candidate_fingerprint: legacy.candidate_fingerprint,
+                    }
+                }
+                _ => {
+                    return RecoveryStartupResult {
+                        diagnostic: Some(RecoveryStartupDiagnostic::InvalidPending {
+                            message: current_error.to_string(),
+                        }),
+                        ..Default::default()
+                    };
+                }
+            }
         }
     };
     let catalog = PersistenceCatalog::bootstrap(root);
@@ -369,8 +437,8 @@ fn apply_validated(
     pending: &PendingRecoveryDescriptor,
 ) -> Result<()> {
     let store = match &pending.action {
-        StagedRecoveryAction::Restore { store_id, .. } => {
-            manager.eligible_store(*store_id, true)?
+        StagedRecoveryAction::Restore { target, .. } => {
+            manager.eligible_store(target.members()[0], true)?
         }
         StagedRecoveryAction::Reset { store_id } => manager.eligible_store(*store_id, false)?,
     };
@@ -378,19 +446,18 @@ fn apply_validated(
 
     match &pending.action {
         StagedRecoveryAction::Restore {
-            store_id,
+            target,
             snapshot_id,
         } => {
-            let target = RecoveryTarget::for_store(*store_id);
-            let candidates = manager.restore_candidates(target, snapshot_id, &|| false)?;
+            let candidates = manager.restore_candidates(*target, snapshot_id, &|| false)?;
             let fingerprint = if pending.format_version == LEGACY_RECOVERY_FORMAT_VERSION {
                 fingerprint(&candidates[0].path, &|| false)?
             } else {
-                target_fingerprint(target, &candidates, &|| false)?
+                target_fingerprint(*target, &candidates, &|| false)?
             };
             apply_restore_target_with_expected(
                 manager,
-                target,
+                *target,
                 &candidates,
                 &fingerprint,
                 &pending.candidate_fingerprint,
@@ -560,6 +627,8 @@ struct MaterializedCandidate {
     path: PathBuf,
     parent: PathBuf,
     kind: StoreKind,
+    expected_fingerprint: String,
+    validated_file_bytes: Option<Vec<u8>>,
 }
 
 fn apply_restore_target_with_expected(
@@ -634,10 +703,17 @@ fn apply_restore_target(
         RecoveryTarget::Store(_) => {
             let item = &materialized[0];
             before_member_install(item.store_id)?;
-            install_materialized(manager.catalog.get(item.store_id), item, "pre-restore")
+            validate_materialized_before_install(item, cancelled)?;
+            let store = manager.catalog.get(item.store_id);
+            install_materialized(store, item, "pre-restore")?;
+            ensure!(
+                fingerprint(&store.path, cancelled)? == item.expected_fingerprint,
+                "installed recovery destination does not match validated candidate"
+            );
+            Ok(())
         }
         RecoveryTarget::Group(_) => {
-            install_materialized_group(manager, &materialized, before_member_install)
+            install_materialized_group(manager, &materialized, cancelled, before_member_install)
         }
     };
     cleanup_materialized(&materialized);
@@ -661,16 +737,17 @@ fn materialize_candidate(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("store");
-    let staging = match candidate.kind {
+    let (staging, validated_file_bytes) = match candidate.kind {
         StoreKind::File => {
             let bytes = read_file_cancellable(&candidate.path, cancelled)
                 .context("materialize recovery file")?;
-            reserve_staging_file(
+            let staging = reserve_staging_file(
                 &parent,
                 &format!(".{name}.recovery-staging"),
                 &bytes,
                 cancelled,
-            )?
+            )?;
+            (staging, Some(bytes))
         }
         StoreKind::Directory => {
             let staging = reserve_sibling(&parent, &format!(".{name}.recovery-staging"))?;
@@ -678,7 +755,7 @@ fn materialize_candidate(
                 cleanup_created_directory(&parent, &staging);
                 return Err(error).context("materialize recovery directory");
             }
-            staging
+            (staging, None)
         }
     };
     let result = (|| {
@@ -696,6 +773,8 @@ fn materialize_candidate(
             path: staging.clone(),
             parent,
             kind: candidate.kind,
+            expected_fingerprint: expected,
+            validated_file_bytes,
         })
     })();
     if result.is_err() {
@@ -711,12 +790,29 @@ fn install_materialized(
 ) -> Result<()> {
     match materialized.kind {
         StoreKind::File => {
-            let bytes = fs::read(&materialized.path).context("read materialized recovery file")?;
+            let bytes = materialized
+                .validated_file_bytes
+                .as_deref()
+                .context("validated recovery file bytes are unavailable")?;
             install_file_with(&store.path, &bytes, reason, save_atomic)
                 .context("atomically install recovered file")
         }
         StoreKind::Directory => install_staged_directory(&store.path, &materialized.path, reason),
     }
+}
+
+fn validate_materialized_before_install(
+    materialized: &MaterializedCandidate,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    check_cancelled(cancelled)?;
+    if materialized.kind == StoreKind::Directory {
+        ensure!(
+            fingerprint(&materialized.path, cancelled)? == materialized.expected_fingerprint,
+            "materialized recovery directory changed before installation"
+        );
+    }
+    Ok(())
 }
 
 struct GroupInstallState {
@@ -729,6 +825,7 @@ struct GroupInstallState {
 fn install_materialized_group(
     manager: &RecoveryManager<'_>,
     materialized: &[MaterializedCandidate],
+    cancelled: &dyn Fn() -> bool,
     before_member_install: &dyn Fn(PersistentStoreId) -> Result<()>,
 ) -> Result<()> {
     let mut states = Vec::with_capacity(materialized.len());
@@ -736,6 +833,7 @@ fn install_materialized_group(
         let store = manager.catalog.get(item.store_id);
         let result: Result<()> = (|| {
             before_member_install(item.store_id)?;
+            validate_materialized_before_install(item, cancelled)?;
             let name = store
                 .path
                 .file_name()
@@ -757,8 +855,10 @@ fn install_materialized_group(
             });
             match item.kind {
                 StoreKind::File => {
-                    let bytes =
-                        fs::read(&item.path).context("read materialized recovery group file")?;
+                    let bytes = item
+                        .validated_file_bytes
+                        .as_deref()
+                        .context("validated recovery group file bytes are unavailable")?;
                     save_atomic(&store.path, &bytes)
                         .context("durably install recovery group file")?;
                 }
@@ -767,6 +867,10 @@ fn install_materialized_group(
                         .context("install recovery group directory")?;
                 }
             }
+            ensure!(
+                fingerprint(&store.path, cancelled)? == item.expected_fingerprint,
+                "installed recovery group member does not match validated candidate"
+            );
             Ok(())
         })();
         if let Err(error) = result {
@@ -1354,6 +1458,51 @@ fn regular_tree_paths(root: &Path, cancelled: &dyn Fn() -> bool) -> Result<Vec<P
     Ok(files)
 }
 
+#[cfg(test)]
+type TraversalHook = Arc<dyn Fn(&dyn Fn() -> bool) + Send + Sync>;
+
+#[cfg(test)]
+fn traversal_hook() -> &'static Mutex<Option<(PathBuf, TraversalHook)>> {
+    static HOOK: OnceLock<Mutex<Option<(PathBuf, TraversalHook)>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn set_traversal_hook(root: &Path, hook: Option<TraversalHook>) {
+    *traversal_hook().lock().unwrap() = hook.map(|hook| (root.to_path_buf(), hook));
+}
+
+#[cfg(test)]
+fn run_traversal_hook(root: &Path, cancelled: &dyn Fn() -> bool) {
+    let hook = traversal_hook().lock().unwrap().clone();
+    if let Some((hook_root, hook)) = hook
+        && paths_equal(&hook_root, root)
+    {
+        hook(cancelled);
+    }
+}
+
+#[cfg(test)]
+fn pending_commit_hook() -> &'static Mutex<Option<(PathBuf, TraversalHook)>> {
+    static HOOK: OnceLock<Mutex<Option<(PathBuf, TraversalHook)>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn set_pending_commit_hook(root: &Path, hook: Option<TraversalHook>) {
+    *pending_commit_hook().lock().unwrap() = hook.map(|hook| (root.to_path_buf(), hook));
+}
+
+#[cfg(test)]
+fn run_pending_commit_hook(root: &Path, cancelled: &dyn Fn() -> bool) {
+    let hook = pending_commit_hook().lock().unwrap().clone();
+    if let Some((hook_root, hook)) = hook
+        && paths_equal(&hook_root, root)
+    {
+        hook(cancelled);
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path, cancelled: &dyn Fn() -> bool) -> Result<()> {
     fn visit(source: &Path, destination: &Path, cancelled: &dyn Fn() -> bool) -> Result<()> {
         check_cancelled(cancelled)?;
@@ -1542,7 +1691,7 @@ mod tests {
         let before = fs::read(root.path().join("settings.json")).unwrap();
         let id = snapshot_id(&root, &catalog);
         let pending = RecoveryManager::new(&root, &catalog)
-            .stage_restore(PersistentStoreId::Settings, &id)
+            .stage_restore(RecoveryTarget::Store(PersistentStoreId::Settings), &id)
             .unwrap();
         assert_eq!(fs::read(root.path().join("settings.json")).unwrap(), before);
         assert_eq!(
@@ -1563,12 +1712,54 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_after_pending_commit_removes_exact_written_descriptor() {
+        let (_dir, root, catalog) = fixture();
+        let checks = std::cell::Cell::new(0);
+        let result = RecoveryManager::new(&root, &catalog).stage_reset_cancellable(
+            PersistentStoreId::Settings,
+            &|| {
+                let current = checks.get();
+                checks.set(current + 1);
+                current >= 1
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!root.path().join("recovery/pending.json").exists());
+    }
+
+    #[test]
+    fn cancelled_writer_does_not_remove_newer_pending_descriptor() {
+        let (_dir, root, catalog) = fixture();
+        let manager = RecoveryManager::new(&root, &catalog);
+        let pending_path = manager.pending_path();
+        let replacement = b"newer pending generation".to_vec();
+        let checks = std::cell::Cell::new(0);
+        let result = manager.stage_reset_cancellable(PersistentStoreId::Settings, &|| {
+            let current = checks.get();
+            checks.set(current + 1);
+            if current == 1 {
+                fs::write(&pending_path, &replacement).unwrap();
+                true
+            } else {
+                false
+            }
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(pending_path).unwrap(), replacement);
+    }
+
+    #[test]
     fn invalid_snapshot_id_is_rejected_without_pending_or_destination_change() {
         let (_dir, root, catalog) = fixture();
         let before = fs::read(root.path().join("settings.json")).unwrap();
         assert!(
             RecoveryManager::new(&root, &catalog)
-                .stage_restore(PersistentStoreId::Settings, "../escape")
+                .stage_restore(
+                    RecoveryTarget::Store(PersistentStoreId::Settings),
+                    "../escape"
+                )
                 .is_err()
         );
         assert_eq!(fs::read(root.path().join("settings.json")).unwrap(), before);
@@ -1590,7 +1781,7 @@ mod tests {
         let manager = RecoveryManager::new(&root, &catalog);
 
         let restore = manager
-            .stage_restore(PersistentStoreId::Notes, &snapshot)
+            .stage_restore(RecoveryTarget::Store(PersistentStoreId::Notes), &snapshot)
             .unwrap_err();
         assert!(
             restore
@@ -1643,7 +1834,10 @@ mod tests {
             );
             assert!(
                 manager
-                    .stage_restore(PersistentStoreId::NoteTemplates, &snapshot)
+                    .stage_restore(
+                        RecoveryTarget::Store(PersistentStoreId::NoteTemplates),
+                        &snapshot
+                    )
                     .is_err()
             );
             assert!(
@@ -1660,7 +1854,7 @@ mod tests {
         let (_dir, root, catalog) = fixture();
         let id = snapshot_id(&root, &catalog);
         RecoveryManager::new(&root, &catalog)
-            .stage_restore(PersistentStoreId::Settings, &id)
+            .stage_restore(RecoveryTarget::Store(PersistentStoreId::Settings), &id)
             .unwrap();
         let destination = root.path().join("settings.json");
         fs::write(&destination, b"live bytes").unwrap();
@@ -1687,7 +1881,7 @@ mod tests {
         let id = snapshot_id(&root, &catalog);
         let manager = RecoveryManager::new(&root, &catalog);
         let pending = manager
-            .stage_restore(PersistentStoreId::Settings, &id)
+            .stage_restore(RecoveryTarget::Store(PersistentStoreId::Settings), &id)
             .unwrap();
         let store = catalog.get(PersistentStoreId::Settings);
         let candidate = manager.restore_candidate(store, &id).unwrap();
@@ -1747,7 +1941,7 @@ mod tests {
         let original = fs::read(root.path().join("settings.json")).unwrap();
         let id = snapshot_id(&root, &catalog);
         RecoveryManager::new(&root, &catalog)
-            .stage_restore(PersistentStoreId::Settings, &id)
+            .stage_restore(RecoveryTarget::Store(PersistentStoreId::Settings), &id)
             .unwrap();
         fs::write(root.path().join("settings.json"), b"corrupt current").unwrap();
         let result = apply_pending_recovery(&root);
@@ -1788,20 +1982,89 @@ mod tests {
         manager.write_pending(&pending).unwrap();
         assert!(apply_pending_recovery(&root).diagnostic.is_none());
 
-        let unsafe_group = PendingRecoveryDescriptor {
-            format_version: LEGACY_RECOVERY_FORMAT_VERSION,
-            action: StagedRecoveryAction::Restore {
-                store_id: PersistentStoreId::MkMacroDocument,
-                snapshot_id: "legacy".into(),
-            },
-            candidate_fingerprint: "fnv1a64:0000000000000000".into(),
-        };
-        manager.write_pending(&unsafe_group).unwrap();
+        let unsafe_group = serde_json::json!({
+            "format_version": LEGACY_RECOVERY_FORMAT_VERSION,
+            "action": { "kind": "restore", "store_id": "MkMacroDocument", "snapshot_id": "legacy" },
+            "candidate_fingerprint": "fnv1a64:0000000000000000"
+        });
+        save_atomic(
+            &manager.pending_path(),
+            &serde_json::to_vec_pretty(&unsafe_group).unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             apply_pending_recovery(&root).diagnostic,
             Some(RecoveryStartupDiagnostic::InvalidPending { .. })
         ));
         assert!(manager.pending_path().exists());
+    }
+
+    #[test]
+    fn legacy_v1_non_group_restore_remains_supported() {
+        let (_directory, root, catalog) = fixture();
+        let id = snapshot_id(&root, &catalog);
+        let source = root
+            .path()
+            .join("backups")
+            .join(&id)
+            .join("stores/Settings");
+        let legacy = serde_json::json!({
+            "format_version": LEGACY_RECOVERY_FORMAT_VERSION,
+            "action": { "kind": "restore", "store_id": "Settings", "snapshot_id": id },
+            "candidate_fingerprint": fingerprint(&source, &|| false).unwrap()
+        });
+        fs::create_dir(root.path().join("recovery")).unwrap();
+        save_atomic(
+            &root.path().join("recovery/pending.json"),
+            &serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.path().join("settings.json"), b"changed live data").unwrap();
+
+        let result = apply_pending_recovery(&root);
+
+        assert!(result.diagnostic.is_none(), "{:?}", result.diagnostic);
+        assert!(matches!(
+            result.applied,
+            Some(StagedRecoveryAction::Restore {
+                target: RecoveryTarget::Store(PersistentStoreId::Settings),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn grouped_pending_descriptor_serializes_explicit_target() {
+        let descriptor = PendingRecoveryDescriptor {
+            format_version: RECOVERY_FORMAT_VERSION,
+            action: StagedRecoveryAction::Restore {
+                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
+                snapshot_id: "snapshot".into(),
+            },
+            candidate_fingerprint: "fingerprint".into(),
+        };
+        let value = serde_json::to_value(&descriptor).unwrap();
+        assert_eq!(value["action"]["target"]["kind"], "group");
+        assert_eq!(value["action"]["target"]["id"], "mk_macro");
+        assert_eq!(
+            serde_json::from_value::<PendingRecoveryDescriptor>(value).unwrap(),
+            descriptor
+        );
+    }
+
+    #[test]
+    fn current_mkmacro_single_store_restore_is_rejected() {
+        let (_directory, root, catalog) = fixture();
+        let result = RecoveryManager::new(&root, &catalog).stage_restore(
+            RecoveryTarget::Store(PersistentStoreId::MkMacroAssets),
+            "snapshot",
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("document and assets group")
+        );
     }
 
     #[test]
@@ -1834,7 +2097,7 @@ mod tests {
         let (_dir, root, catalog) = fixture();
         let id = snapshot_id(&root, &catalog);
         RecoveryManager::new(&root, &catalog)
-            .stage_restore(PersistentStoreId::Settings, &id)
+            .stage_restore(RecoveryTarget::Store(PersistentStoreId::Settings), &id)
             .unwrap();
         let pending_path = root.path().join("recovery/pending.json");
         let mut pending: PendingRecoveryDescriptor =
@@ -1988,7 +2251,7 @@ mod tests {
         let pending = PendingRecoveryDescriptor {
             format_version: RECOVERY_FORMAT_VERSION,
             action: StagedRecoveryAction::Restore {
-                store_id: PersistentStoreId::MkMacroDocument,
+                target,
                 snapshot_id: "test-snapshot".into(),
             },
             candidate_fingerprint: fingerprint.clone(),
@@ -2025,6 +2288,47 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("mkmacros.json.pre-restore.")
         }));
+    }
+
+    #[test]
+    fn mutation_of_second_materialized_member_rolls_back_first_member() {
+        let (_directory, root, catalog, candidates) = mkmacro_group_fixture();
+        let manager = RecoveryManager::new(&root, &catalog);
+        let target = RecoveryTarget::Group(RecoveryGroupId::MkMacro);
+        let expected = target_fingerprint(target, &candidates, &|| false).unwrap();
+        let document = catalog.get(PersistentStoreId::MkMacroDocument).path.clone();
+        let assets = catalog.get(PersistentStoreId::MkMacroAssets).path.clone();
+        let old_document = fs::read(&document).unwrap();
+
+        let result = apply_restore_target_with_expected(
+            &manager,
+            target,
+            &candidates,
+            &expected,
+            &expected,
+            &|| false,
+            &|store_id| {
+                if store_id == PersistentStoreId::MkMacroAssets {
+                    let staging = fs::read_dir(root.path())?
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|path| {
+                            path.file_name().is_some_and(|name| {
+                                name.to_string_lossy()
+                                    .starts_with(".mkmacro_assets.recovery-staging.")
+                            })
+                        })
+                        .context("locate materialized assets")?;
+                    fs::write(staging.join("new.png"), b"unvalidated replacement")?;
+                }
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(document).unwrap(), old_document);
+        assert_eq!(fs::read(assets.join("old.png")).unwrap(), b"old asset");
+        assert!(!assets.join("new.png").exists());
     }
 
     #[test]
@@ -2092,7 +2396,7 @@ mod tests {
         let pending = PendingRecoveryDescriptor {
             format_version: RECOVERY_FORMAT_VERSION,
             action: StagedRecoveryAction::Restore {
-                store_id: PersistentStoreId::MkMacroAssets,
+                target,
                 snapshot_id: "test-snapshot".into(),
             },
             candidate_fingerprint: staged.clone(),

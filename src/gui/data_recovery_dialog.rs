@@ -1,8 +1,9 @@
 use crate::commands::{DataDialogFocus, DataRecoveryCommand, DataRecoveryConfirmation};
 use crate::persistence::{
     BackupPolicy, DataRequestId, DataService, DataServiceActivity, DataServiceFailure,
-    DataServiceRequest, DataServiceResult, PersistentStoreId, SnapshotRecord, SnapshotStatus,
-    StagedRecoveryAction, StoreHealth, StoreHealthReport, StoreKind, StoreOwnership,
+    DataServiceRequest, DataServiceResult, PersistentStoreId, RecoveryGroupId, RecoveryTarget,
+    SnapshotRecord, SnapshotStatus, StagedRecoveryAction, StoreHealth, StoreHealthReport,
+    StoreKind, StoreOwnership,
 };
 use crate::platform::app_data::AppDataRoot;
 use crate::settings::Settings;
@@ -21,7 +22,7 @@ pub(crate) enum DataDialogSection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingRecoveryIntent {
     Restore {
-        store_id: PersistentStoreId,
+        target: RecoveryTarget,
         snapshot_id: String,
     },
     Reset {
@@ -34,10 +35,10 @@ impl PendingRecoveryIntent {
         let confirmation = DataRecoveryConfirmation::from_explicit_user_confirmation();
         match self {
             Self::Restore {
-                store_id,
+                target,
                 snapshot_id,
             } => DataRecoveryCommand::Restore {
-                store_id,
+                target,
                 snapshot_id,
                 confirmation,
             },
@@ -234,11 +235,11 @@ impl DataRecoveryDialog {
     pub(crate) fn stage_recovery(&mut self, command: &DataRecoveryCommand) -> Result<(), String> {
         let action = match command {
             DataRecoveryCommand::Restore {
-                store_id,
+                target,
                 snapshot_id,
                 ..
             } => StagedRecoveryAction::Restore {
-                store_id: *store_id,
+                target: *target,
                 snapshot_id: snapshot_id.clone(),
             },
             DataRecoveryCommand::Reset { store_id, .. } => StagedRecoveryAction::Reset {
@@ -543,17 +544,32 @@ impl DataRecoveryDialog {
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
             for store in &self.health {
+                let Some(target) = recovery_target_for_row(store.id) else {
+                    continue;
+                };
+                let target_eligible = target.members().into_iter().all(|member| {
+                    self.health.iter().any(|report| {
+                        report.id == member
+                            && report.ownership == StoreOwnership::ApplicationOwned
+                            && report.restore_eligible
+                    })
+                });
                 let restore = restore_enabled(
-                    store.id,
+                    target,
                     store.ownership,
-                    store.restore_eligible,
+                    target_eligible,
                     selected.as_deref(),
                     &self.snapshots,
                 );
                 let reset =
                     store.ownership == StoreOwnership::ApplicationOwned && store.reset_eligible;
                 ui.horizontal(|ui| {
-                    ui.label(store.label)
+                    let label = if target == RecoveryTarget::Group(RecoveryGroupId::MkMacro) {
+                        "MkMacro document + assets"
+                    } else {
+                        store.label
+                    };
+                    ui.label(label)
                         .on_hover_text(store.path.display().to_string());
                     if ui
                         .add_enabled(
@@ -564,7 +580,7 @@ impl DataRecoveryDialog {
                     {
                         actions.push(DataRecoveryUiAction::Confirm(
                             PendingRecoveryIntent::Restore {
-                                store_id: store.id,
+                                target,
                                 snapshot_id: selected
                                     .clone()
                                     .expect("enabled restore has snapshot"),
@@ -721,7 +737,7 @@ fn store_open_targets(report: &StoreHealthReport) -> Vec<StoreOpenTarget> {
 }
 
 fn restore_enabled(
-    id: PersistentStoreId,
+    target: RecoveryTarget,
     ownership: StoreOwnership,
     eligible: bool,
     selected: Option<&str>,
@@ -733,13 +749,34 @@ fn restore_enabled(
             snapshots.iter().any(|snapshot| {
                 snapshot.manifest.snapshot_id == selected
                     && snapshot.manifest.status != SnapshotStatus::Failed
-                    && snapshot
-                        .manifest
-                        .included
-                        .iter()
-                        .any(|entry| entry.store_id == format!("{id:?}"))
+                    && target.members().into_iter().all(|id| {
+                        let name = format!("{id:?}");
+                        !snapshot
+                            .manifest
+                            .failed
+                            .iter()
+                            .any(|entry| entry.store_id == name)
+                            && !snapshot
+                                .manifest
+                                .skipped
+                                .iter()
+                                .any(|entry| entry.store_id == name)
+                            && snapshot
+                                .manifest
+                                .included
+                                .iter()
+                                .any(|entry| entry.store_id == name)
+                    })
             })
         })
+}
+
+fn recovery_target_for_row(id: PersistentStoreId) -> Option<RecoveryTarget> {
+    match id {
+        PersistentStoreId::MkMacroDocument => Some(RecoveryTarget::Group(RecoveryGroupId::MkMacro)),
+        PersistentStoreId::MkMacroAssets => None,
+        id => Some(RecoveryTarget::Store(id)),
+    }
 }
 
 fn health_label(health: &StoreHealth) -> String {
@@ -801,33 +838,87 @@ mod tests {
     fn action_enablement_requires_owned_eligible_included_store() {
         let snapshots = [record("one", PersistentStoreId::Settings)];
         assert!(restore_enabled(
-            PersistentStoreId::Settings,
+            RecoveryTarget::Store(PersistentStoreId::Settings),
             StoreOwnership::ApplicationOwned,
             true,
             Some("one"),
             &snapshots
         ));
         assert!(!restore_enabled(
-            PersistentStoreId::Actions,
+            RecoveryTarget::Store(PersistentStoreId::Actions),
             StoreOwnership::ApplicationOwned,
             true,
             Some("one"),
             &snapshots
         ));
         assert!(!restore_enabled(
-            PersistentStoreId::Settings,
+            RecoveryTarget::Store(PersistentStoreId::Settings),
             StoreOwnership::External,
             true,
             Some("one"),
             &snapshots
         ));
         assert!(!restore_enabled(
-            PersistentStoreId::Settings,
+            RecoveryTarget::Store(PersistentStoreId::Settings),
             StoreOwnership::ApplicationOwned,
             false,
             Some("one"),
             &snapshots
         ));
+    }
+
+    #[test]
+    fn mkmacro_group_requires_complete_manifested_document_and_assets() {
+        let target = RecoveryTarget::Group(RecoveryGroupId::MkMacro);
+        let mut snapshot = record("one", PersistentStoreId::MkMacroDocument);
+        assert!(!restore_enabled(
+            target,
+            StoreOwnership::ApplicationOwned,
+            true,
+            Some("one"),
+            std::slice::from_ref(&snapshot),
+        ));
+        snapshot.manifest.included.push(SnapshotEntry {
+            store_id: format!("{:?}", PersistentStoreId::MkMacroAssets),
+            source_path: PathBuf::from("mkmacro_assets"),
+            snapshot_path: Some(PathBuf::from("stores/MkMacroAssets")),
+            detail: None,
+        });
+        assert!(restore_enabled(
+            target,
+            StoreOwnership::ApplicationOwned,
+            true,
+            Some("one"),
+            std::slice::from_ref(&snapshot),
+        ));
+        snapshot
+            .manifest
+            .skipped
+            .push(crate::persistence::SnapshotEntry {
+                store_id: format!("{:?}", PersistentStoreId::MkMacroAssets),
+                source_path: PathBuf::from("mkmacro_assets"),
+                snapshot_path: None,
+                detail: None,
+            });
+        assert!(!restore_enabled(
+            target,
+            StoreOwnership::ApplicationOwned,
+            true,
+            Some("one"),
+            std::slice::from_ref(&snapshot),
+        ));
+    }
+
+    #[test]
+    fn mkmacro_has_one_explicit_document_and_assets_restore_row() {
+        assert_eq!(
+            recovery_target_for_row(PersistentStoreId::MkMacroDocument),
+            Some(RecoveryTarget::Group(RecoveryGroupId::MkMacro))
+        );
+        assert_eq!(
+            recovery_target_for_row(PersistentStoreId::MkMacroAssets),
+            None
+        );
     }
 
     #[test]
@@ -855,7 +946,7 @@ mod tests {
     #[test]
     fn confirmation_and_completion_explain_preservation_next_launch_and_restart() {
         let intent = PendingRecoveryIntent::Restore {
-            store_id: PersistentStoreId::Settings,
+            target: RecoveryTarget::Store(PersistentStoreId::Settings),
             snapshot_id: "one".into(),
         };
         let (description, warning) = intent.confirmation_copy("Settings");
@@ -863,6 +954,23 @@ mod tests {
         assert!(
             copy.contains("preserved") && copy.contains("next launch") && copy.contains("restart")
         );
+    }
+
+    #[test]
+    fn grouped_confirmation_preserves_explicit_target() {
+        let target = RecoveryTarget::Group(RecoveryGroupId::MkMacro);
+        let command = PendingRecoveryIntent::Restore {
+            target,
+            snapshot_id: "one".into(),
+        }
+        .confirmed_command();
+        assert!(matches!(
+            command,
+            DataRecoveryCommand::Restore {
+                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
+                ..
+            }
+        ));
     }
 
     #[test]

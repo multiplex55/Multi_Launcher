@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn recovery_requires_a_typed_confirmed_request_and_never_uses_a_raw_action() {
         let command = DataRecoveryCommand::Restore {
-            store_id: PersistentStoreId::Settings,
+            target: crate::persistence::RecoveryTarget::Store(PersistentStoreId::Settings),
             snapshot_id: "snapshot-1".into(),
             confirmation: DataRecoveryConfirmation::from_explicit_user_confirmation(),
         };

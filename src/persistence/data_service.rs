@@ -148,8 +148,6 @@ struct ProductionBackend {
     root: AppDataRoot,
     catalog: Option<PersistenceCatalog>,
     catalog_factory: Option<Box<dyn CatalogFactory>>,
-    #[cfg(test)]
-    recovery_started: Option<Box<dyn Fn(&AtomicBool) + Send>>,
 }
 
 trait CatalogFactory: Send + 'static {
@@ -187,12 +185,6 @@ impl DataServiceBackend for ProductionBackend {
     ) -> Result<DataServiceResult, String> {
         if cancel.load(Ordering::Acquire) {
             return Err("operation cancelled".into());
-        }
-        #[cfg(test)]
-        if matches!(request, DataServiceRequest::StageRecovery(_)) {
-            if let Some(hook) = &self.recovery_started {
-                hook(cancel);
-            }
         }
         let root = self.root.clone();
         let catalog = self.catalog();
@@ -233,9 +225,9 @@ impl DataServiceBackend for ProductionBackend {
                 let manager = RecoveryManager::new(&root, catalog);
                 match action {
                     StagedRecoveryAction::Restore {
-                        store_id,
+                        target,
                         snapshot_id,
-                    } => manager.stage_restore_cancellable(store_id, &snapshot_id, &|| {
+                    } => manager.stage_restore_cancellable(target, &snapshot_id, &|| {
                         cancel.load(Ordering::Acquire)
                     }),
                     StagedRecoveryAction::Reset { store_id } => manager
@@ -267,8 +259,6 @@ impl DataService {
                 root,
                 catalog: Some(catalog),
                 catalog_factory: None,
-                #[cfg(test)]
-                recovery_started: None,
             },
             repaint,
         )
@@ -287,8 +277,6 @@ impl DataService {
                 catalog_factory: Some(Box::new(move || {
                     PersistenceCatalog::new(&factory_root, &settings)
                 })),
-                #[cfg(test)]
-                recovery_started: None,
             },
             repaint,
         )
@@ -616,7 +604,6 @@ mod tests {
                         .push(thread::current().name().unwrap_or("unnamed").to_owned());
                     PersistenceCatalog::new(&factory_root, &Settings::default())
                 })),
-                recovery_started: None,
             },
             || {},
         )
@@ -859,23 +846,38 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_path(directory.path());
         let catalog = PersistenceCatalog::new(&root, &Settings::default());
+        let snapshot = BackupEngine::new(&root, &catalog)
+            .create_snapshot()
+            .unwrap()
+            .manifest
+            .snapshot_id;
         let (started_tx, started_rx) = channel();
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered_hook = Arc::clone(&entered);
+        super::super::recovery::set_traversal_hook(
+            root.path(),
+            Some(Arc::new(move |cancelled| {
+                if !entered_hook.swap(true, Ordering::SeqCst) {
+                    started_tx.send(()).unwrap();
+                    while !cancelled() {
+                        thread::yield_now();
+                    }
+                }
+            })),
+        );
         let backend = ProductionBackend {
             root: root.clone(),
             catalog: Some(catalog),
             catalog_factory: None,
-            recovery_started: Some(Box::new(move |cancel| {
-                started_tx.send(()).unwrap();
-                while !cancel.load(Ordering::Acquire) {
-                    thread::yield_now();
-                }
-            })),
         };
         let mut service = DataService::start_with_backend(backend, || {}).unwrap();
         service
             .submit(DataServiceRequest::StageRecovery(
-                StagedRecoveryAction::Reset {
-                    store_id: PersistentStoreId::Settings,
+                StagedRecoveryAction::Restore {
+                    target: super::super::RecoveryTarget::Group(
+                        super::super::RecoveryGroupId::MkMacro,
+                    ),
+                    snapshot_id: snapshot,
                 },
             ))
             .unwrap();
@@ -883,8 +885,42 @@ mod tests {
 
         let before = Instant::now();
         service.shutdown();
+        super::super::recovery::set_traversal_hook(root.path(), None);
 
         assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(service.worker.is_none());
+        assert!(!root.path().join("recovery/pending.json").exists());
+        assert!(service.drain_results().is_empty());
+    }
+
+    #[test]
+    fn shutdown_after_pending_commit_removes_hidden_cancelled_action() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path());
+        let catalog = PersistenceCatalog::new(&root, &Settings::default());
+        let (committed_tx, committed_rx) = channel();
+        super::super::recovery::set_pending_commit_hook(
+            root.path(),
+            Some(Arc::new(move |cancelled| {
+                committed_tx.send(()).unwrap();
+                while !cancelled() {
+                    thread::yield_now();
+                }
+            })),
+        );
+        let mut service = DataService::start(root.clone(), catalog, || {}).unwrap();
+        service
+            .submit(DataServiceRequest::StageRecovery(
+                StagedRecoveryAction::Reset {
+                    store_id: PersistentStoreId::Settings,
+                },
+            ))
+            .unwrap();
+        committed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        service.shutdown();
+        super::super::recovery::set_pending_commit_hook(root.path(), None);
+
         assert!(service.worker.is_none());
         assert!(!root.path().join("recovery/pending.json").exists());
         assert!(service.drain_results().is_empty());
