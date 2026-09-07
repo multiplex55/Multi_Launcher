@@ -4319,10 +4319,9 @@ impl MkMacroDialog {
         }) {
             return Some("Another playback operation is active".into());
         }
-        let d = self.cached_diagnostics();
-        d.iter()
-            .find(|x| x.severity == DiagnosticSeverity::Fatal)
-            .map(|x| x.message.clone())
+        self.analysis_cache
+            .borrow_mut()
+            .root_failure(&self.draft, self.draft_revision, m.id)
     }
 
     fn prepare_execution(&mut self) -> anyhow::Result<u64> {

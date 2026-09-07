@@ -405,7 +405,70 @@ fn table_viewport_height(available_height: f32) -> f32 {
     available_height.max(MIN_TABLE_VIEWPORT_HEIGHT)
 }
 
+fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
+    use eframe::egui::{Color32, RichText};
+    let diagnostics = d.cached_diagnostics();
+    let mut target = None;
+    if diagnostics.is_empty() {
+        return false;
+    }
+    eframe::egui::CollapsingHeader::new(format!("Diagnostics ({})", diagnostics.len()))
+        .id_source("mkmacro_document_diagnostics")
+        .show(ui, |ui| {
+            eframe::egui::ScrollArea::vertical()
+                .id_source("mkmacro_diagnostics_scroll")
+                .max_height(150.0)
+                .show_rows(
+                    ui,
+                    ui.text_style_height(&eframe::egui::TextStyle::Body),
+                    diagnostics.len(),
+                    |ui, range| {
+                        for index in range {
+                            let diagnostic = &diagnostics[index];
+                            let (severity, color) = match diagnostic.severity {
+                                crate::mkmacro::DiagnosticSeverity::Fatal => {
+                                    ("Error", Color32::RED)
+                                }
+                                crate::mkmacro::DiagnosticSeverity::Warning => {
+                                    ("Warning", Color32::YELLOW)
+                                }
+                            };
+                            let owner = d
+                                .draft
+                                .macros
+                                .iter()
+                                .find(|m| m.id == diagnostic.macro_id)
+                                .map(|m| m.name.as_str())
+                                .unwrap_or("Document");
+                            let text = format!("{severity} · {owner}: {}", diagnostic.message);
+                            if ui
+                                .add(
+                                    eframe::egui::Label::new(RichText::new(text).color(color))
+                                        .truncate(true)
+                                        .sense(eframe::egui::Sense::click()),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\nCode: {}",
+                                    diagnostic.message, diagnostic.code
+                                ))
+                                .clicked()
+                            {
+                                target = Some(index);
+                            }
+                        }
+                    },
+                );
+        });
+    if let Some(index) = target {
+        return super::navigation::navigate_diagnostic(d, &diagnostics[index]);
+    }
+    false
+}
+
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
+    if show_diagnostics(ui, d) {
+        return;
+    }
     let Some(mid) = d.selected_macro_id else {
         ui.label("Select a macro");
         return;
@@ -465,6 +528,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         .and_then(|(_, id)| visible.iter().position(|i| rows[*i] == id));
     let depths: Vec<_> = structure.steps.iter().map(|s| s.depth).collect();
     let mut clicked = None;
+    let mut diagnostic_target = None;
     let mut changed = false;
     let mut updates = Vec::new();
     let mut breakpoint_toggles = Vec::new();
@@ -567,13 +631,15 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                             render_context_menu(ui, &menu, &mut command);
                         });
                         if let Some(items) = row_diagnostics.get(&s.id) {
-                            let first = items[0];
+                            let first = items.iter().copied().find(|diagnostic| diagnostic.severity == crate::mkmacro::DiagnosticSeverity::Fatal).unwrap_or(items[0]);
                             let color = match first.severity {
                                 crate::mkmacro::DiagnosticSeverity::Fatal => eframe::egui::Color32::RED,
                                 crate::mkmacro::DiagnosticSeverity::Warning => eframe::egui::Color32::YELLOW,
                             };
                             let hover = items.iter().map(|x| format!("{}\nCode: {}", x.message, x.code)).collect::<Vec<_>>().join("\n\n");
-                            ui.colored_label(color, format!("⚠ {}", first.message)).on_hover_text(hover);
+                            if ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(format!("⚠ {}", first.message)).color(color)).sense(eframe::egui::Sense::click())).on_hover_text(hover).clicked() {
+                                if !interaction_blocked { diagnostic_target = Some(s.id); }
+                            }
                         }
                         });
                     });
@@ -743,6 +809,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             }
         }
         d.mark_dirty();
+    }
+    if let Some(step_id) = diagnostic_target {
+        super::navigation::navigate(d, mid, step_id);
     }
     // Only route table shortcuts while no modal/editor, focused control, active
     // pointer drag, popup, or context menu owns input.

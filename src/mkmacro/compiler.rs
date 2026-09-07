@@ -25,6 +25,129 @@ pub struct MkExecutionPlan {
     pub instructions: Arc<[MkInstruction]>,
     pub step_to_instruction: HashMap<u64, usize>,
 }
+
+#[derive(Debug, Clone)]
+pub struct MkCompiledSignature {
+    pub parameters: Arc<[MkMacroParameter]>,
+    pub outputs: Arc<[MkMacroOutput]>,
+    parameter_indices: HashMap<MkSignatureId, usize>,
+    output_indices: HashMap<MkSignatureId, usize>,
+}
+impl MkCompiledSignature {
+    fn new(signature: &MkMacroSignature) -> Self {
+        Self {
+            parameters: signature.parameters.clone().into(),
+            outputs: signature.outputs.clone().into(),
+            parameter_indices: signature
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.id, i))
+                .collect(),
+            output_indices: signature
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (o.id, i))
+                .collect(),
+        }
+    }
+    pub fn parameter(&self, id: MkSignatureId) -> Option<&MkMacroParameter> {
+        self.parameter_indices
+            .get(&id)
+            .map(|i| &self.parameters[*i])
+    }
+    pub fn output(&self, id: MkSignatureId) -> Option<&MkMacroOutput> {
+        self.output_indices.get(&id).map(|i| &self.outputs[*i])
+    }
+}
+
+/// Immutable document snapshot of the selected root's dependency closure.
+/// Plans retain separate step identities, playback, breakpoints and Call rows.
+#[derive(Debug, Clone)]
+pub struct MkCompiledProgram {
+    pub root_macro_id: u64,
+    order: Arc<[u64]>,
+    plans: HashMap<u64, Arc<MkExecutionPlan>>,
+    signatures: HashMap<u64, MkCompiledSignature>,
+    names: HashMap<u64, String>,
+}
+impl MkCompiledProgram {
+    pub fn macro_ids(&self) -> &[u64] {
+        &self.order
+    }
+    pub fn plan(&self, id: u64) -> Option<&Arc<MkExecutionPlan>> {
+        self.plans.get(&id)
+    }
+    pub fn signature(&self, id: u64) -> Option<&MkCompiledSignature> {
+        self.signatures.get(&id)
+    }
+    pub fn name(&self, id: u64) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+}
+
+/// Builds a semantically validated program. Runtime capability admission stays
+/// at the existing execution entry point (`compile`) until reusable execution
+/// is supported; this API does not imply that a program can yet be executed.
+pub fn compile_program(
+    document: &MkMacroDocument,
+    root_macro_id: u64,
+) -> Result<MkCompiledProgram, Vec<MkDiagnostic>> {
+    let analysis = analyze_document(document);
+    let mut diagnostics: Vec<_> = analysis
+        .graph
+        .root_diagnostics(root_macro_id, &analysis.diagnostics)
+        .into_iter()
+        .cloned()
+        .collect();
+    match analysis
+        .graph
+        .macro_index(root_macro_id)
+        .map(|index| &document.macros[index])
+    {
+        None => diagnostics.push(MkDiagnostic::fatal(
+            root_macro_id,
+            None,
+            "missing_root_macro",
+            "Selected root macro does not exist",
+        )),
+        Some(root) if !root.enabled => diagnostics.push(MkDiagnostic::fatal(
+            root_macro_id,
+            None,
+            "disabled_root_macro",
+            "Selected root macro is disabled",
+        )),
+        _ => {}
+    }
+    if !can_run(&diagnostics) {
+        return Err(diagnostics);
+    }
+    let order = analysis.graph.closure(
+        root_macro_id,
+        super::call_graph::DependencyPolicy::EnabledCalls,
+    );
+    let mut plans = HashMap::new();
+    let mut signatures = HashMap::new();
+    let mut names = HashMap::new();
+    for id in &order {
+        let owner = &document.macros[analysis
+            .graph
+            .macro_index(*id)
+            .expect("validated dependency identity")];
+        plans.insert(*id, Arc::new(lower_validated_macro(owner)));
+        signatures.insert(*id, MkCompiledSignature::new(&owner.signature));
+        names.insert(*id, owner.name.clone());
+    }
+    Ok(MkCompiledProgram {
+        root_macro_id,
+        order: order.into(),
+        plans,
+        signatures,
+        names,
+    })
+}
+
 pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
     let doc = MkMacroDocument {
         settings: Default::default(),
@@ -36,6 +159,12 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
     if !can_run(&d) {
         return Err(d);
     }
+    Ok(lower_validated_macro(m))
+}
+
+/// The caller has validated structure in its real document context. Lowering
+/// never calls validation and never fabricates a singleton for a callee.
+fn lower_validated_macro(m: &MkMacro) -> MkExecutionPlan {
     let mut ins = vec![];
     let mut map = HashMap::new();
     let mut stack: Vec<(usize, &str, Option<usize>)> = vec![];
@@ -87,12 +216,12 @@ pub fn compile(m: &MkMacro) -> Result<MkExecutionPlan, Vec<MkDiagnostic>> {
             _ => {}
         }
     }
-    Ok(MkExecutionPlan {
+    MkExecutionPlan {
         macro_id: m.id,
         playback: m.playback.clone(),
         instructions: ins.into(),
         step_to_instruction: map,
-    })
+    }
 }
 fn patch_loop(v: &mut [MkInstruction], start: usize, end: usize, cont: usize, exit: usize) {
     for x in &mut v[start + 1..end] {
@@ -133,6 +262,100 @@ mod tests {
             playback: Default::default(),
             steps,
         }
+    }
+
+    #[test]
+    fn program_keeps_transitive_plans_and_immutable_callee_metadata() {
+        let mut root = mac(vec![step(
+            1,
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 2,
+                ..Default::default()
+            }),
+        )]);
+        root.name = "root".into();
+        let mut child = mac(vec![step(
+            1,
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 3,
+                ..Default::default()
+            }),
+        )]);
+        child.id = 2;
+        child.name = "child".into();
+        child.playback.speed_percent = 175;
+        child.steps[0].breakpoint = true;
+        let mut leaf = mac(vec![step(1, MkAction::Return(Default::default()))]);
+        leaf.id = 3;
+        let mut unrelated = mac(vec![step(0, MkAction::Else)]);
+        unrelated.id = 4;
+        let mut doc = MkMacroDocument {
+            macros: vec![root, child, leaf, unrelated],
+            ..Default::default()
+        };
+        let program = compile_program(&doc, 1).unwrap();
+        assert_eq!(program.macro_ids(), [1, 2, 3]);
+        assert!(program.plan(4).is_none());
+        assert!(matches!(
+            program.plan(1).unwrap().instructions[0].step.action,
+            MkAction::CallMacro(_)
+        ));
+        assert_eq!(program.plan(2).unwrap().playback.speed_percent, 175);
+        assert!(program.plan(2).unwrap().instructions[0].step.breakpoint);
+        assert_eq!(program.plan(2).unwrap().step_to_instruction[&1], 0);
+        doc.macros[1].name = "edited".into();
+        doc.macros[1].steps.clear();
+        doc.macros[1].playback.speed_percent = 10;
+        assert_eq!(program.name(2), Some("child"));
+        assert_eq!(program.plan(2).unwrap().instructions.len(), 1);
+        assert_eq!(program.plan(2).unwrap().playback.speed_percent, 175);
+        // The runtime's existing entry point still rejects unsupported actions.
+        assert!(
+            compile(&doc.macros[0])
+                .unwrap_err()
+                .iter()
+                .any(|d| d.code == "unsupported_reusable_action")
+        );
+    }
+
+    #[test]
+    fn program_admission_scopes_failures_and_preserves_global_identity_errors() {
+        let mut unrelated = mac(vec![step(1, MkAction::Else)]);
+        unrelated.id = 2;
+        let mut doc = MkMacroDocument {
+            macros: vec![mac(vec![]), unrelated],
+            ..Default::default()
+        };
+        assert_eq!(compile_program(&doc, 1).unwrap().macro_ids(), [1]);
+        doc.macros[0].steps.push(step(
+            1,
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 2,
+                ..Default::default()
+            }),
+        ));
+        assert!(
+            compile_program(&doc, 1)
+                .unwrap_err()
+                .iter()
+                .any(|d| d.macro_id == 2 && d.code == "invalid_else")
+        );
+        doc.macros[0].steps.clear();
+        for ambiguous in [0, 1] {
+            doc.macros[1].id = ambiguous;
+            assert!(
+                compile_program(&doc, 1)
+                    .unwrap_err()
+                    .iter()
+                    .any(|d| d.scope == DiagnosticScope::Document && d.code == "invalid_macro_id")
+            );
+        }
+        assert!(
+            compile_program(&MkMacroDocument::default(), 90)
+                .unwrap_err()
+                .iter()
+                .any(|d| d.code == "missing_root_macro" && d.macro_id == 90)
+        );
     }
     #[test]
     fn folder_metadata_does_not_change_compilation() {

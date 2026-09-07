@@ -379,7 +379,11 @@ impl ActionEditorState {
         }
     }
 
-    fn refresh_variable_catalog(&mut self, steps: &[MkStep]) {
+    fn refresh_variable_catalog(
+        &mut self,
+        steps: &[MkStep],
+        document: Option<(&MkMacroDocument, u64)>,
+    ) {
         let index = if let Some(id) = self.editing_id {
             steps
                 .iter()
@@ -403,7 +407,10 @@ impl ActionEditorState {
         };
         self.variable_consumer_index = index;
         self.variable_consumer_id = self.editing_id;
-        self.variable_catalog = VariableCatalog::before_step(steps, index);
+        self.variable_catalog = match document {
+            Some((document, id)) => VariableCatalog::before_macro(document, id, index),
+            None => VariableCatalog::before_step(steps, index),
+        };
     }
     fn cancel_owned_passive_overlay(&mut self) {
         if let Some(operation_id) = self.active_point_pick.take() {
@@ -2143,20 +2150,11 @@ impl VariablePickerModel {
 }
 
 fn variable_type_label(value_type: VariableValueType) -> &'static str {
-    match value_type {
-        VariableValueType::String => "String",
-        VariableValueType::Number => "Number",
-        VariableValueType::Boolean => "Boolean",
-        VariableValueType::Point => "Point",
-        VariableValueType::Unknown => "Unknown",
-    }
+    super::variable_catalog::variable_type_label(value_type)
 }
 
 fn variable_detail_text(descriptor: &VariableDescriptor) -> String {
-    let mut lines = vec![format!(
-        "Produced by {} at step {} (stable ID {}).",
-        descriptor.source_action_label, descriptor.source_step_number, descriptor.source_step_id
-    )];
+    let mut lines = vec![format!("Produced by {}.", descriptor.source.caption())];
     for reason in &descriptor.uncertainty_reasons {
         lines.push(reason.help_text().to_owned());
     }
@@ -2226,11 +2224,10 @@ fn variable_picker_ui(
                     .warning_marker()
                     .map_or(String::new(), |marker| format!("{marker} "));
                 let label = format!(
-                    "{warning}{} · {} · {} · step {}",
+                    "{warning}{} · {} · {}",
                     descriptor.name,
                     variable_type_label(descriptor.value_type),
-                    descriptor.source_action_label,
-                    descriptor.source_step_number
+                    descriptor.source.caption()
                 );
                 let response = ui.selectable_label(index == highlighted, label);
                 response
@@ -2478,10 +2475,10 @@ fn target_ui_with_variables(
         MkCoordinateTarget::Variable { name } => {
             if let Some(catalog) = options.variable_catalog {
                 variable_picker_ui(ui, options.picker_id, name, catalog, |value_type| {
-                    value_type == VariableValueType::Point
+                    value_type == VariableValueType::Known(MkValueType::Point)
                 });
-                if let Some(warning) =
-                    catalog.warning_for_expected_type(name, VariableValueType::Point)
+                if let Some(warning) = catalog
+                    .warning_for_expected_type(name, VariableValueType::Known(MkValueType::Point))
                 {
                     ui.colored_label(
                         egui::Color32::YELLOW,
@@ -4262,7 +4259,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             .find(|m| Some(m.id) == d.selected_macro_id)
             .map(|m| m.steps.as_slice())
             .unwrap_or_default();
-        d.action_editor.refresh_variable_catalog(steps);
+        d.action_editor
+            .refresh_variable_catalog(steps, d.selected_macro_id.map(|id| (&d.draft, id)));
         d.action_editor.variable_catalog_key = Some(catalog_key);
     }
     egui::Window::new("Action Editor")
@@ -4767,7 +4765,9 @@ mod tests {
             variable_step(5, "future", MkValue::Point(MkPoint { x: 5, y: 6 })),
         ];
         let catalog = VariableCatalog::before_step(&steps, 4);
-        let model = VariablePickerModel::new(&catalog, |kind| kind == VariableValueType::Point);
+        let model = VariablePickerModel::new(&catalog, |kind| {
+            kind == VariableValueType::Known(MkValueType::Point)
+        });
         assert_eq!(
             model
                 .suggestions
@@ -4836,12 +4836,12 @@ mod tests {
         let consumer = variable_step(2, "unused", MkValue::Null);
         let mut editor = test_editor();
         editor.begin_edit(&consumer);
-        editor.refresh_variable_catalog(&[producer.clone(), consumer.clone()]);
+        editor.refresh_variable_catalog(&[producer.clone(), consumer.clone()], None);
         assert_eq!(editor.variable_consumer_index, 1);
         assert_eq!(editor.variable_consumer_id, Some(2));
         assert_eq!(editor.variable_catalog.effective_variables().len(), 1);
 
-        editor.refresh_variable_catalog(&[consumer, producer]);
+        editor.refresh_variable_catalog(&[consumer, producer], None);
         assert_eq!(editor.variable_consumer_index, 0);
         assert!(editor.variable_catalog.effective_variables().is_empty());
     }
@@ -4894,16 +4894,18 @@ mod tests {
             ),
         ];
         let pure_catalog = VariableCatalog::before_step(&steps, 3);
-        let pure = VariablePickerModel::new(&pure_catalog, |kind| kind == VariableValueType::Point);
+        let pure = VariablePickerModel::new(&pure_catalog, |kind| {
+            kind == VariableValueType::Known(MkValueType::Point)
+        });
 
         let mut editor = test_editor();
         editor.begin_edit(&steps[3]);
-        editor.refresh_variable_catalog(&steps);
+        editor.refresh_variable_catalog(&steps, None);
         let integrated = VariablePickerModel::new(&editor.variable_catalog, |kind| {
-            kind == VariableValueType::Point
+            kind == VariableValueType::Known(MkValueType::Point)
         });
         let click = VariablePickerModel::new(&editor.variable_catalog, |kind| {
-            kind == VariableValueType::Point
+            kind == VariableValueType::Known(MkValueType::Point)
         });
 
         assert_eq!(integrated, pure);
@@ -4930,7 +4932,7 @@ mod tests {
             integrated
                 .suggestions
                 .iter()
-                .filter(|item| item.value_type != VariableValueType::Point)
+                .filter(|item| item.value_type != VariableValueType::Known(MkValueType::Point))
                 .count(),
             0
         );
@@ -4944,7 +4946,7 @@ mod tests {
         ];
         let catalog = VariableCatalog::before_step(&steps, 2);
         let warning = catalog
-            .warning_for_expected_type("name", VariableValueType::Point)
+            .warning_for_expected_type("name", VariableValueType::Known(MkValueType::Point))
             .unwrap();
         assert_eq!(
             warning.message_for_consumer("Mouse Click"),
@@ -4989,7 +4991,9 @@ mod tests {
             marker(79, MkAction::EndIf),
         ];
         let catalog = VariableCatalog::before_step(&conditional_steps, usize::MAX);
-        let model = VariablePickerModel::new(&catalog, |kind| kind == VariableValueType::Point);
+        let model = VariablePickerModel::new(&catalog, |kind| {
+            kind == VariableValueType::Known(MkValueType::Point)
+        });
         assert_eq!(model.suggestions.len(), 1);
         assert_eq!(
             model.suggestions[0].availability,
@@ -5002,11 +5006,15 @@ mod tests {
 
         let descriptor = VariableDescriptor {
             name: "image_point".into(),
-            value_type: VariableValueType::Point,
-            source_step_id: 77,
-            source_step_index: 2,
-            source_step_number: 3,
-            source_action_label: "Find Image",
+            value_type: VariableValueType::Known(MkValueType::Point),
+            source: super::super::variable_catalog::VariableSource::Step(
+                super::super::variable_catalog::VariableStepSource {
+                    step_id: 77,
+                    step_index: 2,
+                    step_number: 3,
+                    action_label: "Find Image",
+                },
+            ),
             availability: VariableAvailability::PossiblyUnavailable,
             uncertainty_reasons: vec![
                 VariableUncertaintyReason::ProducedInside(MkBlockKind::If),

@@ -252,6 +252,23 @@ pub(super) fn navigate(d: &mut MkMacroDialog, macro_id: u64, step_id: u64) -> bo
     true
 }
 
+pub(super) fn navigate_diagnostic(
+    d: &mut MkMacroDialog,
+    diagnostic: &crate::mkmacro::MkDiagnostic,
+) -> bool {
+    if d.action_editor.draft.is_some() || super::step_table::table_modal_open(d) {
+        return false;
+    }
+    if let Some(step_id) = diagnostic.step_id {
+        navigate(d, diagnostic.macro_id, step_id)
+    } else if d.draft.macros.iter().any(|m| m.id == diagnostic.macro_id) {
+        d.set_selected_macro(Some(diagnostic.macro_id));
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +426,31 @@ mod tests {
         assert_eq!(d.draft_revision(), revision);
         assert_eq!(d.draft, original);
         assert!(!d.dirty);
+    }
+    #[test]
+    fn diagnostics_navigate_macro_or_folded_row_and_respect_editor_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let mut d = MkMacroDialog::new(Arc::new(store));
+        d.draft = document();
+        d.mark_dirty();
+        d.set_selected_macro(Some(1));
+        let diagnostic = MkDiagnostic::fatal(2, None, "test", "macro-level finding");
+        d.action_editor
+            .begin_new(MkAction::Delay(Default::default()));
+        assert!(!navigate_diagnostic(&mut d, &diagnostic));
+        assert_eq!(d.selected_macro_id, Some(1));
+        d.action_editor.draft = None;
+        assert!(navigate_diagnostic(&mut d, &diagnostic));
+        assert_eq!(d.selected_macro_id, Some(2));
+        let structure = d.cached_structure(1).unwrap();
+        d.editor_state.folds.toggle(1, 10, &structure);
+        let row = MkDiagnostic::warning(1, Some(30), "test", "row finding");
+        let revision = d.draft_revision();
+        assert!(navigate_diagnostic(&mut d, &row));
+        assert_eq!(d.selection.primary, Some(30));
+        assert_eq!(d.editor_state.scroll_to, Some((1, 30)));
+        assert!(!d.editor_state.folds.is_collapsed(1, 10));
+        assert_eq!(d.draft_revision(), revision);
     }
 }

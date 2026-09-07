@@ -9,6 +9,8 @@ pub(super) struct AnalysisCache {
     revision: Option<u64>,
     diagnostics: Arc<Vec<MkDiagnostic>>,
     structures: HashMap<u64, Arc<StructureAnalysis>>,
+    graph: crate::mkmacro::call_graph::CallGraph,
+    root_failures: HashMap<u64, Option<String>>,
     environment: Vec<MkDiagnostic>,
     environment_document: Option<MkMacroDocument>,
     pub generation: u64,
@@ -42,7 +44,14 @@ impl AnalysisCache {
             return;
         }
         self.environment_pending = self.environment_document.as_ref() != Some(document);
-        let mut diagnostics = validate_document(document, None);
+        let analysis = crate::mkmacro::analyze_document(document);
+        let mut diagnostics = analysis.diagnostics;
+        crate::mkmacro::validation::append_runtime_capability_diagnostics(
+            document,
+            &mut diagnostics,
+        );
+        self.graph = analysis.graph;
+        self.root_failures.clear();
         // Do not display an environment result for a removed or edited action.
         // Explicit Refresh checks new image/monitor references against the OS.
         diagnostics.extend(
@@ -95,6 +104,25 @@ impl AnalysisCache {
         self.ensure(document, revision);
         self.structures.get(&macro_id).cloned()
     }
+
+    pub fn root_failure(
+        &mut self,
+        document: &MkMacroDocument,
+        revision: u64,
+        root: u64,
+    ) -> Option<String> {
+        self.ensure(document, revision);
+        self.root_failures
+            .entry(root)
+            .or_insert_with(|| {
+                self.graph
+                    .root_diagnostics(root, &self.diagnostics)
+                    .into_iter()
+                    .find(|d| d.severity == crate::mkmacro::DiagnosticSeverity::Fatal)
+                    .map(|d| d.message.clone())
+            })
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -110,5 +138,44 @@ mod tests {
         assert_eq!(cache.generation, 1);
         assert!(!Arc::ptr_eq(&first, &cache.diagnostics(&document, 2)));
         assert_eq!(cache.generation, 2);
+    }
+    #[test]
+    fn root_admission_is_scoped_and_cached_until_a_dependency_revision_changes() {
+        use crate::mkmacro::*;
+        let mut document: MkMacroDocument = serde_json::from_value(serde_json::json!({"macros":[
+            {"id":1,"name":"root"}, {"id":2,"name":"unrelated","playback":{"speed_percent":0}}
+        ]}))
+        .unwrap();
+        let mut cache = AnalysisCache::default();
+        assert!(cache.root_failure(&document, 1, 1).is_none());
+        assert!(cache.root_failure(&document, 1, 2).is_some());
+        assert_eq!(cache.generation, 1);
+        assert_eq!(cache.root_failures.len(), 2);
+        for _ in 0..20 {
+            assert!(cache.root_failure(&document, 1, 1).is_none());
+        }
+        assert_eq!(cache.generation, 1);
+        document.macros[0].steps.push(
+            serde_json::from_value(
+                serde_json::json!({"id":1,"action":{"type":"call_macro","data":{"macro_id":2}}}),
+            )
+            .unwrap(),
+        );
+        assert!(cache.root_failure(&document, 2, 1).is_some());
+        assert_eq!(cache.generation, 2);
+        // An edited callee changes the cached document diagnostics on revision.
+        let old = cache.diagnostics(&document, 2);
+        document.macros[1].playback.speed_percent = 100;
+        let new = cache.diagnostics(&document, 3);
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert!(!new.iter().any(|d| d.code == "invalid_speed"));
+        document.macros[1].id = 0;
+        assert!(cache.root_failure(&document, 4, 1).is_some());
+        assert!(
+            cache
+                .diagnostics(&document, 4)
+                .iter()
+                .any(|d| d.scope == DiagnosticScope::Document)
+        );
     }
 }

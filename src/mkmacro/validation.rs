@@ -21,28 +21,60 @@ pub enum DiagnosticSeverity {
     Warning,
     Fatal,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticScope {
+    Macro,
+    Document,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MkDiagnostic {
     pub severity: DiagnosticSeverity,
+    pub scope: DiagnosticScope,
     pub macro_id: u64,
     pub step_id: Option<u64>,
     pub code: &'static str,
     pub message: String,
+    pub target_macro_id: Option<u64>,
+    pub cycle_path: Vec<u64>,
 }
-fn push(
+impl MkDiagnostic {
+    pub(crate) fn fatal(
+        macro_id: u64,
+        step_id: Option<u64>,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Fatal,
+            scope: DiagnosticScope::Macro,
+            macro_id,
+            step_id,
+            code,
+            message: message.into(),
+            target_macro_id: None,
+            cycle_path: Vec::new(),
+        }
+    }
+    pub(crate) fn warning(
+        macro_id: u64,
+        step_id: Option<u64>,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Warning,
+            ..Self::fatal(macro_id, step_id, code, message)
+        }
+    }
+}
+pub(crate) fn push(
     out: &mut Vec<MkDiagnostic>,
     m: u64,
     s: Option<u64>,
     code: &'static str,
     msg: impl Into<String>,
 ) {
-    out.push(MkDiagnostic {
-        severity: DiagnosticSeverity::Fatal,
-        macro_id: m,
-        step_id: s,
-        code,
-        message: msg.into(),
-    })
+    out.push(MkDiagnostic::fatal(m, s, code, msg))
 }
 fn delay(p: &MkDelayPayload, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
     match p.mode {
@@ -91,39 +123,9 @@ fn delay(p: &MkDelayPayload, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) 
     }
 }
 pub(crate) fn interpolation_syntax(template: &str) -> Result<(), &'static str> {
-    let mut cursor = 0;
-    while cursor < template.len() {
-        let rest = &template[cursor..];
-        let prefix = if rest.starts_with("$${") {
-            Some((3, "escaped "))
-        } else if rest.starts_with("${") {
-            Some((2, ""))
-        } else {
-            None
-        };
-        if let Some((offset, escaped)) = prefix {
-            let start = cursor + offset;
-            let Some(end) = template[start..].find('}').map(|end| start + end) else {
-                return Err(if escaped.is_empty() {
-                    "unclosed interpolation placeholder"
-                } else {
-                    "unclosed escaped interpolation placeholder"
-                });
-            };
-            if end == start {
-                return Err(if escaped.is_empty() {
-                    "empty interpolation placeholder"
-                } else {
-                    "empty escaped interpolation placeholder"
-                });
-            }
-            cursor = end + 1;
-        } else {
-            cursor += rest.chars().next().unwrap().len_utf8();
-        }
-    }
-    Ok(())
+    super::interpolation::scan_template(template).try_for_each(|part| part.map(|_| ()))
 }
+
 fn image_outputs(p: &MkImagePayload, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
     let slots = [
         ("found", "invalid_image_output_found", &p.outputs.found),
@@ -169,38 +171,61 @@ pub fn validate_document_with_context(
     doc: &MkMacroDocument,
     context: ValidationContext<'_>,
 ) -> Vec<MkDiagnostic> {
-    let asset_root = context.asset_root;
-    let mut out = vec![];
-    let mut mids = HashSet::new();
-    for m in &doc.macros {
-        if m.id == 0 || !mids.insert(m.id) {
-            push(
-                &mut out,
-                m.id,
-                None,
-                "invalid_macro_id",
-                "Macro IDs must be non-zero and unique",
-            )
-        };
-        // Signature identities are never repaired implicitly: callers may already
-        // refer to an ambiguous or deleted definition by its persisted ID.
-        let mut signature_ids = HashSet::new();
-        for id in m
-            .signature
-            .parameters
-            .iter()
-            .map(|p| p.id)
-            .chain(m.signature.outputs.iter().map(|o| o.id))
-        {
-            if id.0 == 0 || !signature_ids.insert(id) {
+    let mut analysis = analyze_document_with_context(doc, context);
+    append_runtime_capability_diagnostics(doc, &mut analysis.diagnostics);
+    analysis.diagnostics
+}
+
+/// Semantic analysis is independent of runtime support. Execution entry points
+/// retain the capability guard until reusable execution is installed.
+pub struct DocumentAnalysis {
+    pub graph: super::call_graph::CallGraph,
+    pub diagnostics: Vec<MkDiagnostic>,
+}
+
+pub fn analyze_document(doc: &MkMacroDocument) -> DocumentAnalysis {
+    analyze_document_with_context(
+        doc,
+        ValidationContext {
+            asset_root: None,
+            monitors: MonitorValidation::NotRequested,
+        },
+    )
+}
+
+pub(crate) fn append_runtime_capability_diagnostics(
+    doc: &MkMacroDocument,
+    out: &mut Vec<MkDiagnostic>,
+) {
+    for owner in &doc.macros {
+        for step in &owner.steps {
+            if matches!(step.action, MkAction::CallMacro(_) | MkAction::Return(_)) {
                 push(
-                    &mut out,
-                    m.id,
-                    None,
-                    "invalid_signature_id",
-                    "Parameter and output IDs must be non-zero and unique within the macro",
+                    out,
+                    owner.id,
+                    Some(step.id),
+                    "unsupported_reusable_action",
+                    "Reusable macro actions cannot execute in this version",
                 );
             }
+        }
+    }
+}
+
+fn analyze_document_with_context(
+    doc: &MkMacroDocument,
+    context: ValidationContext<'_>,
+) -> DocumentAnalysis {
+    let asset_root = context.asset_root;
+    let graph = super::call_graph::CallGraph::build(doc);
+    let mut out = graph.identity_diagnostics().to_vec();
+    out.extend(graph.cycle_diagnostics(super::call_graph::DependencyPolicy::EnabledCalls));
+    let mut invalid_signatures = HashSet::new();
+    for m in &doc.macros {
+        let start = out.len();
+        super::reusable_validation::signature(m.id, &m.signature, &mut out);
+        if out.len() != start {
+            invalid_signatures.insert(m.id);
         }
         let mut ids = HashSet::new();
         let pixel_search_ids: HashSet<u64> = m
@@ -254,15 +279,7 @@ pub fn validate_document_with_context(
                 )
             }
             match &s.action {
-                MkAction::CallMacro(_) | MkAction::Return(_) => {
-                    push(
-                        &mut out,
-                        m.id,
-                        sid,
-                        "unsupported_reusable_action",
-                        "Reusable macro actions cannot execute in this version",
-                    );
-                }
+                MkAction::CallMacro(_) | MkAction::Return(_) => {}
                 MkAction::LauncherCommand(payload) => {
                     if let Some(action) = &payload.legacy_resolved_action {
                         if action.action.trim().is_empty() {
@@ -422,6 +439,17 @@ pub fn validate_document_with_context(
                             "invalid_variable",
                             format!("Variable name is invalid: {e}"),
                         )
+                    }
+                }
+                MkAction::UiReadValue { variable, .. } => {
+                    if let Err(reason) = validate_variable_name(variable) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_variable",
+                            format!("Variable name is invalid: {reason}"),
+                        );
                     }
                 }
                 MkAction::PromptInput(payload) => {
@@ -861,7 +889,6 @@ pub fn validate_document_with_context(
                 )
                 | MkAction::UiInvoke(_)
                 | MkAction::UiSetValue { .. }
-                | MkAction::UiReadValue { .. }
                 | MkAction::UiToggle(_)
                 | MkAction::UiSelect(_)
                 | MkAction::UiFocus(_)
@@ -878,7 +905,560 @@ pub fn validate_document_with_context(
             )
         }
     }
-    out
+    for owner in &doc.macros {
+        super::authoring_analysis::analyze_macro(doc, &graph, owner, &invalid_signatures, &mut out);
+    }
+    DocumentAnalysis {
+        graph,
+        diagnostics: out,
+    }
+}
+
+#[cfg(test)]
+mod reusable_tests {
+    use super::*;
+    use crate::mkmacro::{
+        call_graph::{CallGraph, DependencyPolicy},
+        compiler::compile_program,
+    };
+
+    fn owner(id: u64, actions: Vec<MkAction>) -> MkMacro {
+        MkMacro {
+            id,
+            name: format!("Macro {id}"),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            signature: Default::default(),
+            steps: actions
+                .into_iter()
+                .enumerate()
+                .map(|(index, action)| MkStep {
+                    id: index as u64 + 1,
+                    enabled: true,
+                    breakpoint: false,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: Default::default(),
+                    metadata: Default::default(),
+                    action,
+                })
+                .collect(),
+        }
+    }
+    fn call(id: u64) -> MkAction {
+        MkAction::CallMacro(MkCallMacroPayload {
+            macro_id: id,
+            ..Default::default()
+        })
+    }
+    fn document(macros: Vec<MkMacro>) -> MkMacroDocument {
+        MkMacroDocument {
+            macros,
+            ..Default::default()
+        }
+    }
+    fn diagnostics(doc: &MkMacroDocument) -> Vec<MkDiagnostic> {
+        analyze_document(doc).diagnostics
+    }
+    fn parameter(
+        id: u64,
+        name: &str,
+        kind: MkValueType,
+        default_value: Option<MkValue>,
+    ) -> MkMacroParameter {
+        MkMacroParameter {
+            id: MkSignatureId(id),
+            name: name.into(),
+            value_type: kind,
+            description: String::new(),
+            default_value,
+        }
+    }
+    fn output(id: u64, name: &str, kind: MkValueType) -> MkMacroOutput {
+        MkMacroOutput {
+            id: MkSignatureId(id),
+            name: name.into(),
+            value_type: kind,
+            description: String::new(),
+        }
+    }
+    fn has(
+        ds: &[MkDiagnostic],
+        code: &str,
+        owner: u64,
+        step: Option<u64>,
+        severity: DiagnosticSeverity,
+    ) -> bool {
+        ds.iter().any(|d| {
+            d.code == code
+                && d.macro_id == owner
+                && d.step_id == step
+                && d.severity == severity
+                && d.scope == DiagnosticScope::Macro
+        })
+    }
+
+    #[test]
+    fn signature_names_ids_defaults_and_binding_identity_are_central() {
+        let mut callee = owner(2, vec![]);
+        callee.signature.parameters = vec![
+            parameter(11, "first", MkValueType::Number, Some(MkValue::Number(1.0))),
+            parameter(
+                12,
+                "second",
+                MkValueType::Boolean,
+                Some(MkValue::Boolean(true)),
+            ),
+        ];
+        let mut doc = document(vec![owner(1, vec![call(2)]), callee]);
+        assert!(can_run(&diagnostics(&doc)));
+        if let MkAction::CallMacro(call) = &mut doc.macros[0].steps[0].action {
+            call.arguments.push(MkCallArgumentBinding {
+                parameter_id: MkSignatureId(11),
+                source: MkValueSource::Variable {
+                    name: "mouse.x".into(),
+                },
+            });
+        }
+        doc.macros[1].signature.parameters.reverse();
+        doc.macros[1].signature.parameters[1].name = "renamed".into();
+        assert!(can_run(&diagnostics(&doc)));
+        assert_eq!(
+            compile_program(&doc, 1)
+                .unwrap()
+                .signature(2)
+                .unwrap()
+                .parameter(MkSignatureId(11))
+                .unwrap()
+                .name,
+            "renamed"
+        );
+        doc.macros[1]
+            .signature
+            .parameters
+            .retain(|p| p.id != MkSignatureId(11));
+        assert!(has(
+            &diagnostics(&doc),
+            "dangling_call_parameter",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
+        assert!(
+            matches!(&doc.macros[0].steps[0].action, MkAction::CallMacro(call) if call.arguments[0].parameter_id == MkSignatureId(11))
+        );
+        doc.macros[1].signature.parameters.push(parameter(
+            12,
+            "second",
+            MkValueType::Number,
+            Some(MkValue::Null),
+        ));
+        doc.macros[1]
+            .signature
+            .outputs
+            .push(output(0, "macro.id", MkValueType::String));
+        let ds = diagnostics(&doc);
+        for code in [
+            "invalid_signature_id",
+            "duplicate_signature_name",
+            "invalid_signature_name",
+            "invalid_parameter_default",
+        ] {
+            assert!(
+                has(&ds, code, 2, None, DiagnosticSeverity::Fatal),
+                "{code}: {ds:?}"
+            );
+        }
+        assert!(has(
+            &ds,
+            "invalid_call_signature",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
+        assert!(!ds.iter().any(|d| d.code == "binding_type_mismatch"));
+    }
+
+    #[test]
+    fn call_reports_every_invalid_binding_with_caller_and_target_context() {
+        let mut callee = owner(2, vec![]);
+        callee.signature.parameters = vec![
+            parameter(10, "required", MkValueType::Number, None),
+            parameter(11, "other", MkValueType::Boolean, None),
+        ];
+        callee.signature.outputs = vec![output(20, "answer", MkValueType::String)];
+        let call = MkCallMacroPayload {
+            macro_id: 2,
+            arguments: vec![
+                MkCallArgumentBinding {
+                    parameter_id: MkSignatureId(10),
+                    source: MkValueSource::Literal(MkValue::String("wrong".into())),
+                },
+                MkCallArgumentBinding {
+                    parameter_id: MkSignatureId(10),
+                    source: MkValueSource::Variable {
+                        name: String::new(),
+                    },
+                },
+                MkCallArgumentBinding {
+                    parameter_id: MkSignatureId(99),
+                    source: MkValueSource::Literal(MkValue::Number(1.0)),
+                },
+            ],
+            outputs: vec![
+                MkCallOutputBinding {
+                    output_id: MkSignatureId(20),
+                    caller_variable: "mouse.x".into(),
+                },
+                MkCallOutputBinding {
+                    output_id: MkSignatureId(20),
+                    caller_variable: "same".into(),
+                },
+                MkCallOutputBinding {
+                    output_id: MkSignatureId(99),
+                    caller_variable: "same".into(),
+                },
+            ],
+        };
+        let doc = document(vec![owner(1, vec![MkAction::CallMacro(call)]), callee]);
+        let ds = diagnostics(&doc);
+        for code in [
+            "duplicate_call_argument",
+            "dangling_call_parameter",
+            "missing_call_argument",
+            "binding_type_mismatch",
+            "invalid_binding_reference",
+            "duplicate_call_output",
+            "dangling_call_output",
+            "invalid_call_output_variable",
+            "duplicate_call_output_variable",
+        ] {
+            assert!(
+                has(&ds, code, 1, Some(1), DiagnosticSeverity::Fatal),
+                "{code}: {ds:?}"
+            );
+            assert!(
+                ds.iter()
+                    .filter(|d| d.code == code)
+                    .all(|d| d.target_macro_id == Some(2))
+            );
+        }
+    }
+
+    #[test]
+    fn graph_is_iterative_deterministic_and_distinguishes_authored_edges() {
+        let mut doc = document(vec![
+            owner(1, vec![call(2)]),
+            owner(2, vec![call(3)]),
+            owner(3, vec![call(1)]),
+        ]);
+        let graph = CallGraph::build(&doc);
+        assert_eq!(graph.closure(1, DependencyPolicy::EnabledCalls), [1, 2, 3]);
+        let ds = diagnostics(&doc);
+        let cycle = ds.iter().find(|d| d.code == "call_cycle").unwrap();
+        assert_eq!(cycle.cycle_path, [1, 2, 3, 1]);
+        assert_eq!(
+            (cycle.macro_id, cycle.step_id, cycle.target_macro_id),
+            (3, Some(1), Some(1))
+        );
+        assert!(
+            cycle
+                .message
+                .contains("Macro 1 (#1) -> Macro 2 (#2) -> Macro 3 (#3) -> Macro 1 (#1)")
+        );
+        doc.macros[1].steps[0].enabled = false;
+        let graph = CallGraph::build(&doc);
+        assert_eq!(graph.closure(1, DependencyPolicy::EnabledCalls), [1, 2]);
+        assert_eq!(
+            graph.closure(1, DependencyPolicy::AllAuthoredCalls),
+            [1, 2, 3]
+        );
+        assert!(
+            graph
+                .cycle_diagnostics(DependencyPolicy::EnabledCalls)
+                .is_empty()
+        );
+        assert_eq!(
+            graph
+                .cycle_diagnostics(DependencyPolicy::AllAuthoredCalls)
+                .len(),
+            1
+        );
+        let direct = document(vec![owner(1, vec![call(1)])]);
+        assert_eq!(
+            diagnostics(&direct)
+                .iter()
+                .find(|d| d.code == "call_cycle")
+                .unwrap()
+                .cycle_path,
+            [1, 1]
+        );
+        // A deep authored chain exercises bounded Rust stack usage.
+        let deep = document(
+            (1..=4096)
+                .map(|id| {
+                    owner(
+                        id,
+                        if id == 4096 {
+                            vec![]
+                        } else {
+                            vec![call(id + 1)]
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let graph = CallGraph::build(&deep);
+        assert_eq!(graph.closure(1, DependencyPolicy::EnabledCalls).len(), 4096);
+        assert!(
+            graph
+                .cycle_diagnostics(DependencyPolicy::EnabledCalls)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_disabled_and_ambiguous_dependencies_are_never_retargeted() {
+        let mut doc = document(vec![owner(1, vec![call(2)])]);
+        let ds = diagnostics(&doc);
+        assert!(has(
+            &ds,
+            "missing_call_target",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
+        assert_eq!(
+            ds.iter()
+                .find(|d| d.code == "missing_call_target")
+                .unwrap()
+                .target_macro_id,
+            Some(2)
+        );
+        doc.macros.push(owner(2, vec![]));
+        doc.macros[1].enabled = false;
+        assert!(has(
+            &diagnostics(&doc),
+            "disabled_call_target",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
+        doc.macros[1].enabled = true;
+        doc.macros[1].signature.parameters = vec![
+            parameter(1, "one", MkValueType::String, None),
+            parameter(1, "two", MkValueType::Number, None),
+        ];
+        doc.macros[0].steps[0].enabled = false;
+        assert!(has(
+            &diagnostics(&doc),
+            "invalid_call_signature",
+            1,
+            Some(1),
+            DiagnosticSeverity::Fatal
+        ));
+        assert!(compile_program(&doc, 1).is_err());
+    }
+
+    #[test]
+    fn return_sets_are_complete_typed_and_fallthrough_is_rejected() {
+        let mut root = owner(
+            1,
+            vec![MkAction::Return(MkReturnPayload {
+                outputs: vec![
+                    MkReturnValueBinding {
+                        output_id: MkSignatureId(1),
+                        source: MkValueSource::Literal(MkValue::Boolean(true)),
+                    },
+                    MkReturnValueBinding {
+                        output_id: MkSignatureId(1),
+                        source: MkValueSource::Literal(MkValue::Number(2.0)),
+                    },
+                    MkReturnValueBinding {
+                        output_id: MkSignatureId(99),
+                        source: MkValueSource::Literal(MkValue::Number(2.0)),
+                    },
+                ],
+            })],
+        );
+        root.signature.outputs = vec![
+            output(1, "value", MkValueType::Number),
+            output(2, "other", MkValueType::String),
+        ];
+        let mut doc = document(vec![root]);
+        let ds = diagnostics(&doc);
+        for code in [
+            "duplicate_return_output",
+            "dangling_return_output",
+            "missing_return_output",
+            "binding_type_mismatch",
+        ] {
+            assert!(
+                has(&ds, code, 1, Some(1), DiagnosticSeverity::Fatal),
+                "{code}: {ds:?}"
+            );
+        }
+        doc.macros[0].steps[0].action = MkAction::Return(MkReturnPayload {
+            outputs: vec![
+                MkReturnValueBinding {
+                    output_id: MkSignatureId(1),
+                    source: MkValueSource::Literal(MkValue::Number(2.0)),
+                },
+                MkReturnValueBinding {
+                    output_id: MkSignatureId(2),
+                    source: MkValueSource::Literal(MkValue::String("ok".into())),
+                },
+            ],
+        });
+        assert!(can_run(&diagnostics(&doc)));
+        doc.macros[0].steps[0].on_error = MkErrorPolicy::Continue;
+        assert!(can_run(&diagnostics(&doc)));
+        let fallback = doc.macros[0].steps[0].clone();
+        if let MkAction::Return(ret) = &mut doc.macros[0].steps[0].action {
+            ret.outputs[0].source = MkValueSource::Variable {
+                name: "unresolved".into(),
+            };
+        }
+        assert!(has(
+            &diagnostics(&doc),
+            "output_return_fallthrough",
+            1,
+            None,
+            DiagnosticSeverity::Fatal
+        ));
+        doc.macros[0].steps.push(MkStep { id: 2, ..fallback });
+        assert!(can_run(&diagnostics(&doc)));
+        doc.macros[0].steps.pop();
+        doc.macros[0].steps[0].on_error = MkErrorPolicy::Stop;
+        doc.macros[0].steps[0].enabled = false;
+        assert!(has(
+            &diagnostics(&doc),
+            "output_return_fallthrough",
+            1,
+            None,
+            DiagnosticSeverity::Fatal
+        ));
+    }
+
+    #[test]
+    fn static_reads_follow_runtime_fields_and_warnings_do_not_block() {
+        let mut root = owner(
+            1,
+            vec![
+                MkAction::SetVariable {
+                    name: "literal".into(),
+                    value: MkValue::String("${not_a_read}".into()),
+                },
+                MkAction::Text(MkTextPayload {
+                    text: "$${escaped} ${missing} ${挨拶}".into(),
+                    mode: MkTextMode::Type,
+                }),
+                MkAction::Return(Default::default()),
+                MkAction::Text(MkTextPayload {
+                    text: "${unreachable_read}".into(),
+                    mode: MkTextMode::Type,
+                }),
+            ],
+        );
+        root.steps[0].metadata.label = "${label}".into();
+        root.steps[1].metadata.label = "${label}".into();
+        root.steps[0].metadata.comment = "${comment}".into();
+        let ds = diagnostics(&document(vec![root]));
+        assert!(can_run(&ds));
+        assert!(has(
+            &ds,
+            "unused_local",
+            1,
+            Some(1),
+            DiagnosticSeverity::Warning
+        ));
+        assert!(has(
+            &ds,
+            "duplicate_label",
+            1,
+            Some(2),
+            DiagnosticSeverity::Warning
+        ));
+        assert!(has(
+            &ds,
+            "unreachable_step",
+            1,
+            Some(4),
+            DiagnosticSeverity::Warning
+        ));
+        let reads: Vec<_> = ds
+            .iter()
+            .filter(|d| d.code == "read_before_definition")
+            .collect();
+        assert_eq!(reads.len(), 2);
+        assert!(reads.iter().all(|d| d.step_id == Some(2)));
+        assert!(reads.iter().any(|d| d.message.contains("挨拶")));
+    }
+
+    #[test]
+    fn branches_loops_and_disabled_openers_keep_conservative_reachability() {
+        let condition = MkCondition::All { conditions: vec![] };
+        let delay = || MkAction::Delay(Default::default());
+        for control in [MkAction::Break, MkAction::Continue] {
+            let root = owner(
+                1,
+                vec![
+                    MkAction::RepeatStart { count: 2 },
+                    control,
+                    delay(),
+                    MkAction::RepeatEnd,
+                    delay(),
+                ],
+            );
+            let ds = diagnostics(&document(vec![root]));
+            assert!(has(
+                &ds,
+                "unreachable_step",
+                1,
+                Some(3),
+                DiagnosticSeverity::Warning
+            ));
+            assert!(!has(
+                &ds,
+                "unreachable_step",
+                1,
+                Some(5),
+                DiagnosticSeverity::Warning
+            ));
+        }
+        let mut root = owner(
+            1,
+            vec![
+                MkAction::If(condition),
+                MkAction::Return(Default::default()),
+                MkAction::EndIf,
+                delay(),
+            ],
+        );
+        assert!(
+            !diagnostics(&document(vec![root.clone()]))
+                .iter()
+                .any(|d| d.code == "unreachable_step")
+        );
+        root.steps[0].enabled = false;
+        assert!(has(
+            &diagnostics(&document(vec![root.clone()])),
+            "unreachable_step",
+            1,
+            Some(4),
+            DiagnosticSeverity::Warning
+        ));
+        root.steps[1].enabled = false;
+        assert!(
+            !diagnostics(&document(vec![root]))
+                .iter()
+                .any(|d| d.code == "unreachable_step")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1809,13 +2389,15 @@ mod notification_action_tests {
                 .any(|d| d.code == "invalid_notify_description_interpolation"
                     && d.message.contains("notify.description"))
         );
-        assert!(
-            diagnostics(MkAction::Notify(MkNotifyPayload {
-                title: "Done ${job}".into(),
-                description: "Result $${literal}".into(),
-                ..MkNotifyPayload::default()
-            }))
-            .is_empty()
+        let valid = diagnostics(MkAction::Notify(MkNotifyPayload {
+            title: "Done ${job}".into(),
+            description: "Result $${literal}".into(),
+            ..MkNotifyPayload::default()
+        }));
+        assert!(can_run(&valid));
+        assert_eq!(
+            valid.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["read_before_definition"]
         );
     }
 }
@@ -1880,13 +2462,17 @@ mod launcher_command_action_tests {
             "note open ${note_name}",
             "unknown-plugin command available only during playback",
         ] {
-            assert!(
-                diagnostics(MkLauncherCommandPayload {
-                    query: query.into(),
-                    legacy_resolved_action: None,
-                })
-                .is_empty(),
-                "{query:?}"
+            let found = diagnostics(MkLauncherCommandPayload {
+                query: query.into(),
+                legacy_resolved_action: None,
+            });
+            assert!(can_run(&found), "{query:?}: {found:?}");
+            assert_eq!(
+                found
+                    .iter()
+                    .filter(|d| d.code == "read_before_definition")
+                    .count(),
+                usize::from(query.contains("${note_name}"))
             );
         }
     }

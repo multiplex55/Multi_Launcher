@@ -1,6 +1,8 @@
 //! Versioned model, validation, compilation, and persistence for the new macro system.
 pub mod asset_authoring;
+pub mod authoring_analysis;
 pub mod authoring_fields;
+pub mod call_graph;
 pub mod compiler;
 pub mod coordinates;
 pub mod editor_mutation;
@@ -19,6 +21,7 @@ pub mod recorder_hooks;
 pub mod recorder_hotkeys;
 pub mod recorder_runtime;
 pub mod recorder_windows;
+mod reusable_validation;
 pub mod runtime;
 pub mod screen;
 pub mod store;

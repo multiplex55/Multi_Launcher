@@ -26,8 +26,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | M01 | Persisted model and schema 12 | baseline | complete | 89fdb753; construction gates passed, behavioral execution tracked in M13/M14 |
 | M02 | Shared identity/mutation operations and analysis invalidation | M01 | complete | 875466b8; construction gates passed; behavioral execution M13 |
 | M03 | Clipboard, drag/drop, folding and step annotations | M02 | complete | 401933ca; construction gates passed; behavioral execution M13 |
-| M04 | Typed field visitors and navigation/search/replace/outline | M03 | complete | construction gates passed; commit being recorded; behavioral execution M13 |
-| M05 | Central reusable/static validation and program compilation | M01, M04 | pending | |
+| M04 | Typed field visitors and navigation/search/replace/outline | M03 | complete | cd9969db; construction gates passed; behavioral execution M13 |
+| M05 | Central reusable/static validation and program compilation | M01, M04 | complete | construction gates passed; behavioral execution M13/M14; commit recorded next milestone |
 | M06 | Executor frame ownership with existing behavior parity | M05 | pending | |
 | M07 | Nested calls, typed invocation and Return execution | M06 | pending | |
 | M08 | Frame-aware debug events and Runtime Inspector | M07 | pending | |
@@ -39,7 +39,7 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | M14 | Runtime/debug/invocation regression coverage and focused verification | M13 | pending | |
 | M15 | Independent review, remediation and authoritative full verification | M14 | pending | |
 
-## Verified current architecture and required migrations
+## Verified baseline architecture and required migrations
 
 - `src/mkmacro/model.rs`: schema 11; `MkMacro` and `MkStep` have no signature/metadata grouping. Values already use tagged serde in `variables.rs`; `Null` remains runtime-only. Model action enum matches are widespread in executor, validation, recorder, action catalog/editor and tests.
 - `store.rs`: `read_document` applies migrations through `migrate_v10_to_v11`, then serde defaults, version update and `repair_ids`; `probe_document` is a separate read-only health path. `repair_ids` enforces document-local macro IDs and **per-macro** step uniqueness; folder IDs form a separate namespace. Its allocation scans maxima and handles overflow. It currently repairs duplicate IDs without graph context, which is unsafe to reuse blindly for new signature bindings.
@@ -230,6 +230,10 @@ Diagnostic provenance: zero/duplicate macro IDs must form explicit document-glob
 
 **Late tests / migrations:** M13 spec 47 in existing store target/module tests, unchanged v10/11 asset migration tests, atomic failure injection; no new binary/dependency. Risk: save repairs IDs after package remap (avoid double remapping), lock recursion, store save failure after asset publication, oversized base64 allocation, asset paths in dormant nested fields.
 
+**Read-only M11 handoff after M04:** store `Inner::transaction` serializes save/reload/publication and `asset_authoring` serializes PNG writes; batch import belongs inside the store with documented transaction-then-asset lock order and private lock-held helpers (public save/write calls would re-lock). `publish` computes asset-aware diagnostics before replacing snapshot, so publish assets first and snapshot last; existing watcher remains sufficient. Validate original PNG bytes once through store containment/decode helpers; `validate_image_ref` returns decoded pixels, while `image_refs()` enumerates unrelated filesystem assets and is not dependency discovery. Reuse M04 Image-kind field traversal for exact discovery/remapping. Use existing case-insensitive migration naming and byte-identical reuse logic, but retain ownership/rollback through document persistence: migration's current rollback ends too early. Add stale document/disk/asset checks under locks, verify no post-remap ID repair changes, and an injected fallible checkpoint after earlier asset publication/during document persistence. Existing `before_publication` hook is after persistence and cannot simulate those failures. Preserve watcher transaction, root-containment, PNG-limit, migration rollback and atomic-file failure tests. Templates need their own catalog/probe/reset entry in M12; embedded assets need not join the existing document/assets recovery group.
+
+Parent verified the locked existing `tempfile` 3.21.0 implementation provides `NamedTempFile::persist_noclobber`; Windows publication omits `MOVEFILE_REPLACE_EXISTING` for this path. This can supply staged create-only publication without a dependency or new raw Windows API. Export/template closure must include every authored Call target, including disabled rows, because import remaps every persisted relationship; keep that traversal policy distinct from executable enabled-edge closure and reject cycles in exported authored graphs.
+
 ## M12 — Libraries, user templates and help
 
 **Goal / spec:** 32, 36 and documentation phase 18. Suggested commit `feat(mkmacro): add macro library and template workflows`.
@@ -243,6 +247,8 @@ Diagnostic provenance: zero/duplicate macro IDs must form explicit document-glob
 **Construction gate:** formatting, `cargo check`, review help vs actual UI shortcut semantics and persistence catalog entry.
 
 **Late tests / migrations:** M13 spec 48, package UI preparation/cancel models, template storage/probe recovery tests, existing macro duplication clears-only-hotkey invariant. Risk: template save uses unsaved root but persisted stale dependency, toolbar operations silently overwrite dirty draft, path rooted to wrong data directory.
+
+Parent documentation inventory after M04: no existing MkMacro-specific Markdown guide or static section in `help_window.rs` was found. General help currently renders plugin descriptions/commands; `plugins/mkmacro.rs` exposes command descriptions, and the dialog toolbar supplies action tooltips. Add focused user help at the actual chosen UI/documentation owner and link it from README rather than assuming an existing detailed MkMacro guide.
 
 ## M13 — Model/editor/validation/package coverage
 
@@ -263,7 +269,7 @@ Diagnostic provenance: zero/duplicate macro IDs must form explicit document-glob
 **Acceptance/gates:** `cargo fmt --all --check`, `cargo check`, `cargo check --tests` if not already proven since API changes, `git diff --check`; then focused commands using actual discovered names:
 
 ```text
-cargo nextest run --lib -E 'test(mkmacro::model::) | test(mkmacro::variables::) | test(mkmacro::structure::) | test(mkmacro::editor_mutation::) | test(mkmacro::validation::) | test(mkmacro::compiler::)'
+cargo nextest run --lib -E 'test(mkmacro::model::) | test(mkmacro::variables::) | test(mkmacro::interpolation::) | test(mkmacro::structure::) | test(mkmacro::editor_mutation::) | test(mkmacro::authoring_fields::) | test(mkmacro::authoring_analysis::) | test(mkmacro::call_graph::) | test(mkmacro::reusable_validation::) | test(mkmacro::validation::) | test(mkmacro::compiler::)'
 cargo nextest run --lib -E 'test(gui::mkmacro_dialog::) | test(mkmacro::store::) | test(mkmacro::package::) | test(mkmacro::templates::)'
 cargo nextest run --test mkmacro_authoring --test mkmacro_compiler --test mkmacro_store
 ```
@@ -385,3 +391,13 @@ Construction/targeted/full verification and review findings are appended by the 
 - Implementer final `cargo check --tests` passed (17.52 seconds), `cargo check` passed (7.97 seconds), `cargo fmt --all --check` passed, and `git diff --check` passed. Parent inspected final domain/visitor/payload/UI/focus/cache/lifecycle diffs and independently ran `git diff --check` successfully.
 - Twelve focused tests added: seven typed-field/replacement tests, two navigation/cache/outline tests, and three search/replacement-apply/keyboard tests. Behavioral execution remains deferred to M13; native GUI smoke remains pending integration. Parent review found no unresolved substantive M04 defect.
 - No new dependency, worker, polling loop, filesystem scan or ordinary-frame graph rebuild. Call/Return capability gates remain intentionally in place until M07.
+- Commit: `cd9969db feat(mkmacro): add searchable outline and safe replacement`. Working tree clean immediately after commit; M05 started after commit success.
+
+### M05 construction verification
+
+- Added central signature, stable-ID Call/Return binding/type validation and explicit document-global identity diagnostics. Deterministic iterative dependency analysis separates enabled runtime edges from all authored package edges; closure admission retains caller-owned missing/disabled/ambiguous target failures while unrelated invalid macros remain visible without blocking a valid root.
+- Extracted immutable compiled programs with O(1) plan/signature/name lookup and validated lowering that preserves individual macro instructions, jumps, playback and breakpoints. Existing singleton compile and temporary reusable runtime capability guards remain until M07.
+- Moved variable catalog facts/tests into shared domain authoring analysis, including real parameter sources, Call output types, Unset/disabled/UI-read behavior and conservative control-flow warnings. Shared streaming interpolation scanner preserves exact-key Unicode reads, escaped/nonrecursive syntax and left-to-right failure order. Safe literal Returns terminate under Continue; potentially failing sources retain fallthrough.
+- Added revision-cached root admission and modal-safe diagnostic navigation. Parent reviewed domain/compiler/cache/UI changes and resolved eager-parser error precedence, ambiguous signature inference, Continue-Return flow and action-editor navigation ownership findings. Row markers prioritize Fatal over warnings. No unresolved substantive M05 finding.
+- Implementer final `cargo check --tests` passed (15.76 seconds), `cargo check` passed (7.53 seconds), `cargo fmt --all --check` passed, and `git diff --check` passed. Parent independently inspected the final diff and ran `git diff --check` successfully.
+- Fourteen focused tests added for contracts/graph/program/flow/catalog/cache/navigation/interpolation, with existing catalog tests and legitimate warning expectations migrated. Behavioral execution explicitly deferred to M13/M14; M13 includes the new shared-domain test module. No production dependency, worker or polling added.

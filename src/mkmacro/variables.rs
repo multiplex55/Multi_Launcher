@@ -37,6 +37,15 @@ impl MkValueType {
     pub fn accepts(self, value: &MkValue) -> bool {
         value.value_type() == Some(self)
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::String => "String",
+            Self::Number => "Number",
+            Self::Boolean => "Boolean",
+            Self::Point => "Point",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +88,31 @@ pub const BUILT_INS: &[&str] = &[
 ];
 pub fn is_builtin(name: &str) -> bool {
     BUILT_INS.contains(&name)
+}
+/// Reads resolve exact runtime keys, including built-ins and historical Unicode
+/// names. Assignment identifier restrictions must not narrow that contract.
+pub fn validate_variable_reference(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        Err("variable reference cannot be empty")
+    } else {
+        Ok(())
+    }
+}
+
+pub fn builtin_type(name: &str) -> Option<MkValueType> {
+    if !is_builtin(name) {
+        return None;
+    }
+    Some(match name {
+        "active_window.title" | "active_window.process" | "macro.name" => MkValueType::String,
+        "last_action_success"
+        | "last_window_result"
+        | "last_image_found"
+        | "last_pixel_found"
+        | "last_image_result"
+        | "last_pixel_result" => MkValueType::Boolean,
+        _ => MkValueType::Number,
+    })
 }
 pub fn validate_variable_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
