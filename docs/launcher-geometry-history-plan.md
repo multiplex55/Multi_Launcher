@@ -27,8 +27,8 @@ succeeded.
 | 1. Preserve launcher geometry during restore | `complete` | Milestone 0 complete | `8c8bc31d` |
 | 2. Add launcher query-history navigation | `complete` | Milestone 1 complete | `72ebbb77` |
 | Integration verification | `complete` | Milestones 1 and 2 complete | Not applicable |
-| Independent review and remediation | `in_progress` | Integration verification passes | Pending if remediation is required |
-| Final verification | `pending` | Review has no unresolved substantive findings | Not applicable |
+| Independent review and remediation | `complete` | Integration verification passes | `ad64f0e5` |
+| Final verification | `in_progress` | Review has no unresolved substantive findings | Not applicable |
 
 ## Baseline architecture and inventory
 
@@ -511,7 +511,7 @@ Begins only after Milestones 1 and 2 are complete and committed.
 
 ## Independent review and remediation gate
 
-**Status:** `in_progress`
+**Status:** `complete`
 
 After integration verification passes, a high-reasoning reviewer who did not
 perform the primary implementation must inspect the original request, this
@@ -531,17 +531,17 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
 
 **Acceptance criteria:**
 
-- [ ] Reviewer returns concrete findings ordered by severity.
-- [ ] No unresolved substantive defect remains.
-- [ ] Valid findings are remediated by an implementation agent, verified with
+- [x] Reviewer returns concrete findings ordered by severity.
+- [x] No unresolved substantive defect remains.
+- [x] Valid findings are remediated by an implementation agent, verified with
   affected targeted tests, and committed separately when materially distinct.
-- [ ] Review is repeated when remediation warrants it.
+- [x] Review is repeated when remediation warrants it.
 - [ ] Full integration verification is rerun after behavior/shared-code
   remediation.
 
 **Actual review/remediation:**
 
-- Reviewer/task: independent review completed; remediation remains in progress.
+- Reviewer/task: independent review and post-remediation re-review completed.
 - Findings: event routing combined frame-level modifiers with aggregate
   `key_pressed` state, which could misclassify batched key events; routing tests
   did not exercise event consumption; and the activation-reset test changed the
@@ -554,14 +554,16 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
   exercise this production helper with differing frame/event modifiers and
   verify consumption. The activation test retains the same recalled query so a
   fresh post-activation snapshot depends on the central reset.
-- Remediation commits: pending.
+- Remediation commit: `ad64f0e5 test(gui): harden query history event routing`.
 - Targeted reruns: `cargo nextest run query_history` passed; 13 tests run, 13
   passed, 3,282 skipped.
+- Re-review: all findings resolved; no new substantive correctness,
+  compatibility, architecture, or performance regression found.
 - Full-suite rerun: pending because remediation changes shared GUI routing.
 
 ## Final verification gate
 
-**Status:** `pending`
+**Status:** `in_progress`
 
 **Acceptance criteria:**
 
@@ -593,7 +595,7 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
 | 0. Execution ledger | `bef14309` | `docs(gui): plan launcher geometry and history navigation` | Ledger inspection and whitespace checks passed |
 | 1. Geometry-preserving restore | `8c8bc31d` | `fix(gui): preserve launcher geometry during restore` | Focused geometry, visibility, lifecycle, format, check, and diff checks passed |
 | 2. Query-history navigation | `72ebbb77` | `feat(gui): add launcher query history navigation` | Navigator, routing, history, autocomplete, focus, debounce, format, check, and diff checks passed |
-| Review remediation, if needed | Not applicable yet | Pending | Pending |
+| Review remediation | `ad64f0e5` | `test(gui): harden query history event routing` | 13 history/routing tests plus format, check, and diff checks passed; independent re-review found no remaining substantive issue |
 
 ## Manual smoke-check record
 
