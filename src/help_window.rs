@@ -31,6 +31,8 @@ impl HelpWindow {
                     if let Some(hk) = &app.help_hotkey_str {
                         ui.label(format!("Help overlay: {hk}"));
                     }
+                    ui.label("Older query: Ctrl+Up");
+                    ui.label("Newer query / restore draft: Ctrl+Down");
                     ui.separator();
                     ui.label(egui::RichText::new("Dashboard").strong());
                     ui.label(

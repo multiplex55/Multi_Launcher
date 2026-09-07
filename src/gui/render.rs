@@ -24,6 +24,90 @@ impl LauncherApp {
         query_has_focus
     }
 
+    fn consume_query_history_shortcut(
+        query_has_focus: bool,
+        input: &mut egui::InputState,
+    ) -> Option<QueryHistoryDirection> {
+        if !query_has_focus {
+            return None;
+        }
+
+        let matching_event = |key| {
+            input.events.iter().position(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: event_key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if *event_key == key
+                        && modifiers.ctrl
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.mac_cmd
+                )
+            })
+        };
+        let (event_index, direction) = if let Some(index) = matching_event(egui::Key::ArrowUp) {
+            (index, QueryHistoryDirection::Older)
+        } else if let Some(index) = matching_event(egui::Key::ArrowDown) {
+            (index, QueryHistoryDirection::Newer)
+        } else {
+            return None;
+        };
+
+        // Remove the exact event whose own modifier snapshot matched. Using
+        // `consume_key` here would logically match and consume shifted arrows.
+        input.events.remove(event_index);
+        Some(direction)
+    }
+
+    fn handle_query_text_changed(&mut self) {
+        self.autocomplete_index = 0;
+        if Self::is_note_search_query(&self.query) {
+            self.last_note_search_change = Some(Instant::now());
+        } else {
+            self.last_note_search_change = None;
+            self.search();
+        }
+    }
+
+    fn apply_history_query(&mut self, query: String) {
+        self.query = query;
+        self.selected = None;
+        self.suggestions.clear();
+        self.handle_query_text_changed();
+        self.move_cursor_end = true;
+        self.focus_input();
+    }
+
+    fn navigate_query_history_with(
+        &mut self,
+        direction: QueryHistoryDirection,
+        snapshot: impl FnOnce() -> Vec<String>,
+    ) {
+        let next_query = match direction {
+            QueryHistoryDirection::Older => self.query_history.older(&self.query, snapshot),
+            QueryHistoryDirection::Newer => self.query_history.newer(&self.query),
+        };
+        if let Some(query) = next_query {
+            self.apply_history_query(query);
+        }
+    }
+
+    fn navigate_query_history(&mut self, direction: QueryHistoryDirection) {
+        self.navigate_query_history_with(direction, || {
+            history::with_history(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| entry.query.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        });
+    }
+
     pub(crate) fn launcher_enter_activation_enabled(
         query_has_focus: bool,
         file_search_open: bool,
@@ -1014,6 +1098,7 @@ impl eframe::App for LauncherApp {
             tracing::debug!("Restoring window on restore_flag");
             apply_visibility(
                 true,
+                VisiblePlacementPolicy::PreserveCurrentGeometry,
                 ctx,
                 self.offscreen_pos,
                 self.follow_mouse,
@@ -1033,6 +1118,7 @@ impl eframe::App for LauncherApp {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
             apply_visibility(
                 should_be_visible,
+                VisiblePlacementPolicy::ApplyConfiguredPlacement,
                 ctx,
                 self.offscreen_pos,
                 self.follow_mouse,
@@ -1175,14 +1261,16 @@ impl eframe::App for LauncherApp {
                 }
                 let query_has_focus = query_response.has_focus();
 
+                self.query_history.synchronize(&self.query);
                 if query_response.changed() {
-                    self.autocomplete_index = 0;
-                    if Self::is_note_search_query(&self.query) {
-                        self.last_note_search_change = Some(Instant::now());
-                    } else {
-                        self.last_note_search_change = None;
-                        self.search();
-                    }
+                    self.handle_query_text_changed();
+                }
+
+                let history_direction = ctx.input_mut(|input| {
+                    Self::consume_query_history_shortcut(query_has_focus, input)
+                });
+                if let Some(direction) = history_direction {
+                    self.navigate_query_history(direction);
                 }
 
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
@@ -1211,7 +1299,9 @@ impl eframe::App for LauncherApp {
                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
                         }
 
-                if Self::launcher_query_keyboard_enabled(query_has_focus) {
+                if history_direction.is_none()
+                    && Self::launcher_query_keyboard_enabled(query_has_focus)
+                {
                     for key in [
                         egui::Key::ArrowDown,
                         egui::Key::ArrowUp,
@@ -1833,6 +1923,201 @@ mod tests {
                 args: None,
             })
             .collect()
+    }
+
+    fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn query_history_shortcuts_use_event_modifiers_and_require_exact_ctrl_only_focus() {
+        let route = |query_has_focus, frame_modifiers, events| {
+            let ctx = egui::Context::default();
+            ctx.begin_frame(egui::RawInput {
+                modifiers: frame_modifiers,
+                events,
+                ..Default::default()
+            });
+            let direction = ctx.input_mut(|input| {
+                LauncherApp::consume_query_history_shortcut(query_has_focus, input)
+            });
+            let arrows_remain = ctx.input(|input| {
+                input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowDown)
+            });
+            let _ = ctx.end_frame();
+            (direction, arrows_remain)
+        };
+
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::SHIFT,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ),
+            (Some(QueryHistoryDirection::Older), false)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::NONE,
+                vec![key_press(egui::Key::ArrowDown, egui::Modifiers::CTRL)],
+            ),
+            (Some(QueryHistoryDirection::Newer), false)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::CTRL,
+                vec![key_press(
+                    egui::Key::ArrowUp,
+                    egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                )],
+            ),
+            (None, true)
+        );
+        assert_eq!(
+            route(
+                false,
+                egui::Modifiers::CTRL,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ),
+            (None, true)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::CTRL,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            ),
+            (None, true)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::NONE,
+                vec![key_press(
+                    egui::Key::ArrowUp,
+                    egui::Modifiers {
+                        command: true,
+                        ..egui::Modifiers::CTRL
+                    },
+                )],
+            ),
+            (Some(QueryHistoryDirection::Older), false)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::CTRL,
+                vec![
+                    key_press(
+                        egui::Key::ArrowUp,
+                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                    ),
+                    key_press(egui::Key::ArrowDown, egui::Modifiers::CTRL),
+                ],
+            ),
+            (Some(QueryHistoryDirection::Newer), true)
+        );
+    }
+
+    #[test]
+    fn consumed_query_history_arrow_cannot_reach_result_navigation() {
+        let ctx = egui::Context::default();
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ..Default::default()
+        });
+        let mut app = new_app(&ctx);
+        app.results = two_results();
+        app.selected = Some(1);
+
+        assert_eq!(
+            ctx.input_mut(|input| LauncherApp::consume_query_history_shortcut(true, input)),
+            Some(QueryHistoryDirection::Older)
+        );
+        if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+            app.handle_key(egui::Key::ArrowUp);
+        }
+
+        assert_eq!(app.selected, Some(1));
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn query_history_recall_reuses_search_selection_autocomplete_focus_and_cursor_paths() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "draft".into();
+        app.results = two_results();
+        app.selected = Some(1);
+        app.suggestions = vec!["stale suggestion".into()];
+        app.autocomplete_index = 3;
+
+        app.navigate_query_history_with(QueryHistoryDirection::Older, || {
+            vec!["Recalled Query".into()]
+        });
+
+        assert_eq!(app.query, "Recalled Query");
+        assert_eq!(app.selected, None);
+        assert_eq!(app.autocomplete_index, 0);
+        assert!(app.suggestions.is_empty());
+        assert_eq!(app.last_search_query, "Recalled Query");
+        assert!(app.last_results_valid);
+        assert!(app.focus_query);
+        assert!(app.move_cursor_end);
+    }
+
+    #[test]
+    fn query_history_note_search_recall_uses_existing_debounce() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "draft".into();
+        app.last_search_query = "before recall".into();
+        app.last_results_valid = true;
+
+        app.navigate_query_history_with(QueryHistoryDirection::Older, || {
+            vec!["note search project road map".into()]
+        });
+
+        assert_eq!(app.query, "note search project road map");
+        assert_eq!(app.last_search_query, "before recall");
+        assert!(app.last_note_search_change.is_some());
+        assert!(app.focus_query);
+        assert!(app.move_cursor_end);
+    }
+
+    #[test]
+    fn query_history_action_activation_resets_snapshot_before_next_traversal() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "draft".into();
+        app.navigate_query_history_with(QueryHistoryDirection::Older, || {
+            vec!["old snapshot".into()]
+        });
+
+        app.activate_action(
+            Action {
+                label: "Invalid".into(),
+                desc: "Test".into(),
+                action: "mkmacro:future".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Enter,
+        );
+        assert_eq!(app.query, "old snapshot");
+        app.navigate_query_history_with(QueryHistoryDirection::Older, || {
+            vec!["newly recorded".into()]
+        });
+
+        assert_eq!(app.query, "newly recorded");
     }
 
     #[test]

@@ -110,6 +110,7 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        self.query_history.reset();
         if let Ok(guard) = ACTIVATION_HOOK.lock()
             && let Some(ref hook) = *guard
         {

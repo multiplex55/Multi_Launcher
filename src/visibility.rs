@@ -22,6 +22,15 @@ impl ViewportCtx for egui::Context {
     }
 }
 
+/// Controls whether making the launcher visible also reapplies its configured
+/// placement. Restoring an already-visible launcher must preserve any geometry
+/// changes made during the current visible session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VisiblePlacementPolicy {
+    ApplyConfiguredPlacement,
+    PreserveCurrentGeometry,
+}
+
 /// Process a hotkey trigger and update the minimized state, issuing viewport
 /// commands when possible. This mirrors the logic from `main.rs`.
 pub fn handle_visibility_trigger<C: ViewportCtx>(
@@ -48,6 +57,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
             if let Some(c) = &*guard {
                 apply_visibility(
                     next,
+                    VisiblePlacementPolicy::ApplyConfiguredPlacement,
                     c,
                     offscreen,
                     follow_mouse,
@@ -84,6 +94,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
             tracing::debug!(from=?old, to=?next, "visibility updated");
             apply_visibility(
                 next,
+                VisiblePlacementPolicy::ApplyConfiguredPlacement,
                 c,
                 offscreen,
                 follow_mouse,
@@ -105,6 +116,7 @@ pub fn handle_visibility_trigger<C: ViewportCtx>(
 /// Apply the current visibility state to the viewport.
 pub fn apply_visibility<C: ViewportCtx>(
     visible: bool,
+    placement_policy: VisiblePlacementPolicy,
     ctx: &C,
     offscreen: (f32, f32),
     follow_mouse: bool,
@@ -114,20 +126,23 @@ pub fn apply_visibility<C: ViewportCtx>(
     window_size: (f32, f32),
 ) {
     if visible {
-        if static_enabled {
-            if let Some((x, y)) = static_pos {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        if placement_policy == VisiblePlacementPolicy::ApplyConfiguredPlacement {
+            if static_enabled {
+                if let Some((x, y)) = static_pos {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                }
+                if let Some((w, h)) = static_size {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                }
+            } else if follow_mouse
+                && let Some((x, y)) = crate::window_manager::current_mouse_position()
+            {
+                let pos_x = x - window_size.0 / 2.0;
+                let pos_y = y - window_size.1 / 2.0;
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    pos_x, pos_y,
+                )));
             }
-            if let Some((w, h)) = static_size {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-            }
-        } else if follow_mouse && let Some((x, y)) = crate::window_manager::current_mouse_position()
-        {
-            let pos_x = x - window_size.0 / 2.0;
-            let pos_y = y - window_size.1 / 2.0;
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                pos_x, pos_y,
-            )));
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

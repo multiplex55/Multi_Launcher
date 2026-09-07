@@ -32,6 +32,7 @@ mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
 mod notes_dialog;
+mod query_history;
 mod render;
 mod screenshot_editor;
 mod search;
@@ -130,7 +131,7 @@ use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSett
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
-use crate::visibility::apply_visibility;
+use crate::visibility::{VisiblePlacementPolicy, apply_visibility};
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use dashboard_editor_dialog::DashboardEditorDialog;
@@ -141,6 +142,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
+use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]
 use search::{COMPLETION_REBUILD_DEBOUNCE, NOTE_SEARCH_DEBOUNCE};
 use serde::{Deserialize, Serialize};
@@ -438,6 +440,7 @@ pub struct LauncherApp {
     suggestions: Vec<String>,
     autocomplete_index: usize,
     pub query: String,
+    query_history: QueryHistoryNavigator,
     pub results: Vec<Action>,
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
@@ -1536,6 +1539,7 @@ impl LauncherApp {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
             query: String::new(),
+            query_history: QueryHistoryNavigator::default(),
             results: (*actions).clone(),
             matcher: SkimMatcherV2::default(),
             error: None,
@@ -1760,6 +1764,7 @@ impl LauncherApp {
         tracing::debug!("initial viewport visible: {}", initial_visible);
         apply_visibility(
             initial_visible,
+            VisiblePlacementPolicy::ApplyConfiguredPlacement,
             ctx,
             offscreen_pos,
             follow_mouse,
