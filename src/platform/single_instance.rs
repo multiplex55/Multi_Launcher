@@ -6,7 +6,10 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::PCWSTR;
 
-const MUTEX_NAMESPACE: &str = "Local\\MultiLauncher.SingleInstance";
+// The global object namespace makes one canonical data root single-instance
+// across Windows sessions. The default mutex security descriptor is sufficient
+// for another process running as the same user; no permissive ACL is needed.
+const MUTEX_NAMESPACE: &str = "Global\\MultiLauncher.SingleInstance";
 const HASH_KEY_0: u64 = 0x4d75_6c74_694c_6e63;
 const HASH_KEY_1: u64 = 0x6872_2e44_6174_6152;
 
@@ -40,8 +43,12 @@ impl Drop for SingleInstanceGuard {
 }
 
 fn mutex_name(data_root: &AppDataRoot) -> String {
+    mutex_name_for_identity(&data_root.normalized_identity())
+}
+
+fn mutex_name_for_identity(normalized_identity: &str) -> String {
     let mut hasher = SipHasher13::new_with_keys(HASH_KEY_0, HASH_KEY_1);
-    hasher.write(data_root.normalized_identity().as_bytes());
+    hasher.write(normalized_identity.as_bytes());
     format!("{MUTEX_NAMESPACE}.{:016x}", hasher.finish())
 }
 
@@ -72,7 +79,10 @@ fn acquire_named(name: &str) -> anyhow::Result<SingleInstanceAcquire> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SingleInstanceAcquire, SingleInstanceGuard, acquire_named, mutex_name};
+    use super::{
+        SingleInstanceAcquire, SingleInstanceGuard, acquire_named, mutex_name,
+        mutex_name_for_identity,
+    };
     use crate::platform::app_data::AppDataRoot;
     use std::fs;
     use std::path::PathBuf;
@@ -108,6 +118,16 @@ mod tests {
     #[test]
     fn first_named_mutex_acquisition_succeeds() {
         let _guard = expect_acquired(acquire_named(&unique_name("first")).unwrap());
+    }
+
+    #[test]
+    fn canonical_mutex_name_uses_machine_wide_namespace() {
+        // Keep this exact contract deterministic: Global\\ is what closes the
+        // cross-session ownership gap for the same canonical AppDataRoot.
+        assert_eq!(
+            mutex_name_for_identity(r"c:\users\example\appdata\roaming\multi_launcher"),
+            "Global\\MultiLauncher.SingleInstance.78c32ab260f4eda2"
+        );
     }
 
     #[test]
