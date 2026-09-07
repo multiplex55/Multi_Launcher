@@ -19,6 +19,8 @@ static FAV_VERSION: AtomicU64 = AtomicU64::new(0);
 static FAV_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static VERSIONED_FAVS: Lazy<Mutex<Option<(PathBuf, Vec<FavEntry>)>>> =
     Lazy::new(|| Mutex::new(None));
+static LIVE_FAVS: Lazy<super::live_snapshot::LiveSnapshotRegistry<FavEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FavEntry {
@@ -77,6 +79,7 @@ fn update_favs_with_save(
     let mut favs = load_favs(path)?;
     if mutate(&mut favs)? {
         save(path, &favs)?;
+        LIVE_FAVS.publish(path, &favs);
         record_versioned_favs(path, &favs);
     }
     Ok(favs)
@@ -214,17 +217,30 @@ pub struct FavPlugin {
 
 impl FavPlugin {
     pub fn new() -> Self {
-        let startup = load_favs(FAV_FILE).unwrap_or_else(|error| {
-            tracing::error!(%error, "favorite startup retained invalid persisted file");
-            Vec::new()
-        });
-        let data = Arc::new(Mutex::new(startup.clone()));
-        *VERSIONED_FAVS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((PathBuf::from(FAV_FILE), startup));
+        Self::new_for_path(FAV_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = fav_transaction_guard();
+            let startup = match load_favs(path) {
+                Ok(favs) => Some(favs),
+                Err(error) => {
+                    tracing::error!(%error, "favorite startup retained invalid persisted file");
+                    None
+                }
+            };
+            let data = LIVE_FAVS.get_or_create(path, startup.clone());
+            if let Some(startup) = startup {
+                *VERSIONED_FAVS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((PathBuf::from(path), startup));
+            }
+            data
+        };
         let data_clone = data.clone();
-        let path = FAV_FILE.to_string();
+        let path = path.to_string();
         let watch_path = path.clone();
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
@@ -602,5 +618,26 @@ mod persistence_tests {
         reload_fav_snapshot(path_text, &data).unwrap();
         assert_eq!(*data.lock().unwrap(), external);
         assert_eq!(fav_version(), after_local + 1);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let path = path.to_str().unwrap();
+        save_favs(path, &[]).unwrap();
+        let first = FavPlugin::new_for_path(path);
+        let second = FavPlugin::new_for_path(path);
+
+        set_fav(path, "Immediate", "noop:published", Some("argument")).unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(plugin.search("fav Immediate").iter().any(|action| {
+                action.label == "Immediate"
+                    && action.action == "noop:published"
+                    && action.args.as_deref() == Some("argument")
+            }));
+        }
     }
 }

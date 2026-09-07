@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const FOLDERS_FILE: &str = "folders.json";
 static FOLDERS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static LIVE_FOLDERS: Lazy<super::live_snapshot::LiveSnapshotRegistry<FolderEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FolderEntry {
@@ -86,6 +88,7 @@ pub fn update_folders(
     let mut folders = load_folders(path)?;
     if mutate(&mut folders)? {
         save_json_atomic(path, &folders)?;
+        LIVE_FOLDERS.publish(path, &folders);
     }
     Ok(folders)
 }
@@ -164,14 +167,23 @@ pub struct FoldersPlugin {
 impl FoldersPlugin {
     /// Create a new folders plugin.
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(load_folders(FOLDERS_FILE).unwrap_or_else(
-            |error| {
-                tracing::error!(%error, "folder startup retained invalid persisted file");
-                Vec::new()
-            },
-        )));
+        Self::new_for_path(FOLDERS_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = folders_transaction_guard();
+            let startup = match load_folders(path) {
+                Ok(folders) => Some(folders),
+                Err(error) => {
+                    tracing::error!(%error, "folder startup retained invalid persisted file");
+                    None
+                }
+            };
+            LIVE_FOLDERS.get_or_create(path, startup)
+        };
         let data_clone = data.clone();
-        let path = FOLDERS_FILE.to_string();
+        let path = path.to_string();
         let watcher = watch_json(&path, {
             let path = path.clone();
             move || {
@@ -489,5 +501,29 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
         reload_folder_snapshot(path.to_str().unwrap(), &data).unwrap();
         assert_eq!(*data.lock().unwrap(), recovered);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("folders.json");
+        let folder_path = directory.path().join("immediate-folder");
+        std::fs::create_dir(&folder_path).unwrap();
+        let store = store.to_str().unwrap();
+        save_folders(store, &[]).unwrap();
+        let first = FoldersPlugin::new_for_path(store);
+        let second = FoldersPlugin::new_for_path(store);
+
+        append_folder(store, folder_path.to_str().unwrap()).unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(
+                plugin
+                    .search("f immediate-folder")
+                    .iter()
+                    .any(|action| { action.action == folder_path.to_string_lossy() })
+            );
+        }
     }
 }

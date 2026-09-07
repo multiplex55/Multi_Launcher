@@ -100,6 +100,7 @@ impl PluginEditor {
             Ok(())
         }) {
             Ok(s) => {
+                crate::plugins::macros::configure_search_runtime(&s, &app.actions_path);
                 app.update_paths(
                     s.plugin_dirs.clone(),
                     s.index_paths.clone(),

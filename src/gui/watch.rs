@@ -5,6 +5,7 @@ pub(super) fn watch_file(
     path: &Path,
     tx: Sender<WatchEvent>,
     event: WatchEvent,
+    repaint: egui::Context,
 ) -> notify::Result<RecommendedWatcher> {
     let target = path.to_path_buf();
     let target_is_directory = path.is_dir();
@@ -19,7 +20,9 @@ pub(super) fn watch_file(
                     &target,
                     target_is_directory,
                 ) {
-                    let _ = tx.send(event.clone());
+                    if tx.send(event.clone()).is_ok() {
+                        repaint.request_repaint();
+                    }
                 }
             }
             Err(e) => tracing::error!("watch error: {:?}", e),
@@ -214,6 +217,30 @@ mod tests {
     use eframe::egui;
     use std::sync::{Arc, atomic::AtomicBool, mpsc::channel};
     use tempfile::tempdir;
+
+    #[test]
+    fn watcher_enqueues_then_requests_repaint_for_external_change() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("actions.json");
+        std::fs::write(&path, "[]").unwrap();
+        let (event_tx, event_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let ctx = egui::Context::default();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = repaint_tx.send(());
+        });
+        let _watcher = watch_file(&path, event_tx, WatchEvent::Actions, ctx).unwrap();
+
+        crate::common::persistence::save_json_atomic(&path, &serde_json::json!([])).unwrap();
+
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            WatchEvent::Actions
+        ));
+        repaint_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("watch callback should wake idle egui after enqueue");
+    }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(

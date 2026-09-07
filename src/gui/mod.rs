@@ -1185,6 +1185,7 @@ impl LauncherApp {
         restore_flag: Arc<AtomicBool>,
         help_flag: Arc<AtomicBool>,
     ) -> Self {
+        crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
         let (tx, rx) = channel();
         register_event_sender(tx.clone());
         let mut watchers = Vec::new();
@@ -1212,8 +1213,11 @@ impl LauncherApp {
         let dashboard_registry = WidgetRegistry::with_defaults();
         let dashboard_event_cb = std::sync::Arc::new({
             let tx = tx.clone();
+            let ctx = ctx.clone();
             move |ev: DashboardEvent| {
-                let _ = tx.send(WatchEvent::Dashboard(ev));
+                if tx.send(WatchEvent::Dashboard(ev)).is_ok() {
+                    ctx.request_repaint();
+                }
             }
         });
         let mut dashboard = Dashboard::new(
@@ -1243,6 +1247,10 @@ impl LauncherApp {
             crate::clipboard_modify::watch::ClipboardModifyWatcher::start(
                 clipboard_modify_runtime.store.clone(),
                 Duration::from_millis(150),
+                {
+                    let ctx = ctx.clone();
+                    move || ctx.request_repaint()
+                },
             )
             .map_err(
                 |error| tracing::warn!(%error, "failed to watch Clipboard Modify configuration"),
@@ -1250,7 +1258,12 @@ impl LauncherApp {
             .ok();
 
         #[cfg(not(test))]
-        match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
+        match watch_file(
+            Path::new(&actions_path),
+            tx.clone(),
+            WatchEvent::Actions,
+            ctx.clone(),
+        ) {
             Ok(w) => watchers.push(w),
             Err(e) => {
                 tracing::error!("watch error: {:?}", e);
@@ -1271,8 +1284,12 @@ impl LauncherApp {
         #[cfg(test)]
         {
             if Path::new(&actions_path).exists() {
-                if let Ok(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions)
-                {
+                if let Ok(w) = watch_file(
+                    Path::new(&actions_path),
+                    tx.clone(),
+                    WatchEvent::Actions,
+                    ctx.clone(),
+                ) {
                     watchers.push(w);
                 }
             } else if enable_toasts && show_error_toasts {
@@ -1292,6 +1309,7 @@ impl LauncherApp {
             Path::new(crate::plugins::folders::FOLDERS_FILE),
             tx.clone(),
             WatchEvent::Folders,
+            ctx.clone(),
         ) {
             Ok(w) => watchers.push(w),
             Err(e) => {
@@ -1314,7 +1332,7 @@ impl LauncherApp {
         {
             let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
             if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders) {
+                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders, ctx.clone()) {
                     watchers.push(w);
                 }
             } else if enable_toasts && show_error_toasts {
@@ -1334,6 +1352,7 @@ impl LauncherApp {
             Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
             tx.clone(),
             WatchEvent::Bookmarks,
+            ctx.clone(),
         ) {
             Ok(w) => watchers.push(w),
             Err(e) => {
@@ -1356,7 +1375,7 @@ impl LauncherApp {
         {
             let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
             if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks) {
+                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks, ctx.clone()) {
                     watchers.push(w);
                 }
             } else if enable_toasts && show_error_toasts {
@@ -1402,7 +1421,7 @@ impl LauncherApp {
                 WatchEvent::Gestures,
             ),
         ] {
-            match watch_file(path, tx.clone(), event) {
+            match watch_file(path, tx.clone(), event, ctx.clone()) {
                 Ok(w) => watchers.push(w),
                 Err(e) => tracing::error!("watch error: {:?}", e),
             }
@@ -1437,7 +1456,7 @@ impl LauncherApp {
             ),
         ] {
             if path.exists()
-                && let Ok(w) = watch_file(path, tx.clone(), event)
+                && let Ok(w) = watch_file(path, tx.clone(), event, ctx.clone())
             {
                 watchers.push(w);
             }
@@ -3221,6 +3240,24 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
         }
     }
     None
+}
+
+pub fn recv_test_event_timeout(
+    rx: &Receiver<WatchEvent>,
+    timeout: Duration,
+) -> Option<TestWatchEvent> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = rx.recv_timeout(remaining).ok()?;
+        match event {
+            WatchEvent::Actions | WatchEvent::Folders | WatchEvent::Bookmarks => {
+                return Some(event.into());
+            }
+            _ if Instant::now() < deadline => {}
+            _ => return None,
+        }
+    }
 }
 
 #[cfg(test)]

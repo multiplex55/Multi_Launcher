@@ -24,6 +24,7 @@ pub mod keys;
 pub mod layout;
 pub mod layouts_storage;
 pub mod link;
+mod live_snapshot;
 pub mod lorem;
 pub mod macros;
 pub mod media;

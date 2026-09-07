@@ -18,6 +18,8 @@ static SNIPPETS_VERSION: AtomicU64 = AtomicU64::new(0);
 static SNIPPETS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static VERSIONED_SNIPPETS: Lazy<Mutex<Option<(PathBuf, Vec<SnippetEntry>)>>> =
     Lazy::new(|| Mutex::new(None));
+static LIVE_SNIPPETS: Lazy<super::live_snapshot::LiveSnapshotRegistry<SnippetEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SnippetEntry {
@@ -79,6 +81,7 @@ fn update_snippets_with_save(
     let mut snippets = load_snippets(path)?;
     if mutate(&mut snippets)? {
         save(path, &snippets)?;
+        LIVE_SNIPPETS.publish(path, &snippets);
         record_versioned_snippets(path, &snippets);
     }
     Ok(snippets)
@@ -161,17 +164,30 @@ pub struct SnippetsPlugin {
 impl SnippetsPlugin {
     /// Create a new snippets plugin instance.
     pub fn new() -> Self {
-        let startup = load_snippets(SNIPPETS_FILE).unwrap_or_else(|error| {
-            tracing::error!(%error, "snippet startup retained invalid persisted file");
-            Vec::new()
-        });
-        let data = Arc::new(Mutex::new(startup.clone()));
-        *VERSIONED_SNIPPETS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((PathBuf::from(SNIPPETS_FILE), startup));
+        Self::new_for_path(SNIPPETS_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = snippets_transaction_guard();
+            let startup = match load_snippets(path) {
+                Ok(snippets) => Some(snippets),
+                Err(error) => {
+                    tracing::error!(%error, "snippet startup retained invalid persisted file");
+                    None
+                }
+            };
+            let data = LIVE_SNIPPETS.get_or_create(path, startup.clone());
+            if let Some(startup) = startup {
+                *VERSIONED_SNIPPETS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((PathBuf::from(path), startup));
+            }
+            data
+        };
         let data_clone = data.clone();
-        let path = SNIPPETS_FILE.to_string();
+        let path = path.to_string();
         let watcher = watch_json(&path, {
             let path = path.clone();
             move || {
@@ -545,5 +561,24 @@ mod persistence_tests {
         reload_snippet_snapshot(path_text, &data).unwrap();
         assert_eq!(*data.lock().unwrap(), external);
         assert_eq!(snippets_version(), after_local + 1);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        save_snippets(path, &[]).unwrap();
+        let first = SnippetsPlugin::new_for_path(path);
+        let second = SnippetsPlugin::new_for_path(path);
+
+        append_snippet(path, "immediate", "published text").unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(plugin.search("cs immediate").iter().any(|action| {
+                action.label == "immediate" && action.action == "clipboard:published text"
+            }));
+        }
     }
 }

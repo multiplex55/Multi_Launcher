@@ -15,6 +15,8 @@ pub const BOOKMARKS_FILE: &str = "bookmarks.json";
 static BOOKMARK_CACHE: Lazy<Arc<Mutex<LruCache<String, Vec<Action>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(LruCache::new(64))));
 static BOOKMARKS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static LIVE_BOOKMARKS: Lazy<super::live_snapshot::LiveSnapshotRegistry<BookmarkEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
 fn invalidate_bookmark_cache() {
     if let Ok(mut cache) = BOOKMARK_CACHE.lock() {
@@ -40,15 +42,24 @@ pub struct BookmarksPlugin {
 impl BookmarksPlugin {
     /// Construct a new `BookmarksPlugin` with a fuzzy matcher.
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(load_bookmarks(BOOKMARKS_FILE).unwrap_or_else(
-            |error| {
-                tracing::error!(%error, "bookmark startup retained invalid persisted file");
-                Vec::new()
-            },
-        )));
+        Self::new_for_path(BOOKMARKS_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = bookmarks_transaction_guard();
+            let startup = match load_bookmarks(path) {
+                Ok(bookmarks) => Some(bookmarks),
+                Err(error) => {
+                    tracing::error!(%error, "bookmark startup retained invalid persisted file");
+                    None
+                }
+            };
+            LIVE_BOOKMARKS.get_or_create(path, startup)
+        };
         let cache = BOOKMARK_CACHE.clone();
         let data_clone = data.clone();
-        let path = BOOKMARKS_FILE.to_string();
+        let path = path.to_string();
         let watcher = watch_json(&path, {
             let path = path.clone();
             let cache_clone = cache.clone();
@@ -262,6 +273,7 @@ fn update_bookmarks_with_save(
     let mut bookmarks = load_bookmarks(path)?;
     if mutate(&mut bookmarks)? {
         save(path, &bookmarks)?;
+        LIVE_BOOKMARKS.publish(path, &bookmarks);
         invalidate_bookmark_cache();
     }
     Ok(bookmarks)
@@ -446,6 +458,7 @@ impl Plugin for BookmarksPlugin {
 mod tests {
     use super::*;
     use std::sync::Barrier;
+    use std::time::{Duration, Instant};
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -628,5 +641,82 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
         reload_bookmark_snapshot(path.to_str().unwrap(), &data, &cache).unwrap();
         assert_eq!(*data.lock().unwrap(), recovered);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bookmarks.json");
+        let path = path.to_str().unwrap();
+        save_bookmarks(path, &[]).unwrap();
+        let first = BookmarksPlugin::new_for_path(path);
+        let second = BookmarksPlugin::new_for_path(path);
+
+        append_bookmark_with_alias(path, "example.com", Some("Immediate")).unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(plugin.search("bm Immediate").iter().any(|action| {
+                action.action == "https://example.com" && action.label == "Immediate"
+            }));
+        }
+    }
+
+    #[test]
+    fn native_watcher_retains_invalid_and_removed_then_recovers_valid_snapshot() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bookmarks.json");
+        let path_text = path.to_str().unwrap();
+        let initial = vec![bookmark("https://initial.example", Some("Initial"))];
+        save_bookmarks(path_text, &initial).unwrap();
+        let plugin = BookmarksPlugin::new_for_path(path_text);
+        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
+        let _probe = watch_json(&path, move || {
+            let _ = notify_tx.send(());
+        })
+        .unwrap();
+
+        std::fs::write(&path, "invalid").unwrap();
+        notify_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("malformed replacement should notify");
+        assert!(
+            plugin
+                .search("bm Initial")
+                .iter()
+                .any(|a| a.label == "Initial")
+        );
+
+        while notify_rx.try_recv().is_ok() {}
+        std::fs::remove_file(&path).unwrap();
+        notify_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("removal should notify");
+        assert!(
+            plugin
+                .search("bm Initial")
+                .iter()
+                .any(|a| a.label == "Initial")
+        );
+
+        while notify_rx.try_recv().is_ok() {}
+        let recovered = vec![bookmark("https://recovered.example", Some("Recovered"))];
+        crate::common::persistence::save_json_atomic(&path, &recovered).unwrap();
+        notify_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("valid atomic replacement should notify");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !plugin
+            .search("bm Recovered")
+            .iter()
+            .any(|action| action.label == "Recovered")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "valid watcher reload did not publish"
+            );
+            std::thread::yield_now();
+        }
     }
 }

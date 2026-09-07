@@ -30,6 +30,36 @@ static PLUGIN_MANAGER: OnceCell<Mutex<PluginManager>> = OnceCell::new();
 /// Hash of the settings used to populate [`PLUGIN_MANAGER`].
 static SETTINGS_HASH: OnceCell<Mutex<u64>> = OnceCell::new();
 static MACROS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static LIVE_MACROS: Lazy<super::live_snapshot::LiveSnapshotRegistry<MacroEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
+static SEARCH_RUNTIME: Lazy<Mutex<LegacyMacroSearchRuntime>> =
+    Lazy::new(|| Mutex::new(LegacyMacroSearchRuntime::default()));
+
+#[derive(Clone)]
+struct LegacyMacroSearchRuntime {
+    settings: Settings,
+    actions_path: String,
+}
+
+impl Default for LegacyMacroSearchRuntime {
+    fn default() -> Self {
+        Self {
+            settings: Settings::default(),
+            actions_path: "actions.json".into(),
+        }
+    }
+}
+
+/// Publish the already-committed runtime configuration used by legacy macro
+/// step resolution. Macro execution must not re-read settings from disk.
+pub fn configure_search_runtime(settings: &Settings, actions_path: &str) {
+    *SEARCH_RUNTIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = LegacyMacroSearchRuntime {
+        settings: settings.clone(),
+        actions_path: actions_path.to_owned(),
+    };
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct MacroStep {
@@ -97,6 +127,7 @@ fn update_macros_with_save(
     let mut macros = load_macros(path)?;
     if mutate(&mut macros)? {
         save(path, &macros)?;
+        LIVE_MACROS.publish(path, &macros);
     }
     Ok(macros)
 }
@@ -136,8 +167,12 @@ pub fn take_error_messages() -> Vec<String> {
 /// See `benches/macros_search.rs` for a simple Criterion benchmark measuring
 /// the steady-state performance of this function.
 pub fn search_first_action(query: &str) -> Option<Action> {
-    let settings = Settings::load("settings.json").unwrap_or_default();
-    let actions = match load_actions("actions.json") {
+    let runtime = SEARCH_RUNTIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let settings = runtime.settings;
+    let actions = match load_actions(&runtime.actions_path) {
         Ok(actions) => actions,
         Err(error) => {
             tracing::error!(%error, "macro action lookup retained invalid actions file");
@@ -267,13 +302,23 @@ pub struct MacrosPlugin {
 
 impl MacrosPlugin {
     pub fn new() -> Self {
-        let startup = load_macros(MACROS_FILE).unwrap_or_else(|error| {
-            tracing::error!(%error, "macro startup retained invalid persisted file");
-            Vec::new()
-        });
-        let data = Arc::new(Mutex::new(startup));
+        Self::new_for_path(MACROS_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = macros_transaction_guard();
+            let startup = match load_macros(path) {
+                Ok(macros) => Some(macros),
+                Err(error) => {
+                    tracing::error!(%error, "macro startup retained invalid persisted file");
+                    None
+                }
+            };
+            LIVE_MACROS.get_or_create(path, startup)
+        };
         let data_clone = data.clone();
-        let path = MACROS_FILE.to_string();
+        let path = path.to_string();
         let watch_path = path.clone();
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
@@ -570,5 +615,56 @@ mod persistence_tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
         reload_macro_snapshot(path.to_str().unwrap(), &data).unwrap();
         assert_eq!(*data.lock().unwrap(), recovered);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(MACROS_FILE);
+        let path = path.to_str().unwrap();
+        save_macros(path, &[]).unwrap();
+        let first = MacrosPlugin::new_for_path(path);
+        let second = MacrosPlugin::new_for_path(path);
+
+        save_macros(path, &[entry("immediate")]).unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(plugin.search("macro list immediate").iter().any(|action| {
+                action.label == "immediate" && action.action == "macro:immediate"
+            }));
+        }
+    }
+
+    #[test]
+    fn search_uses_committed_runtime_settings_and_custom_actions_path_after_disk_corruption() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("custom-settings.json");
+        let actions_path = directory.path().join("custom-actions.json");
+        let action = Action {
+            label: "Runtime action".into(),
+            desc: "custom".into(),
+            action: "runtime:action".into(),
+            args: None,
+        };
+        crate::actions::save_actions(
+            actions_path.to_str().unwrap(),
+            std::slice::from_ref(&action),
+        )
+        .unwrap();
+        let mut settings = Settings::default();
+        settings.enabled_plugins = Some(["omni_search".to_string()].into_iter().collect());
+        settings.save(settings_path.to_str().unwrap()).unwrap();
+        configure_search_runtime(&settings, actions_path.to_str().unwrap());
+        std::fs::write(&settings_path, "corrupt after startup").unwrap();
+
+        let resolved =
+            search_first_action("o Runtime action").expect("runtime action remains enabled");
+        assert_eq!(resolved.action, action.action);
+        assert!(
+            search_first_action("help").is_none(),
+            "plugins disabled in committed runtime settings must stay disabled"
+        );
     }
 }

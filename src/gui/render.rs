@@ -1733,9 +1733,7 @@ impl eframe::App for LauncherApp {
         self.clipboard_modify_events.clear();
         self.clipboard_modify_watcher = None;
         self.multi_manager.shutdown();
-        let multi_manager_save_on_exit = crate::settings::Settings::load(&self.settings_path)
-            .map(|settings| settings.multi_manager.save_on_exit)
-            .unwrap_or(true);
+        let multi_manager_save_on_exit = self.multi_manager_save_on_exit();
         if multi_manager_save_on_exit && let Err(err) = self.multi_manager.save() {
             self.report_error("multi_manager.save_on_exit", err);
         }
@@ -1778,6 +1776,12 @@ impl eframe::App for LauncherApp {
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
         #[cfg(not(test))]
         std::process::exit(0);
+    }
+}
+
+impl LauncherApp {
+    fn multi_manager_save_on_exit(&self) -> bool {
+        self.multi_manager_settings.save_on_exit
     }
 }
 
@@ -1829,6 +1833,19 @@ mod tests {
                 args: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn shutdown_uses_committed_multi_manager_policy_after_settings_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.settings_path = settings_path.to_string_lossy().into_owned();
+        app.multi_manager_settings.save_on_exit = false;
+        std::fs::write(&settings_path, "corrupt after startup").unwrap();
+
+        assert!(!app.multi_manager_save_on_exit());
     }
 
     struct FakePlugin;

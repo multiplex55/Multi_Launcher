@@ -20,7 +20,11 @@ pub struct ClipboardModifyWatcher {
 }
 
 impl ClipboardModifyWatcher {
-    pub fn start(store: ClipboardModifierStore, debounce: Duration) -> notify::Result<Self> {
+    pub fn start(
+        store: ClipboardModifierStore,
+        debounce: Duration,
+        repaint: impl Fn() + Send + 'static,
+    ) -> notify::Result<Self> {
         let path = store.path.clone();
         let watch_path = path
             .parent()
@@ -29,7 +33,9 @@ impl ClipboardModifyWatcher {
         let (tx, rx) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(
             move |res| {
-                let _ = tx.send(res);
+                if tx.send(res).is_ok() {
+                    repaint();
+                }
             },
             Config::default(),
         )?;

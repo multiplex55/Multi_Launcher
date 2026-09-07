@@ -41,6 +41,7 @@ impl SettingsEditor {
         app: &mut LauncherApp,
         new_settings: Settings,
     ) {
+        crate::plugins::macros::configure_search_runtime(&new_settings, &app.actions_path);
         app.update_paths(
             new_settings.plugin_dirs.clone(),
             new_settings.index_paths.clone(),
