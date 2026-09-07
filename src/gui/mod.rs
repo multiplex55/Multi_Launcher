@@ -3150,51 +3150,38 @@ impl LauncherApp {
 
     /// Delete a note by its slug identifier.
     pub fn delete_note(&mut self, slug: &str) {
-        use crate::plugins::note::{load_notes, remove_note};
-        match load_notes() {
-            Ok(notes) => {
-                if let Some((idx, note)) = notes.into_iter().enumerate().find(|(_, n)| {
-                    n.slug == slug
-                        || n.alias
-                            .as_ref()
-                            .map(|a| a.eq_ignore_ascii_case(slug))
-                            .unwrap_or(false)
-                }) {
+        use crate::plugins::note::remove_note_by_identity;
+        match remove_note_by_identity(slug) {
+            Ok(removed) => {
+                if let Some(note) = removed {
                     let word_count = note.content.split_whitespace().count();
-                    if let Err(e) = remove_note(idx) {
-                        self.report_error_message(
-                            "launcher",
-                            format!("Failed to remove note: {e}"),
+                    let msg = format!(
+                        "Removed note {} ({} words)",
+                        note.alias.as_ref().unwrap_or(&note.title),
+                        word_count
+                    );
+                    append_toast_log(&msg);
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: msg.clone().into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
                         );
-                    } else {
-                        let msg = format!(
-                            "Removed note {} ({} words)",
-                            note.alias.as_ref().unwrap_or(&note.title),
-                            word_count
-                        );
-                        append_toast_log(&msg);
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: msg.clone().into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                        if self.query.trim_start().starts_with("note list") {
-                            self.pending_query = Some(self.query.clone());
-                            self.search();
-                        }
-                        self.notes_dialog.open();
                     }
+                    if self.query.trim_start().starts_with("note list") {
+                        self.pending_query = Some(self.query.clone());
+                        self.search();
+                    }
+                    self.notes_dialog.open();
                 } else {
                     self.report_error_message("launcher", "Note not found");
                 }
             }
-            Err(e) => self.report_error_message("launcher", format!("Failed to load notes: {e}")),
+            Err(e) => self.report_error_message("launcher", format!("Failed to remove note: {e}")),
         }
         self.focus_input();
     }
