@@ -1106,6 +1106,10 @@ fn validate_owned_destination(root: &AppDataRoot, destination: &Path) -> Result<
         destination.starts_with(root.path()),
         "destination escapes application data root"
     );
+    ensure!(
+        !paths_equal(destination, root.path()),
+        "application data root cannot be a recovery destination"
+    );
     reject_reparse(&canonical_root)?;
     let relative = destination
         .strip_prefix(root.path())
@@ -1569,6 +1573,86 @@ mod tests {
         );
         assert_eq!(fs::read(root.path().join("settings.json")).unwrap(), before);
         assert!(!root.path().join("recovery/pending.json").exists());
+    }
+
+    #[test]
+    fn forged_root_directory_destination_is_rejected_for_restore_and_reset() {
+        let (_directory, root, base_catalog) = fixture();
+        let snapshot = snapshot_id(&root, &base_catalog);
+        let mut notes = base_catalog.get(PersistentStoreId::Notes).clone();
+        notes.path = root.path().to_path_buf();
+        notes.kind = StoreKind::Directory;
+        notes.ownership = StoreOwnership::ApplicationOwned;
+        notes.backup_policy = super::super::BackupPolicy::Include;
+        notes.restore_eligible = true;
+        notes.reset_eligible = true;
+        let catalog = PersistenceCatalog::from_stores(vec![notes]);
+        let manager = RecoveryManager::new(&root, &catalog);
+
+        let restore = manager
+            .stage_restore(PersistentStoreId::Notes, &snapshot)
+            .unwrap_err();
+        assert!(
+            restore
+                .to_string()
+                .contains("application data root cannot be a recovery destination")
+        );
+        let reset = manager.stage_reset(PersistentStoreId::Notes).unwrap_err();
+        assert!(
+            reset
+                .to_string()
+                .contains("application data root cannot be a recovery destination")
+        );
+        assert!(!manager.pending_path().exists());
+    }
+
+    #[test]
+    fn overlapping_note_templates_are_rejected_for_restore_and_reset() {
+        for case in 0..3 {
+            let (_directory, root, base_catalog) = fixture();
+            let snapshot = snapshot_id(&root, &base_catalog);
+            let notes_path = root.path().join("owned-notes");
+            let templates_path = match case {
+                0 => notes_path.clone(),
+                1 => notes_path.join("templates"),
+                _ => root.path().join("template-parent"),
+            };
+            let notes_path = if case == 2 {
+                templates_path.join("notes")
+            } else {
+                notes_path
+            };
+            let mut notes = base_catalog.get(PersistentStoreId::Notes).clone();
+            notes.path = notes_path;
+            notes.ownership = StoreOwnership::ApplicationOwned;
+            notes.backup_policy = super::super::BackupPolicy::Include;
+            notes.restore_eligible = true;
+            notes.reset_eligible = true;
+            let mut templates = base_catalog.get(PersistentStoreId::NoteTemplates).clone();
+            templates.path = templates_path;
+            templates.ownership = StoreOwnership::ApplicationOwned;
+            templates.backup_policy = super::super::BackupPolicy::Include;
+            templates.restore_eligible = true;
+            templates.reset_eligible = true;
+            let catalog = PersistenceCatalog::from_stores(vec![templates, notes]);
+            let manager = RecoveryManager::new(&root, &catalog);
+
+            assert_eq!(
+                catalog.get(PersistentStoreId::NoteTemplates).backup_policy,
+                super::super::BackupPolicy::ExcludeOverlappingStore
+            );
+            assert!(
+                manager
+                    .stage_restore(PersistentStoreId::NoteTemplates, &snapshot)
+                    .is_err()
+            );
+            assert!(
+                manager
+                    .stage_reset(PersistentStoreId::NoteTemplates)
+                    .is_err()
+            );
+            assert!(!manager.pending_path().exists());
+        }
     }
 
     #[test]

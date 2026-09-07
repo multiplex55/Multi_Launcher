@@ -120,6 +120,8 @@ pub enum BackupPolicy {
     Include,
     ExcludeExternal,
     ExcludeCoveredByParent,
+    ExcludeUnsafeRoot,
+    ExcludeOverlappingStore,
     ExcludeReplaceable,
     ExcludeRuntime,
 }
@@ -250,7 +252,7 @@ impl PersistenceCatalog {
             crate::plugins::note::template_dir_configuration();
         let templates_path = absolute_from(&current_dir, &template_source);
 
-        let stores = PersistentStoreId::ALL
+        let mut stores = PersistentStoreId::ALL
             .into_iter()
             .map(|id| {
                 descriptor_for(
@@ -267,7 +269,8 @@ impl PersistenceCatalog {
                     scratchpad_setting.as_deref(),
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        finalize_directory_ownership(root, &mut stores);
         Self { stores }
     }
 
@@ -283,9 +286,54 @@ impl PersistenceCatalog {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_stores(stores: Vec<StoreDescriptor>) -> Self {
+    pub(crate) fn from_stores(mut stores: Vec<StoreDescriptor>) -> Self {
+        resolve_overlapping_directories(&mut stores);
         Self { stores }
     }
+}
+
+fn finalize_directory_ownership(root: &AppDataRoot, stores: &mut [StoreDescriptor]) {
+    for store in stores.iter_mut().filter(|store| {
+        store.kind == StoreKind::Directory
+            && path_is_within(root.path(), &store.path)
+            && path_is_within(&store.path, root.path())
+    }) {
+        exclude_directory(store, BackupPolicy::ExcludeUnsafeRoot);
+    }
+    resolve_overlapping_directories(stores);
+}
+
+fn resolve_overlapping_directories(stores: &mut [StoreDescriptor]) {
+    let mut candidates = stores
+        .iter()
+        .enumerate()
+        .filter(|(_, store)| store.kind == StoreKind::Directory && is_recoverable(store))
+        .map(|(index, store)| (store.id != PersistentStoreId::Notes, index))
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+
+    let mut owners: Vec<usize> = Vec::new();
+    for (_, index) in candidates {
+        let overlaps_owner = owners.iter().any(|owner| {
+            path_is_within(&stores[*owner].path, &stores[index].path)
+                || path_is_within(&stores[index].path, &stores[*owner].path)
+        });
+        if overlaps_owner {
+            exclude_directory(&mut stores[index], BackupPolicy::ExcludeOverlappingStore);
+        } else {
+            owners.push(index);
+        }
+    }
+}
+
+fn is_recoverable(store: &StoreDescriptor) -> bool {
+    store.backup_policy == BackupPolicy::Include || store.restore_eligible || store.reset_eligible
+}
+
+fn exclude_directory(store: &mut StoreDescriptor, policy: BackupPolicy) {
+    store.backup_policy = policy;
+    store.restore_eligible = false;
+    store.reset_eligible = false;
 }
 
 #[derive(Clone, Copy)]
@@ -997,16 +1045,63 @@ mod tests {
         let dashboard = root_path.join("dashboard.json");
         let notes = root_path.join("notes");
         let templates = root_path.join("templates");
-        PersistenceCatalog {
-            stores: PersistentStoreId::ALL
-                .into_iter()
-                .map(|id| {
-                    descriptor_for(
-                        id, &root, settings, current, &dashboard, false, &notes, false, &templates,
-                        true, None,
-                    )
-                })
-                .collect(),
+        let mut stores = PersistentStoreId::ALL
+            .into_iter()
+            .map(|id| {
+                descriptor_for(
+                    id, &root, settings, current, &dashboard, false, &notes, false, &templates,
+                    true, None,
+                )
+            })
+            .collect::<Vec<_>>();
+        finalize_directory_ownership(&root, &mut stores);
+        PersistenceCatalog { stores }
+    }
+
+    fn catalog_with_note_paths(
+        root_path: &Path,
+        notes_path: &Path,
+        templates_path: &Path,
+    ) -> PersistenceCatalog {
+        let root = root(root_path);
+        let mut stores = PersistentStoreId::ALL
+            .into_iter()
+            .map(|id| {
+                descriptor_for(
+                    id,
+                    &root,
+                    &Settings::default(),
+                    root_path,
+                    &root_path.join("dashboard.json"),
+                    false,
+                    notes_path,
+                    true,
+                    templates_path,
+                    true,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        finalize_directory_ownership(&root, &mut stores);
+        PersistenceCatalog { stores }
+    }
+
+    fn assert_no_overlapping_recoverable_directories(catalog: &PersistenceCatalog) {
+        let recoverable = catalog
+            .stores()
+            .iter()
+            .filter(|store| store.kind == StoreKind::Directory && is_recoverable(store))
+            .collect::<Vec<_>>();
+        for (index, store) in recoverable.iter().enumerate() {
+            for other in &recoverable[index + 1..] {
+                assert!(
+                    !path_is_within(&store.path, &other.path)
+                        && !path_is_within(&other.path, &store.path),
+                    "overlapping directory owners: {:?} and {:?}",
+                    store.id,
+                    other.id
+                );
+            }
         }
     }
 
@@ -1210,6 +1305,83 @@ mod tests {
         );
         assert!(!configured_external.restore_eligible);
         assert!(!configured_external.reset_eligible);
+    }
+
+    #[test]
+    fn application_data_root_directory_is_visible_but_never_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        for (notes_path, templates_path, unsafe_id) in [
+            (
+                directory.path().to_path_buf(),
+                directory.path().join("templates"),
+                PersistentStoreId::Notes,
+            ),
+            (
+                directory.path().join("notes"),
+                directory.path().to_path_buf(),
+                PersistentStoreId::NoteTemplates,
+            ),
+        ] {
+            let catalog = catalog_with_note_paths(directory.path(), &notes_path, &templates_path);
+            let store = catalog.get(unsafe_id);
+
+            assert_eq!(store.ownership, StoreOwnership::ApplicationOwned);
+            assert_eq!(store.backup_policy, BackupPolicy::ExcludeUnsafeRoot);
+            assert!(!store.restore_eligible);
+            assert!(!store.reset_eligible);
+            assert_no_overlapping_recoverable_directories(&catalog);
+        }
+    }
+
+    #[test]
+    fn notes_owns_exact_and_nested_template_trees_in_both_directions() {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("notes");
+        for templates in [
+            notes.clone(),
+            notes.join("templates"),
+            directory.path().join("templates").join("notes-parent"),
+        ] {
+            let notes_path = if templates.ends_with("notes-parent") {
+                templates.join("notes")
+            } else {
+                notes.clone()
+            };
+            let catalog = catalog_with_note_paths(directory.path(), &notes_path, &templates);
+            let notes_store = catalog.get(PersistentStoreId::Notes);
+            let templates_store = catalog.get(PersistentStoreId::NoteTemplates);
+            let assets = catalog.get(PersistentStoreId::NotesAssets);
+
+            assert_eq!(notes_store.backup_policy, BackupPolicy::Include);
+            assert!(notes_store.restore_eligible);
+            assert!(notes_store.reset_eligible);
+            assert_eq!(
+                templates_store.backup_policy,
+                BackupPolicy::ExcludeOverlappingStore
+            );
+            assert!(!templates_store.restore_eligible);
+            assert!(!templates_store.reset_eligible);
+            assert_eq!(assets.backup_policy, BackupPolicy::ExcludeCoveredByParent);
+            assert!(!assets.restore_eligible);
+            assert!(!assets.reset_eligible);
+            assert_no_overlapping_recoverable_directories(&catalog);
+        }
+    }
+
+    #[test]
+    fn non_overlapping_owned_templates_remain_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = catalog_with_note_paths(
+            directory.path(),
+            &directory.path().join("notes"),
+            &directory.path().join("templates"),
+        );
+        let templates = catalog.get(PersistentStoreId::NoteTemplates);
+
+        assert_eq!(templates.backup_policy, BackupPolicy::Include);
+        assert!(templates.restore_eligible);
+        assert!(templates.reset_eligible);
+        assert_no_overlapping_recoverable_directories(&catalog);
     }
 
     #[test]

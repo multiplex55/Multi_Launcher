@@ -542,6 +542,8 @@ fn policy_reason(policy: BackupPolicy) -> &'static str {
         BackupPolicy::Include => "included",
         BackupPolicy::ExcludeExternal => "external source excluded",
         BackupPolicy::ExcludeCoveredByParent => "covered by parent store",
+        BackupPolicy::ExcludeUnsafeRoot => "application data root cannot be backed up as a store",
+        BackupPolicy::ExcludeOverlappingStore => "source overlaps another included store",
         BackupPolicy::ExcludeReplaceable => "replaceable or private data excluded",
         BackupPolicy::ExcludeRuntime => "runtime data excluded",
     }
@@ -904,6 +906,16 @@ mod tests {
                 BackupPolicy::ExcludeCoveredByParent,
                 "covered",
             ),
+            (
+                PersistentStoreId::Notes,
+                BackupPolicy::ExcludeUnsafeRoot,
+                "unsafe-root",
+            ),
+            (
+                PersistentStoreId::NoteTemplates,
+                BackupPolicy::ExcludeOverlappingStore,
+                "overlap",
+            ),
         ] {
             let path = outside.path().join(name);
             fs::write(&path, name).unwrap();
@@ -921,7 +933,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.manifest.external.len(), 1);
-        assert_eq!(result.manifest.skipped.len(), 3);
+        assert_eq!(result.manifest.skipped.len(), 5);
+        assert!(result.manifest.skipped.iter().any(|entry| {
+            entry.detail.as_deref() == Some("application data root cannot be backed up as a store")
+        }));
+        assert!(result.manifest.skipped.iter().any(|entry| {
+            entry.detail.as_deref() == Some("source overlaps another included store")
+        }));
         assert!(
             !fs::read_dir(&result.path)
                 .unwrap()
