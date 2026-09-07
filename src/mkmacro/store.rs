@@ -425,6 +425,59 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     Ok(Some((doc, changed)))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentProbe {
+    Supported,
+    Unsupported(u32),
+}
+
+/// Validate document structure for health reporting without running the
+/// filesystem-aware asset migration or changing the source document.
+pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let input_version = value
+        .get("schema_version")
+        .and_then(|version| version.as_u64())
+        .unwrap_or(0) as u32;
+    if input_version > SCHEMA_VERSION {
+        return Ok(DocumentProbe::Unsupported(input_version));
+    }
+    if input_version == SCHEMA_VERSION {
+        serde_json::from_value::<MkMacroDocument>(value)?;
+        return Ok(DocumentProbe::Supported);
+    }
+    if input_version == 1 {
+        migrate_v1_to_v2(&mut value)?;
+    }
+    if input_version <= 2 {
+        migrate_v2_to_v3(&mut value)?;
+    }
+    if input_version <= 3 {
+        migrate_v3_to_v4(&mut value);
+    }
+    if input_version <= 4 {
+        migrate_v4_to_v5(&mut value)?;
+    }
+    if input_version <= 7 {
+        migrate_v7_to_v8(&mut value)?;
+    }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(8) {
+        migrate_v8_to_v9(&mut value)?;
+    }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(9) {
+        migrate_v9_to_v10(&mut value)?;
+    }
+    let macros = value
+        .get("macros")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("schema 10 macro document must contain a macros array"))?;
+    anyhow::ensure!(
+        macros.iter().all(serde_json::Value::is_object),
+        "schema 10 macros must be objects"
+    );
+    Ok(DocumentProbe::Supported)
+}
+
 /// Filesystem-aware schema-10 migration. The JSON value is rewritten only after
 /// every required legacy source has been decoded and copied successfully. Flat
 /// files created by this pass are tracked so a failed transaction can remove

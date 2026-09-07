@@ -512,7 +512,7 @@ fn load_gestures_plan(path: &Path) -> anyhow::Result<(GestureDb, bool)> {
     }
 }
 
-fn decode_gestures(path: &Path, bytes: &[u8]) -> anyhow::Result<GestureDb> {
+pub(crate) fn decode_gestures(path: &Path, bytes: &[u8]) -> anyhow::Result<GestureDb> {
     decode_gestures_plan(path, bytes).map(|(db, _)| db)
 }
 

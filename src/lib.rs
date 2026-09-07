@@ -41,6 +41,7 @@ pub mod note_todo_sync;
 pub mod note_ui_state;
 pub mod notes_markdown;
 pub mod performance;
+pub mod persistence;
 pub mod platform;
 pub mod plugin;
 pub mod plugin_editor;
