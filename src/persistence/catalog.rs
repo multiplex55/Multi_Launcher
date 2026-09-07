@@ -254,6 +254,11 @@ impl PersistenceCatalog {
             .find(|store| store.id == id)
             .expect("every persistent store ID has one canonical descriptor")
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_stores(stores: Vec<StoreDescriptor>) -> Self {
+        Self { stores }
+    }
 }
 
 #[derive(Clone, Copy)]
