@@ -533,15 +533,16 @@ impl ClipboardModifyDialogState {
         base: &ClipboardModifierCatalog,
         store: &ClipboardModifierStore,
     ) -> Result<ClipboardModifierCatalog, String> {
-        let catalog = self.validate_pipeline_draft(base)?;
-        let model = crate::clipboard_modify::config::model_from_catalog(&catalog);
-        if let Err(e) = store.save(&model) {
-            self.pipeline_editor_error = Some(format!(
-                "Could not save clipboard pipelines. Check file permissions and retry: {e}"
-            ));
-            return Err(self.pipeline_editor_error.clone().unwrap());
-        }
-        store.replace_valid(catalog.clone());
+        self.validate_pipeline_draft(base)?;
+        let catalog = match store.save_pipelines(base, self.pipeline_draft.clone()) {
+            Ok(catalog) => catalog,
+            Err(e) => {
+                self.pipeline_editor_error = Some(format!(
+                    "Could not save clipboard pipelines. Check file permissions and retry: {e}"
+                ));
+                return Err(self.pipeline_editor_error.clone().unwrap());
+            }
+        };
         self.unsaved_pipeline_draft = false;
         self.pipeline_editor_error = None;
         Ok(catalog)
@@ -689,15 +690,16 @@ impl ClipboardModifyDialogState {
         base: &ClipboardModifierCatalog,
         store: &ClipboardModifierStore,
     ) -> Result<ClipboardModifierCatalog, String> {
-        let catalog = self.validate_template_draft(base)?;
-        let model = crate::clipboard_modify::config::model_from_catalog(&catalog);
-        if let Err(e) = store.save(&model) {
-            self.template_editor_error = Some(format!(
-                "Could not save clipboard templates. Check file permissions and retry: {e}"
-            ));
-            return Err(self.template_editor_error.clone().unwrap());
-        }
-        store.replace_valid(catalog.clone());
+        self.validate_template_draft(base)?;
+        let catalog = match store.save_templates(base, self.template_draft.clone()) {
+            Ok(catalog) => catalog,
+            Err(e) => {
+                self.template_editor_error = Some(format!(
+                    "Could not save clipboard templates. Check file permissions and retry: {e}"
+                ));
+                return Err(self.template_editor_error.clone().unwrap());
+            }
+        };
         self.unsaved_template_draft = false;
         self.template_editor_error = None;
         Ok(catalog)

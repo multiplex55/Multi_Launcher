@@ -31,6 +31,7 @@ It’s designed to be “one hotkey away” from:
 - [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
 - [Configuration](#configuration)
 - [Data files](#data-files)
+- [Data safety and recovery](#data-safety-and-recovery)
 - [Building](#building)
 - [Troubleshooting](#troubleshooting)
 - [Manual smoke tests](#manual-smoke-tests)
@@ -122,6 +123,7 @@ Multi Launcher is centered around a **single query box**:
 | `rs` / `osrs` | RuneScape helpers | `osrs wiki karamja gloves` |
 | `cal` | Calendar/reminders | `cal` / `cal add today 5pm Pay rent` |
 | `fs` | File-search plugin | `fs` / `fs file main` / `fs content TODO` |
+| `data` | Data health, backups, and recovery | `data` / `data health` / `data backup` / `data folder` |
 
 ---
 
@@ -732,6 +734,18 @@ These are created/updated as you use the app (typically in the working directory
 * `calendar/events.json` — calendar events
 * `calendar/state.json` — calendar UI state
 * `toast.log` — toast debug log (viewable from UI)
+
+---
+
+## Data safety and recovery
+
+Multi Launcher allows only one running process to own a given application data directory. Important user-authored stores use validated, atomic replacement: a missing or intentionally empty store may initialize normally, but malformed or unreadable existing data is retained and reported instead of being silently replaced with defaults. File watchers likewise keep the last valid in-memory snapshot until a later valid file update arrives.
+
+Use `data` or `data health` to open **Data & Recovery**. The interface scans only when opened or refreshed; backup, health, and recovery preparation run on a bounded background worker. It shows each known store's path, ownership, backup eligibility, and health without displaying stored content. `data folder` opens the application data directory, and **Copy diagnostics** copies metadata and error summaries only.
+
+`data backup` creates a snapshot under the application data directory's `backups` folder. Snapshots include eligible application-owned critical data and a manifest. The newest five recognized snapshots are retained. Private or replaceable histories, runtime state, logs, and configured external data locations are excluded by default; unknown folders under `backups` are not pruned.
+
+Restore and reset are explicit, confirmed, staged operations. They do not replace live data while the current process is using it. The selected operation is validated, the current destination is preserved with a reasoned backup where applicable, and the change is applied before normal data loading on the next launch. A restart is therefore required. If validation or installation fails, the pending instruction and live destination remain available for diagnosis or retry.
 
 ---
 

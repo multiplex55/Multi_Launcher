@@ -122,7 +122,15 @@ impl Dashboard {
         event_cb: Option<std::sync::Arc<dyn Fn(DashboardEvent) + Send + Sync>>,
     ) -> Self {
         let path = config_path.as_ref().to_path_buf();
-        let (config, slots, warnings) = Self::load_internal(&path, &registry);
+        let (config, slots, warnings) = match Self::load_internal(&path, &registry) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                let config = DashboardConfig::default();
+                let (slots, mut warnings) = normalize_slots(&config, &registry);
+                warnings.insert(0, format!("failed to load dashboard config: {error}"));
+                (config, slots, warnings)
+            }
+        };
         let mut dashboard = Self {
             config_path: path,
             config,
@@ -141,13 +149,13 @@ impl Dashboard {
     fn load_internal(
         path: &Path,
         registry: &WidgetRegistry,
-    ) -> (DashboardConfig, Vec<NormalizedSlot>, Vec<String>) {
-        let cfg = DashboardConfig::load(path, registry).unwrap_or_default();
+    ) -> anyhow::Result<(DashboardConfig, Vec<NormalizedSlot>, Vec<String>)> {
+        let cfg = DashboardConfig::load(path, registry)?;
         let (slots, mut warnings) = normalize_slots(&cfg, registry);
         if slots.is_empty() {
             warnings.push("dashboard has no valid slots".into());
         }
-        (cfg, slots, warnings)
+        Ok((cfg, slots, warnings))
     }
 
     fn rebuild_runtime_slots(&mut self, slots: Vec<NormalizedSlot>) {
@@ -182,10 +190,26 @@ impl Dashboard {
     }
 
     pub fn reload(&mut self) {
-        let (cfg, slots, warnings) = Self::load_internal(&self.config_path, &self.registry);
-        self.config = cfg;
-        self.warnings = warnings;
-        self.rebuild_runtime_slots(slots);
+        if !self.config_path.exists() {
+            self.warnings = vec![format!(
+                "dashboard config {} was removed; retaining last-good state",
+                self.config_path.display()
+            )];
+            return;
+        }
+        match Self::load_internal(&self.config_path, &self.registry) {
+            Ok((config, slots, warnings)) => {
+                let changed = self.config != config || self.slots != slots;
+                self.config = config;
+                self.warnings = warnings;
+                if changed {
+                    self.rebuild_runtime_slots(slots);
+                }
+            }
+            Err(error) => {
+                self.warnings = vec![format!("failed to load dashboard config: {error}")];
+            }
+        }
     }
 
     pub fn set_path(&mut self, path: impl AsRef<Path>) {
@@ -778,11 +802,12 @@ mod tests {
             grid: GridConfig { rows: 1, cols: 1 },
             slots: vec![SlotConfig::with_widget("record", 0, 0)],
         };
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        cfg.save(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dashboard.json");
+        cfg.save(&path).unwrap();
 
         let registry = recording_registry();
-        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let mut dashboard = dashboard_with_config(&path, registry);
         let plugins = PluginManager::new();
         let data_cache = DashboardDataCache::new();
         let ctx = dashboard_context(&plugins, &data_cache);
@@ -814,11 +839,12 @@ mod tests {
                 SlotConfig::with_widget("record", 0, 1),
             ],
         };
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        cfg.save(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dashboard.json");
+        cfg.save(&path).unwrap();
 
         let registry = recording_registry();
-        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let mut dashboard = dashboard_with_config(&path, registry);
         let plugins = PluginManager::new();
         let data_cache = DashboardDataCache::new();
         let ctx = dashboard_context(&plugins, &data_cache);
@@ -850,11 +876,12 @@ mod tests {
                 ..SlotConfig::with_widget("record", 0, 0)
             }],
         };
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        cfg.save(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dashboard.json");
+        cfg.save(&path).unwrap();
 
         let registry = recording_registry();
-        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let mut dashboard = dashboard_with_config(&path, registry);
         let plugins = PluginManager::new();
         let data_cache = DashboardDataCache::new();
         let ctx = dashboard_context(&plugins, &data_cache);
@@ -891,11 +918,12 @@ mod tests {
                 ..SlotConfig::with_widget("record", 0, 0)
             }],
         };
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        cfg.save(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dashboard.json");
+        cfg.save(&path).unwrap();
 
         let registry = recording_registry();
-        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let mut dashboard = dashboard_with_config(&path, registry);
         let plugins = PluginManager::new();
         let data_cache = DashboardDataCache::new();
         let ctx = dashboard_context(&plugins, &data_cache);
@@ -928,11 +956,12 @@ mod tests {
                 ..SlotConfig::with_widget("overflow", 0, 0)
             }],
         };
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        cfg.save(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dashboard.json");
+        cfg.save(&path).unwrap();
 
         let registry = overflow_registry();
-        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let mut dashboard = dashboard_with_config(&path, registry);
         let plugins = PluginManager::new();
         let data_cache = DashboardDataCache::new();
         let ctx = dashboard_context(&plugins, &data_cache);
@@ -972,11 +1001,12 @@ mod tests {
                 ..SlotConfig::with_widget("updating", 0, 0)
             }],
         };
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        cfg.save(tmp.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dashboard.json");
+        cfg.save(&path).unwrap();
 
         let registry = updating_registry();
-        let mut dashboard = dashboard_with_config(tmp.path(), registry);
+        let mut dashboard = dashboard_with_config(&path, registry);
         let plugins = PluginManager::new();
         let data_cache = DashboardDataCache::new();
         let ctx = dashboard_context(&plugins, &data_cache);
@@ -1000,7 +1030,7 @@ mod tests {
                 ..SlotConfig::with_widget("updating", 0, 0)
             }],
         };
-        updated_cfg.save(tmp.path()).unwrap();
+        updated_cfg.save(&path).unwrap();
 
         dashboard.reload();
 
@@ -1014,5 +1044,54 @@ mod tests {
         assert_eq!(CREATED.load(Ordering::SeqCst), 1);
         assert_eq!(UPDATED.load(Ordering::SeqCst), 1);
         assert_eq!(take_renders(), vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn reload_retains_last_good_on_invalid_and_recovers_without_self_write_churn() {
+        CREATED.store(0, Ordering::SeqCst);
+        UPDATED.store(0, Ordering::SeqCst);
+        let config = DashboardConfig {
+            version: 1,
+            grid: GridConfig { rows: 1, cols: 1 },
+            slots: vec![SlotConfig {
+                settings: json!({ "label": "first" }),
+                ..SlotConfig::with_widget("updating", 0, 0)
+            }],
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("dashboard.json");
+        config.save(&path).unwrap();
+        let mut dashboard = Dashboard::new(&path, updating_registry(), None);
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+
+        config.save(&path).unwrap();
+        dashboard.reload();
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
+
+        std::fs::write(&path, b"{broken").unwrap();
+        dashboard.reload();
+        assert_eq!(dashboard.config, config);
+        assert_eq!(dashboard.slots.len(), 1);
+        assert!(dashboard.warnings[0].contains("failed to load dashboard config"));
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
+
+        std::fs::remove_file(&path).unwrap();
+        dashboard.reload();
+        assert_eq!(dashboard.config, config);
+        assert_eq!(dashboard.slots.len(), 1);
+        assert!(dashboard.warnings[0].contains("was removed"));
+        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 0);
+
+        let mut recovered = config.clone();
+        recovered.slots[0].settings = json!({ "label": "recovered" });
+        // Simulate an external repair; the transactional save API intentionally
+        // refuses to replace the malformed critical document.
+        crate::common::persistence::save_json_atomic(&path, &recovered).unwrap();
+        dashboard.reload();
+        assert_eq!(dashboard.config, recovered);
+        assert_eq!(UPDATED.load(Ordering::SeqCst), 1);
     }
 }

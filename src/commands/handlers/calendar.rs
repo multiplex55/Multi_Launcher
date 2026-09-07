@@ -8,8 +8,8 @@ use crate::commands::{
 };
 use crate::plugins::calendar::{
     CALENDAR_DATA, CALENDAR_STATE_FILE, add_event, expand_instances, format_event_label,
-    load_state, parse_calendar_add, parse_calendar_search, parse_date_reference,
-    parse_duration_spec, save_state, search_events, snooze_event,
+    parse_calendar_add, parse_calendar_search, parse_date_reference, parse_duration_spec,
+    search_events, snooze_event, update_state,
 };
 
 pub(crate) fn handle_calendar(
@@ -29,10 +29,11 @@ pub(crate) fn handle_calendar(
 fn open(host: &mut dyn CommandHost, view: &str) -> CommandOutcome {
     let now = Local::now().naive_local();
     let mut outcome = CommandOutcome::default();
-    let mut state = load_state(CALENDAR_STATE_FILE).unwrap_or_default();
-    state.last_opened = Some(now);
-    state.last_viewed_day = Some(now.date());
-    if let Err(error) = save_state(CALENDAR_STATE_FILE, &state) {
+    if let Err(error) = update_state(CALENDAR_STATE_FILE, |state| {
+        state.last_opened = Some(now);
+        state.last_viewed_day = Some(now.date());
+        Ok(())
+    }) {
         outcome
             .toasts
             .push(ToastPolicy::Error(format!("Calendar state error: {error}")));
@@ -55,10 +56,11 @@ fn jump(host: &mut dyn CommandHost, reference: &str) -> CommandOutcome {
     let mut outcome = CommandOutcome::default();
     match parse_date_reference(reference, now.date()) {
         Some(date) => {
-            let mut state = load_state(CALENDAR_STATE_FILE).unwrap_or_default();
-            state.last_opened = Some(now);
-            state.last_viewed_day = Some(date);
-            if let Err(error) = save_state(CALENDAR_STATE_FILE, &state) {
+            if let Err(error) = update_state(CALENDAR_STATE_FILE, |state| {
+                state.last_opened = Some(now);
+                state.last_viewed_day = Some(date);
+                Ok(())
+            }) {
                 outcome
                     .toasts
                     .push(ToastPolicy::Error(format!("Calendar state error: {error}")));
@@ -388,6 +390,26 @@ mod tests {
             false
         }
         fn report_clipboard_modify_action_error(&mut self, _: String) {}
+    }
+    impl crate::commands::DataCommandHost for Host {
+        fn open_data_dialog(&mut self, _: crate::commands::DataDialogFocus) -> Result<(), String> {
+            Ok(())
+        }
+        fn request_data_backup(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn open_data_folder(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn stage_data_recovery(
+            &mut self,
+            _: &crate::commands::DataRecoveryCommand,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn data_launcher_should_refocus(&self) -> bool {
+            false
+        }
     }
     impl HeadlessCommandHost for Host {
         fn execute_headless_command(

@@ -132,6 +132,14 @@ pub trait ClipboardModifyCommandHost {
     fn report_clipboard_modify_action_error(&mut self, message: String);
 }
 
+pub trait DataCommandHost {
+    fn open_data_dialog(&mut self, focus: super::DataDialogFocus) -> Result<(), String>;
+    fn request_data_backup(&mut self) -> Result<(), String>;
+    fn open_data_folder(&mut self) -> Result<(), String>;
+    fn stage_data_recovery(&mut self, command: &super::DataRecoveryCommand) -> Result<(), String>;
+    fn data_launcher_should_refocus(&self) -> bool;
+}
+
 pub trait HeadlessCommandHost {
     fn execute_headless_command(
         &mut self,
@@ -160,6 +168,7 @@ pub trait CommandHost:
     + DiffCommandHost
     + ScreenshotCommandHost
     + ClipboardModifyCommandHost
+    + DataCommandHost
     + HeadlessCommandHost
 {
 }
@@ -177,6 +186,7 @@ impl<T> CommandHost for T where
         + DiffCommandHost
         + ScreenshotCommandHost
         + ClipboardModifyCommandHost
+        + DataCommandHost
         + HeadlessCommandHost
 {
 }

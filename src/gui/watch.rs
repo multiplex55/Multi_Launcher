@@ -1,30 +1,40 @@
 use super::*;
+use std::path::{Path, PathBuf};
 
 pub(super) fn watch_file(
     path: &Path,
     tx: Sender<WatchEvent>,
     event: WatchEvent,
+    repaint: egui::Context,
 ) -> notify::Result<RecommendedWatcher> {
+    let target = path.to_path_buf();
+    let target_is_directory = path.is_dir();
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| match res {
             Ok(ev) => {
                 if matches!(
                     ev.kind,
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) && crate::common::json_watch::event_targets_path(
+                    &ev,
+                    &target,
+                    target_is_directory,
                 ) {
-                    let _ = tx.send(event.clone());
+                    if tx.send(event.clone()).is_ok() {
+                        repaint.request_repaint();
+                    }
                 }
             }
             Err(e) => tracing::error!("watch error: {:?}", e),
         },
         Config::default(),
     )?;
-    watcher
-        .watch(path, RecursiveMode::NonRecursive)
-        .or_else(|_| {
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            watcher.watch(parent, RecursiveMode::NonRecursive)
-        })?;
+    let watch_root = if target_is_directory {
+        path
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("."))
+    };
+    watcher.watch(watch_root, RecursiveMode::NonRecursive)?;
     Ok(watcher)
 }
 
@@ -33,50 +43,101 @@ impl LauncherApp {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 WatchEvent::Actions => {
-                    if let Ok(mut acts) = load_actions(&self.actions_path) {
-                        let custom_len = acts.len();
-                        self.custom_len = custom_len;
-                        if let Some(paths) = &self.index_paths {
-                            let options =
-                                indexer::IndexOptions::with_max_items(self.max_indexed_items);
-                            for batch in indexer::index_paths_batched(paths, options) {
-                                match batch {
-                                    Ok(idx) => {
-                                        acts.extend(idx);
-                                        self.actions = Arc::new(acts.clone());
-                                        self.update_action_cache();
-                                        self.search();
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(error = %e, "failed to index paths");
-                                        self.report_error_message(
-                                            "launcher",
-                                            format!("Failed to index paths: {e}"),
-                                        );
-                                        break;
-                                    }
+                    let _transaction = crate::actions::transaction_guard();
+                    let custom = match load_actions_typed(&self.actions_path) {
+                        Ok(crate::common::persistence::LoadState::Missing) => {
+                            let error = crate::common::persistence::PersistenceError::Read {
+                                path: PathBuf::from(&self.actions_path),
+                                source: std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "actions file was removed; retaining last-good state",
+                                ),
+                            };
+                            self.report_error_message(
+                                "actions.reload",
+                                format!("Failed to reload actions: {error}"),
+                            );
+                            self.actions_persistence_diagnostic = Some(error);
+                            continue;
+                        }
+                        Ok(crate::common::persistence::LoadState::Empty) => Vec::new(),
+                        Ok(crate::common::persistence::LoadState::Loaded(actions)) => actions,
+                        Err(error) => {
+                            self.report_error_message(
+                                "actions.reload",
+                                format!("Failed to reload actions: {error}"),
+                            );
+                            self.actions_persistence_diagnostic = Some(error);
+                            continue;
+                        }
+                    };
+                    let current_custom_len = self.custom_len.min(self.actions.len());
+                    if self.actions[..current_custom_len] == custom {
+                        self.actions_persistence_diagnostic = None;
+                        tracing::debug!("ignored unchanged actions reload notification");
+                        continue;
+                    }
+
+                    let mut indexed = Vec::new();
+                    if let Some(paths) = &self.index_paths {
+                        let options = indexer::IndexOptions::with_max_items(self.max_indexed_items);
+                        for batch in indexer::index_paths_batched(paths, options) {
+                            match batch {
+                                Ok(actions) => indexed.extend(actions),
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to index paths");
+                                    self.report_error_message(
+                                        "launcher",
+                                        format!("Failed to index paths: {e}"),
+                                    );
+                                    break;
                                 }
                             }
                         }
-                        self.actions = Arc::new(acts);
-                        self.update_action_cache();
-                        self.search();
-                        crate::actions::bump_actions_version();
-                        tracing::info!("actions reloaded");
                     }
+                    self.publish_actions(custom, indexed);
+                    self.actions_persistence_diagnostic = None;
+                    crate::actions::bump_actions_version();
+                    tracing::info!("actions reloaded");
                 }
-                WatchEvent::Folders => {
-                    let (aliases, aliases_lc) = Self::folder_alias_maps();
-                    self.folder_aliases = aliases;
-                    self.folder_aliases_lc = aliases_lc;
-                    self.search();
+                WatchEvent::Folders
+                    if !Path::new(crate::plugins::folders::FOLDERS_FILE).exists() =>
+                {
+                    self.report_error_message(
+                        "folders.reload",
+                        "Folders file was removed; retaining last-good aliases",
+                    );
                 }
-                WatchEvent::Bookmarks => {
-                    let (aliases, aliases_lc) = Self::bookmark_alias_maps();
-                    self.bookmark_aliases = aliases;
-                    self.bookmark_aliases_lc = aliases_lc;
-                    self.search();
+                WatchEvent::Folders => match Self::try_folder_alias_maps() {
+                    Ok((aliases, aliases_lc)) => {
+                        self.folder_aliases = aliases;
+                        self.folder_aliases_lc = aliases_lc;
+                        self.search();
+                    }
+                    Err(error) => self.report_error_message(
+                        "folders.reload",
+                        format!("Failed to reload folder aliases: {error}"),
+                    ),
+                },
+                WatchEvent::Bookmarks
+                    if !Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE).exists() =>
+                {
+                    self.report_error_message(
+                        "bookmarks.reload",
+                        "Bookmarks file was removed; retaining last-good aliases",
+                    );
                 }
+                WatchEvent::Bookmarks => match Self::try_bookmark_alias_maps() {
+                    Ok((aliases, aliases_lc)) => {
+                        self.bookmark_aliases = aliases;
+                        self.bookmark_aliases_lc = aliases_lc;
+                        self.search();
+                    }
+                    Err(error) => self.report_error_message(
+                        "bookmarks.reload",
+                        format!("Failed to reload bookmark aliases: {error}"),
+                    ),
+                },
                 WatchEvent::Clipboard => {
                     self.dashboard_data_cache
                         .request_refresh(DashboardRefreshRequest::Clipboard);
@@ -156,6 +217,30 @@ mod tests {
     use eframe::egui;
     use std::sync::{Arc, atomic::AtomicBool, mpsc::channel};
     use tempfile::tempdir;
+
+    #[test]
+    fn watcher_enqueues_then_requests_repaint_for_external_change() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("actions.json");
+        std::fs::write(&path, "[]").unwrap();
+        let (event_tx, event_rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let ctx = egui::Context::default();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = repaint_tx.send(());
+        });
+        let _watcher = watch_file(&path, event_tx, WatchEvent::Actions, ctx).unwrap();
+
+        crate::common::persistence::save_json_atomic(&path, &serde_json::json!([])).unwrap();
+
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            WatchEvent::Actions
+        ));
+        repaint_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("watch callback should wake idle egui after enqueue");
+    }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
@@ -293,6 +378,20 @@ mod tests {
         assert_eq!(
             app.bookmark_aliases_lc.get("https://example.com"),
             Some(&Some("updated example alias".into()))
+        );
+
+        std::fs::remove_file(crate::plugins::folders::FOLDERS_FILE).unwrap();
+        std::fs::remove_file(crate::plugins::bookmarks::BOOKMARKS_FILE).unwrap();
+        send_event(WatchEvent::Folders);
+        send_event(WatchEvent::Bookmarks);
+        app.process_watch_events();
+        assert_eq!(
+            app.folder_aliases.get("C:/Docs"),
+            Some(&Some("Updated Docs Alias".into()))
+        );
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("Updated Example Alias".into()))
         );
 
         std::env::set_current_dir(original_dir).unwrap();

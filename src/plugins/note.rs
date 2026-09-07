@@ -22,8 +22,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc::{SyncSender, TrySendError, sync_channel},
 };
+use std::thread::{self, JoinHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteExternalOpen {
@@ -90,7 +92,7 @@ impl Default for NotePluginSettings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     pub title: String,
     pub path: PathBuf,
@@ -273,13 +275,14 @@ static CACHE: Lazy<Arc<Mutex<NoteCache>>> =
 static TEMPLATE_CACHE: Lazy<Arc<Mutex<HashMap<String, String>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+static NOTE_MUTATION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static TEMPLATE_MUTATION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:[#@])([A-Za-z0-9_]+)").unwrap());
 static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 // Matches markdown image syntax `![alt](path)` capturing the path portion.
 static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap());
 static NOTE_VERSION: AtomicU64 = AtomicU64::new(0);
-static LAST_NOTE_REINDEX_MS: AtomicU64 = AtomicU64::new(0);
-const NOTE_REINDEX_DEBOUNCE_MS: u64 = 250;
 
 #[cfg(test)]
 type NoteSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync;
@@ -287,11 +290,50 @@ type NoteSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send
 #[cfg(test)]
 static NOTE_SAVE_HOOK: Lazy<Mutex<Option<Box<NoteSaveHook>>>> = Lazy::new(|| Mutex::new(None));
 
+#[cfg(test)]
+type NoteRemoveHook = dyn Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync;
+
+#[cfg(test)]
+static NOTE_REMOVE_HOOK: Lazy<Mutex<Option<Box<NoteRemoveHook>>>> = Lazy::new(|| Mutex::new(None));
+
 fn persist_note_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     #[cfg(test)]
     if let Some(hook) = NOTE_SAVE_HOOK
         .lock()
         .expect("note save hook lock poisoned")
+        .as_ref()
+    {
+        return hook(path, bytes);
+    }
+
+    crate::common::atomic_file::save_atomic(path, bytes)
+}
+
+fn remove_note_file(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = NOTE_REMOVE_HOOK
+        .lock()
+        .expect("note remove hook lock poisoned")
+        .as_ref()
+    {
+        return hook(path);
+    }
+
+    std::fs::remove_file(path).map_err(Into::into)
+}
+
+#[cfg(test)]
+type TemplateSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync;
+
+#[cfg(test)]
+static TEMPLATE_SAVE_HOOK: Lazy<Mutex<Option<Box<TemplateSaveHook>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+fn persist_template_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = TEMPLATE_SAVE_HOOK
+        .lock()
+        .expect("template save hook lock poisoned")
         .as_ref()
     {
         return hook(path, bytes);
@@ -636,13 +678,20 @@ fn normalize_note_aliases(note: &mut Note) {
 }
 
 pub fn template_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ML_NOTE_TEMPLATES_DIR") {
-        return PathBuf::from(dir);
+    template_dir_configuration().0
+}
+
+pub(crate) fn template_dir_configuration() -> (PathBuf, bool) {
+    match std::env::var("ML_NOTE_TEMPLATES_DIR") {
+        Ok(dir) => (PathBuf::from(dir), true),
+        Err(_) => (
+            dirs_next::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".multi_launcher")
+                .join("templates"),
+            false,
+        ),
     }
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".multi_launcher")
-        .join("templates")
 }
 
 pub fn validate_template_name(name: &str) -> anyhow::Result<&str> {
@@ -735,20 +784,35 @@ where
 }
 
 pub fn save_template(name: &str, content: &str) -> anyhow::Result<()> {
-    let path = template_path(name)?;
+    let name = validate_template_name(name)?.to_string();
+    let path = template_path(&name)?;
+    let _mutation = TEMPLATE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note template mutation lock poisoned"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, content)?;
-    reload_templates()
+    persist_template_file(&path, content.as_bytes())
+        .with_context(|| format!("save note template {}", path.display()))?;
+    if let Ok(mut templates) = TEMPLATE_CACHE.lock() {
+        templates.insert(name, content.to_string());
+    }
+    Ok(())
 }
 
 pub fn delete_template(name: &str) -> anyhow::Result<()> {
-    let path = template_path(name)?;
+    let name = validate_template_name(name)?.to_string();
+    let path = template_path(&name)?;
+    let _mutation = TEMPLATE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note template mutation lock poisoned"))?;
     if path.exists() {
         std::fs::remove_file(path)?;
     }
-    reload_templates()
+    if let Ok(mut templates) = TEMPLATE_CACHE.lock() {
+        templates.remove(&name);
+    }
+    Ok(())
 }
 
 pub fn notes_dir() -> PathBuf {
@@ -938,12 +1002,19 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
 
 pub fn refresh_cache() -> anyhow::Result<()> {
     let notes = load_notes()?;
+    publish_note_cache(notes);
+    Ok(())
+}
+
+fn publish_note_cache(notes: Vec<Note>) {
     let cache = NoteCache::from_notes(notes);
     if let Ok(mut guard) = CACHE.lock() {
+        if guard.notes == cache.notes {
+            return;
+        }
         *guard = cache;
+        bump_note_version();
     }
-    bump_note_version();
-    Ok(())
 }
 
 fn bump_note_version() {
@@ -993,23 +1064,58 @@ pub fn available_tags() -> Vec<String> {
 /// is `false` and a different note already exists at the target path, the
 /// function returns `Ok(false)` without modifying the file system or the note
 /// itself.
-pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
+fn note_from_persisted_content(path: PathBuf, slug: String, content: String) -> Note {
+    let aliases = extract_aliases(&content);
+    Note {
+        title: content
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("# "))
+            .map(str::to_owned)
+            .unwrap_or_else(|| slug.replace('-', " ")),
+        tags: extract_tags(&content),
+        links: extract_links(&content),
+        alias: aliases.first().cloned(),
+        aliases,
+        entity_refs: extract_entity_refs(&content),
+        path,
+        content,
+        slug,
+    }
+}
+
+fn note_content_for_persistence(note: &Note) -> String {
+    let mut content = if note.content.starts_with("# ") {
+        note.content.clone()
+    } else {
+        format!("# {}\n\n{}", note.title, note.content)
+    };
+    if let Some(alias) = &note.alias
+        && !content.lines().any(|line| line.starts_with("Alias:"))
+    {
+        let mut lines = content.lines();
+        let first = lines.next().unwrap_or("");
+        let rest = lines.collect::<Vec<_>>().join("\n");
+        content = format!("{first}\nAlias: {alias}\n{rest}");
+    }
+    content
+}
+
+fn save_note_locked(
+    note: &mut Note,
+    overwrite: bool,
+    existing_notes: Vec<Note>,
+) -> anyhow::Result<bool> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
-    let existing_slugs: HashSet<String> = CACHE
-        .lock()
-        .map(|cache| {
-            cache
-                .notes
-                .iter()
-                .filter(|cached| {
-                    (note.path.as_os_str().is_empty() || cached.path != note.path)
-                        && (note.slug.is_empty() || cached.slug != note.slug)
-                })
-                .map(|cached| cached.slug.clone())
-                .collect()
+    let existing_slugs: HashSet<String> = existing_notes
+        .iter()
+        .filter(|existing| {
+            (note.path.as_os_str().is_empty() || existing.path != note.path)
+                && (note.slug.is_empty() || existing.slug != note.slug)
         })
-        .unwrap_or_default();
+        .map(|existing| existing.slug.clone())
+        .collect();
 
     let slug = if note.slug.is_empty() {
         reset_slug_lookup();
@@ -1027,43 +1133,135 @@ pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
     if path.exists() && note.path != path && !overwrite {
         return Ok(false);
     }
-    let mut content = if note.content.starts_with("# ") {
-        note.content.clone()
-    } else {
-        format!("# {}\n\n{}", note.title, note.content)
-    };
-    if let Some(a) = &note.alias
-        && !content.lines().any(|l| l.starts_with("Alias:"))
-    {
-        let mut lines = content.lines();
-        let first = lines.next().unwrap_or("");
-        let rest = lines.collect::<Vec<_>>().join("\n");
-        content = format!("{first}\nAlias: {a}\n{rest}");
-    }
-    note.aliases = extract_aliases(&content);
+    let content = note_content_for_persistence(note);
+    let mut aliases = extract_aliases(&content);
     if let Some(alias) = &note.alias
-        && !note.aliases.iter().any(|a| a.eq_ignore_ascii_case(alias))
+        && !aliases.iter().any(|a| a.eq_ignore_ascii_case(alias))
     {
-        note.aliases.insert(0, alias.clone());
+        aliases.insert(0, alias.clone());
     }
-    note.aliases = dedup_aliases(note.aliases.clone());
-    note.alias = note.aliases.first().cloned();
-    note.tags = extract_tags(&content);
-    note.entity_refs = extract_entity_refs(&content);
+    aliases = dedup_aliases(aliases);
+    let alias = aliases.first().cloned();
+    let tags = extract_tags(&content);
+    let entity_refs = extract_entity_refs(&content);
+    let path_changed = !note.path.as_os_str().is_empty() && note.path != path;
+    let overwritten_destination = if path_changed && path.exists() {
+        Some(
+            std::fs::read(&path)
+                .with_context(|| format!("snapshot overwritten note {}", path.display()))?,
+        )
+    } else {
+        None
+    };
     persist_note_file(&path, content.as_bytes())
         .with_context(|| format!("save note {}", path.display()))?;
-    if !note.path.as_os_str().is_empty() && note.path != path {
-        let _ = std::fs::remove_file(&note.path);
+    if path_changed
+        && let Err(error) = remove_note_file(&note.path)
+            .with_context(|| format!("remove renamed note {}", note.path.display()))
+    {
+        let rollback = match overwritten_destination {
+            Some(bytes) => crate::common::atomic_file::save_atomic(&path, &bytes)
+                .with_context(|| format!("restore overwritten note {}", path.display())),
+            None => std::fs::remove_file(&path)
+                .with_context(|| format!("remove rolled-back note {}", path.display())),
+        };
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(error.context(format!("rollback failed: {rollback:#}"))),
+        };
     }
+    let committed = note_from_persisted_content(path.clone(), slug.clone(), content);
+    let mut next_notes = existing_notes;
+    next_notes.retain(|existing| existing.path != note.path && existing.slug != slug);
+    next_notes.push(committed);
+    publish_note_cache(next_notes);
     note.path = path;
     note.slug = slug;
-    refresh_cache()?;
+    note.aliases = aliases;
+    note.alias = alias;
+    note.tags = tags;
+    note.entity_refs = entity_refs;
     Ok(true)
 }
 
+pub fn save_note(note: &mut Note, overwrite: bool) -> anyhow::Result<bool> {
+    let _mutation = NOTE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    let notes = load_notes()?;
+    save_note_locked(note, overwrite, notes)
+}
+
+/// Replace one existing note's content using its latest on-disk identity.
+pub fn save_note_content(identity: &str, content: &str) -> anyhow::Result<Option<Note>> {
+    let _mutation = NOTE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    let notes = load_notes()?;
+    let Some(mut note) = notes
+        .iter()
+        .find(|note| {
+            note.slug == identity
+                || note
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(identity))
+        })
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    note.content = content.to_string();
+    note.title = content.lines().next().unwrap_or(&note.title).to_string();
+    save_note_locked(&mut note, true, notes)?;
+    Ok(Some(note))
+}
+
+/// Append content to one existing note using its latest on-disk contents.
+pub fn append_note_content(identity: &str, suffix: &str) -> anyhow::Result<Option<Note>> {
+    let _mutation = NOTE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    let notes = load_notes()?;
+    let Some(mut note) = notes
+        .iter()
+        .find(|note| {
+            note.slug == identity
+                || note
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(identity))
+        })
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    note.content.push_str(suffix);
+    save_note_locked(&mut note, true, notes)?;
+    Ok(Some(note))
+}
+
+/// Replace the complete notes directory with `notes`.
+///
+/// This destructive whole-store helper is retained for internal fixture/setup
+/// compatibility. Interactive mutations must use `save_note` or
+/// `remove_note_by_identity` so a stale snapshot cannot prune newer notes.
 pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
+    let _mutation = NOTE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
+    let original_notes = load_notes()?;
+    let original_files = original_notes
+        .iter()
+        .map(|note| {
+            std::fs::read(&note.path)
+                .with_context(|| format!("snapshot note {}", note.path.display()))
+                .map(|bytes| (note.path.clone(), bytes))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
     reset_slug_lookup();
     for n in notes {
         if !n.slug.is_empty() {
@@ -1071,6 +1269,7 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
         }
     }
     let mut expected = HashSet::new();
+    let mut prepared = Vec::with_capacity(notes.len());
     for note in notes {
         let slug = if note.slug.is_empty() {
             unique_slug(&note.title)
@@ -1078,30 +1277,61 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
             note.slug.clone()
         };
         let path = dir.join(format!("{slug}.md"));
-        expected.insert(path.clone());
-        let mut content = if note.content.starts_with("# ") {
-            note.content.clone()
-        } else {
-            format!("# {}\n\n{}", note.title, note.content)
-        };
-        if let Some(a) = &note.alias
-            && !content.lines().any(|l| l.starts_with("Alias:"))
+        if !expected.insert(path.clone()) {
+            anyhow::bail!("duplicate note slug {slug}");
+        }
+        let content = note_content_for_persistence(note);
+        let committed = note_from_persisted_content(path.clone(), slug, content.clone());
+        prepared.push((path, content.into_bytes(), committed));
+    }
+
+    let restore = |changed_paths: &HashSet<PathBuf>| -> anyhow::Result<()> {
+        for path in changed_paths {
+            if !original_files.iter().any(|(original, _)| original == path) && path.exists() {
+                std::fs::remove_file(path)
+                    .with_context(|| format!("remove rolled-back note {}", path.display()))?;
+            }
+        }
+        for (path, bytes) in &original_files {
+            crate::common::atomic_file::save_atomic(path, bytes)
+                .with_context(|| format!("restore note {}", path.display()))?;
+        }
+        Ok(())
+    };
+
+    let mut changed_paths = HashSet::new();
+    for (path, bytes, _) in &prepared {
+        changed_paths.insert(path.clone());
+        if let Err(error) =
+            persist_note_file(path, bytes).with_context(|| format!("save note {}", path.display()))
         {
-            let mut lines = content.lines();
-            let first = lines.next().unwrap_or("");
-            let rest = lines.collect::<Vec<_>>().join("\n");
-            content = format!("{first}\nAlias: {a}\n{rest}");
-        }
-        persist_note_file(&path, content.as_bytes())
-            .with_context(|| format!("save note {}", path.display()))?;
-    }
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("md") && !expected.contains(&path) {
-            let _ = std::fs::remove_file(path);
+            let rollback = restore(&changed_paths);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(error.context(format!("rollback failed: {rollback:#}"))),
+            };
         }
     }
-    refresh_cache()?;
+
+    for (path, _) in &original_files {
+        if !expected.contains(path) {
+            if let Err(error) = std::fs::remove_file(path)
+                .with_context(|| format!("remove stale note {}", path.display()))
+            {
+                let rollback = restore(&changed_paths);
+                return match rollback {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(error.context(format!("rollback failed: {rollback:#}"))),
+                };
+            }
+        }
+    }
+    publish_note_cache(
+        prepared
+            .into_iter()
+            .map(|(_, _, committed)| committed)
+            .collect(),
+    );
     Ok(())
 }
 
@@ -1120,13 +1350,94 @@ pub fn append_note(title: &str, content: &str) -> anyhow::Result<()> {
     save_note(&mut note, true).map(|_| ())
 }
 
-pub fn remove_note(index: usize) -> anyhow::Result<()> {
+pub fn remove_note_by_identity(identity: &str) -> anyhow::Result<Option<Note>> {
+    let _mutation = NOTE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
     let notes = load_notes()?;
-    if let Some(note) = notes.get(index) {
-        let _ = std::fs::remove_file(&note.path);
+    let Some(note) = notes.iter().find(|note| {
+        note.slug == identity
+            || note
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(identity))
+    }) else {
+        return Ok(None);
+    };
+    let removed = note.clone();
+    std::fs::remove_file(&removed.path)
+        .with_context(|| format!("remove note {}", removed.path.display()))?;
+    let mut next_notes = notes;
+    next_notes.retain(|note| note.path != removed.path);
+    publish_note_cache(next_notes);
+    Ok(Some(removed))
+}
+
+struct NoteReloadCoordinator {
+    wake: SyncSender<()>,
+    shutting_down: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl NoteReloadCoordinator {
+    fn start(
+        mut reload: impl FnMut() -> anyhow::Result<()> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let (wake, receiver) = sync_channel(1);
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutting_down);
+        let worker = thread::Builder::new()
+            .name("notes-reload".into())
+            .spawn(move || {
+                while receiver.recv().is_ok() {
+                    if worker_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    while receiver.try_recv().is_ok() {}
+                    if let Err(error) = reload() {
+                        tracing::error!(%error, "notes watcher retained last-good cache");
+                    }
+                }
+            })?;
+        Ok(Self {
+            wake,
+            shutting_down,
+            worker: Some(worker),
+        })
     }
-    refresh_cache()?;
-    Ok(())
+
+    fn requester(&self) -> SyncSender<()> {
+        self.wake.clone()
+    }
+
+    fn request(requester: &SyncSender<()>) {
+        match requester.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) | Err(TrySendError::Disconnected(())) => {}
+        }
+    }
+}
+
+impl Drop for NoteReloadCoordinator {
+    fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct NoteWatcher {
+    watcher: Option<RecommendedWatcher>,
+    coordinator: Option<NoteReloadCoordinator>,
+}
+
+impl Drop for NoteWatcher {
+    fn drop(&mut self) {
+        // Unregister native callbacks before stopping their owned consumer.
+        self.watcher.take();
+        self.coordinator.take();
+    }
 }
 
 pub struct NotePlugin {
@@ -1138,7 +1449,7 @@ pub struct NotePlugin {
     aliases_enabled: bool,
     templates_enabled: bool,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<NoteWatcher>,
 }
 
 impl NotePlugin {
@@ -1149,24 +1460,25 @@ impl NotePlugin {
         let templates = TEMPLATE_CACHE.clone();
         let dir = notes_dir();
         let _ = std::fs::create_dir_all(&dir);
+        let watch_target = dir.clone();
+        let coordinator = NoteReloadCoordinator::start(refresh_cache).ok();
+        let requester = coordinator.as_ref().map(NoteReloadCoordinator::requester);
         let watcher = RecommendedWatcher::new(
-            move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res
-                    && matches!(
+            move |res: notify::Result<notify::Event>| match res {
+                Ok(event)
+                    if matches!(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    )
+                    ) && crate::common::json_watch::event_targets_path(
+                        &event,
+                        &watch_target,
+                        true,
+                    ) && let Some(requester) = &requester =>
                 {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let last = LAST_NOTE_REINDEX_MS.load(Ordering::SeqCst);
-                    if now.saturating_sub(last) >= NOTE_REINDEX_DEBOUNCE_MS {
-                        LAST_NOTE_REINDEX_MS.store(now, Ordering::SeqCst);
-                        let _ = refresh_cache();
-                    }
+                    NoteReloadCoordinator::request(requester);
                 }
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error, "notes watcher notification failed"),
             },
             Config::default(),
         )
@@ -1182,6 +1494,13 @@ impl NotePlugin {
                 .is_ok()
                 .then_some(watcher)
         });
+        let watcher = match (watcher, coordinator) {
+            (Some(watcher), Some(coordinator)) => Some(NoteWatcher {
+                watcher: Some(watcher),
+                coordinator: Some(coordinator),
+            }),
+            _ => None,
+        };
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -2176,6 +2495,97 @@ mod tests {
     }
 
     #[test]
+    fn note_reload_coordinator_coalesces_bursts_to_one_pending_reload() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let coordinator = NoteReloadCoordinator::start(move || {
+            worker_calls.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let requester = coordinator.requester();
+
+        NoteReloadCoordinator::request(&requester);
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        for _ in 0..100 {
+            NoteReloadCoordinator::request(&requester);
+        }
+        release_tx.send(()).unwrap();
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        drop(requester);
+        drop(coordinator);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn note_reload_coordinator_processes_recovery_after_failed_reload() {
+        let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
+        let attempt = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_attempt = Arc::clone(&attempt);
+        let coordinator = NoteReloadCoordinator::start(move || {
+            let attempt = worker_attempt.fetch_add(1, Ordering::SeqCst);
+            let success = attempt > 0;
+            outcome_tx.send(success).unwrap();
+            if success {
+                Ok(())
+            } else {
+                anyhow::bail!("injected unreadable notes directory")
+            }
+        })
+        .unwrap();
+        let requester = coordinator.requester();
+
+        NoteReloadCoordinator::request(&requester);
+        assert!(
+            !outcome_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        );
+        NoteReloadCoordinator::request(&requester);
+        assert!(
+            outcome_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        );
+        drop(requester);
+        drop(coordinator);
+        assert_eq!(attempt.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn note_reload_coordinator_shutdown_joins_and_drops_worker_state() {
+        struct DropSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let signal = DropSignal(dropped_tx);
+        let coordinator = NoteReloadCoordinator::start(move || {
+            let _ = &signal;
+            Ok(())
+        })
+        .unwrap();
+
+        drop(coordinator);
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("coordinator drop must join and release worker-owned state");
+    }
+
+    #[test]
     fn saves_png_assets_with_safe_names_and_collision_suffixes() {
         let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let notes = tempfile::tempdir().unwrap();
@@ -2268,6 +2678,34 @@ mod tests {
 
     fn clear_note_save_hook() {
         *NOTE_SAVE_HOOK.lock().expect("note save hook lock poisoned") = None;
+    }
+
+    fn set_note_remove_hook(
+        hook: impl Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        *NOTE_REMOVE_HOOK
+            .lock()
+            .expect("note remove hook lock poisoned") = Some(Box::new(hook));
+    }
+
+    fn clear_note_remove_hook() {
+        *NOTE_REMOVE_HOOK
+            .lock()
+            .expect("note remove hook lock poisoned") = None;
+    }
+
+    fn set_template_save_hook(
+        hook: impl Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        *TEMPLATE_SAVE_HOOK
+            .lock()
+            .expect("template save hook lock poisoned") = Some(Box::new(hook));
+    }
+
+    fn clear_template_save_hook() {
+        *TEMPLATE_SAVE_HOOK
+            .lock()
+            .expect("template save hook lock poisoned") = None;
     }
 
     fn assert_no_bak_files(dir: &std::path::Path) {
@@ -2401,6 +2839,24 @@ mod tests {
             delete_template(" meeting ").unwrap();
             assert_eq!(list_templates().unwrap(), Vec::<String>::new());
             assert!(!dir.join("meeting.md").exists());
+        });
+    }
+
+    #[test]
+    fn failed_template_save_preserves_destination_and_committed_cache() {
+        with_template_dir(|dir| {
+            save_template("meeting", "# Original").unwrap();
+            set_template_save_hook(|_, _| anyhow::bail!("deterministic template save failure"));
+
+            let result = save_template("meeting", "# Updated");
+            clear_template_save_hook();
+
+            assert!(result.is_err());
+            assert_eq!(
+                std::fs::read_to_string(dir.join("meeting.md")).unwrap(),
+                "# Original"
+            );
+            assert_eq!(get_template("meeting"), Some("# Original".into()));
         });
     }
 
@@ -2861,9 +3317,9 @@ mod tests {
         use std::fs;
         use tempfile::tempdir;
 
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let dir = tempdir().unwrap();
-        let prev = std::env::var("ML_NOTES_DIR").ok();
-        unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()) };
+        let _env = NotesDirEnvGuard::set(dir.path());
 
         fs::write(
             dir.path().join("one.md"),
@@ -2876,6 +3332,9 @@ Body",
         let first = note_cache_snapshot();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].slug, "one");
+        let first_version = note_version();
+        refresh_cache().unwrap();
+        assert_eq!(note_version(), first_version);
 
         fs::write(
             dir.path().join("two.md"),
@@ -2888,12 +3347,34 @@ Body",
         let second = note_cache_snapshot();
         assert_eq!(second.len(), 2);
         assert!(second.iter().any(|n| n.slug == "two"));
+    }
 
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("ML_NOTES_DIR", p) };
-        } else {
-            unsafe { std::env::remove_var("ML_NOTES_DIR") };
-        }
+    #[test]
+    fn note_cache_retains_unreadable_reload_then_recovers_without_duplicate_version() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let original = set_notes(Vec::new());
+        std::fs::write(dir.path().join("one.md"), "# One\n\nBody").unwrap();
+        refresh_cache().unwrap();
+        let committed = note_cache_snapshot();
+        let committed_version = note_version();
+
+        let unreadable = dir.path().join("broken.md");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(refresh_cache().is_err());
+        assert_eq!(note_cache_snapshot(), committed);
+        assert_eq!(note_version(), committed_version);
+
+        std::fs::remove_dir(unreadable).unwrap();
+        std::fs::write(dir.path().join("two.md"), "# Two\n\nBody").unwrap();
+        refresh_cache().unwrap();
+        assert_eq!(note_cache_snapshot().len(), 2);
+        assert_eq!(note_version(), committed_version + 1);
+        refresh_cache().unwrap();
+        assert_eq!(note_version(), committed_version + 1);
+
+        restore_cache(original);
     }
 
     #[test]
@@ -3744,11 +4225,15 @@ Body",
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         };
+        let draft_before_save = note.clone();
+        let cache_before_save = note_cache_snapshot();
 
         let result = save_note(&mut note, true);
         clear_note_save_hook();
 
         assert!(result.is_err());
+        assert_eq!(note, draft_before_save);
+        assert_eq!(note_cache_snapshot(), cache_before_save);
         assert_eq!(fs::read_to_string(&path).unwrap(), "# Alpha\n\noriginal");
         assert_no_bak_files(dir.path());
 
@@ -3807,7 +4292,54 @@ Body",
     }
 
     #[test]
-    fn save_notes_failed_write_does_not_delete_unrelated_old_notes_or_create_backups() {
+    fn save_note_rename_delete_failure_restores_overwritten_destination_and_cache() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+
+        let old_path = dir.path().join("alpha.md");
+        let destination_path = dir.path().join("beta.md");
+        fs::write(&old_path, "# Alpha\n\noriginal alpha").unwrap();
+        fs::write(&destination_path, "# Beta\n\noriginal beta").unwrap();
+        refresh_cache().unwrap();
+        let cache_before_save = note_cache_snapshot();
+        set_note_remove_hook(|_path| anyhow::bail!("deterministic remove failure"));
+
+        let mut note = Note {
+            title: "Beta replacement".into(),
+            path: old_path.clone(),
+            content: "# Beta replacement\n\nupdated".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "beta".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let draft_before_save = note.clone();
+
+        let result = save_note(&mut note, true);
+        clear_note_remove_hook();
+
+        assert!(result.is_err());
+        assert_eq!(note, draft_before_save);
+        assert_eq!(note_cache_snapshot(), cache_before_save);
+        assert_eq!(
+            fs::read_to_string(old_path).unwrap(),
+            "# Alpha\n\noriginal alpha"
+        );
+        assert_eq!(
+            fs::read_to_string(destination_path).unwrap(),
+            "# Beta\n\noriginal beta"
+        );
+        assert_no_bak_files(dir.path());
+    }
+
+    #[test]
+    fn save_notes_failed_write_rolls_back_the_whole_note_set() {
         use std::fs;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tempfile::tempdir;
@@ -3820,6 +4352,7 @@ Body",
         let stale_path = dir.path().join("stale.md");
         fs::write(&stale_path, "# Stale\n\nkeep me").unwrap();
         refresh_cache().unwrap();
+        let cache_before_save = note_cache_snapshot();
         let writes = Arc::new(AtomicUsize::new(0));
         let hook_writes = writes.clone();
         set_note_save_hook(move |path, bytes| {
@@ -3865,11 +4398,9 @@ Body",
             fs::read_to_string(&stale_path).unwrap(),
             "# Stale\n\nkeep me"
         );
-        assert_eq!(
-            fs::read_to_string(dir.path().join("alpha.md")).unwrap(),
-            "# Alpha\n\nnew"
-        );
+        assert!(!dir.path().join("alpha.md").exists());
         assert!(!dir.path().join("beta.md").exists());
+        assert_eq!(note_cache_snapshot(), cache_before_save);
         assert_no_bak_files(dir.path());
 
         if let Some(p) = prev {
@@ -3877,5 +4408,94 @@ Body",
         } else {
             unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
+    }
+
+    #[test]
+    fn committed_single_note_save_does_not_depend_on_a_post_commit_reload() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let path = dir.path().join("alpha.md");
+        let other_path = dir.path().join("beta.md");
+        fs::write(&path, "# Alpha\n\noriginal").unwrap();
+        fs::write(&other_path, "# Beta\n\nkeep cached").unwrap();
+        refresh_cache().unwrap();
+
+        let hook_other_path = other_path.clone();
+        set_note_save_hook(move |path, bytes| {
+            crate::common::atomic_file::save_atomic(path, bytes)?;
+            fs::write(&hook_other_path, [0xff, 0xfe])?;
+            Ok(())
+        });
+
+        let saved = save_note_content("alpha", "# Alpha\n\nupdated");
+        clear_note_save_hook();
+
+        let saved = saved.unwrap().unwrap();
+        assert_eq!(saved.slug, "alpha");
+        assert_eq!(fs::read_to_string(path).unwrap(), "# Alpha\n\nupdated");
+        let cached = note_cache_snapshot();
+        assert!(
+            cached
+                .iter()
+                .any(|note| note.content == "# Alpha\n\nupdated")
+        );
+        assert!(
+            cached
+                .iter()
+                .any(|note| note.content == "# Beta\n\nkeep cached")
+        );
+    }
+
+    #[test]
+    fn stale_single_note_edit_retains_a_newer_concurrent_addition() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+
+        let mut alpha = test_note("Alpha", "alpha", "# Alpha\n\noriginal");
+        save_note(&mut alpha, true).unwrap();
+        let stale_alpha = load_notes().unwrap().remove(0);
+
+        let mut beta = test_note("Beta", "beta", "# Beta\n\nadded later");
+        save_note(&mut beta, true).unwrap();
+        save_note_content(&stale_alpha.slug, "# Alpha\n\nedited from stale dialog")
+            .unwrap()
+            .unwrap();
+
+        let notes = load_notes().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().any(|note| {
+            note.slug == "alpha" && note.content.contains("edited from stale dialog")
+        }));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.slug == "beta" && note.content.contains("added later"))
+        );
+    }
+
+    #[test]
+    fn identity_delete_retains_notes_added_after_the_callers_snapshot() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+
+        let mut alpha = test_note("Alpha", "alpha", "# Alpha\n\nremove me");
+        save_note(&mut alpha, true).unwrap();
+        let _stale_snapshot = load_notes().unwrap();
+        let mut beta = test_note("Beta", "beta", "# Beta\n\nkeep me");
+        save_note(&mut beta, true).unwrap();
+
+        let removed = remove_note_by_identity("alpha").unwrap().unwrap();
+
+        assert_eq!(removed.slug, "alpha");
+        let notes = load_notes().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].slug, "beta");
+        assert_eq!(note_cache_snapshot()[0].slug, "beta");
     }
 }

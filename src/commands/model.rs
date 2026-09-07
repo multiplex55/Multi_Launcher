@@ -6,6 +6,7 @@ use crate::common::entity_ref::EntityRef;
 use crate::diff::query::DiffOpenPayload;
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
+use crate::persistence::{PersistentStoreId, RecoveryTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationSource {
@@ -71,6 +72,7 @@ pub enum Command {
     Layout(LayoutCommand),
     Macro(MacroCommand),
     Crop(CropCommand),
+    Data(DataCommand),
     External(ExternalCommand),
 }
 
@@ -101,6 +103,7 @@ impl Command {
             Self::Layout(_) => "layout",
             Self::Macro(_) => "macro",
             Self::Crop(_) => "crop",
+            Self::Data(_) => "data",
             Self::External(_) => "external",
         }
     }
@@ -130,6 +133,7 @@ impl Command {
             Self::Layout(v) => v.kind_name(),
             Self::Macro(v) => v.kind_name(),
             Self::Crop(v) => v.kind_name(),
+            Self::Data(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
         }
     }
@@ -509,6 +513,77 @@ pub enum CropCommand {
     Screenshot,
 }
 kinds!(CropCommand, Self::Image => "image", Self::Screenshot => "screenshot");
+
+/// User-facing data maintenance commands.
+///
+/// Recovery is intentionally nested under this domain instead of extending
+/// [`StorageCommand`], whose established meaning is launcher catalog data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataCommand {
+    Dialog,
+    Health,
+    Backup,
+    OpenFolder,
+    Recovery(DataRecoveryCommand),
+    Invalid { raw: String, error: String },
+}
+
+impl DataCommand {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Dialog => "dialog",
+            Self::Health => "health",
+            Self::Backup => "backup",
+            Self::OpenFolder => "folder",
+            Self::Recovery(command) => command.kind_name(),
+            Self::Invalid { .. } => "invalid",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataDialogFocus {
+    Overview,
+    Health,
+}
+
+/// Proof that a destructive recovery request came from an explicit UI
+/// confirmation step. Raw action parsing cannot produce this token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DataRecoveryConfirmation(());
+
+impl DataRecoveryConfirmation {
+    /// Minted only by the crate-owned confirmation UI after the user accepts
+    /// the destructive recovery prompt.
+    pub(crate) fn from_explicit_user_confirmation() -> Self {
+        Self(())
+    }
+}
+
+/// Recovery requests are constructed by the Data & Recovery UI after the user
+/// has selected a typed catalog store and explicitly confirmed the operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataRecoveryCommand {
+    Restore {
+        target: RecoveryTarget,
+        snapshot_id: String,
+        confirmation: DataRecoveryConfirmation,
+    },
+    Reset {
+        store_id: PersistentStoreId,
+        confirmation: DataRecoveryConfirmation,
+    },
+}
+
+impl DataRecoveryCommand {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Restore { .. } => "restore",
+            Self::Reset { .. } => "reset",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternalNamespace {
     Favorite,

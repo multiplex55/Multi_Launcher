@@ -13,7 +13,7 @@ pub mod handlers;
 pub use bus::CommandBus;
 pub use error::CommandError;
 pub use host::{
-    CalendarCommandHost, ClipboardModifyCommandHost, CommandHost, CropCommandHost,
+    CalendarCommandHost, ClipboardModifyCommandHost, CommandHost, CropCommandHost, DataCommandHost,
     DialogCommandHost, DiffCommandHost, FileSearchCommandHost, HeadlessCommandHost,
     LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
     ScreenshotCommandHost, ScreenshotCommandResult, TodoCommandHost,

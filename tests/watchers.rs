@@ -7,7 +7,6 @@ use multi_launcher::plugins::folders::{FOLDERS_FILE, FolderEntry, save_folders};
 use multi_launcher::settings::Settings;
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
-use std::thread::sleep;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -53,8 +52,9 @@ fn actions_watcher_sends_event() {
     let app = new_app(&ctx, acts);
 
     save_actions("actions.json", &[]).unwrap();
-    sleep(Duration::from_millis(200));
-    let ev = multi_launcher::gui::recv_test_event(app.watch_receiver()).unwrap();
+    let ev =
+        multi_launcher::gui::recv_test_event_timeout(app.watch_receiver(), Duration::from_secs(3))
+            .unwrap();
     assert!(matches!(ev, TestWatchEvent::Actions));
 }
 
@@ -80,8 +80,9 @@ fn folders_watcher_sends_event() {
         }],
     )
     .unwrap();
-    sleep(Duration::from_millis(200));
-    let ev = multi_launcher::gui::recv_test_event(app.watch_receiver()).unwrap();
+    let ev =
+        multi_launcher::gui::recv_test_event_timeout(app.watch_receiver(), Duration::from_secs(3))
+            .unwrap();
     assert!(matches!(ev, TestWatchEvent::Folders));
 }
 
@@ -106,7 +107,8 @@ fn bookmarks_watcher_sends_event() {
         }],
     )
     .unwrap();
-    sleep(Duration::from_millis(200));
-    let ev = multi_launcher::gui::recv_test_event(app.watch_receiver()).unwrap();
+    let ev =
+        multi_launcher::gui::recv_test_event_timeout(app.watch_receiver(), Duration::from_secs(3))
+            .unwrap();
     assert!(matches!(ev, TestWatchEvent::Bookmarks));
 }

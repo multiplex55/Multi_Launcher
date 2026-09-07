@@ -90,17 +90,17 @@ impl DashboardEditorDialog {
         }
     }
 
-    fn save(&mut self) {
-        let tmp = format!("{}.tmp", self.path);
-        if let Err(e) = self.config.save(&tmp) {
-            self.error = Some(format!("Failed to save: {e}"));
-            return;
+    fn save(&mut self, registry: &WidgetRegistry) {
+        match DashboardConfig::replace(&self.path, registry, self.config.clone()) {
+            Ok(committed) => {
+                self.config = committed;
+                self.error = None;
+                self.pending_save = true;
+            }
+            Err(e) => {
+                self.error = Some(format!("Failed to save: {e}"));
+            }
         }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            self.error = Some(format!("Failed to finalize save: {e}"));
-            return;
-        }
-        self.pending_save = true;
     }
 
     pub fn ui(
@@ -212,7 +212,7 @@ impl DashboardEditorDialog {
                         }
                         ui.add_enabled_ui(!has_conflicts, |ui| {
                             if ui.button("Save").clicked() {
-                                self.save();
+                                self.save(registry);
                             }
                         });
                         if has_conflicts {
@@ -1467,5 +1467,28 @@ impl DashboardEditorDialog {
                 Err(err)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_document_stays_read_only_when_editor_save_is_attempted() {
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let original = b"{broken";
+        std::fs::write(temporary.path(), original).unwrap();
+        let registry = WidgetRegistry::with_defaults();
+        let mut dialog = DashboardEditorDialog::default();
+        dialog.open(temporary.path().to_str().unwrap(), &registry);
+        assert!(dialog.error.is_some());
+
+        dialog.config.grid.rows = 9;
+        dialog.save(&registry);
+
+        assert!(!dialog.pending_save);
+        assert!(dialog.error.as_deref().unwrap().contains("Failed to save"));
+        assert_eq!(std::fs::read(temporary.path()).unwrap(), original);
     }
 }

@@ -78,13 +78,18 @@ impl HelpWindow {
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| ui.heading("Available commands"));
                 ui.separator();
-                if ui
-                    .checkbox(&mut self.show_examples, "Show examples")
-                    .changed()
-                    && let Ok(mut s) = crate::settings::Settings::load(&app.settings_path)
-                {
-                    s.show_examples = self.show_examples;
-                    let _ = s.save(&app.settings_path);
+                let mut show_examples = self.show_examples;
+                if ui.checkbox(&mut show_examples, "Show examples").changed() {
+                    match crate::settings::Settings::update(&app.settings_path, |settings| {
+                        settings.show_examples = show_examples;
+                        Ok(())
+                    }) {
+                        Ok(_) => self.show_examples = show_examples,
+                        Err(error) => app.report_error_message(
+                            "help.settings.save",
+                            format!("Failed to save help settings: {error}"),
+                        ),
+                    }
                 }
                 ui.horizontal(|ui| {
                     ui.label("Filter:");

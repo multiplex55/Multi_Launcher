@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::common::persistence::{LoadState, load_json, save_json_atomic_replaceable};
 use crate::plugin::Plugin;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,12 @@ struct SavedAlarm {
 }
 
 fn save_persistent_alarms_locked(timers: &HashMap<u64, TimerEntry>) {
+    if let Err(error) = save_persistent_alarms_to(ALARMS_FILE, timers) {
+        tracing::error!(%error, "alarm persistence skipped");
+    }
+}
+
+fn save_persistent_alarms_to(path: &str, timers: &HashMap<u64, TimerEntry>) -> anyhow::Result<()> {
     let list: Vec<SavedAlarm> = timers
         .values()
         .filter(|t| t.persist)
@@ -49,8 +56,12 @@ fn save_persistent_alarms_locked(timers: &HashMap<u64, TimerEntry>) {
             sound: t.sound.clone(),
         })
         .collect();
-    if let Ok(json) = serde_json::to_string_pretty(&list) {
-        let _ = std::fs::write(ALARMS_FILE, json);
+    match load_json::<Vec<SavedAlarm>>(path) {
+        Ok(LoadState::Missing | LoadState::Empty | LoadState::Loaded(_)) => {
+            save_json_atomic_replaceable(path, &list)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -310,14 +321,15 @@ pub fn load_saved_alarms() {
     if ALARMS_LOADED.load(Ordering::SeqCst) {
         return;
     }
-    let content = std::fs::read_to_string(ALARMS_FILE).unwrap_or_default();
-    if content.is_empty() {
-        return;
-    }
-    let list: Vec<SavedAlarm> = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("failed to parse alarms file: {e}");
+    let list = match load_json::<Vec<SavedAlarm>>(ALARMS_FILE) {
+        Ok(LoadState::Missing | LoadState::Empty) => {
+            ALARMS_LOADED.store(true, Ordering::SeqCst);
+            return;
+        }
+        Ok(LoadState::Loaded(list)) => list,
+        Err(error) => {
+            tracing::error!(%error, "failed to load alarms; retaining the existing file");
+            ALARMS_LOADED.store(true, Ordering::SeqCst);
             return;
         }
     };
@@ -868,5 +880,24 @@ impl Plugin for TimerPlugin {
 
     fn query_prefixes(&self) -> &[&str] {
         &["timer", "alarm"]
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn missing_alarms_initialize_but_malformed_store_rejects_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alarms.json");
+        let path_str = path.to_str().unwrap();
+        save_persistent_alarms_to(path_str, &HashMap::new()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+
+        let invalid = b"not alarms";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(save_persistent_alarms_to(path_str, &HashMap::new()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

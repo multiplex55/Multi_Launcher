@@ -1,11 +1,17 @@
 #![windows_subsystem = "windows"]
 #![allow(clippy::type_complexity)]
 
-use multi_launcher::actions::{Action, load_actions};
+use multi_launcher::actions::{Action, load_startup_actions};
+use multi_launcher::common::persistence::PersistenceError;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::{HotkeyTrigger, parse_hotkey};
+use multi_launcher::platform::{
+    app_data::AppDataRoot,
+    single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
+};
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::settings::Settings;
+use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::handle_visibility_trigger;
 use multi_launcher::{indexer, logging};
 
@@ -102,6 +108,9 @@ fn spawn_gui(
     custom_len: usize,
     settings: Settings,
     settings_path: String,
+    startup_settings_diagnostic: Option<SettingsStartupDiagnostic>,
+    startup_actions_diagnostic: Option<PersistenceError>,
+    startup_recovery: multi_launcher::persistence::RecoveryStartupResult,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     event_tx: Sender<()>,
 ) -> (
@@ -112,12 +121,6 @@ fn spawn_gui(
     Arc<Mutex<Option<egui::Context>>>,
 ) {
     let custom_len_for_window = custom_len;
-    let mut settings = settings;
-    if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings)
-        && let Err(err) = settings.save(&settings_path)
-    {
-        tracing::warn!(?err, "failed to save clipboard modify enablement migration");
-    }
     let reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
     let reserved_launcher_hotkey_refs = reserved_launcher_hotkeys
         .iter()
@@ -194,7 +197,7 @@ fn spawn_gui(
                 }
                 tracing::debug!("egui context stored");
                 let launcher_timer = multi_launcher::performance::Timer::start();
-                let app = LauncherApp::new(
+                let mut app = LauncherApp::new(
                     &cc.egui_ctx,
                     actions_for_window,
                     custom_len_for_window,
@@ -210,6 +213,9 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.startup_settings_diagnostic = startup_settings_diagnostic;
+                app.actions_persistence_diagnostic = startup_actions_diagnostic;
+                app.set_startup_persistence_context(startup_recovery);
                 launcher_timer.finish("startup.launcher_app");
                 Box::new(app)
             }),
@@ -222,15 +228,34 @@ fn spawn_gui(
 
 fn main() -> anyhow::Result<()> {
     multi_launcher::performance::init_process_timer();
+    // This ownership boundary must stay ahead of every persistent read,
+    // migration, watcher, worker, plugin, and GUI initialization.
+    let app_data_root = AppDataRoot::from_settings_path("settings.json")?;
+    let _single_instance_guard = match SingleInstanceGuard::acquire(&app_data_root)? {
+        SingleInstanceAcquire::Acquired(guard) => guard,
+        SingleInstanceAcquire::AlreadyRunning => return Ok(()),
+    };
     let settings_timer = multi_launcher::performance::Timer::start();
-    let mut settings = Settings::load("settings.json").unwrap_or_default();
+    let startup_preload = load_startup_preload(&app_data_root, "settings.json");
+    let startup_recovery = startup_preload.recovery;
+    let startup_settings = startup_preload.settings;
+    let mut settings = startup_settings.settings;
+    let startup_settings_diagnostic = startup_settings.diagnostic;
     multi_launcher::settings::set_settings_path("settings.json");
-    if multi_launcher::plugins::clipboard_modify::migrate_enablement(&mut settings) {
-        let _ = settings.save("settings.json");
-    }
     let _logging_guard = logging::init(settings.debug_logging, settings.log_file_path());
     settings_timer.finish("startup.settings_load");
+    if let Some(diagnostic) = startup_recovery.diagnostic.as_ref() {
+        tracing::error!(error = %diagnostic, "startup recovery remains pending for retry");
+    } else if let Some(action) = startup_recovery.applied.as_ref() {
+        tracing::info!(?action, "applied staged startup recovery");
+    }
     tracing::debug!(?settings, "settings loaded");
+    if let Some(diagnostic) = startup_settings_diagnostic.as_ref() {
+        tracing::error!(
+            error = %diagnostic.error(),
+            "settings startup used temporary defaults without replacing the persisted file"
+        );
+    }
     multi_launcher::plugins::mouse_gestures::sync_enabled_plugins(
         settings.enabled_plugins.as_ref(),
     );
@@ -242,9 +267,17 @@ fn main() -> anyhow::Result<()> {
         multi_launcher::plugins::mouse_gestures::apply_runtime_settings(cfg);
     }
     let actions_timer = multi_launcher::performance::Timer::start();
-    let mut actions_vec = load_actions("actions.json").unwrap_or_default();
+    let startup_actions = load_startup_actions("actions.json");
+    let mut actions_vec = startup_actions.actions;
+    let startup_actions_diagnostic = startup_actions.diagnostic;
     let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
+    if let Some(diagnostic) = startup_actions_diagnostic.as_ref() {
+        tracing::error!(
+            error = %diagnostic,
+            "actions startup used a temporary empty list without replacing the persisted file"
+        );
+    }
     actions_timer.finish("startup.action_load");
 
     let (restart_tx, restart_rx) = channel::<Settings>();
@@ -296,6 +329,9 @@ fn main() -> anyhow::Result<()> {
         custom_len,
         settings.clone(),
         "settings.json".to_string(),
+        startup_settings_diagnostic,
+        startup_actions_diagnostic,
+        startup_recovery,
         settings.enabled_capabilities.clone(),
         event_tx.clone(),
     );

@@ -9,37 +9,35 @@ impl LauncherApp {
         (alias, alias_lc)
     }
 
-    pub(crate) fn folder_alias_maps() -> (
+    pub(crate) fn try_folder_alias_maps() -> anyhow::Result<(
         HashMap<String, Option<String>>,
         HashMap<String, Option<String>>,
-    ) {
+    )> {
         let mut aliases = HashMap::new();
         let mut aliases_lc = HashMap::new();
-        for folder in crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
-            .unwrap_or_else(|_| crate::plugins::folders::default_folders())
+        for folder in crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)?
         {
             let (alias, alias_lc) = Self::normalize_alias(folder.alias);
             aliases.insert(folder.path.clone(), alias);
             aliases_lc.insert(folder.path, alias_lc);
         }
-        (aliases, aliases_lc)
+        Ok((aliases, aliases_lc))
     }
 
-    pub(crate) fn bookmark_alias_maps() -> (
+    pub(crate) fn try_bookmark_alias_maps() -> anyhow::Result<(
         HashMap<String, Option<String>>,
         HashMap<String, Option<String>>,
-    ) {
+    )> {
         let mut aliases = HashMap::new();
         let mut aliases_lc = HashMap::new();
         for bookmark in
-            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
-                .unwrap_or_default()
+            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)?
         {
             let (alias, alias_lc) = Self::normalize_alias(bookmark.alias);
             aliases.insert(bookmark.url.clone(), alias);
             aliases_lc.insert(bookmark.url, alias_lc);
         }
-        (aliases, aliases_lc)
+        Ok((aliases, aliases_lc))
     }
 
     fn alias_matches_lc(&self, action: &str, query_lc: &str) -> bool {

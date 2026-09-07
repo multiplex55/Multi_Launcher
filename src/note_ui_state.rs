@@ -1,8 +1,12 @@
+use crate::common::persistence::save_json_atomic_replaceable;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const NOTE_UI_STATE_RELATIVE_PATH: &str = "note_ui_state.json";
+static NOTE_UI_STATE_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteUiState {
@@ -63,16 +67,22 @@ pub fn load(path: &Path) -> anyhow::Result<NoteUiState> {
 }
 
 pub fn save(path: &Path, state: &NoteUiState) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, state.to_json_pretty()?)?;
-    Ok(())
+    save_json_atomic_replaceable(path, state).map_err(Into::into)
+}
+
+pub fn update(path: &Path, mutate: impl FnOnce(&mut NoteUiState)) -> anyhow::Result<NoteUiState> {
+    let _transaction = NOTE_UI_STATE_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = load(path)?;
+    mutate(&mut state);
+    save(path, &state)?;
+    Ok(state)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::NoteUiState;
+    use super::{NoteUiState, update};
 
     #[test]
     fn serializes_collapsed_sections_per_note_slug() {
@@ -126,5 +136,20 @@ mod tests {
         state.set_collapsed_sections("daily-note", Vec::<String>::new());
 
         assert!(state.notes.is_empty());
+    }
+
+    #[test]
+    fn missing_initializes_but_malformed_update_is_rejected_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note-ui.json");
+        update(&path, |state| {
+            state.set_collapsed_sections("note", ["section".to_string()]);
+        })
+        .unwrap();
+
+        let invalid = b"not note ui state";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(update(&path, |state| state.notes.clear()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

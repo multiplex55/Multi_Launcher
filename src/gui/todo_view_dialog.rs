@@ -1,7 +1,7 @@
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::gui::LauncherApp;
 use crate::plugins::note::load_notes;
-use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, save_todos};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, replace_todos};
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -68,11 +68,12 @@ pub struct TodoViewDialog {
     editing_text: String,
     editing_priority: u8,
     editing_tags: String,
+    load_error: Option<String>,
 }
 
 impl TodoViewDialog {
     pub fn open(&mut self) {
-        self.entries = load_todos(TODO_FILE).unwrap_or_default();
+        let _ = self.load_from(TODO_FILE);
         self.open = true;
         self.filter.clear();
         self.sort_mode = TodoSortMode::Priority;
@@ -80,7 +81,11 @@ impl TodoViewDialog {
     }
 
     pub fn open_edit(&mut self, idx: usize) {
-        self.entries = load_todos(TODO_FILE).unwrap_or_default();
+        if self.load_from(TODO_FILE).is_err() {
+            self.editing_idx = None;
+            self.open = true;
+            return;
+        }
         if let Some(e) = self.entries.get(idx) {
             self.editing_idx = Some(idx);
             self.editing_text = e.text.clone();
@@ -164,12 +169,42 @@ impl TodoViewDialog {
         }
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_todos(TODO_FILE, &self.entries) {
+    fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
+        match load_todos(path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_entries(&mut self, path: &str, candidate: Vec<TodoEntry>) -> anyhow::Result<()> {
+        match replace_todos(path, candidate) {
+            Ok(committed) => {
+                self.entries = committed;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<TodoEntry>) -> bool {
+        if let Err(e) = self.commit_entries(TODO_FILE, candidate) {
             app.report_error_message("ui operation", format!("Failed to save todos: {e}"));
+            false
         } else {
             app.search();
             app.focus_input();
+            true
         }
     }
 
@@ -181,6 +216,7 @@ impl TodoViewDialog {
         let (min_size, max_size) = todo_view_window_constraints();
         let mut close = false;
         let mut save_now = false;
+        let mut candidate_entries = self.entries.clone();
         egui::Window::new("View Todos")
             .open(&mut self.open)
             .resizable(false)
@@ -188,6 +224,16 @@ impl TodoViewDialog {
             .min_size(min_size)
             .max_size(max_size)
             .show(ctx, |ui| {
+                if let Some(error) = &self.load_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Todos are read-only because loading failed: {error}"),
+                    );
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    return;
+                }
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_label("Sort")
                         .selected_text(match self.sort_mode {
@@ -210,7 +256,8 @@ impl TodoViewDialog {
                     ui.text_edit_singleline(&mut self.filter);
                 });
                 ui.separator();
-                let indices = Self::sorted_todo_indices(&self.entries, &self.filter, self.sort_mode);
+                let indices =
+                    Self::sorted_todo_indices(&candidate_entries, &self.filter, self.sort_mode);
                 let note_titles: HashMap<String, String> = load_notes()
                     .unwrap_or_default()
                     .into_iter()
@@ -280,7 +327,7 @@ impl TodoViewDialog {
                                                 .filter(|t| !t.is_empty())
                                                 .map(|t| t.to_string())
                                                 .collect();
-                                            if let Some(e) = self.entries.get_mut(idx) {
+                                            if let Some(e) = candidate_entries.get_mut(idx) {
                                                 e.text = self.editing_text.clone();
                                                 e.priority = self.editing_priority;
                                                 e.tags = tags;
@@ -295,7 +342,6 @@ impl TodoViewDialog {
                                                         }
                                                 }
                                             }
-                                            self.editing_idx = None;
                                             save_now = true;
                                         }
                                         if ui.button("Cancel").clicked() {
@@ -304,7 +350,7 @@ impl TodoViewDialog {
                                     });
                                 });
                             } else {
-                                let entry = &mut self.entries[idx];
+                                let entry = &mut candidate_entries[idx];
                                 ui.push_id(("todo_view_row", idx), |ui| {
                                     ui.horizontal(|ui| {
                                         if ui.checkbox(&mut entry.done, "").changed() {
@@ -434,7 +480,9 @@ impl TodoViewDialog {
                 });
             });
         if save_now {
-            self.save(app);
+            if self.save(app, candidate_entries) {
+                self.editing_idx = None;
+            }
         }
         if close {
             self.open = false;
@@ -542,5 +590,27 @@ mod tests {
 
         let by_tag = TodoViewDialog::sorted_todo_indices(&entries, "#work", TodoSortMode::Priority);
         assert_eq!(by_tag, vec![2, 1]);
+    }
+
+    #[test]
+    fn invalid_reload_and_commit_keep_last_good_and_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let initial = vec![todo_entry("saved", 1, &[])];
+        crate::plugins::todo::save_todos(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = TodoViewDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        let invalid = b"invalid todos";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(dialog.load_from(path.to_str().unwrap()).is_err());
+        assert_eq!(dialog.entries, initial);
+        assert!(dialog.load_error.is_some());
+        assert!(
+            dialog
+                .commit_entries(path.to_str().unwrap(), Vec::new())
+                .is_err()
+        );
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

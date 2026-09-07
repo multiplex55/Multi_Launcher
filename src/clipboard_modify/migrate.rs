@@ -25,6 +25,20 @@ pub fn migrate_file(
     VersionedClipboardModifiersFile,
     super::model::ClipboardModifierCatalog,
 )> {
+    let (model, catalog) = decode_migration(version, bytes)?;
+    let _ = backup_file(path, "schema-migration")?;
+    save_model_atomic(path, &model)?;
+    Ok((model, catalog))
+}
+
+/// Decode and validate a legacy document without creating a backup or rewriting it.
+pub(crate) fn decode_migration(
+    version: u32,
+    bytes: &[u8],
+) -> Result<(
+    VersionedClipboardModifiersFile,
+    super::model::ClipboardModifierCatalog,
+)> {
     match version {
         0 => {
             let old: V0File = serde_json::from_slice(bytes)?;
@@ -39,8 +53,6 @@ pub fn migrate_file(
                 pipelines: old.pipelines,
             };
             let catalog = validate_model(&model)?;
-            let _ = backup_file(path, "schema-migration")?;
-            save_model_atomic(path, &model)?;
             Ok((model, catalog))
         }
         _ => anyhow::bail!("unsupported old schema_version {version}"),

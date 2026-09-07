@@ -546,7 +546,16 @@ impl LauncherApp {
 
     fn pin_result_menu(&mut self, ui: &mut egui::Ui, action: &Action) {
         ui.separator();
-        let pins = history::load_pins(HISTORY_PINS_FILE).unwrap_or_default();
+        let pins = match history::load_pins(HISTORY_PINS_FILE) {
+            Ok(pins) => pins,
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Pinned results are read-only: {error}"),
+                );
+                return;
+            }
+        };
         let is_pinned = pins.iter().any(|pin| pin.matches_action(action));
         let pin = HistoryPin {
             action_id: action.action.clone(),
@@ -918,6 +927,15 @@ impl eframe::App for LauncherApp {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
         self.multi_manager.maybe_auto_save_bindings();
+        if let Some(message) = self.data_recovery_dialog.take_startup_notice()
+            && self.enable_toasts
+        {
+            self.add_toast(Toast {
+                text: message.into(),
+                kind: ToastKind::Warning,
+                options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+            });
+        }
         if self.enable_toasts {
             self.toasts.show(ctx);
         }
@@ -1642,6 +1660,34 @@ impl eframe::App for LauncherApp {
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
         cpu_dlg.ui(ctx, self);
         self.cpu_list_dialog = cpu_dlg;
+        let (data_actions, data_notices) = self.data_recovery_dialog.ui(ctx);
+        for notice in data_notices {
+            if notice.error {
+                self.report_error_message("data", notice.message);
+            } else if self.enable_toasts {
+                self.add_toast(Toast {
+                    text: notice.message.into(),
+                    kind: ToastKind::Success,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                });
+            }
+        }
+        for action in data_actions {
+            match action {
+                DataRecoveryUiAction::OpenPath(path) => {
+                    if let Err(error) = open::that(&path) {
+                        self.report_error_message(
+                            "data",
+                            format!("Failed to open {}: {error}", path.display()),
+                        );
+                    }
+                }
+                DataRecoveryUiAction::Confirm(intent) => {
+                    self.queue_data_recovery_confirmation(intent);
+                }
+            }
+        }
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
         toast_dlg.ui(ctx, self);
         self.toast_log_dialog = toast_dlg;
@@ -1656,10 +1702,18 @@ impl eframe::App for LauncherApp {
         self.calendar_event_details = calendar_details;
         match self.confirm_modal.ui(ctx) {
             ConfirmationResult::Confirmed => {
-                self.resolve_pending_confirmation(true);
+                if self.pending_data_recovery.is_some() {
+                    self.resolve_data_recovery_confirmation(true);
+                } else {
+                    self.resolve_pending_confirmation(true);
+                }
             }
             ConfirmationResult::Cancelled => {
-                self.resolve_pending_confirmation(false);
+                if self.pending_data_recovery.is_some() {
+                    self.resolve_data_recovery_confirmation(false);
+                } else {
+                    self.resolve_pending_confirmation(false);
+                }
             }
             ConfirmationResult::None => {}
         }
@@ -1673,14 +1727,13 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
         self.clipboard_modify_immediate.cancel_pending();
         self.clipboard_modify_events.clear();
         self.clipboard_modify_watcher = None;
         self.multi_manager.shutdown();
-        let multi_manager_save_on_exit = crate::settings::Settings::load(&self.settings_path)
-            .map(|settings| settings.multi_manager.save_on_exit)
-            .unwrap_or(true);
+        let multi_manager_save_on_exit = self.multi_manager_save_on_exit();
         if multi_manager_save_on_exit && let Err(err) = self.multi_manager.save() {
             self.report_error("multi_manager.save_on_exit", err);
         }
@@ -1691,9 +1744,13 @@ impl eframe::App for LauncherApp {
         self.visible_flag.store(false, Ordering::SeqCst);
         self.last_visible = false;
         self.save_file_search_ui_preferences_if_dirty();
-        if let Ok(mut settings) = crate::settings::Settings::load(&self.settings_path) {
-            settings.window_size = Some(self.window_size);
-            settings.pinned_panels = self.pinned_panels.clone();
+        let window_size = self.window_size;
+        let pinned_panels = self.pinned_panels.clone();
+        let dialog_width = self.clipboard_modify_dialog.persisted_window_size.x;
+        let dialog_height = self.clipboard_modify_dialog.persisted_window_size.y;
+        let _ = crate::settings::Settings::update(&self.settings_path, |settings| {
+            settings.window_size = Some(window_size);
+            settings.pinned_panels = pinned_panels;
             // Persist only the explicitly approved, non-sensitive Clipboard
             // Modify UI geometry. Runtime source/preview/undo data is held only
             // by the dialog/service and is never serialized into Settings.
@@ -1704,24 +1761,27 @@ impl eframe::App for LauncherApp {
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or_default();
             let hide_launcher_after_apply = clipboard_modify_preferences.hide_launcher_after_apply;
-            clipboard_modify_preferences.dialog_width =
-                self.clipboard_modify_dialog.persisted_window_size.x;
-            clipboard_modify_preferences.dialog_height =
-                self.clipboard_modify_dialog.persisted_window_size.y;
+            clipboard_modify_preferences.dialog_width = dialog_width;
+            clipboard_modify_preferences.dialog_height = dialog_height;
             debug_assert_eq!(
                 clipboard_modify_preferences.hide_launcher_after_apply, hide_launcher_after_apply,
                 "persisting dialog geometry must not reset the live visibility preference"
             );
-            if let Ok(value) = serde_json::to_value(clipboard_modify_preferences) {
-                settings
-                    .plugin_settings
-                    .insert("clipboard_modify".into(), value);
-            }
-            let _ = settings.save(&self.settings_path);
-        }
+            let value = serde_json::to_value(clipboard_modify_preferences)?;
+            settings
+                .plugin_settings
+                .insert("clipboard_modify".into(), value);
+            Ok(())
+        });
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
         #[cfg(not(test))]
         std::process::exit(0);
+    }
+}
+
+impl LauncherApp {
+    fn multi_manager_save_on_exit(&self) -> bool {
+        self.multi_manager_settings.save_on_exit
     }
 }
 
@@ -1773,6 +1833,19 @@ mod tests {
                 args: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn shutdown_uses_committed_multi_manager_policy_after_settings_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.settings_path = settings_path.to_string_lossy().into_owned();
+        app.multi_manager_settings.save_on_exit = false;
+        std::fs::write(&settings_path, "corrupt after startup").unwrap();
+
+        assert!(!app.multi_manager_save_on_exit());
     }
 
     struct FakePlugin;

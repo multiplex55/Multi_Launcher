@@ -1,4 +1,3 @@
-use super::config::{LoadError, load_current_or_migrate};
 use super::store::ClipboardModifierStore;
 use crate::gui::ClipboardModifyGuiEvent;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -21,7 +20,11 @@ pub struct ClipboardModifyWatcher {
 }
 
 impl ClipboardModifyWatcher {
-    pub fn start(store: ClipboardModifierStore, debounce: Duration) -> notify::Result<Self> {
+    pub fn start(
+        store: ClipboardModifierStore,
+        debounce: Duration,
+        repaint: impl Fn() + Send + 'static,
+    ) -> notify::Result<Self> {
         let path = store.path.clone();
         let watch_path = path
             .parent()
@@ -30,7 +33,9 @@ impl ClipboardModifyWatcher {
         let (tx, rx) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(
             move |res| {
-                let _ = tx.send(res);
+                if tx.send(res).is_ok() {
+                    repaint();
+                }
             },
             Config::default(),
         )?;
@@ -55,8 +60,9 @@ impl ClipboardModifyWatcher {
                     if matches!(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    ) && (event.paths.is_empty()
-                        || event.paths.iter().any(|p| p == &self.path)) =>
+                    ) && crate::common::json_watch::event_targets_path(
+                        &event, &self.path, false,
+                    ) =>
                 {
                     self.reload_deadline = Some(now + self.debounce);
                 }
@@ -72,19 +78,10 @@ impl ClipboardModifyWatcher {
             return Vec::new();
         }
         self.reload_deadline = None;
-        let event = match load_current_or_migrate(&self.path) {
-            Ok((_model, catalog)) => {
-                self.store.replace_valid(catalog);
-                ClipboardModifyGuiEvent::ConfigurationReloadSuccess
-            }
-            Err(LoadError::Future(version)) => {
-                let error = format!("unsupported future schema {version}");
-                self.store.retain_with_error(error.clone());
-                ClipboardModifyGuiEvent::ConfigurationReloadFailure(error)
-            }
+        let event = match self.store.reload_now() {
+            Ok(_) => ClipboardModifyGuiEvent::ConfigurationReloadSuccess,
             Err(error) => {
                 let error = error.to_string();
-                self.store.retain_with_error(error.clone());
                 ClipboardModifyGuiEvent::ConfigurationReloadFailure(error)
             }
         };

@@ -15,7 +15,7 @@ use crate::plugins::note::{
     note_cache_snapshot, note_link_menu_targets_snapshot, note_version, resolve_note_query,
     save_note, save_note_image_asset,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos, todo_version};
+use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good, todo_version};
 use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
 use chrono::{DateTime, Local, TimeZone};
@@ -664,7 +664,7 @@ fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
 }
 
 fn open_todo_reference(app: &mut LauncherApp, todo_id: &str) {
-    let todos = load_todos(TODO_FILE).unwrap_or_default();
+    let todos = load_todos_or_last_good(TODO_FILE);
     if let Some((idx, _)) = todos.iter().enumerate().find(|(_, t)| t.id == todo_id) {
         app.todo_view_dialog.open_edit(idx);
     } else {
@@ -911,25 +911,15 @@ impl NotePanel {
     }
 
     fn persist_details_visibility(&self, app: &mut LauncherApp) {
-        match crate::settings::Settings::load(&app.settings_path) {
-            Ok(mut settings) => {
-                if settings.note_show_details == self.show_metadata {
-                    return;
-                }
-                settings.note_show_details = self.show_metadata;
-                if let Err(err) = settings.save(&app.settings_path) {
-                    app.report_error(
-                        "ui operation",
-                        format!("Failed to save note detail visibility setting: {err}"),
-                    );
-                } else {
-                    app.note_show_details = self.show_metadata;
-                }
-            }
+        match crate::settings::Settings::update(&app.settings_path, |settings| {
+            settings.note_show_details = self.show_metadata;
+            Ok(())
+        }) {
+            Ok(_) => app.note_show_details = self.show_metadata,
             Err(err) => {
                 app.report_error(
                     "ui operation",
-                    format!("Failed to load settings for note detail visibility: {err}"),
+                    format!("Failed to save note detail visibility setting: {err}"),
                 );
             }
         }
@@ -1099,24 +1089,11 @@ impl NotePanel {
             return;
         }
         let path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
-        let mut state = match crate::note_ui_state::load(&path) {
-            Ok(state) => state,
-            Err(err) => {
-                self.report_ui_state_error_once(
-                    app,
-                    format!(
-                        "Failed to load note UI state from {}: {err}",
-                        path.display()
-                    ),
-                );
-                return;
-            }
-        };
-        state.set_collapsed_sections(
-            self.note.slug.clone(),
-            self.collapsed_sections.iter().cloned(),
-        );
-        if let Err(err) = crate::note_ui_state::save(&path, &state) {
+        let slug = self.note.slug.clone();
+        let collapsed = self.collapsed_sections.iter().cloned().collect::<Vec<_>>();
+        if let Err(err) = crate::note_ui_state::update(&path, |state| {
+            state.set_collapsed_sections(slug, collapsed);
+        }) {
             self.report_ui_state_error_once(
                 app,
                 format!("Failed to save note UI state to {}: {err}", path.display()),
@@ -1252,7 +1229,7 @@ impl NotePanel {
             return;
         }
 
-        let todos = load_todos(TODO_FILE).unwrap_or_default();
+        let todos = load_todos_or_last_good(TODO_FILE);
         self.derived.todo_label_map = todos
             .iter()
             .filter(|t| !t.id.is_empty())
@@ -2604,7 +2581,7 @@ impl NotePanel {
                         if let Some(slug) = &row.note_slug {
                             app.open_note_panel(slug, None);
                         } else if let Some(todo_id) = &row.todo_id {
-                            let todos = load_todos(TODO_FILE).unwrap_or_default();
+                            let todos = load_todos_or_last_good(TODO_FILE);
                             if let Some((todo_idx, _)) =
                                 todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
                             {
@@ -2630,7 +2607,7 @@ impl NotePanel {
                         if let Some(slug) = &row.note_slug {
                             app.open_note_panel(slug, None);
                         } else if let Some(todo_id) = &row.todo_id {
-                            let todos = load_todos(TODO_FILE).unwrap_or_default();
+                            let todos = load_todos_or_last_good(TODO_FILE);
                             if let Some((todo_idx, _)) =
                                 todos.iter().enumerate().find(|(_, t)| &t.id == todo_id)
                             {
@@ -3844,11 +3821,7 @@ impl NotePanel {
 
         ui.menu_button("Link todo", |ui| {
             ui.label("Select existing todo");
-            for todo in load_todos(TODO_FILE)
-                .unwrap_or_default()
-                .into_iter()
-                .take(12)
-            {
+            for todo in load_todos_or_last_good(TODO_FILE).into_iter().take(12) {
                 let todo_id = if todo.id.is_empty() {
                     todo.text.clone()
                 } else {

@@ -1,5 +1,6 @@
 mod calendar;
 mod clipboard_modify;
+mod data;
 mod dialog_crop;
 mod file_search_diff;
 mod headless_gui;
@@ -12,6 +13,7 @@ mod todo;
 
 pub(crate) use calendar::handle_calendar;
 pub(crate) use clipboard_modify::handle_clipboard_modify;
+pub(crate) use data::handle_data;
 pub(crate) use dialog_crop::{handle_crop, handle_simple_dialog};
 pub(crate) use file_search_diff::{handle_diff, handle_file_search};
 pub(crate) use headless_gui::handle_headless_gui;

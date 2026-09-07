@@ -5,7 +5,7 @@ use crate::settings::MultiManagerSettings;
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
@@ -27,6 +27,12 @@ pub enum ReconnectStartResult {
     Started,
     AlreadyRunning,
     SnapshotLockFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspacePathScope {
+    AppDataRoot,
+    External,
 }
 
 struct ReconnectInProgressGuard {
@@ -51,6 +57,8 @@ pub struct MultiManagerState {
     pub runtime: MultiManagerRuntime,
     pub last_hotkey_info: Arc<Mutex<Option<(String, Instant)>>>,
     pub workspace_path: PathBuf,
+    pub workspace_path_scope: WorkspacePathScope,
+    pub workspace_load_error: Option<String>,
     pub bindings_path: PathBuf,
     pub auto_save: bool,
     pub auto_reconnect_on_load: bool,
@@ -73,12 +81,25 @@ impl MultiManagerState {
             .parent()
             .unwrap_or_else(|| Path::new("."));
         let workspace_path = resolve_relative_to(settings_dir, &settings.workspaces_path);
+        let workspace_path_scope = classify_workspace_path(settings_dir, &workspace_path);
         let bindings_path = resolve_relative_to(settings_dir, &settings.bindings_path);
 
         // Startup only restores saved HWND binding snapshots here. Any title/window
         // matching is scheduled later and performed by the async reconnect coordinator.
-        let loaded =
-            prepare_workspaces_for_startup(store::load_or_default(&workspace_path), &bindings_path);
+        let (loaded, workspace_load_error) = match store::load_workspace_state(&workspace_path) {
+            Ok(crate::common::persistence::LoadState::Missing)
+            | Ok(crate::common::persistence::LoadState::Empty) => (Vec::new(), None),
+            Ok(crate::common::persistence::LoadState::Loaded(workspaces)) => (workspaces, None),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    path = %workspace_path.display(),
+                    "failed to load MultiManager workspaces; retaining an unsaved temporary empty view"
+                );
+                (Vec::new(), Some(err.to_string()))
+            }
+        };
+        let loaded = prepare_workspaces_for_startup(loaded, &bindings_path);
         let workspaces = Arc::new(Mutex::new(loaded));
         let runtime = start_runtime_after_restore(Arc::clone(&workspaces), settings);
         let last_hotkey_info = Arc::clone(&runtime.last_hotkey_info);
@@ -95,6 +116,8 @@ impl MultiManagerState {
             runtime,
             last_hotkey_info,
             workspace_path,
+            workspace_path_scope,
+            workspace_load_error,
             bindings_path,
             auto_save: settings.auto_save,
             auto_reconnect_on_load: settings.auto_reconnect_on_load,
@@ -117,18 +140,22 @@ impl MultiManagerState {
     }
 
     pub fn save(&mut self) -> Result<()> {
-        let workspaces = self
+        let mut workspaces = self
             .workspaces
             .lock()
             .map_err(|_| anyhow::anyhow!("MultiManager workspace lock poisoned"))?;
-        store::save_workspaces(&self.workspace_path, &workspaces).with_context(|| {
-            format!(
-                "failed to save MultiManager workspaces to {}",
-                self.workspace_path.display()
-            )
-        })?;
+        let committed =
+            store::replace_workspaces(&self.workspace_path, &workspaces).with_context(|| {
+                format!(
+                    "failed to save MultiManager workspaces to {}",
+                    self.workspace_path.display()
+                )
+            })?;
+        *workspaces = committed;
+        drop(workspaces);
         self.dirty = false;
         self.dirty_since = None;
+        self.workspace_load_error = None;
         self.last_save_attempt = Some(Instant::now());
         Ok(())
     }
@@ -155,7 +182,13 @@ impl MultiManagerState {
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        let mut loaded = store::load_workspaces(&self.workspace_path)?;
+        let mut loaded = match store::load_workspaces(&self.workspace_path) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                self.workspace_load_error = Some(err.to_string());
+                return Err(err);
+            }
+        };
         restore_bindings_for_load(&mut loaded, &self.bindings_path);
         {
             let mut workspaces = self
@@ -166,6 +199,7 @@ impl MultiManagerState {
         }
         self.dirty = false;
         self.dirty_since = None;
+        self.workspace_load_error = None;
         self.bindings_dirty = false;
         self.bindings_dirty_since = None;
         self.runtime
@@ -499,6 +533,47 @@ fn resolve_relative_to(base: &Path, path: &str) -> PathBuf {
     }
 }
 
+fn classify_workspace_path(settings_dir: &Path, workspace_path: &Path) -> WorkspacePathScope {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root_path = if settings_dir.is_absolute() {
+        settings_dir.to_path_buf()
+    } else {
+        current_dir.join(settings_dir)
+    };
+    let candidate_path = if workspace_path.is_absolute() {
+        workspace_path.to_path_buf()
+    } else {
+        current_dir.join(workspace_path)
+    };
+    let root = lexically_normalize(&root_path);
+    let candidate = lexically_normalize(&candidate_path);
+    let root_identity = PathBuf::from(root.to_string_lossy().to_lowercase());
+    let candidate_identity = PathBuf::from(candidate.to_string_lossy().to_lowercase());
+    if candidate_identity.starts_with(root_identity) {
+        WorkspacePathScope::AppDataRoot
+    } else {
+        WorkspacePathScope::External
+    }
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +799,121 @@ mod tests {
         state.maybe_auto_save();
         assert!(!state.dirty);
         assert!(state.workspace_path.exists());
+    }
+
+    #[test]
+    fn malformed_startup_uses_temporary_view_but_cannot_overwrite_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        let original = b"{malformed workspaces";
+        std::fs::write(&workspace_path, original).unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+
+        assert!(state.workspaces.lock().unwrap().is_empty());
+        assert!(state.workspace_load_error.is_some());
+        state.workspaces.lock().unwrap().push(MmWorkspace {
+            id: "candidate".into(),
+            ..Default::default()
+        });
+        state.mark_dirty();
+
+        assert!(state.save().is_err());
+        assert!(state.dirty);
+        assert!(state.workspace_load_error.is_some());
+        assert_eq!(std::fs::read(&workspace_path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_autosave_retains_dirty_candidate_and_disk_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        std::fs::write(&workspace_path, r#"[{"id":"saved","name":"Saved"}]"#).unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_save: true,
+                workspaces_path: "workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        let malformed = b"{externally corrupted";
+        std::fs::write(&workspace_path, malformed).unwrap();
+        state.workspaces.lock().unwrap()[0].name = "Unsaved".into();
+        state.mark_dirty();
+        state.force_debounce_elapsed();
+
+        state.maybe_auto_save();
+
+        assert!(state.dirty);
+        assert_eq!(state.workspaces.lock().unwrap()[0].name, "Unsaved");
+        assert_eq!(std::fs::read(&workspace_path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn invalid_reload_retains_last_good_then_valid_reload_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        std::fs::write(&workspace_path, r#"[{"id":"old","name":"Old"}]"#).unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        std::fs::write(&workspace_path, "{").unwrap();
+        assert!(state.reload().is_err());
+        assert_eq!(state.workspaces.lock().unwrap()[0].name, "Old");
+        assert!(state.workspace_load_error.is_some());
+
+        std::fs::write(&workspace_path, r#"[{"id":"new","name":"New"}]"#).unwrap();
+        state.reload().unwrap();
+        assert_eq!(state.workspaces.lock().unwrap()[0].name, "New");
+        assert!(state.workspace_load_error.is_none());
+    }
+
+    #[test]
+    fn workspace_paths_preserve_resolution_and_classify_external_locations() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        let external = dir.path().join("external/workspaces.json");
+        let settings_path = profile.join("settings.json");
+        let owned = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: "data/workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        assert_eq!(owned.workspace_path, profile.join("data/workspaces.json"));
+        assert_eq!(owned.workspace_path_scope, WorkspacePathScope::AppDataRoot);
+
+        let external_state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                workspaces_path: external.display().to_string(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        assert_eq!(external_state.workspace_path, external);
+        assert_eq!(
+            external_state.workspace_path_scope,
+            WorkspacePathScope::External
+        );
     }
 
     #[test]

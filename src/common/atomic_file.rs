@@ -8,9 +8,28 @@ pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     save_atomic_with_replace(path, bytes, replace_existing)
 }
 
+/// Atomically replace high-frequency, replaceable state without forcing the
+/// file or rename through stable storage before returning.
+///
+/// This preserves the previous destination across partial writes and replace
+/// failures, while deliberately avoiding the `sync_all` and Windows
+/// write-through cost reserved for critical user-authored data.
+pub fn save_atomic_replaceable(path: &Path, bytes: &[u8]) -> Result<()> {
+    save_atomic_with_policy(path, bytes, false, replace_existing_replaceable)
+}
+
 fn save_atomic_with_replace(
     path: &Path,
     bytes: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<()> {
+    save_atomic_with_policy(path, bytes, true, replace)
+}
+
+fn save_atomic_with_policy(
+    path: &Path,
+    bytes: &[u8],
+    durable: bool,
     replace: impl FnOnce(&Path, &Path) -> Result<()>,
 ) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -24,7 +43,9 @@ fn save_atomic_with_replace(
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         file.write_all(bytes)?;
         file.flush()?;
-        file.sync_all()?;
+        if durable {
+            file.sync_all()?;
+        }
         drop(file);
         replace(&tmp, path)?;
         Ok(())
@@ -88,6 +109,16 @@ fn timestamp() -> String {
 
 #[cfg(windows)]
 fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
+    replace_existing_with_flags(src, dst, true)
+}
+
+#[cfg(windows)]
+fn replace_existing_replaceable(src: &Path, dst: &Path) -> Result<()> {
+    replace_existing_with_flags(src, dst, false)
+}
+
+#[cfg(windows)]
+fn replace_existing_with_flags(src: &Path, dst: &Path, write_through: bool) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -100,13 +131,12 @@ fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
     let d = wide(dst);
     let mut attempt = 0;
     loop {
-        match unsafe {
-            MoveFileExW(
-                PCWSTR(s.as_ptr()),
-                PCWSTR(d.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        } {
+        let flags = if write_through {
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        } else {
+            MOVEFILE_REPLACE_EXISTING
+        };
+        match unsafe { MoveFileExW(PCWSTR(s.as_ptr()), PCWSTR(d.as_ptr()), flags) } {
             Ok(()) => return Ok(()),
             Err(error) => {
                 // File-system watchers, virus scanners, and indexers can briefly hold the
@@ -146,6 +176,11 @@ fn replace_existing(src: &Path, dst: &Path) -> Result<()> {
     fs::rename(src, dst).map_err(Into::into)
 }
 
+#[cfg(not(windows))]
+fn replace_existing_replaceable(src: &Path, dst: &Path) -> Result<()> {
+    replace_existing(src, dst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +213,29 @@ mod tests {
         assert!(
             temp_entries.is_empty(),
             "temporary files should be removed after a failed replace: {temp_entries:?}"
+        );
+    }
+
+    #[test]
+    fn replaceable_atomic_failed_replace_preserves_existing_destination_and_removes_temp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("history.json");
+        fs::write(&dest, b"original history").expect("write existing destination");
+
+        let result = save_atomic_with_policy(&dest, b"updated history", false, |_tmp, _dst| {
+            anyhow::bail!("deterministic replace failure")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"original history");
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".history.json.tmp."))
         );
     }
 

@@ -228,6 +228,33 @@ fn builtin_search_filtered_routes_file_omni_and_folder_prefixes() {
 }
 
 #[test]
+fn data_prefix_routes_only_when_the_builtin_plugin_is_enabled() {
+    use multi_launcher::plugins::data::DataPlugin;
+    use std::collections::HashSet;
+
+    let mut plugins = PluginManager::new();
+    plugins.register(Box::new(DataPlugin));
+
+    let results = plugins.search_filtered("data health", None, None);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "data:health");
+
+    let disabled = HashSet::from(["web_search".to_string()]);
+    assert!(
+        plugins
+            .search_filtered("data health", Some(&disabled), None)
+            .is_empty()
+    );
+    assert!(plugins.commands_filtered(Some(&disabled)).is_empty());
+
+    let enabled = HashSet::from(["data".to_string()]);
+    assert_eq!(
+        plugins.search_filtered("data backup", Some(&enabled), None)[0].action,
+        "data:backup"
+    );
+}
+
+#[test]
 fn diff_prefix_routes_only_to_diff_among_native_file_plugins() {
     use multi_launcher::plugins::diff::DiffPlugin;
     use multi_launcher::plugins::file_search::FileSearchPlugin;

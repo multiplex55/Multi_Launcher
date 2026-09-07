@@ -224,9 +224,16 @@ impl MouseGestureService {
         right_click_backend: Arc<dyn RightClickBackend>,
         cursor_provider: Arc<dyn CursorPositionProvider>,
     ) -> Self {
-        let db = load_gestures(GESTURES_FILE)
-            .map(|db| Arc::new(Mutex::new(db)))
-            .ok();
+        let db = match load_gestures(GESTURES_FILE) {
+            Ok(db) => Some(Arc::new(Mutex::new(db))),
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "failed to load mouse gestures; service starts without definitions"
+                );
+                None
+            }
+        };
         Self {
             config: MouseGestureConfig::default(),
             db,
@@ -1120,33 +1127,87 @@ fn format_cheatsheet_text(db: &Option<SharedGestureDb>, limit: usize) -> Option<
     Some(lines.join("\n"))
 }
 
-const GESTURES_STATE_FILE: &str = "mouse_gestures_state.json";
+pub(crate) const GESTURES_STATE_FILE: &str = "mouse_gestures_state.json";
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct GestureSelectionState {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct GestureSelectionState {
     selections: HashMap<String, usize>,
+    #[serde(skip, default = "default_true")]
+    persistence_valid: bool,
+}
+
+impl Default for GestureSelectionState {
+    fn default() -> Self {
+        Self {
+            selections: HashMap::new(),
+            persistence_valid: true,
+        }
+    }
+}
+
+pub(crate) fn decode_selection_state(
+    bytes: &[u8],
+) -> Result<GestureSelectionState, serde_json::Error> {
+    serde_json::from_slice(bytes)
+}
+
+fn load_selection_state_typed(
+    path: &str,
+) -> Result<
+    crate::common::persistence::LoadState<GestureSelectionState>,
+    crate::common::persistence::PersistenceError,
+> {
+    use crate::common::persistence::{LoadState, PersistenceError, read_bytes};
+
+    match read_bytes(path)? {
+        LoadState::Missing => Ok(LoadState::Missing),
+        LoadState::Empty => Ok(LoadState::Empty),
+        LoadState::Loaded(bytes) => decode_selection_state(&bytes)
+            .map(LoadState::Loaded)
+            .map_err(|source| PersistenceError::MalformedJson {
+                path: path.into(),
+                source,
+            }),
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn selection_key(label: &str, tokens: &str) -> String {
     format!("{label}::{tokens}")
 }
 
-fn load_selection_state(path: &str) -> GestureSelectionState {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return GestureSelectionState::default();
+pub(crate) fn load_selection_state(path: &str) -> GestureSelectionState {
+    match load_selection_state_typed(path) {
+        Ok(crate::common::persistence::LoadState::Missing)
+        | Ok(crate::common::persistence::LoadState::Empty) => GestureSelectionState::default(),
+        Ok(crate::common::persistence::LoadState::Loaded(state)) => state,
+        Err(error) => {
+            tracing::error!(%error, "mouse gesture selection state is invalid; persistence disabled for this session");
+            GestureSelectionState {
+                persistence_valid: false,
+                ..Default::default()
+            }
+        }
     }
-    serde_json::from_str(&content).unwrap_or_default()
 }
 
 fn save_selection_state(path: &str, state: &GestureSelectionState) {
-    match serde_json::to_string_pretty(state) {
-        Ok(json) => {
-            if let Err(err) = std::fs::write(path, json) {
-                tracing::error!(?err, "failed to save mouse gesture selection state");
-            }
-        }
-        Err(err) => tracing::error!(?err, "failed to serialize mouse gesture selection state"),
+    if !state.persistence_valid {
+        tracing::error!(
+            path,
+            "mouse gesture selection state update skipped because the existing file is invalid"
+        );
+        return;
+    }
+    if let Err(error) = crate::common::persistence::load_json::<GestureSelectionState>(path) {
+        tracing::error!(%error, "mouse gesture selection state update skipped because the current file is invalid");
+        return;
+    }
+    if let Err(err) = crate::common::persistence::save_json_atomic_replaceable(path, state) {
+        tracing::error!(?err, "failed to save mouse gesture selection state");
     }
 }
 
@@ -1172,6 +1233,18 @@ mod tests {
             args: None,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn malformed_selection_state_disables_writes_and_preserves_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gesture-state.json");
+        let invalid = b"not gesture state";
+        std::fs::write(&path, invalid).unwrap();
+        let state = load_selection_state(path.to_str().unwrap());
+        assert!(!state.persistence_valid);
+        save_selection_state(path.to_str().unwrap(), &state);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 
     #[test]

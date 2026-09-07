@@ -15,6 +15,7 @@ mod convert_panel;
 mod cpu_list_dialog;
 pub mod crop_dialog;
 mod dashboard_editor_dialog;
+mod data_recovery_dialog;
 mod diff_dialog;
 mod fav_dialog;
 mod file_search_dialog;
@@ -63,6 +64,9 @@ pub use clipboard_dialog::ClipboardDialog;
 pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
 pub use cpu_list_dialog::CpuListDialog;
+pub(crate) use data_recovery_dialog::{
+    DataRecoveryDialog, DataRecoveryUiAction, PendingRecoveryIntent, SafeStartupDiagnostic,
+};
 pub use diff_dialog::DiffDialogState;
 pub use fav_dialog::FavDialog;
 pub use file_search_dialog::{
@@ -97,7 +101,7 @@ pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
 
 use crate::actions::folders;
-use crate::actions::{Action, load_actions};
+use crate::actions::{Action, load_actions_typed};
 use crate::actions_editor::ActionsEditor;
 use crate::clipboard_modify::coordinator::{
     ImmediateCompletionEvent, ImmediateExecutionCoordinator,
@@ -340,6 +344,7 @@ pub enum Panel {
     VolumeDialog,
     BrightnessDialog,
     CpuListDialog,
+    DataRecoveryDialog,
     ToastLogDialog,
     CalendarPopover,
     CalendarEventEditor,
@@ -386,6 +391,7 @@ struct PanelStates {
     volume_dialog: bool,
     brightness_dialog: bool,
     cpu_list_dialog: bool,
+    data_recovery_dialog: bool,
     toast_log_dialog: bool,
     calendar_popover: bool,
     calendar_event_editor: bool,
@@ -457,6 +463,11 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
+    /// Persistence failure captured before GUI startup. A later recovery UI can
+    /// consume this without re-reading or replacing the damaged settings file.
+    pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
+    pub actions_persistence_diagnostic: Option<crate::common::persistence::PersistenceError>,
+    pub startup_recovery: crate::persistence::RecoveryStartupResult,
     pub multi_manager: MultiManagerState,
     pub multi_manager_settings: MultiManagerSettings,
     pub launcher_hwnd: Option<usize>,
@@ -558,6 +569,7 @@ pub struct LauncherApp {
     volume_dialog: VolumeDialog,
     brightness_dialog: BrightnessDialog,
     cpu_list_dialog: CpuListDialog,
+    data_recovery_dialog: DataRecoveryDialog,
     toast_log_dialog: ToastLogDialog,
     calendar_popover: CalendarPopover,
     calendar_event_editor: CalendarEventEditor,
@@ -626,6 +638,7 @@ pub struct LauncherApp {
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmCommand>,
+    pending_data_recovery: Option<PendingRecoveryIntent>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
     pub file_search_selected_kind: crate::file_search::model::SearchKind,
@@ -652,6 +665,72 @@ impl CachedSearchEntry {
 }
 
 impl LauncherApp {
+    pub fn set_startup_persistence_context(
+        &mut self,
+        recovery: crate::persistence::RecoveryStartupResult,
+    ) {
+        let mut diagnostics = Vec::new();
+        if let Some(diagnostic) = self.startup_settings_diagnostic.as_ref() {
+            let error = diagnostic.error();
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Settings startup".into(),
+                path: Some(error.path().to_path_buf()),
+                summary: format!("{} failed: {error}", error.operation()),
+            });
+        }
+        if let Some(error) = self.actions_persistence_diagnostic.as_ref() {
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Actions startup".into(),
+                path: Some(error.path().to_path_buf()),
+                summary: format!("{} failed: {error}", error.operation()),
+            });
+        }
+        if let Some(diagnostic) = recovery.diagnostic.as_ref() {
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Startup recovery".into(),
+                path: None,
+                summary: diagnostic.to_string(),
+            });
+        } else if let Some(action) = recovery.applied.as_ref() {
+            diagnostics.push(SafeStartupDiagnostic {
+                label: "Startup recovery applied".into(),
+                path: None,
+                summary: format!("Applied {action:?} before persistent stores loaded"),
+            });
+        }
+        self.startup_recovery = recovery;
+        self.data_recovery_dialog
+            .set_startup_diagnostics(diagnostics);
+    }
+
+    pub(crate) fn update_custom_actions(
+        &mut self,
+        mutate: impl FnOnce(&mut Vec<Action>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let committed = crate::actions::update_actions(&self.actions_path, mutate)?;
+        let indexed = self
+            .actions
+            .iter()
+            .skip(self.custom_len)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.publish_actions(committed, indexed);
+        Ok(())
+    }
+
+    fn publish_actions(
+        &mut self,
+        custom: Vec<Action>,
+        additional: impl IntoIterator<Item = Action>,
+    ) {
+        self.custom_len = custom.len();
+        let mut actions = custom;
+        actions.extend(additional);
+        self.actions = Arc::new(actions);
+        self.update_action_cache();
+        self.search();
+    }
+
     pub fn plugin_enabled(&self, name: &str) -> bool {
         match &self.enabled_plugins {
             Some(set) => set.contains(name),
@@ -818,71 +897,75 @@ impl LauncherApp {
     pub(crate) fn handle_file_search_ui_command(&mut self, command: FileSearchUiCommand) {
         match command {
             FileSearchUiCommand::PersistPreferences(preferences) => {
-                self.file_search_dialog.settings.ui_preferences = preferences.clone();
-                self.file_search_dialog.set_ui_preferences(preferences);
-                match crate::settings::Settings::load(&self.settings_path) {
-                    Ok(mut settings) => {
-                        let mut cfg = settings
-                            .plugin_settings
-                            .get("file_search")
-                            .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            .unwrap_or_else(
-                                crate::file_search::settings::FileSearchSettings::default,
-                            );
-                        cfg.ui_preferences = self.file_search_dialog.ui_preferences.clone();
-                        if let Ok(value) = serde_json::to_value(&cfg) {
-                            settings
-                                .plugin_settings
-                                .insert("file_search".to_owned(), value.clone());
-                            self.settings_editor
-                                .set_plugin_setting_value("file_search", value);
-                            if let Err(error) = settings.save(&self.settings_path) {
-                                self.report_error_message(
-                                    "file_search.preferences.save",
-                                    format!("Failed to save file-search preferences: {error}"),
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => self.report_error_message(
-                        "file_search.preferences.load",
-                        format!("Failed to load settings: {error}"),
-                    ),
-                }
-            }
-            FileSearchUiCommand::ConfigureRipgrep(path) => {
-                match crate::settings::Settings::load(&self.settings_path) {
-                    Ok(mut settings) => {
-                        let mut cfg = settings
-                            .plugin_settings
-                            .get("file_search")
-                            .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            .unwrap_or_else(
-                                crate::file_search::settings::FileSearchSettings::default,
-                            );
-                        cfg.ripgrep_executable_path = path;
-                        if let Ok(value) = serde_json::to_value(&cfg) {
-                            settings
-                                .plugin_settings
-                                .insert("file_search".to_owned(), value.clone());
-                            self.settings_editor
-                                .set_plugin_setting_value("file_search", value);
-                            match settings.save(&self.settings_path) {
-                                Ok(()) => {
-                                    self.apply_file_search_settings(cfg);
-                                    self.file_search_dialog.warning_error_message =
-                                        Some("ripgrep path saved for future searches.".to_owned());
+                match crate::settings::Settings::update(&self.settings_path, |settings| {
+                    let mut cfg = settings
+                        .plugin_settings
+                        .get("file_search")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                    cfg.ui_preferences = preferences;
+                    let value = serde_json::to_value(&cfg)?;
+                    settings
+                        .plugin_settings
+                        .insert("file_search".to_owned(), value);
+                    Ok(())
+                }) {
+                    Ok(settings) => {
+                        if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
+                            match serde_json::from_value(value.clone()) {
+                                Ok(committed) => {
+                                    self.file_search_dialog.ui_preferences_dirty = false;
+                                    self.apply_file_search_settings(committed);
+                                    self.settings_editor
+                                        .set_plugin_setting_value("file_search", value);
                                 }
                                 Err(error) => self.report_error_message(
-                                    "file_search.ripgrep.save",
-                                    format!("Failed to save ripgrep path: {error}"),
+                                    "file_search.preferences.publish",
+                                    format!(
+                                        "Failed to publish saved file-search preferences: {error}"
+                                    ),
                                 ),
                             }
                         }
                     }
+                    Err(error) => {
+                        let persisted = self.file_search_dialog.settings.ui_preferences.clone();
+                        self.file_search_dialog.set_ui_preferences(persisted);
+                        self.report_error_message(
+                            "file_search.preferences.save",
+                            format!("Failed to save file-search preferences: {error}"),
+                        );
+                    }
+                }
+            }
+            FileSearchUiCommand::ConfigureRipgrep(path) => {
+                match crate::settings::Settings::update(&self.settings_path, |settings| {
+                    let mut cfg = settings
+                        .plugin_settings
+                        .get("file_search")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_else(crate::file_search::settings::FileSearchSettings::default);
+                    cfg.ripgrep_executable_path = path;
+                    let value = serde_json::to_value(&cfg)?;
+                    settings
+                        .plugin_settings
+                        .insert("file_search".to_owned(), value);
+                    Ok(())
+                }) {
+                    Ok(settings) => {
+                        if let Some(value) = settings.plugin_settings.get("file_search").cloned() {
+                            self.settings_editor
+                                .set_plugin_setting_value("file_search", value.clone());
+                            if let Ok(cfg) = serde_json::from_value(value) {
+                                self.apply_file_search_settings(cfg);
+                                self.file_search_dialog.warning_error_message =
+                                    Some("ripgrep path saved for future searches.".to_owned());
+                            }
+                        }
+                    }
                     Err(error) => self.report_error_message(
-                        "file_search.ripgrep.load",
-                        format!("Failed to load settings: {error}"),
+                        "file_search.ripgrep.save",
+                        format!("Failed to save ripgrep path: {error}"),
                     ),
                 }
             }
@@ -1102,6 +1185,7 @@ impl LauncherApp {
         restore_flag: Arc<AtomicBool>,
         help_flag: Arc<AtomicBool>,
     ) -> Self {
+        crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
         let (tx, rx) = channel();
         register_event_sender(tx.clone());
         let mut watchers = Vec::new();
@@ -1110,6 +1194,12 @@ impl LauncherApp {
         let show_inline_errors = settings.show_inline_errors;
         let show_error_toasts = settings.show_error_toasts;
         let toast_duration = settings.toast_duration;
+        let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
+            .expect("LauncherApp settings path must resolve an application data root");
+        let data_recovery_dialog = DataRecoveryDialog::new(data_root, settings.clone(), {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
         use std::path::Path;
 
         let dashboard_timer = crate::performance::Timer::start();
@@ -1123,8 +1213,11 @@ impl LauncherApp {
         let dashboard_registry = WidgetRegistry::with_defaults();
         let dashboard_event_cb = std::sync::Arc::new({
             let tx = tx.clone();
+            let ctx = ctx.clone();
             move |ev: DashboardEvent| {
-                let _ = tx.send(WatchEvent::Dashboard(ev));
+                if tx.send(WatchEvent::Dashboard(ev)).is_ok() {
+                    ctx.request_repaint();
+                }
             }
         });
         let mut dashboard = Dashboard::new(
@@ -1136,8 +1229,16 @@ impl LauncherApp {
         dashboard_timer.finish("startup.dashboard_construction");
         let watcher_timer = crate::performance::Timer::start();
 
-        let (folder_aliases, folder_aliases_lc) = Self::folder_alias_maps();
-        let (bookmark_aliases, bookmark_aliases_lc) = Self::bookmark_alias_maps();
+        let (folder_aliases, folder_aliases_lc) =
+            Self::try_folder_alias_maps().unwrap_or_else(|error| {
+                tracing::error!(%error, "folder aliases startup retained invalid persisted file");
+                Default::default()
+            });
+        let (bookmark_aliases, bookmark_aliases_lc) = Self::try_bookmark_alias_maps()
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "bookmark aliases startup retained invalid persisted file");
+                Default::default()
+            });
         let clipboard_modify_catalog = plugins.clipboard_modifier_catalog();
         let (clipboard_modify_runtime, loaded_clipboard_modify) =
             ClipboardModifyRuntime::new(Path::new(&settings_path), clipboard_modify_catalog);
@@ -1146,6 +1247,10 @@ impl LauncherApp {
             crate::clipboard_modify::watch::ClipboardModifyWatcher::start(
                 clipboard_modify_runtime.store.clone(),
                 Duration::from_millis(150),
+                {
+                    let ctx = ctx.clone();
+                    move || ctx.request_repaint()
+                },
             )
             .map_err(
                 |error| tracing::warn!(%error, "failed to watch Clipboard Modify configuration"),
@@ -1153,7 +1258,12 @@ impl LauncherApp {
             .ok();
 
         #[cfg(not(test))]
-        match watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions) {
+        match watch_file(
+            Path::new(&actions_path),
+            tx.clone(),
+            WatchEvent::Actions,
+            ctx.clone(),
+        ) {
             Ok(w) => watchers.push(w),
             Err(e) => {
                 tracing::error!("watch error: {:?}", e);
@@ -1174,8 +1284,12 @@ impl LauncherApp {
         #[cfg(test)]
         {
             if Path::new(&actions_path).exists() {
-                if let Ok(w) = watch_file(Path::new(&actions_path), tx.clone(), WatchEvent::Actions)
-                {
+                if let Ok(w) = watch_file(
+                    Path::new(&actions_path),
+                    tx.clone(),
+                    WatchEvent::Actions,
+                    ctx.clone(),
+                ) {
                     watchers.push(w);
                 }
             } else if enable_toasts && show_error_toasts {
@@ -1195,6 +1309,7 @@ impl LauncherApp {
             Path::new(crate::plugins::folders::FOLDERS_FILE),
             tx.clone(),
             WatchEvent::Folders,
+            ctx.clone(),
         ) {
             Ok(w) => watchers.push(w),
             Err(e) => {
@@ -1217,7 +1332,7 @@ impl LauncherApp {
         {
             let path = Path::new(crate::plugins::folders::FOLDERS_FILE);
             if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders) {
+                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Folders, ctx.clone()) {
                     watchers.push(w);
                 }
             } else if enable_toasts && show_error_toasts {
@@ -1237,6 +1352,7 @@ impl LauncherApp {
             Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE),
             tx.clone(),
             WatchEvent::Bookmarks,
+            ctx.clone(),
         ) {
             Ok(w) => watchers.push(w),
             Err(e) => {
@@ -1259,7 +1375,7 @@ impl LauncherApp {
         {
             let path = Path::new(crate::plugins::bookmarks::BOOKMARKS_FILE);
             if path.exists() {
-                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks) {
+                if let Ok(w) = watch_file(path, tx.clone(), WatchEvent::Bookmarks, ctx.clone()) {
                     watchers.push(w);
                 }
             } else if enable_toasts && show_error_toasts {
@@ -1305,7 +1421,7 @@ impl LauncherApp {
                 WatchEvent::Gestures,
             ),
         ] {
-            match watch_file(path, tx.clone(), event) {
+            match watch_file(path, tx.clone(), event, ctx.clone()) {
                 Ok(w) => watchers.push(w),
                 Err(e) => tracing::error!("watch error: {:?}", e),
             }
@@ -1340,7 +1456,7 @@ impl LauncherApp {
             ),
         ] {
             if path.exists()
-                && let Ok(w) = watch_file(path, tx.clone(), event)
+                && let Ok(w) = watch_file(path, tx.clone(), event, ctx.clone())
             {
                 watchers.push(w);
             }
@@ -1440,6 +1556,9 @@ impl LauncherApp {
             settings_editor,
             plugin_editor,
             settings_path,
+            startup_settings_diagnostic: None,
+            actions_persistence_diagnostic: None,
+            startup_recovery: Default::default(),
             multi_manager,
             multi_manager_settings: settings.multi_manager.clone(),
             launcher_hwnd: None,
@@ -1550,6 +1669,7 @@ impl LauncherApp {
             volume_dialog: VolumeDialog::default(),
             brightness_dialog: BrightnessDialog::default(),
             cpu_list_dialog: CpuListDialog::default(),
+            data_recovery_dialog,
             toast_log_dialog: ToastLogDialog::default(),
             calendar_popover: CalendarPopover::default(),
             calendar_event_editor: CalendarEventEditor::default(),
@@ -1617,6 +1737,7 @@ impl LauncherApp {
             pending_query: None,
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
+            pending_data_recovery: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),
             actions_by_id,
@@ -2098,7 +2219,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 42] = [
+    const TRACKED_PANELS: [Panel; 43] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2132,6 +2253,7 @@ impl LauncherApp {
         Panel::VolumeDialog,
         Panel::BrightnessDialog,
         Panel::CpuListDialog,
+        Panel::DataRecoveryDialog,
         Panel::ToastLogDialog,
         Panel::CalendarPopover,
         Panel::CalendarEventEditor,
@@ -2178,6 +2300,7 @@ impl LauncherApp {
             Panel::VolumeDialog => self.volume_dialog.open,
             Panel::BrightnessDialog => self.brightness_dialog.open,
             Panel::CpuListDialog => self.cpu_list_dialog.open,
+            Panel::DataRecoveryDialog => self.data_recovery_dialog.open,
             Panel::ToastLogDialog => self.toast_log_dialog.open,
             Panel::CalendarPopover => self.calendar_popover_open,
             Panel::CalendarEventEditor => self.calendar_editor_open,
@@ -2385,6 +2508,10 @@ impl LauncherApp {
                 self.cpu_list_dialog.open = false;
                 self.panel_states.cpu_list_dialog = false;
             }
+            Panel::DataRecoveryDialog => {
+                self.data_recovery_dialog.open = false;
+                self.panel_states.data_recovery_dialog = false;
+            }
             Panel::ToastLogDialog => {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
@@ -2570,6 +2697,10 @@ impl LauncherApp {
                 self.cpu_list_dialog.open = false;
                 self.panel_states.cpu_list_dialog = false;
             }
+            Panel::DataRecoveryDialog => {
+                self.data_recovery_dialog.open = false;
+                self.panel_states.data_recovery_dialog = false;
+            }
             Panel::ToastLogDialog => {
                 self.toast_log_dialog.open = false;
                 self.panel_states.toast_log_dialog = false;
@@ -2647,6 +2778,11 @@ impl LauncherApp {
             Panel::VolumeDialog => self.volume_dialog.open = true,
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
             Panel::CpuListDialog => self.cpu_list_dialog.open = true,
+            Panel::DataRecoveryDialog => {
+                let _ = self
+                    .data_recovery_dialog
+                    .open(crate::commands::DataDialogFocus::Overview);
+            }
             Panel::ToastLogDialog => self.toast_log_dialog.open = true,
             Panel::CalendarPopover => self.calendar_popover_open = true,
             Panel::CalendarEventEditor => self.calendar_editor_open = true,
@@ -2687,11 +2823,12 @@ impl LauncherApp {
     }
 
     fn save_pinned_panels(&mut self) {
-        if let Ok(mut s) = Settings::load(&self.settings_path) {
-            s.pinned_panels = self.pinned_panels.clone();
-            if let Err(e) = s.save(&self.settings_path) {
-                self.report_error_message("launcher", format!("Failed to save: {e}"));
-            }
+        let pinned_panels = self.pinned_panels.clone();
+        if let Err(e) = Settings::update(&self.settings_path, |settings| {
+            settings.pinned_panels = pinned_panels;
+            Ok(())
+        }) {
+            self.report_error_message("launcher", format!("Failed to save: {e}"));
         }
     }
 
@@ -2746,6 +2883,7 @@ impl LauncherApp {
         check!(volume_dialog, Panel::VolumeDialog);
         check!(brightness_dialog, Panel::BrightnessDialog);
         check!(cpu_list_dialog, Panel::CpuListDialog);
+        check!(data_recovery_dialog, Panel::DataRecoveryDialog);
         check!(toast_log_dialog, Panel::ToastLogDialog);
         check!(calendar_popover, Panel::CalendarPopover);
         check!(calendar_event_editor, Panel::CalendarEventEditor);
@@ -3012,51 +3150,38 @@ impl LauncherApp {
 
     /// Delete a note by its slug identifier.
     pub fn delete_note(&mut self, slug: &str) {
-        use crate::plugins::note::{load_notes, remove_note};
-        match load_notes() {
-            Ok(notes) => {
-                if let Some((idx, note)) = notes.into_iter().enumerate().find(|(_, n)| {
-                    n.slug == slug
-                        || n.alias
-                            .as_ref()
-                            .map(|a| a.eq_ignore_ascii_case(slug))
-                            .unwrap_or(false)
-                }) {
+        use crate::plugins::note::remove_note_by_identity;
+        match remove_note_by_identity(slug) {
+            Ok(removed) => {
+                if let Some(note) = removed {
                     let word_count = note.content.split_whitespace().count();
-                    if let Err(e) = remove_note(idx) {
-                        self.report_error_message(
-                            "launcher",
-                            format!("Failed to remove note: {e}"),
+                    let msg = format!(
+                        "Removed note {} ({} words)",
+                        note.alias.as_ref().unwrap_or(&note.title),
+                        word_count
+                    );
+                    append_toast_log(&msg);
+                    if self.enable_toasts {
+                        push_toast(
+                            &mut self.toasts,
+                            Toast {
+                                text: msg.clone().into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(self.toast_duration as f64),
+                            },
                         );
-                    } else {
-                        let msg = format!(
-                            "Removed note {} ({} words)",
-                            note.alias.as_ref().unwrap_or(&note.title),
-                            word_count
-                        );
-                        append_toast_log(&msg);
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: msg.clone().into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                        if self.query.trim_start().starts_with("note list") {
-                            self.pending_query = Some(self.query.clone());
-                            self.search();
-                        }
-                        self.notes_dialog.open();
                     }
+                    if self.query.trim_start().starts_with("note list") {
+                        self.pending_query = Some(self.query.clone());
+                        self.search();
+                    }
+                    self.notes_dialog.open();
                 } else {
                     self.report_error_message("launcher", "Note not found");
                 }
             }
-            Err(e) => self.report_error_message("launcher", format!("Failed to load notes: {e}")),
+            Err(e) => self.report_error_message("launcher", format!("Failed to remove note: {e}")),
         }
         self.focus_input();
     }
@@ -3102,6 +3227,24 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
         }
     }
     None
+}
+
+pub fn recv_test_event_timeout(
+    rx: &Receiver<WatchEvent>,
+    timeout: Duration,
+) -> Option<TestWatchEvent> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = rx.recv_timeout(remaining).ok()?;
+        match event {
+            WatchEvent::Actions | WatchEvent::Folders | WatchEvent::Bookmarks => {
+                return Some(event.into());
+            }
+            _ if Instant::now() < deadline => {}
+            _ => return None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3150,6 +3293,158 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn custom_action(label: &str) -> Action {
+        Action {
+            label: label.into(),
+            desc: "custom".into(),
+            action: format!("{label}:action"),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn failed_custom_action_save_retains_published_state_and_version() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![custom_action("committed")]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        app.rebuild_completion_index_now();
+        let actions_before = Arc::clone(&app.actions);
+        let cache_before = app.action_cache.clone();
+        let version_before = crate::actions::actions_version();
+
+        let directory = tempdir().unwrap();
+        let blocker = directory.path().join("not-a-directory");
+        std::fs::write(&blocker, "unchanged").unwrap();
+        app.actions_path = blocker.join("actions.json").to_string_lossy().into_owned();
+
+        let result = app.update_custom_actions(|actions| {
+            actions.push(custom_action("uncommitted"));
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(app.actions.as_ref(), actions_before.as_ref());
+        assert_eq!(app.custom_len, 1);
+        assert_eq!(app.action_cache, cache_before);
+        assert!(app.completion_index.is_some());
+        assert_eq!(crate::actions::actions_version(), version_before);
+        assert_eq!(std::fs::read_to_string(blocker).unwrap(), "unchanged");
+    }
+
+    #[test]
+    fn actions_watcher_retains_invalid_then_publishes_valid_without_local_double_bump() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![custom_action("committed")]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("actions.json");
+        app.actions_path = path.to_string_lossy().into_owned();
+
+        std::fs::write(&path, "not valid actions JSON").unwrap();
+        let version_before = crate::actions::actions_version();
+        send_event(WatchEvent::Actions);
+        app.process_watch_events();
+
+        assert_eq!(app.actions[0], custom_action("committed"));
+        assert_eq!(app.custom_len, 1);
+        assert!(matches!(
+            app.actions_persistence_diagnostic.as_ref(),
+            Some(crate::common::persistence::PersistenceError::MalformedJson { .. })
+        ));
+        assert_eq!(crate::actions::actions_version(), version_before);
+
+        std::fs::remove_file(&path).unwrap();
+        send_event(WatchEvent::Actions);
+        app.process_watch_events();
+        assert_eq!(app.actions[0], custom_action("committed"));
+        assert!(matches!(
+            app.actions_persistence_diagnostic.as_ref(),
+            Some(crate::common::persistence::PersistenceError::Read { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert_eq!(crate::actions::actions_version(), version_before);
+
+        let external = vec![custom_action("external")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        send_event(WatchEvent::Actions);
+        app.process_watch_events();
+
+        assert_eq!(&app.actions[..app.custom_len], external.as_slice());
+        assert_eq!(app.action_cache[0].label_lc, "external");
+        assert!(app.actions_persistence_diagnostic.is_none());
+        assert_eq!(crate::actions::actions_version(), version_before + 1);
+
+        app.update_custom_actions(|actions| {
+            actions.push(custom_action("local"));
+            Ok(())
+        })
+        .unwrap();
+        let version_after_local = crate::actions::actions_version();
+        let published_after_local = Arc::clone(&app.actions);
+        send_event(WatchEvent::Actions);
+        app.process_watch_events();
+
+        assert_eq!(app.actions.as_ref(), published_after_local.as_ref());
+        assert_eq!(crate::actions::actions_version(), version_after_local);
+    }
+
+    #[test]
+    fn failed_file_search_preferences_save_restores_committed_runtime_state() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let committed_preferences = app.file_search_dialog.settings.ui_preferences.clone();
+        let committed_runtime_preferences = app
+            .file_search_coordinator
+            .production_settings()
+            .unwrap()
+            .ui_preferences
+            .clone();
+        let committed_editor_value = app
+            .settings_editor
+            .get_plugin_setting_value("file_search")
+            .cloned();
+
+        let mut candidate = committed_preferences.clone();
+        candidate.whole_word = !candidate.whole_word;
+        app.file_search_dialog.ui_preferences = candidate.clone();
+        app.file_search_dialog.ui_preferences_dirty = true;
+
+        let directory = tempdir().unwrap();
+        let blocker = directory.path().join("not-a-directory");
+        std::fs::write(&blocker, "unchanged").unwrap();
+        app.settings_path = blocker.join("settings.json").to_string_lossy().into_owned();
+
+        app.handle_file_search_ui_command(FileSearchUiCommand::PersistPreferences(candidate));
+
+        assert_eq!(app.file_search_dialog.ui_preferences, committed_preferences);
+        assert_eq!(
+            app.file_search_dialog.settings.ui_preferences,
+            committed_preferences
+        );
+        assert!(!app.file_search_dialog.ui_preferences_dirty);
+        assert_eq!(
+            app.file_search_coordinator
+                .production_settings()
+                .unwrap()
+                .ui_preferences,
+            committed_runtime_preferences
+        );
+        assert_eq!(
+            app.settings_editor
+                .get_plugin_setting_value("file_search")
+                .cloned(),
+            committed_editor_value
+        );
+        assert_eq!(std::fs::read_to_string(blocker).unwrap(), "unchanged");
     }
 
     #[derive(Clone)]
@@ -3967,6 +4262,34 @@ mod tests {
         assert_eq!(
             app.bookmark_aliases_lc.get("https://example.com"),
             Some(&Some("mixedbookmark".into()))
+        );
+
+        std::fs::write(crate::plugins::folders::FOLDERS_FILE, "invalid folders").unwrap();
+        send_event(WatchEvent::Folders);
+        app.process_watch_events();
+        assert_eq!(
+            app.folder_aliases.get("/tmp/folder-one"),
+            Some(&Some("MiXeDFolder".into()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(crate::plugins::folders::FOLDERS_FILE).unwrap(),
+            "invalid folders"
+        );
+
+        std::fs::write(
+            crate::plugins::bookmarks::BOOKMARKS_FILE,
+            "invalid bookmarks",
+        )
+        .unwrap();
+        send_event(WatchEvent::Bookmarks);
+        app.process_watch_events();
+        assert_eq!(
+            app.bookmark_aliases.get("https://example.com"),
+            Some(&Some("MiXeDBookmark".into()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(crate::plugins::bookmarks::BOOKMARKS_FILE).unwrap(),
+            "invalid bookmarks"
         );
 
         let updated_folders_json = serde_json::json!([{

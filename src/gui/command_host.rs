@@ -3,10 +3,10 @@ use std::sync::atomic::Ordering;
 
 use crate::commands::{
     CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
-    CommandOutcome, CropCommandHost, DialogCommandHost, DiffCommandHost, FavoriteLogPolicy,
-    FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommandHost,
-    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
+    CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
+    FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
+    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
+    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
     ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
     VisibilityPolicy,
 };
@@ -199,19 +199,25 @@ impl MouseGestureCommandHost for LauncherApp {
         &mut self,
         args: &crate::mouse_gestures::selection::GestureToggleArgs,
     ) -> Result<(), String> {
-        let mut db =
-            crate::mouse_gestures::db::load_gestures(crate::mouse_gestures::db::GESTURES_FILE)
-                .unwrap_or_default();
-        let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
-            gesture.label == args.label
-                && gesture.tokens == args.tokens
-                && gesture.dir_mode == args.dir_mode
-        }) else {
-            return Ok(());
-        };
-        gesture.enabled = args.enabled;
-        crate::mouse_gestures::db::save_gestures(crate::mouse_gestures::db::GESTURES_FILE, &db)
-            .map_err(|error| error.to_string())?;
+        let committed = crate::mouse_gestures::db::update_gestures(
+            crate::mouse_gestures::db::GESTURES_FILE,
+            |db| {
+                let Some(gesture) = db.gestures.iter_mut().find(|gesture| {
+                    gesture.label == args.label
+                        && gesture.tokens == args.tokens
+                        && gesture.dir_mode == args.dir_mode
+                }) else {
+                    return Ok(false);
+                };
+                if gesture.enabled == args.enabled {
+                    return Ok(false);
+                }
+                gesture.enabled = args.enabled;
+                Ok(true)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        crate::plugins::mouse_gestures::publish_committed_gesture_db(committed);
         self.dashboard_data_cache
             .request_refresh(DashboardRefreshRequest::Gestures);
         Ok(())
@@ -430,6 +436,34 @@ impl ScreenshotCommandHost for LauncherApp {
         self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
     }
 }
+
+impl DataCommandHost for LauncherApp {
+    fn open_data_dialog(&mut self, focus: crate::commands::DataDialogFocus) -> Result<(), String> {
+        self.data_recovery_dialog.open(focus)?;
+        self.focus_panel(super::Panel::DataRecoveryDialog);
+        Ok(())
+    }
+
+    fn request_data_backup(&mut self) -> Result<(), String> {
+        self.data_recovery_dialog.request_backup()
+    }
+
+    fn open_data_folder(&mut self) -> Result<(), String> {
+        open::that(self.data_recovery_dialog.root())
+            .map_err(|error| format!("Failed to open the application data folder: {error}"))
+    }
+
+    fn stage_data_recovery(
+        &mut self,
+        command: &crate::commands::DataRecoveryCommand,
+    ) -> Result<(), String> {
+        self.data_recovery_dialog.stage_recovery(command)
+    }
+
+    fn data_launcher_should_refocus(&self) -> bool {
+        self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
+    }
+}
 fn file_search_mode(kind: crate::file_search::model::SearchKind) -> super::FileSearchMode {
     match kind {
         crate::file_search::model::SearchKind::Filename => super::FileSearchMode::Filename,
@@ -636,6 +670,18 @@ mod tests {
             Command::Screenshot(crate::commands::ScreenshotCommand::UnknownMode {
                 raw: "future".into(),
             }),
+        ] {
+            assert!(command_accepts_query_override(&command));
+        }
+    }
+
+    #[test]
+    fn data_commands_keep_query_override_compatibility() {
+        for command in [
+            Command::Data(crate::commands::DataCommand::Dialog),
+            Command::Data(crate::commands::DataCommand::Health),
+            Command::Data(crate::commands::DataCommand::Backup),
+            Command::Data(crate::commands::DataCommand::OpenFolder),
         ] {
             assert!(command_accepts_query_override(&command));
         }

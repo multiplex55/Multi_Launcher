@@ -1,14 +1,20 @@
 use crate::actions::Action;
+use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::plugin::Plugin;
 use eframe::egui;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::{
+    Mutex, MutexGuard,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 pub const SHELL_CMDS_FILE: &str = "shell_cmds.json";
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ShellCmdEntry {
     pub name: String,
     pub args: String,
@@ -26,6 +32,7 @@ pub struct ShellPluginSettings {
 
 static USE_WEZTERM: AtomicBool = AtomicBool::new(false);
 static SHELL_VERSION: AtomicU64 = AtomicU64::new(0);
+static SHELL_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub fn shell_version() -> u64 {
     SHELL_VERSION.load(Ordering::Acquire)
@@ -41,44 +48,91 @@ fn default_autocomplete() -> bool {
 
 /// Load saved shell commands from `path`.
 pub fn load_shell_cmds(path: &str) -> anyhow::Result<Vec<ShellCmdEntry>> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(Vec::new());
+    match load_shell_cmds_typed(path)? {
+        LoadState::Missing | LoadState::Empty => Ok(Vec::new()),
+        LoadState::Loaded(commands) => Ok(commands),
     }
-    let list: Vec<ShellCmdEntry> = serde_json::from_str(&content)?;
-    Ok(list)
+}
+
+pub fn load_shell_cmds_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<ShellCmdEntry>>, PersistenceError> {
+    load_json(path)
 }
 
 /// Save the list of shell command entries to `path`.
 pub fn save_shell_cmds(path: &str, cmds: &[ShellCmdEntry]) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(cmds)?;
-    std::fs::write(path, json)?;
-    SHELL_VERSION.fetch_add(1, Ordering::Release);
-    Ok(())
+    replace_shell_cmds(path, cmds.to_vec()).map(|_| ())
+}
+
+pub fn replace_shell_cmds(
+    path: &str,
+    replacement: Vec<ShellCmdEntry>,
+) -> anyhow::Result<Vec<ShellCmdEntry>> {
+    update_shell_cmds(path, move |commands| {
+        *commands = replacement;
+        Ok(true)
+    })
+}
+
+pub fn update_shell_cmds(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<ShellCmdEntry>) -> anyhow::Result<bool>,
+) -> anyhow::Result<Vec<ShellCmdEntry>> {
+    update_shell_cmds_with_save(path, mutate, |path, commands| {
+        save_json_atomic(path, commands).map_err(Into::into)
+    })
+}
+
+fn update_shell_cmds_with_save(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<ShellCmdEntry>) -> anyhow::Result<bool>,
+    save: impl FnOnce(&str, &[ShellCmdEntry]) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<ShellCmdEntry>> {
+    let _transaction = shell_transaction_guard();
+    let mut commands = load_shell_cmds(path)?;
+    if mutate(&mut commands)? {
+        save(path, &commands)?;
+        SHELL_VERSION.fetch_add(1, Ordering::Release);
+    }
+    Ok(commands)
+}
+
+fn shell_transaction_guard() -> MutexGuard<'static, ()> {
+    SHELL_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Append a new saved command to `path` if the name is unique.
 pub fn append_shell_cmd(path: &str, name: &str, args: &str) -> anyhow::Result<()> {
-    let mut list = load_shell_cmds(path).unwrap_or_default();
-    if !list.iter().any(|c| c.name == name) {
-        list.push(ShellCmdEntry {
-            name: name.to_string(),
-            args: args.to_string(),
+    let name = name.to_owned();
+    let args = args.to_owned();
+    update_shell_cmds(path, move |commands| {
+        if commands.iter().any(|command| command.name == name) {
+            return Ok(false);
+        }
+        commands.push(ShellCmdEntry {
+            name,
+            args,
             autocomplete: true,
             keep_open: false,
         });
-        save_shell_cmds(path, &list)?;
-    }
+        Ok(true)
+    })?;
     Ok(())
 }
 
 /// Remove the command identified by `name` from `path`.
 pub fn remove_shell_cmd(path: &str, name: &str) -> anyhow::Result<()> {
-    let mut list = load_shell_cmds(path).unwrap_or_default();
-    if let Some(pos) = list.iter().position(|c| c.name == name) {
-        list.remove(pos);
-        save_shell_cmds(path, &list)?;
-    }
+    let name = name.to_owned();
+    update_shell_cmds(path, move |commands| {
+        let Some(position) = commands.iter().position(|command| command.name == name) else {
+            return Ok(false);
+        };
+        commands.remove(position);
+        Ok(true)
+    })?;
     Ok(())
 }
 
@@ -259,5 +313,127 @@ impl Plugin for ShellPlugin {
             Ok(v) => *value = v,
             Err(e) => tracing::error!("failed to serialize shell settings: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn command(name: &str) -> ShellCmdEntry {
+        ShellCmdEntry {
+            name: name.into(),
+            args: format!("echo {name}"),
+            autocomplete: true,
+            keep_open: false,
+        }
+    }
+
+    #[test]
+    fn typed_states_and_serde_defaults_remain_compatible() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert_eq!(load_shell_cmds_typed(&missing).unwrap(), LoadState::Missing);
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, " \r\n\t").unwrap();
+        assert_eq!(load_shell_cmds_typed(&empty).unwrap(), LoadState::Empty);
+        append_shell_cmd(empty.to_str().unwrap(), "initialized", "echo initialized").unwrap();
+        assert_eq!(load_shell_cmds(empty.to_str().unwrap()).unwrap().len(), 1);
+        let legacy = directory.path().join("legacy.json");
+        std::fs::write(&legacy, r#"[{"name":"old","args":"dir"}]"#).unwrap();
+        let loaded = load_shell_cmds(legacy.to_str().unwrap()).unwrap();
+        assert!(loaded[0].autocomplete);
+        assert!(!loaded[0].keep_open);
+        let saved = directory.path().join("nested").join("commands.json");
+        save_shell_cmds(saved.to_str().unwrap(), &loaded).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(saved).unwrap(),
+            serde_json::to_string_pretty(&loaded).unwrap()
+        );
+        let malformed = directory.path().join("malformed.json");
+        std::fs::write(&malformed, "{").unwrap();
+        assert!(matches!(
+            load_shell_cmds_typed(&malformed).unwrap_err(),
+            PersistenceError::MalformedJson { .. }
+        ));
+        assert!(matches!(
+            load_shell_cmds_typed(directory.path()).unwrap_err(),
+            PersistenceError::Read { .. }
+        ));
+    }
+
+    #[test]
+    fn malformed_store_rejects_all_mutations_unchanged() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("commands.json");
+        let invalid = b"not commands";
+        std::fs::write(&path, invalid).unwrap();
+        let path = path.to_str().unwrap();
+        for result in [
+            append_shell_cmd(path, "new", "echo new"),
+            remove_shell_cmd(path, "old"),
+            save_shell_cmds(path, &[command("replacement")]),
+        ] {
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(path).unwrap(), invalid);
+        }
+        assert!(append_shell_cmd(directory.path().to_str().unwrap(), "new", "echo").is_err());
+        assert!(remove_shell_cmd(directory.path().to_str().unwrap(), "old").is_err());
+        assert!(save_shell_cmds(directory.path().to_str().unwrap(), &[command("new")]).is_err());
+    }
+
+    #[test]
+    fn concurrent_adds_both_survive() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(
+            directory
+                .path()
+                .join("commands.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = ["first", "second"].map(|name| {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                append_shell_cmd(&path, name, &format!("echo {name}")).unwrap();
+            })
+        });
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let commands = load_shell_cmds(&path).unwrap();
+        assert!(commands.contains(&command("first")));
+        assert!(commands.contains(&command("second")));
+    }
+
+    #[test]
+    fn failed_save_retains_bytes_and_version() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("commands.json");
+        let original = vec![command("saved")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        let version = shell_version();
+        let result = update_shell_cmds_with_save(
+            path.to_str().unwrap(),
+            |commands| {
+                commands.push(command("lost"));
+                Ok(true)
+            },
+            |_path, _commands| anyhow::bail!("deterministic save failure"),
+        );
+        assert!(result.is_err());
+        assert_eq!(load_shell_cmds(path.to_str().unwrap()).unwrap(), original);
+        assert_eq!(shell_version(), version);
     }
 }

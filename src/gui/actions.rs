@@ -1,5 +1,6 @@
 use super::*;
 use crate::gui::note_mutation::{NoteMutationOutcome, NoteMutationOutput, NoteMutationResult};
+use crate::persistence::{RecoveryGroupId, RecoveryTarget};
 
 /// A compact, testable description of Launcher-owned UI that can be opened by
 /// an action.  Comparing snapshots keeps macro dispatch independent of action
@@ -25,6 +26,46 @@ fn format_wrap_links_toast(result: NoteMutationResult) -> String {
 }
 
 impl LauncherApp {
+    pub(crate) fn queue_data_recovery_confirmation(&mut self, intent: PendingRecoveryIntent) {
+        let label = match &intent {
+            PendingRecoveryIntent::Restore {
+                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
+                ..
+            } => "MkMacro document + assets",
+            PendingRecoveryIntent::Restore {
+                target: RecoveryTarget::Store(store_id),
+                ..
+            }
+            | PendingRecoveryIntent::Reset { store_id } => {
+                self.data_recovery_dialog.store_label(*store_id)
+            }
+        };
+        let (description, warning) = intent.confirmation_copy(label);
+        self.pending_data_recovery = Some(intent);
+        self.confirm_modal.open_custom(description, warning);
+    }
+
+    pub(crate) fn resolve_data_recovery_confirmation(&mut self, confirmed: bool) {
+        if let Some(command) = data_recovery_dialog::resolve_confirmed_intent(
+            &mut self.pending_data_recovery,
+            confirmed,
+        ) {
+            self.dispatch_command_invocation(crate::commands::CommandInvocation {
+                command: crate::commands::Command::Data(crate::commands::DataCommand::Recovery(
+                    command,
+                )),
+                original_action: Action {
+                    label: "Data recovery".into(),
+                    desc: "Data & Recovery".into(),
+                    action: "data:ui-confirmed".into(),
+                    args: None,
+                },
+                query_override: None,
+                source: ActivationSource::Click,
+            });
+        }
+    }
+
     pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
         let pending = self.pending_confirm.take();
         if confirmed && let Some(pending) = pending {
@@ -1532,6 +1573,37 @@ mod tests {
         app.dashboard_data_cache.wait_for_refresh();
         let snapshot = app.dashboard_data_cache.snapshot();
         assert!(!snapshot.gestures.db.gestures[0].enabled);
+        assert!(!app.usage.contains_key("mg:toggle"));
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn mouse_gesture_toggle_rejects_corrupt_store_without_replacing_bytes() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(directory.path()).unwrap();
+        let original = b"{broken";
+        std::fs::write(crate::mouse_gestures::db::GESTURES_FILE, original).unwrap();
+
+        let context = egui::Context::default();
+        let mut app = new_app(&context);
+        let args = crate::mouse_gestures::selection::GestureToggleArgs {
+            label: "Back".into(),
+            tokens: "L".into(),
+            dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+            enabled: false,
+        };
+        app.activate_action(
+            mouse_gesture_action("mg:toggle", Some(serde_json::to_string(&args).unwrap())),
+            None,
+            ActivationSource::Dashboard,
+        );
+
+        assert_eq!(
+            std::fs::read(crate::mouse_gestures::db::GESTURES_FILE).unwrap(),
+            original
+        );
         assert!(!app.usage.contains_key("mg:toggle"));
         std::env::set_current_dir(original_dir).unwrap();
     }

@@ -4,7 +4,7 @@ use crate::linking::{
 };
 use crate::plugin::Plugin;
 use crate::plugins::note::{Note, load_notes};
-use crate::plugins::todo::load_todos;
+use crate::plugins::todo::load_todos_or_last_good;
 
 pub struct LinkPlugin;
 
@@ -50,7 +50,7 @@ impl Plugin for LinkPlugin {
             }];
         }
         let notes = load_notes().unwrap_or_default();
-        let todos = load_todos(crate::plugins::todo::TODO_FILE).unwrap_or_default();
+        let todos = load_todos_or_last_good(crate::plugins::todo::TODO_FILE);
         let catalog = Self::build_catalog(&notes, &todos);
         let telemetry = TracingLinkTelemetry;
         match resolve_link(rest, &catalog, &telemetry) {

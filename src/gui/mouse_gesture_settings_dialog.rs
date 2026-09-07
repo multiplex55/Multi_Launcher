@@ -53,14 +53,6 @@ impl MouseGestureSettingsDialog {
     fn save(&mut self, app: &mut crate::gui::LauncherApp) {
         self.last_error = None;
 
-        let mut settings = match Settings::load(&app.settings_path) {
-            Ok(s) => s,
-            Err(e) => {
-                self.last_error = Some(format!("Failed to load settings: {e}"));
-                return;
-            }
-        };
-
         let value = match serde_json::to_value(&self.settings) {
             Ok(v) => v,
             Err(e) => {
@@ -69,11 +61,12 @@ impl MouseGestureSettingsDialog {
             }
         };
 
-        settings
-            .plugin_settings
-            .insert("mouse_gestures".to_string(), value.clone());
-
-        if let Err(e) = settings.save(&app.settings_path) {
+        if let Err(e) = Settings::update(&app.settings_path, |settings| {
+            settings
+                .plugin_settings
+                .insert("mouse_gestures".to_string(), value.clone());
+            Ok(())
+        }) {
             self.last_error = Some(format!("Failed to save settings: {e}"));
             return;
         }

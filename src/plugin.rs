@@ -12,6 +12,7 @@ use crate::plugins::clipboard_modify::ClipboardModifyPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::crop::CropPlugin;
+use crate::plugins::data::DataPlugin;
 use crate::plugins::diff::DiffPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::emoji::EmojiPlugin;
@@ -551,6 +552,7 @@ impl PluginManager {
         self.register_with_settings(TextCasePlugin, plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
         self.register_with_settings(CropPlugin, plugin_settings);
+        self.register_with_settings(DataPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
         self.register_with_settings(
             IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),

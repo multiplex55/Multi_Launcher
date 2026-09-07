@@ -1,53 +1,88 @@
 use crate::actions::Action;
 use crate::common::json_watch::{JsonWatcher, watch_json};
+use crate::common::persistence::{
+    LoadState, PersistenceError, load_json, save_json_atomic_replaceable,
+};
 use crate::plugin::Plugin;
 use arboard::Clipboard;
 use eframe::egui;
+use once_cell::sync::Lazy;
 use serde_json;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicU64, Ordering},
 };
 
 pub const CLIPBOARD_FILE: &str = "clipboard_history.json";
 
 static CLIPBOARD_VERSION: AtomicU64 = AtomicU64::new(0);
+static CLIPBOARD_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Load clipboard history from `path`.
 ///
 /// Returns an empty queue when the file is missing or empty.
 pub fn load_history(path: &str) -> anyhow::Result<VecDeque<String>> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(VecDeque::new());
-    }
-    let list: Vec<String> = serde_json::from_str(&content)?;
-    Ok(list.into())
+    Ok(match load_history_typed(path)? {
+        LoadState::Missing | LoadState::Empty => VecDeque::new(),
+        LoadState::Loaded(list) => list.into(),
+    })
+}
+
+pub fn load_history_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<String>>, PersistenceError> {
+    load_json(path)
 }
 
 /// Save the clipboard `history` to `path`.
 pub fn save_history(path: &str, history: &VecDeque<String>) -> anyhow::Result<()> {
-    let list: Vec<String> = history.iter().cloned().collect();
-    let json = serde_json::to_string_pretty(&list)?;
-    std::fs::write(path, json)?;
-    bump_clipboard_version();
-    Ok(())
+    let replacement = history.clone();
+    update_history_file(path, move |current| {
+        *current = replacement;
+        Ok(true)
+    })
+    .map(|_| ())
 }
 
 /// Remove the history entry at `index` from the file at `path`.
 pub fn remove_entry(path: &str, index: usize) -> anyhow::Result<()> {
-    let mut history = load_history(path).unwrap_or_default();
-    if index < history.len() {
-        history.remove(index);
-        save_history(path, &history)?;
-    }
-    Ok(())
+    update_history_file(path, |history| {
+        Ok((index < history.len())
+            .then(|| history.remove(index))
+            .is_some())
+    })
+    .map(|_| ())
 }
 
 /// Clear the clipboard history file at `path`.
 pub fn clear_history_file(path: &str) -> anyhow::Result<()> {
-    save_history(path, &VecDeque::new())
+    update_history_file(path, |history| {
+        history.clear();
+        Ok(true)
+    })
+    .map(|_| ())
+}
+
+fn update_history_file(
+    path: &str,
+    mutate: impl FnOnce(&mut VecDeque<String>) -> anyhow::Result<bool>,
+) -> anyhow::Result<VecDeque<String>> {
+    let _transaction = clipboard_transaction_guard();
+    let mut history = load_history(path)?;
+    if mutate(&mut history)? {
+        let list: Vec<_> = history.iter().cloned().collect();
+        save_json_atomic_replaceable(path, &list)?;
+        bump_clipboard_version();
+    }
+    Ok(history)
+}
+
+fn clipboard_transaction_guard() -> MutexGuard<'static, ()> {
+    CLIPBOARD_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn clipboard_version() -> u64 {
@@ -82,7 +117,10 @@ impl ClipboardPlugin {
     /// Create a new plugin keeping up to `max_entries` in history.
     pub fn new(max_entries: usize) -> Self {
         let path = CLIPBOARD_FILE.to_string();
-        let history = Arc::new(Mutex::new(load_history(&path).unwrap_or_default()));
+        let history = Arc::new(Mutex::new(load_history(&path).unwrap_or_else(|error| {
+            tracing::error!(%error, "clipboard history is invalid; retaining a temporary empty view");
+            VecDeque::new()
+        })));
         let history_clone = history.clone();
         let watch_path = path.clone();
         let watcher = watch_json(&watch_path, {
@@ -136,14 +174,22 @@ impl ClipboardPlugin {
             match clipboard.get_text() {
                 Ok(txt) => {
                     if history.front().map(|v| v != &txt).unwrap_or(true) {
-                        if let Some(pos) = history.iter().position(|v| v == &txt) {
-                            history.remove(pos);
+                        let result = update_history_file(&self.path, |next| {
+                            if let Some(pos) = next.iter().position(|v| v == &txt) {
+                                next.remove(pos);
+                            }
+                            next.push_front(txt);
+                            while next.len() > self.max_entries {
+                                next.pop_back();
+                            }
+                            Ok(true)
+                        });
+                        match result {
+                            Ok(committed) => *history = committed,
+                            Err(error) => {
+                                tracing::error!(%error, "clipboard history update skipped")
+                            }
                         }
-                        history.push_front(txt);
-                        while history.len() > self.max_entries {
-                            history.pop_back();
-                        }
-                        let _ = save_history(&self.path, &history);
                     }
                 }
                 Err(e) => {
@@ -284,5 +330,26 @@ impl Plugin for ClipboardPlugin {
             Err(e) => tracing::error!("failed to serialize clipboard settings: {e}"),
         }
         self.max_entries = cfg.max_entries;
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn missing_initializes_but_malformed_rejects_mutations_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clipboard.json");
+        let path_str = path.to_str().unwrap();
+        save_history(path_str, &VecDeque::from(["first".to_string()])).unwrap();
+        assert_eq!(load_history(path_str).unwrap().len(), 1);
+
+        let invalid = b"not clipboard history";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(remove_entry(path_str, 0).is_err());
+        assert!(clear_history_file(path_str).is_err());
+        assert!(save_history(path_str, &VecDeque::new()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

@@ -10,6 +10,7 @@ use crate::common::command::{ParseArgsResult, parse_args};
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::lru::LruCache;
+use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::common::query::parse_query_filters;
 use crate::linking::{
     EntityKey, LinkIndex, LinkRef, LinkTarget, build_index_from_notes_and_todos, format_link_id,
@@ -23,8 +24,9 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, MutexGuard, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -32,6 +34,7 @@ pub const TODO_FILE: &str = "todo.json";
 
 static TODO_VERSION: AtomicU64 = AtomicU64::new(0);
 static NEXT_TODO_ID: AtomicU64 = AtomicU64::new(1);
+static TODO_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn next_todo_id() -> String {
     let next = NEXT_TODO_ID.fetch_add(1, Ordering::SeqCst);
@@ -143,7 +146,7 @@ fn format_todo_link_row(
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct TodoEntry {
     #[serde(default)]
     pub id: String,
@@ -200,8 +203,13 @@ pub(crate) fn decode_todo_tag_action_payload(payload: &str) -> Option<TodoTagAct
 /// Shared in-memory todo cache kept in sync with `todo.json`.
 /// Disk writes and the [`JsonWatcher`] ensure updates are visible immediately
 /// to all plugin instances and tests.
-pub static TODO_DATA: Lazy<Arc<RwLock<Vec<TodoEntry>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(load_todos(TODO_FILE).unwrap_or_default())));
+pub static TODO_DATA: Lazy<Arc<RwLock<Vec<TodoEntry>>>> = Lazy::new(|| {
+    let startup = load_todos(TODO_FILE).unwrap_or_else(|error| {
+        tracing::error!(%error, "todo startup retained invalid persisted file");
+        Vec::new()
+    });
+    Arc::new(RwLock::new(startup))
+});
 
 static TODO_CACHE: Lazy<Arc<RwLock<LruCache<String, Vec<Action>>>>> =
     Lazy::new(|| Arc::new(RwLock::new(LruCache::new(64))));
@@ -285,32 +293,106 @@ pub fn sort_by_priority_desc(entries: &mut Vec<TodoEntry>) {
 
 /// Load todo entries from `path`.
 pub fn load_todos(path: &str) -> anyhow::Result<Vec<TodoEntry>> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(Vec::new());
+    let _transaction = todo_transaction_guard();
+    let (todos, migrated) = load_todos_for_update(path)?;
+    if migrated {
+        save_json_atomic(path, &todos)?;
     }
-    let mut list: Vec<TodoEntry> = serde_json::from_str(&content)?;
-    let mut changed = false;
-    for entry in &mut list {
-        if entry.id.is_empty() {
-            entry.id = next_todo_id();
-            changed = true;
-        }
-    }
-    if changed {
-        let _ = save_todos(path, &list);
-    }
-    Ok(list)
+    Ok(todos)
+}
+
+/// Load the current store for read-only UI/catalog consumers, retaining the
+/// committed process snapshot when an external edit is temporarily invalid.
+pub fn load_todos_or_last_good(path: &str) -> Vec<TodoEntry> {
+    load_todos(path).unwrap_or_else(|error| {
+        tracing::error!(%error, "todo reader retained last-good snapshot");
+        TODO_DATA
+            .read()
+            .map(|todos| todos.clone())
+            .unwrap_or_default()
+    })
+}
+
+pub fn load_todos_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<TodoEntry>>, PersistenceError> {
+    load_json(path)
+}
+
+pub(crate) fn load_todos_for_reload(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<TodoEntry>>, PersistenceError> {
+    let _transaction = todo_transaction_guard();
+    load_todos_typed(path)
 }
 
 /// Save `todos` to `path` as JSON.
 pub fn save_todos(path: &str, todos: &[TodoEntry]) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(todos)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    replace_todos(path, todos.to_vec()).map(|_| ())
 }
 
-fn update_cache(list: Vec<TodoEntry>) {
+pub fn replace_todos(path: &str, replacement: Vec<TodoEntry>) -> anyhow::Result<Vec<TodoEntry>> {
+    update_todos(path, move |todos| {
+        *todos = replacement;
+        Ok(true)
+    })
+}
+
+pub fn update_todos(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<TodoEntry>) -> anyhow::Result<bool>,
+) -> anyhow::Result<Vec<TodoEntry>> {
+    update_todos_with_save(path, mutate, |path, todos| {
+        save_json_atomic(path, todos).map_err(Into::into)
+    })
+}
+
+fn update_todos_with_save(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<TodoEntry>) -> anyhow::Result<bool>,
+    save: impl FnOnce(&str, &[TodoEntry]) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<TodoEntry>> {
+    // Publication below touches the lazy process cache. Initialize it before
+    // taking the store lock so its startup load cannot recursively acquire it.
+    Lazy::force(&TODO_DATA);
+    let _transaction = todo_transaction_guard();
+    let (mut todos, migrated) = load_todos_for_update(path)?;
+    let changed = mutate(&mut todos)?;
+    let ids_added = ensure_todo_ids(&mut todos);
+    if changed || migrated || ids_added {
+        save(path, &todos)?;
+        publish_todo_snapshot(todos.clone());
+    }
+    Ok(todos)
+}
+
+fn load_todos_for_update(path: &str) -> anyhow::Result<(Vec<TodoEntry>, bool)> {
+    let mut todos = match load_todos_typed(path)? {
+        LoadState::Missing | LoadState::Empty => Vec::new(),
+        LoadState::Loaded(todos) => todos,
+    };
+    let migrated = ensure_todo_ids(&mut todos);
+    Ok((todos, migrated))
+}
+
+fn ensure_todo_ids(todos: &mut [TodoEntry]) -> bool {
+    let mut changed = false;
+    for todo in todos {
+        if todo.id.is_empty() {
+            todo.id = next_todo_id();
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn todo_transaction_guard() -> MutexGuard<'static, ()> {
+    TODO_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn publish_todo_snapshot(list: Vec<TodoEntry>) {
     if let Ok(mut lock) = TODO_DATA.write() {
         *lock = list;
     }
@@ -327,73 +409,85 @@ pub fn append_todo(
     tags: &[String],
     refs: &[EntityRef],
 ) -> anyhow::Result<()> {
-    let mut list = load_todos(path).unwrap_or_default();
-    list.push(TodoEntry {
-        id: next_todo_id(),
-        text: text.to_string(),
-        done: false,
-        priority,
-        tags: tags.to_vec(),
-        entity_refs: refs.to_vec(),
-    });
-    save_todos(path, &list)?;
-    update_cache(list);
+    let text = text.to_owned();
+    let tags = tags.to_vec();
+    let refs = refs.to_vec();
+    update_todos(path, move |todos| {
+        todos.push(TodoEntry {
+            id: next_todo_id(),
+            text,
+            done: false,
+            priority,
+            tags,
+            entity_refs: refs,
+        });
+        Ok(true)
+    })?;
     Ok(())
 }
 
 /// Remove the todo at `index` from the list stored at `path`.
 pub fn remove_todo(path: &str, index: usize) -> anyhow::Result<()> {
-    let mut list = load_todos(path).unwrap_or_default();
-    if index < list.len() {
-        list.remove(index);
-        save_todos(path, &list)?;
-        update_cache(list);
-    }
+    update_todos(path, move |todos| {
+        if index >= todos.len() {
+            return Ok(false);
+        }
+        todos.remove(index);
+        Ok(true)
+    })?;
     Ok(())
 }
 
 /// Toggle completion status of the todo at `index` in `path`.
 pub fn mark_done(path: &str, index: usize) -> anyhow::Result<()> {
-    let mut list = load_todos(path).unwrap_or_default();
-    if let Some(entry) = list.get_mut(index) {
-        entry.done = !entry.done;
-        save_todos(path, &list)?;
-        update_cache(list);
-    }
+    update_todos(path, move |todos| {
+        if let Some(entry) = todos.get_mut(index) {
+            entry.done = !entry.done;
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
     Ok(())
 }
 
 /// Set the priority of the todo at `index` in `path`.
 pub fn set_priority(path: &str, index: usize, priority: u8) -> anyhow::Result<()> {
-    let mut list = load_todos(path).unwrap_or_default();
-    if let Some(entry) = list.get_mut(index) {
-        entry.priority = priority;
-        save_todos(path, &list)?;
-        update_cache(list);
-    }
+    update_todos(path, move |todos| {
+        if let Some(entry) = todos.get_mut(index) {
+            if entry.priority == priority {
+                return Ok(false);
+            }
+            entry.priority = priority;
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
     Ok(())
 }
 
 /// Replace the tags of the todo at `index` in `path`.
 pub fn set_tags(path: &str, index: usize, tags: &[String]) -> anyhow::Result<()> {
-    let mut list = load_todos(path).unwrap_or_default();
-    if let Some(entry) = list.get_mut(index) {
-        entry.tags = tags.to_vec();
-        save_todos(path, &list)?;
-        update_cache(list);
-    }
+    let tags = tags.to_vec();
+    update_todos(path, move |todos| {
+        if let Some(entry) = todos.get_mut(index) {
+            if entry.tags == tags {
+                return Ok(false);
+            }
+            entry.tags = tags;
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
     Ok(())
 }
 
 /// Remove all completed todos from `path`.
 pub fn clear_done(path: &str) -> anyhow::Result<()> {
-    let mut list = load_todos(path).unwrap_or_default();
-    let orig_len = list.len();
-    list.retain(|e| !e.done);
-    if list.len() != orig_len {
-        save_todos(path, &list)?;
-        update_cache(list);
-    }
+    update_todos(path, |todos| {
+        let original_len = todos.len();
+        todos.retain(|todo| !todo.done);
+        Ok(todos.len() != original_len)
+    })?;
     Ok(())
 }
 
@@ -414,17 +508,9 @@ impl TodoPlugin {
         let watcher = watch_json(&watch_path, {
             let watch_path = watch_path.clone();
             let data_clone = data.clone();
-            let cache_clone = cache.clone();
             move || {
-                if let Ok(list) = load_todos(&watch_path) {
-                    if let Ok(mut lock) = data_clone.write() {
-                        *lock = list;
-                    }
-                    if let Ok(mut c) = cache_clone.write() {
-                        c.clear();
-                    }
-                    invalidate_todo_links_index_cache();
-                    bump_todo_version();
+                if let Err(error) = reload_todo_snapshot(&watch_path, &data_clone) {
+                    tracing::error!(%error, "invalid todo reload retained last-good state");
                 }
             }
         })
@@ -918,9 +1004,6 @@ impl TodoPlugin {
             } else {
                 mem_todos.clone()
             };
-            if let Ok(mut lock) = self.data.write() {
-                *lock = todos.clone();
-            }
             let mut entries: Vec<(usize, &TodoEntry)> = todos.iter().enumerate().collect();
 
             let filters = parse_query_filters(filter, &["@", "#", "tag:"]);
@@ -983,6 +1066,33 @@ impl TodoPlugin {
 
         Vec::new()
     }
+}
+
+fn reload_todo_snapshot(path: &str, data: &Arc<RwLock<Vec<TodoEntry>>>) -> anyhow::Result<()> {
+    let _transaction = todo_transaction_guard();
+    let (todos, migrated) = match load_todos_typed(path)? {
+        LoadState::Missing => anyhow::bail!("todo file was removed; retaining last-good state"),
+        LoadState::Empty => (Vec::new(), false),
+        LoadState::Loaded(mut todos) => {
+            let migrated = ensure_todo_ids(&mut todos);
+            (todos, migrated)
+        }
+    };
+    if migrated {
+        save_json_atomic(path, &todos)?;
+    }
+    let mut current = data
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *current == todos {
+        return Ok(());
+    }
+    *current = todos;
+    drop(current);
+    invalidate_todo_cache();
+    invalidate_todo_links_index_cache();
+    bump_todo_version();
+    Ok(())
 }
 
 impl Default for TodoPlugin {
@@ -1101,7 +1211,7 @@ impl Plugin for TodoPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Barrier, Mutex};
 
     // TODO_DATA is intentionally process-wide. Tests which replace its contents
     // must not overlap when the suite is run with multiple test threads.
@@ -1118,6 +1228,17 @@ mod tests {
         let mut guard = TODO_DATA.write().unwrap();
         *guard = entries;
         original
+    }
+
+    fn persistence_todo(id: &str, text: &str) -> TodoEntry {
+        TodoEntry {
+            id: id.into(),
+            text: text.into(),
+            done: false,
+            priority: 2,
+            tags: vec!["tag".into()],
+            entity_refs: Vec::new(),
+        }
     }
 
     #[test]
@@ -1432,7 +1553,7 @@ mod tests {
         assert!(!second.is_empty());
         assert_eq!(todo_links_index_rebuild_count(), 1);
 
-        update_cache(vec![TodoEntry {
+        publish_todo_snapshot(vec![TodoEntry {
             id: "t-cache".into(),
             text: "cache me updated".into(),
             done: false,
@@ -1466,6 +1587,194 @@ mod tests {
         let out = plugin.search_internal("todo links id:t-3 --json");
         assert!(out[0].desc.contains("JSON"));
         assert!(out[0].label.starts_with("["));
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+    }
+
+    #[test]
+    fn persistence_states_legacy_defaults_and_pretty_schema_are_compatible() {
+        let _lock = lock_todo_data();
+        let original = set_todos(Vec::new());
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert_eq!(load_todos_typed(&missing).unwrap(), LoadState::Missing);
+        append_todo(missing.to_str().unwrap(), "created", 1, &[], &[]).unwrap();
+        assert_eq!(load_todos(missing.to_str().unwrap()).unwrap().len(), 1);
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, " \r\n").unwrap();
+        assert_eq!(load_todos_typed(&empty).unwrap(), LoadState::Empty);
+        append_todo(empty.to_str().unwrap(), "initialized", 1, &[], &[]).unwrap();
+        assert_eq!(load_todos(empty.to_str().unwrap()).unwrap().len(), 1);
+
+        let legacy = directory.path().join("legacy.json");
+        std::fs::write(&legacy, r#"[{"text":"old","done":false}]"#).unwrap();
+        let loaded = load_todos(legacy.to_str().unwrap()).unwrap();
+        assert!(!loaded[0].id.is_empty());
+        assert_eq!(loaded[0].priority, 0);
+        assert!(loaded[0].tags.is_empty());
+        assert!(loaded[0].entity_refs.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            serde_json::to_string_pretty(&loaded).unwrap()
+        );
+
+        let malformed = directory.path().join("malformed.json");
+        std::fs::write(&malformed, "{").unwrap();
+        assert!(matches!(
+            load_todos_typed(&malformed).unwrap_err(),
+            PersistenceError::MalformedJson { .. }
+        ));
+        assert!(matches!(
+            load_todos_typed(directory.path()).unwrap_err(),
+            PersistenceError::Read { .. }
+        ));
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+    }
+
+    #[test]
+    fn malformed_and_unreadable_todos_reject_all_mutations_unchanged() {
+        let _lock = lock_todo_data();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let invalid = b"invalid todos";
+        std::fs::write(&path, invalid).unwrap();
+        let path = path.to_str().unwrap();
+        assert!(append_todo(path, "new", 1, &[], &[]).is_err());
+        assert!(remove_todo(path, 0).is_err());
+        assert!(mark_done(path, 0).is_err());
+        assert!(set_priority(path, 0, 3).is_err());
+        assert!(set_tags(path, 0, &["new".into()]).is_err());
+        assert!(clear_done(path).is_err());
+        assert!(save_todos(path, &[persistence_todo("new", "replacement")]).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+
+        let unreadable = directory.path().to_str().unwrap();
+        assert!(append_todo(unreadable, "new", 1, &[], &[]).is_err());
+        assert!(remove_todo(unreadable, 0).is_err());
+        assert!(mark_done(unreadable, 0).is_err());
+        assert!(set_priority(unreadable, 0, 3).is_err());
+        assert!(set_tags(unreadable, 0, &[]).is_err());
+        assert!(clear_done(unreadable).is_err());
+        assert!(save_todos(unreadable, &[persistence_todo("new", "replacement")]).is_err());
+    }
+
+    #[test]
+    fn failed_save_preserves_disk_and_all_published_state() {
+        let _lock = lock_todo_data();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let disk = vec![persistence_todo("disk", "disk")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
+        let original = set_todos(vec![persistence_todo("memory", "memory")]);
+        TODO_CACHE.write().unwrap().insert(
+            "sentinel".into(),
+            vec![Action {
+                label: "sentinel".into(),
+                desc: String::new(),
+                action: "noop:sentinel".into(),
+                args: None,
+            }],
+        );
+        *TODO_LINKS_INDEX_CACHE.write().unwrap() = Some(TodoLinksIndexCache {
+            todo_version: 777,
+            note_version: 888,
+            notes: Vec::new(),
+            index: LinkIndex::default(),
+        });
+        let version = todo_version();
+        let result = update_todos_with_save(
+            path.to_str().unwrap(),
+            |todos| {
+                todos.push(persistence_todo("lost", "lost"));
+                Ok(true)
+            },
+            |_path, _todos| anyhow::bail!("deterministic save failure"),
+        );
+        assert!(result.is_err());
+        assert_eq!(load_todos(path.to_str().unwrap()).unwrap(), disk);
+        assert_eq!(
+            *TODO_DATA.read().unwrap(),
+            vec![persistence_todo("memory", "memory")]
+        );
+        assert_eq!(todo_version(), version);
+        assert!(TODO_CACHE.write().unwrap().get("sentinel").is_some());
+        let links_guard = TODO_LINKS_INDEX_CACHE.read().unwrap();
+        let links_cache = links_guard.as_ref().expect("links cache retained");
+        assert_eq!(links_cache.todo_version, 777);
+        assert_eq!(links_cache.note_version, 888);
+        drop(links_guard);
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+        invalidate_todo_cache();
+        reset_todo_links_index_cache_state();
+    }
+
+    #[test]
+    fn concurrent_non_conflicting_mutations_survive() {
+        let _lock = lock_todo_data();
+        let original = set_todos(Vec::new());
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(
+            directory
+                .path()
+                .join("todo.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = ["first", "second"].map(|text| {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                append_todo(&path, text, 1, &[], &[]).unwrap();
+            })
+        });
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let todos = load_todos(&path).unwrap();
+        assert!(todos.iter().any(|todo| todo.text == "first"));
+        assert!(todos.iter().any(|todo| todo.text == "second"));
+        if let Ok(mut guard) = TODO_DATA.write() {
+            *guard = original;
+        }
+    }
+
+    #[test]
+    fn watcher_retains_invalid_recovers_and_deduplicates_self_write() {
+        let _lock = lock_todo_data();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let original = set_todos(Vec::new());
+        let local = vec![persistence_todo("local", "local")];
+        save_todos(path.to_str().unwrap(), &local).unwrap();
+        let version = todo_version();
+        reload_todo_snapshot(path.to_str().unwrap(), &TODO_DATA).unwrap();
+        assert_eq!(todo_version(), version);
+        assert_eq!(*TODO_DATA.read().unwrap(), local);
+
+        std::fs::write(&path, "invalid").unwrap();
+        assert!(reload_todo_snapshot(path.to_str().unwrap(), &TODO_DATA).is_err());
+        assert_eq!(todo_version(), version);
+        assert_eq!(*TODO_DATA.read().unwrap(), local);
+        assert_eq!(load_todos_or_last_good(path.to_str().unwrap()), local);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(reload_todo_snapshot(path.to_str().unwrap(), &TODO_DATA).is_err());
+        assert_eq!(todo_version(), version);
+        assert_eq!(*TODO_DATA.read().unwrap(), local);
+
+        let external = vec![persistence_todo("external", "external")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        reload_todo_snapshot(path.to_str().unwrap(), &TODO_DATA).unwrap();
+        assert_eq!(todo_version(), version + 1);
+        assert_eq!(*TODO_DATA.read().unwrap(), external);
         if let Ok(mut guard) = TODO_DATA.write() {
             *guard = original;
         }

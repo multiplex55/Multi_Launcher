@@ -3,12 +3,17 @@ use super::{
     WidgetSettingsUiResult, default_refresh_throttle_secs, edit_typed_settings, refresh_schedule,
     refresh_settings_ui, run_refresh_schedule,
 };
+use crate::common::persistence::{LoadState, load_json, save_json_atomic};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use chrono::NaiveDateTime;
 use eframe::egui;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+static SCRATCHPAD_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn default_refresh_interval() -> f32 {
     30.0
@@ -413,29 +418,25 @@ fn storage_path_for(cfg: &ScratchpadConfig) -> PathBuf {
 }
 
 fn load_storage(path: &Path) -> (String, Option<String>) {
-    if !path.exists() {
-        return (String::new(), None);
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) => return (String::new(), Some(err.to_string())),
-    };
-    if content.trim().is_empty() {
-        return (String::new(), None);
-    }
-    match serde_json::from_str::<ScratchpadStorage>(&content) {
-        Ok(storage) => (storage.content, None),
-        Err(err) => (String::new(), Some(err.to_string())),
+    let _transaction = SCRATCHPAD_TRANSACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match load_json::<ScratchpadStorage>(path) {
+        Ok(LoadState::Missing | LoadState::Empty) => (String::new(), None),
+        Ok(LoadState::Loaded(storage)) => (storage.content, None),
+        Err(error) => (String::new(), Some(error.to_string())),
     }
 }
 
 fn save_storage(path: &Path, content: &str) -> Result<(), String> {
+    let _transaction = SCRATCHPAD_TRANSACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = load_json::<ScratchpadStorage>(path).map_err(|error| error.to_string())?;
     let payload = ScratchpadStorage {
         content: content.to_string(),
     };
-    let json = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
-    std::fs::write(path, json).map_err(|err| err.to_string())?;
-    Ok(())
+    save_json_atomic(path, &payload).map_err(|error| error.to_string())
 }
 
 fn format_timestamp(value: NaiveDateTime) -> String {
@@ -485,6 +486,25 @@ mod tests {
         let (content, error) = load_storage(&path);
         assert!(error.is_none());
         assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn missing_and_empty_initialize_but_malformed_storage_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nested/scratchpad.json");
+        save_storage(&missing, "first").unwrap();
+        assert_eq!(load_storage(&missing), ("first".into(), None));
+
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, b"").unwrap();
+        save_storage(&empty, "from empty").unwrap();
+        assert_eq!(load_storage(&empty), ("from empty".into(), None));
+
+        let malformed = dir.path().join("malformed.json");
+        let original = b"{private scratchpad bytes";
+        std::fs::write(&malformed, original).unwrap();
+        assert!(save_storage(&malformed, "replacement").is_err());
+        assert_eq!(std::fs::read(&malformed).unwrap(), original);
     }
 
     #[test]

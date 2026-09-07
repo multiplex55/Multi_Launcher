@@ -1,5 +1,5 @@
 use crate::gui::LauncherApp;
-use crate::plugins::macros::{MACROS_FILE, MacroEntry, MacroStep, load_macros, save_macros};
+use crate::plugins::macros::{MACROS_FILE, MacroEntry, MacroStep, load_macros, replace_macros};
 use eframe::egui;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -24,6 +24,7 @@ pub struct MacroDialog {
     category_filter: String,
     add_filter: String,
     add_args: String,
+    load_error: Option<String>,
 }
 
 impl Default for MacroDialog {
@@ -41,6 +42,7 @@ impl Default for MacroDialog {
             category_filter: String::new(),
             add_filter: String::new(),
             add_args: String::new(),
+            load_error: None,
         }
     }
 }
@@ -48,7 +50,7 @@ impl Default for MacroDialog {
 impl MacroDialog {
     /// Load macros and reset dialog state, including the category filter.
     pub fn open(&mut self) {
-        self.entries = load_macros(MACROS_FILE).unwrap_or_default();
+        let _ = self.load_from(MACROS_FILE);
         self.open = true;
         self.edit_idx = None;
         self.label.clear();
@@ -62,12 +64,42 @@ impl MacroDialog {
         self.add_args.clear();
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_macros(MACROS_FILE, &self.entries) {
+    fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
+        match load_macros(path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_entries(&mut self, path: &str, candidate: Vec<MacroEntry>) -> anyhow::Result<()> {
+        match replace_macros(path, candidate) {
+            Ok(committed) => {
+                self.entries = committed;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<MacroEntry>) -> bool {
+        if let Err(e) = self.commit_entries(MACROS_FILE, candidate) {
             app.report_error_message("ui operation", format!("Failed to save macros: {e}"));
+            false
         } else {
             app.search();
             app.focus_input();
+            true
         }
     }
 
@@ -108,9 +140,19 @@ impl MacroDialog {
             return;
         }
         let mut close = false;
-        let mut save_now = false;
+        let mut save_candidate = None;
         let mut open = self.open;
         egui::Window::new("Macros").open(&mut open).show(ctx, |ui| {
+            if let Some(error) = &self.load_error {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Macros are read-only because loading failed: {error}"),
+                );
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+                return;
+            }
             if let Some(idx) = self.edit_idx {
                 ui.horizontal(|ui| {
                     ui.label("Label");
@@ -311,15 +353,17 @@ impl MacroDialog {
                         if self.label.trim().is_empty() {
                             app.report_error_message("ui operation", "Label required");
                         } else {
-                            for step in &mut self.steps {
+                            let mut steps = self.steps.clone();
+                            for step in &mut steps {
                                 if let Some(a) = &step.args
                                     && a.trim().is_empty()
                                 {
                                     step.args = None;
                                 }
                             }
-                            if idx == self.entries.len() {
-                                self.entries.push(MacroEntry {
+                            let mut candidate = self.entries.clone();
+                            if idx == candidate.len() {
+                                candidate.push(MacroEntry {
                                     label: self.label.clone(),
                                     desc: self.desc.clone(),
                                     auto_delay_ms: if self.auto_delay {
@@ -327,9 +371,9 @@ impl MacroDialog {
                                     } else {
                                         None
                                     },
-                                    steps: self.steps.clone(),
+                                    steps,
                                 });
-                            } else if let Some(e) = self.entries.get_mut(idx) {
+                            } else if let Some(e) = candidate.get_mut(idx) {
                                 e.label = self.label.clone();
                                 e.desc = self.desc.clone();
                                 e.auto_delay_ms = if self.auto_delay {
@@ -337,19 +381,9 @@ impl MacroDialog {
                                 } else {
                                     None
                                 };
-                                e.steps = self.steps.clone();
+                                e.steps = steps;
                             }
-                            self.edit_idx = None;
-                            self.label.clear();
-                            self.desc.clear();
-                            self.steps.clear();
-                            self.auto_delay = false;
-                            self.auto_delay_secs = 1.0;
-                            // Clear temporary plugin selection state after saving.
-                            self.add_plugin.clear();
-                            self.add_filter.clear();
-                            self.add_args.clear();
-                            save_now = true;
+                            save_candidate = Some(candidate);
                         }
                     }
                     if ui.button("Cancel").clicked() {
@@ -394,8 +428,9 @@ impl MacroDialog {
                         }
                     });
                 if let Some(idx) = remove {
-                    self.entries.remove(idx);
-                    save_now = true;
+                    let mut candidate = self.entries.clone();
+                    candidate.remove(idx);
+                    save_candidate = Some(candidate);
                 }
                 if ui.button("Add Macro").clicked() {
                     self.edit_idx = Some(self.entries.len());
@@ -414,8 +449,18 @@ impl MacroDialog {
             }
         });
         self.open = open;
-        if save_now {
-            self.save(app);
+        if let Some(candidate) = save_candidate
+            && self.save(app, candidate)
+        {
+            self.edit_idx = None;
+            self.label.clear();
+            self.desc.clear();
+            self.steps.clear();
+            self.auto_delay = false;
+            self.auto_delay_secs = 1.0;
+            self.add_plugin.clear();
+            self.add_filter.clear();
+            self.add_args.clear();
         }
         if close {
             self.open = false;
@@ -493,5 +538,32 @@ mod tests {
         MacroDialog::select_plugin(&mut dlg.add_plugin, &mut dlg.category_filter, "app");
         assert_eq!(dlg.add_plugin, "app");
         assert!(dlg.category_filter.is_empty());
+    }
+
+    #[test]
+    fn invalid_reload_and_commit_keep_last_good_and_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("macros.json");
+        let initial = vec![MacroEntry {
+            label: "saved".into(),
+            desc: "Saved".into(),
+            auto_delay_ms: None,
+            steps: Vec::new(),
+        }];
+        crate::plugins::macros::save_macros(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = MacroDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        let invalid = b"invalid macros";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(dialog.load_from(path.to_str().unwrap()).is_err());
+        assert_eq!(dialog.entries, initial);
+        assert!(dialog.load_error.is_some());
+        assert!(
+            dialog
+                .commit_entries(path.to_str().unwrap(), Vec::new())
+                .is_err()
+        );
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

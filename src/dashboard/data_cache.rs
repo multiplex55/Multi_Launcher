@@ -1,14 +1,15 @@
 use crate::actions::Action;
-use crate::mouse_gestures::db::{GESTURES_FILE, GestureDb, load_gestures};
+use crate::common::persistence::{LoadState, PersistenceError};
+use crate::mouse_gestures::db::{GESTURES_FILE, GestureDb, load_gestures_for_reload};
 use crate::mouse_gestures::usage::{GESTURES_USAGE_FILE, GestureUsageEntry, load_usage};
 use crate::plugins::calendar::{
     CALENDAR_EVENTS_FILE, CalendarSnapshot, build_snapshot, refresh_events_from_disk,
 };
 use crate::plugins::clipboard::{CLIPBOARD_FILE, load_history};
-use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs};
+use crate::plugins::fav::{FAV_FILE, FavEntry, load_favs_for_reload};
 use crate::plugins::note::{Note, load_notes};
-use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets};
-use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos};
+use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets_for_reload};
+use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos_for_reload};
 use crate::{launcher, launcher::RecycleBinInfo};
 use chrono::Local;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -261,6 +262,53 @@ struct ProductionDashboardBackend {
     last_network_time: Option<Instant>,
 }
 
+fn publish_loaded_or_retain<T>(
+    current: &mut Arc<Vec<T>>,
+    loaded: anyhow::Result<Vec<T>>,
+    store: &'static str,
+) {
+    match loaded {
+        Ok(entries) => *current = Arc::new(entries),
+        Err(error) => tracing::error!(%error, store, "dashboard retained last-good snapshot"),
+    }
+}
+
+fn critical_list_for_dashboard<T>(
+    loaded: Result<LoadState<Vec<T>>, PersistenceError>,
+    store: &'static str,
+) -> anyhow::Result<Vec<T>> {
+    match loaded? {
+        LoadState::Missing => anyhow::bail!("{store} file was removed"),
+        LoadState::Empty => Ok(Vec::new()),
+        LoadState::Loaded(entries) => Ok(entries),
+    }
+}
+
+fn gesture_db_for_dashboard() -> anyhow::Result<GestureDb> {
+    match load_gestures_for_reload(GESTURES_FILE)? {
+        LoadState::Missing => anyhow::bail!("gesture definitions file was removed"),
+        LoadState::Empty => Ok(GestureDb::default()),
+        LoadState::Loaded(db) => Ok(db),
+    }
+}
+
+fn publish_gesture_db_or_retain(
+    current: &Arc<GestureDb>,
+    loaded: anyhow::Result<GestureDb>,
+) -> Arc<GestureDb> {
+    match loaded {
+        Ok(db) if db == **current => Arc::clone(current),
+        Ok(db) => Arc::new(db),
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                "failed to refresh gestures; retaining last-good data"
+            );
+            Arc::clone(current)
+        }
+    }
+}
+
 impl ProductionDashboardBackend {
     fn system_status(&mut self, system: &mut System) -> SystemStatusSnapshot {
         system.refresh_cpu_usage();
@@ -333,13 +381,21 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             );
         }
         if batch.contains(DashboardRefreshRequest::Snippets) {
-            next.snippets = Arc::new(load_snippets(SNIPPETS_FILE).unwrap_or_default());
+            publish_loaded_or_retain(
+                &mut next.snippets,
+                critical_list_for_dashboard(load_snippets_for_reload(SNIPPETS_FILE), "snippets"),
+                "snippets",
+            );
         }
         if batch.contains(DashboardRefreshRequest::Notes) {
-            next.notes = Arc::new(load_notes().unwrap_or_default());
+            publish_loaded_or_retain(&mut next.notes, load_notes(), "notes");
         }
         if batch.contains(DashboardRefreshRequest::Todos) {
-            next.todos = Arc::new(load_todos(TODO_FILE).unwrap_or_default());
+            publish_loaded_or_retain(
+                &mut next.todos,
+                critical_list_for_dashboard(load_todos_for_reload(TODO_FILE), "todos"),
+                "todos",
+            );
         }
         if batch.contains(DashboardRefreshRequest::Calendar) {
             let _ = refresh_events_from_disk(CALENDAR_EVENTS_FILE);
@@ -362,11 +418,16 @@ impl DashboardDataBackend for ProductionDashboardBackend {
             next.process_error = None;
         }
         if batch.contains(DashboardRefreshRequest::Favorites) {
-            next.favorites = Arc::new(load_favs(FAV_FILE).unwrap_or_default());
+            publish_loaded_or_retain(
+                &mut next.favorites,
+                critical_list_for_dashboard(load_favs_for_reload(FAV_FILE), "favorites"),
+                "favorites",
+            );
         }
         if batch.contains(DashboardRefreshRequest::Gestures) {
+            let db = publish_gesture_db_or_retain(&next.gestures.db, gesture_db_for_dashboard());
             next.gestures = Arc::new(GestureSnapshot {
-                db: Arc::new(load_gestures(GESTURES_FILE).unwrap_or_default()),
+                db,
                 usage: Arc::new(load_usage(GESTURES_USAGE_FILE)),
             });
         }
@@ -521,6 +582,67 @@ mod tests {
                 ..RefreshBatch::default()
             }
         );
+    }
+
+    #[test]
+    fn invalid_store_refresh_retains_last_good_then_valid_refresh_recovers() {
+        let initial = Arc::new(vec![SnippetEntry {
+            alias: "saved".into(),
+            text: "value".into(),
+        }]);
+        let mut current = Arc::clone(&initial);
+        publish_loaded_or_retain(
+            &mut current,
+            Err(anyhow::anyhow!("malformed snippets")),
+            "snippets",
+        );
+        assert!(Arc::ptr_eq(&current, &initial));
+
+        let recovered = vec![SnippetEntry {
+            alias: "recovered".into(),
+            text: "value".into(),
+        }];
+        publish_loaded_or_retain(&mut current, Ok(recovered.clone()), "snippets");
+        assert_eq!(current.as_ref(), &recovered);
+    }
+
+    #[test]
+    fn removed_critical_store_retains_dashboard_last_good() {
+        let initial = Arc::new(vec![42]);
+        let mut current = Arc::clone(&initial);
+        publish_loaded_or_retain(
+            &mut current,
+            critical_list_for_dashboard::<i32>(Ok(LoadState::Missing), "test store"),
+            "test store",
+        );
+
+        assert!(Arc::ptr_eq(&current, &initial));
+    }
+
+    #[test]
+    fn gesture_refresh_retains_last_good_recovers_and_deduplicates_self_write() {
+        let initial = Arc::new(GestureDb::default());
+        let retained =
+            publish_gesture_db_or_retain(&initial, Err(anyhow::anyhow!("malformed gestures")));
+        assert!(Arc::ptr_eq(&retained, &initial));
+
+        let duplicate = publish_gesture_db_or_retain(&retained, Ok(GestureDb::default()));
+        assert!(Arc::ptr_eq(&duplicate, &initial));
+
+        let mut recovered_db = GestureDb::default();
+        recovered_db
+            .gestures
+            .push(crate::mouse_gestures::db::GestureEntry {
+                label: "recovered".into(),
+                tokens: "L".into(),
+                dir_mode: crate::mouse_gestures::engine::DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: Vec::new(),
+            });
+        let recovered = publish_gesture_db_or_retain(&duplicate, Ok(recovered_db.clone()));
+        assert!(!Arc::ptr_eq(&recovered, &initial));
+        assert_eq!(*recovered, recovered_db);
     }
 
     #[test]

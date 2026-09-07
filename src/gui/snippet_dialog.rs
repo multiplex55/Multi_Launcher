@@ -1,5 +1,5 @@
 use super::{LauncherApp, push_toast};
-use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets, save_snippets};
+use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets, replace_snippets};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
@@ -11,6 +11,7 @@ pub struct SnippetDialog {
     alias: String,
     text: String,
     filter: String,
+    load_error: Option<String>,
 }
 
 fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
@@ -26,7 +27,7 @@ fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
 
 impl SnippetDialog {
     pub fn open(&mut self) {
-        self.entries = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+        let _ = self.load_from(SNIPPETS_FILE);
         self.open = true;
         self.edit_idx = None;
         self.alias.clear();
@@ -35,7 +36,11 @@ impl SnippetDialog {
     }
 
     pub fn open_edit(&mut self, alias: &str) {
-        self.entries = load_snippets(SNIPPETS_FILE).unwrap_or_default();
+        if self.load_from(SNIPPETS_FILE).is_err() {
+            self.edit_idx = None;
+            self.open = true;
+            return;
+        }
         self.filter.clear();
         if let Some(pos) = self.entries.iter().position(|e| e.alias == alias) {
             self.edit_idx = Some(pos);
@@ -49,9 +54,38 @@ impl SnippetDialog {
         self.open = true;
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_snippets(SNIPPETS_FILE, &self.entries) {
+    fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
+        match load_snippets(path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_entries(&mut self, path: &str, candidate: Vec<SnippetEntry>) -> anyhow::Result<()> {
+        match replace_snippets(path, candidate) {
+            Ok(committed) => {
+                self.entries = committed;
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.load_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn save(&mut self, app: &mut LauncherApp, candidate: Vec<SnippetEntry>) -> bool {
+        if let Err(e) = self.commit_entries(SNIPPETS_FILE, candidate) {
             app.report_error_message("ui operation", format!("Failed to save snippets: {e}"));
+            false
         } else {
             if app.enable_toasts {
                 push_toast(
@@ -66,6 +100,7 @@ impl SnippetDialog {
             }
             app.search();
             app.focus_input();
+            true
         }
     }
 
@@ -74,10 +109,20 @@ impl SnippetDialog {
             return;
         }
         let mut close = false;
-        let mut save_now = false;
+        let mut save_candidate = None;
         egui::Window::new("Snippets")
             .open(&mut self.open)
             .show(ctx, |ui| {
+                if let Some(error) = &self.load_error {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Snippets are read-only because loading failed: {error}"),
+                    );
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    return;
+                }
                 if let Some(idx) = self.edit_idx {
                     ui.horizontal(|ui| {
                         ui.label("Alias");
@@ -90,19 +135,17 @@ impl SnippetDialog {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
                                 app.report_error_message("ui operation", "Both fields required");
                             } else {
-                                if idx == self.entries.len() {
-                                    self.entries.push(SnippetEntry {
+                                let mut candidate = self.entries.clone();
+                                if idx == candidate.len() {
+                                    candidate.push(SnippetEntry {
                                         alias: self.alias.clone(),
                                         text: self.text.clone(),
                                     });
-                                } else if let Some(e) = self.entries.get_mut(idx) {
+                                } else if let Some(e) = candidate.get_mut(idx) {
                                     e.alias = self.alias.clone();
                                     e.text = self.text.clone();
                                 }
-                                self.edit_idx = None;
-                                self.alias.clear();
-                                self.text.clear();
-                                save_now = true;
+                                save_candidate = Some(candidate);
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -146,8 +189,9 @@ impl SnippetDialog {
                         ui.label("No snippets match filter");
                     }
                     if let Some(idx) = remove {
-                        self.entries.remove(idx);
-                        save_now = true;
+                        let mut candidate = self.entries.clone();
+                        candidate.remove(idx);
+                        save_candidate = Some(candidate);
                     }
                     if ui.button("Add Snippet").clicked() {
                         self.edit_idx = Some(self.entries.len());
@@ -159,8 +203,12 @@ impl SnippetDialog {
                     }
                 }
             });
-        if save_now {
-            self.save(app);
+        if let Some(candidate) = save_candidate
+            && self.save(app, candidate)
+        {
+            self.edit_idx = None;
+            self.alias.clear();
+            self.text.clear();
         }
         if close {
             self.open = false;
@@ -170,8 +218,8 @@ impl SnippetDialog {
 
 #[cfg(test)]
 mod tests {
-    use super::matches_snippet_filter;
-    use crate::plugins::snippets::SnippetEntry;
+    use super::{SnippetDialog, matches_snippet_filter};
+    use crate::plugins::snippets::{SnippetEntry, save_snippets};
 
     fn snippet(alias: &str, text: &str) -> SnippetEntry {
         SnippetEntry {
@@ -210,5 +258,29 @@ mod tests {
     fn non_match_behavior() {
         let entry = snippet("deploy", "release production");
         assert!(!matches_snippet_filter(&entry, "staging"));
+    }
+
+    #[test]
+    fn invalid_reload_and_commit_keep_dialog_last_good_and_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let initial = vec![snippet("saved", "value")];
+        save_snippets(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        let invalid = b"invalid snippets";
+        std::fs::write(&path, invalid).unwrap();
+
+        assert!(dialog.load_from(path.to_str().unwrap()).is_err());
+        assert_eq!(dialog.entries, initial);
+        assert!(dialog.load_error.is_some());
+        assert!(
+            dialog
+                .commit_entries(path.to_str().unwrap(), vec![snippet("lost", "value")])
+                .is_err()
+        );
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+        assert!(dialog.load_error.is_some());
     }
 }

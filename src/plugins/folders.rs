@@ -1,14 +1,20 @@
 use crate::actions::Action;
+use crate::common::json_watch::{JsonWatcher, watch_json};
+use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::plugin::Plugin;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const FOLDERS_FILE: &str = "folders.json";
+static FOLDERS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static LIVE_FOLDERS: Lazy<super::live_snapshot::LiveSnapshotRegistry<FolderEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FolderEntry {
     pub label: String,
     pub path: String,
@@ -52,19 +58,45 @@ pub fn default_folders() -> Vec<FolderEntry> {
 
 /// Load folder entries from `path` or return the defaults if the file is empty.
 pub fn load_folders(path: &str) -> anyhow::Result<Vec<FolderEntry>> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.is_empty() {
-        return Ok(default_folders());
+    match load_folders_typed(path)? {
+        LoadState::Missing | LoadState::Empty => Ok(default_folders()),
+        LoadState::Loaded(folders) => Ok(folders),
     }
-    let list: Vec<FolderEntry> = serde_json::from_str(&content)?;
-    Ok(list)
+}
+
+pub fn load_folders_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<FolderEntry>>, PersistenceError> {
+    load_json(path)
 }
 
 /// Save `folders` to `path` in JSON format.
 pub fn save_folders(path: &str, folders: &[FolderEntry]) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(folders)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    let replacement = folders.to_vec();
+    update_folders(path, move |current| {
+        *current = replacement;
+        Ok(true)
+    })
+    .map(|_| ())
+}
+
+pub fn update_folders(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<FolderEntry>) -> anyhow::Result<bool>,
+) -> anyhow::Result<Vec<FolderEntry>> {
+    let _transaction = folders_transaction_guard();
+    let mut folders = load_folders(path)?;
+    if mutate(&mut folders)? {
+        save_json_atomic(path, &folders)?;
+        LIVE_FOLDERS.publish(path, &folders);
+    }
+    Ok(folders)
+}
+
+fn folders_transaction_guard() -> MutexGuard<'static, ()> {
+    FOLDERS_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Append a folder path to the list stored at `path`.
@@ -75,43 +107,53 @@ pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
         anyhow::bail!("folder does not exist: {folder}");
     }
 
-    let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
-    if !list.iter().any(|f| f.path == folder) {
-        let label = std::path::Path::new(folder)
+    let folder = folder.to_owned();
+    update_folders(path, move |list| {
+        if list.iter().any(|entry| entry.path == folder) {
+            return Ok(false);
+        }
+        let label = std::path::Path::new(&folder)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| folder.to_string());
+            .unwrap_or_else(|| folder.clone());
         list.push(FolderEntry {
             label,
-            path: folder.to_string(),
+            path: folder,
             alias: None,
         });
-        save_folders(path, &list)?;
-    }
+        Ok(true)
+    })?;
     Ok(())
 }
 
 /// Remove a folder entry matching `folder` from the file at `path`.
 pub fn remove_folder(path: &str, folder: &str) -> anyhow::Result<()> {
-    let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
-    if let Some(pos) = list.iter().position(|f| f.path == folder) {
+    let folder = folder.to_owned();
+    update_folders(path, move |list| {
+        let Some(pos) = list.iter().position(|entry| entry.path == folder) else {
+            return Ok(false);
+        };
         list.remove(pos);
-        save_folders(path, &list)?;
-    }
+        Ok(true)
+    })?;
     Ok(())
 }
 
 /// Set or clear the alias for a folder entry.
 pub fn set_alias(path: &str, folder: &str, alias: &str) -> anyhow::Result<()> {
-    let mut list = load_folders(path).unwrap_or_else(|_| default_folders());
-    if let Some(item) = list.iter_mut().find(|f| f.path == folder) {
-        item.alias = if alias.is_empty() {
-            None
-        } else {
-            Some(alias.to_string())
+    let folder = folder.to_owned();
+    let alias = alias.to_owned();
+    update_folders(path, move |list| {
+        let Some(item) = list.iter_mut().find(|entry| entry.path == folder) else {
+            return Ok(false);
         };
-        save_folders(path, &list)?;
-    }
+        let updated = if alias.is_empty() { None } else { Some(alias) };
+        if item.alias == updated {
+            return Ok(false);
+        }
+        item.alias = updated;
+        Ok(true)
+    })?;
     Ok(())
 }
 
@@ -119,44 +161,38 @@ pub struct FoldersPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<FolderEntry>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl FoldersPlugin {
     /// Create a new folders plugin.
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(
-            load_folders(FOLDERS_FILE).unwrap_or_else(|_| default_folders()),
-        ));
-        let data_clone = data.clone();
-        let path = FOLDERS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res
-                        && matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        )
-                    {
-                        let list = load_folders(&path).unwrap_or_else(|_| default_folders());
-                        if let Ok(mut lock) = data_clone.lock() {
-                            *lock = list;
-                        }
-                    }
+        Self::new_for_path(FOLDERS_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = folders_transaction_guard();
+            let startup = match load_folders(path) {
+                Ok(folders) => Some(folders),
+                Err(error) => {
+                    tracing::error!(%error, "folder startup retained invalid persisted file");
+                    None
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
+            };
+            LIVE_FOLDERS.get_or_create(path, startup)
+        };
+        let data_clone = data.clone();
+        let path = path.to_string();
+        let watcher = watch_json(&path, {
+            let path = path.clone();
+            move || {
+                if let Err(error) = reload_folder_snapshot(&path, &data_clone) {
+                    tracing::error!(%error, "invalid folder reload retained last-good state");
+                }
             }
-        }
+        })
+        .ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
@@ -190,6 +226,21 @@ impl FoldersPlugin {
             })
             .collect()
     }
+}
+
+fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> anyhow::Result<()> {
+    let _transaction = folders_transaction_guard();
+    let folders = match load_folders_typed(path)? {
+        LoadState::Missing => anyhow::bail!("folders file was removed; retaining last-good state"),
+        LoadState::Empty => default_folders(),
+        LoadState::Loaded(folders) => folders,
+    };
+    if let Ok(mut current) = data.lock() {
+        if *current != folders {
+            *current = folders;
+        }
+    }
+    Ok(())
 }
 
 impl Default for FoldersPlugin {
@@ -296,5 +347,183 @@ impl Plugin for FoldersPlugin {
 
     fn query_prefixes(&self) -> &[&str] {
         &["f"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn folder(label: &str, path: &str, alias: Option<&str>) -> FolderEntry {
+        FolderEntry {
+            label: label.into(),
+            path: path.into(),
+            alias: alias.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn typed_load_preserves_missing_empty_valid_malformed_and_unreadable() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert_eq!(load_folders_typed(&missing).unwrap(), LoadState::Missing);
+        assert_eq!(
+            load_folders(missing.to_str().unwrap()).unwrap(),
+            default_folders()
+        );
+
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, " \r\n\t").unwrap();
+        assert_eq!(load_folders_typed(&empty).unwrap(), LoadState::Empty);
+        assert_eq!(
+            load_folders(empty.to_str().unwrap()).unwrap(),
+            default_folders()
+        );
+
+        let valid = directory.path().join("valid.json");
+        let expected = vec![folder("One", "C:\\one", Some("first"))];
+        std::fs::write(&valid, serde_json::to_vec(&expected).unwrap()).unwrap();
+        assert_eq!(
+            load_folders_typed(&valid).unwrap(),
+            LoadState::Loaded(expected.clone())
+        );
+        let saved = directory.path().join("saved.json");
+        save_folders(saved.to_str().unwrap(), &expected).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(saved).unwrap(),
+            serde_json::to_string_pretty(&expected).unwrap()
+        );
+
+        let malformed = directory.path().join("malformed.json");
+        std::fs::write(&malformed, "{broken").unwrap();
+        assert!(matches!(
+            load_folders_typed(&malformed).unwrap_err(),
+            PersistenceError::MalformedJson { .. }
+        ));
+        assert!(matches!(
+            load_folders_typed(directory.path()).unwrap_err(),
+            PersistenceError::Read { .. }
+        ));
+    }
+
+    #[test]
+    fn malformed_file_rejects_add_remove_and_alias_without_changing_bytes() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("folders.json");
+        let candidate = directory.path().join("candidate");
+        std::fs::create_dir(&candidate).unwrap();
+        let invalid = b"not folder JSON";
+        std::fs::write(&path, invalid).unwrap();
+        let path = path.to_str().unwrap();
+        let candidate = candidate.to_str().unwrap();
+
+        assert!(append_folder(path, candidate).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+        assert!(remove_folder(path, candidate).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+        assert!(set_alias(path, candidate, "alias").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn concurrent_adds_both_survive() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let first_folder = directory.path().join("first");
+        let second_folder = directory.path().join("second");
+        std::fs::create_dir(&first_folder).unwrap();
+        std::fs::create_dir(&second_folder).unwrap();
+        let path = Arc::new(
+            directory
+                .path()
+                .join("folders.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let first = {
+            let path = Arc::clone(&path);
+            let folder = first_folder.to_string_lossy().into_owned();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                append_folder(&path, &folder).unwrap();
+            })
+        };
+        let second = {
+            let path = Arc::clone(&path);
+            let folder = second_folder.to_string_lossy().into_owned();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                append_folder(&path, &folder).unwrap();
+            })
+        };
+
+        barrier.wait();
+        first.join().unwrap();
+        second.join().unwrap();
+        let committed = load_folders(&path).unwrap();
+        assert!(
+            committed
+                .iter()
+                .any(|entry| entry.path == first_folder.to_string_lossy())
+        );
+        assert!(
+            committed
+                .iter()
+                .any(|entry| entry.path == second_folder.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn invalid_reload_retains_last_good_then_valid_reload_recovers() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("folders.json");
+        let initial = vec![folder("Initial", "C:\\initial", None)];
+        let data = Arc::new(Mutex::new(initial.clone()));
+        std::fs::write(&path, "invalid").unwrap();
+
+        assert!(reload_folder_snapshot(path.to_str().unwrap(), &data).is_err());
+        assert_eq!(*data.lock().unwrap(), initial);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(reload_folder_snapshot(path.to_str().unwrap(), &data).is_err());
+        assert_eq!(*data.lock().unwrap(), initial);
+
+        let recovered = vec![folder("Recovered", "C:\\recovered", Some("Recovered"))];
+        std::fs::write(&path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
+        reload_folder_snapshot(path.to_str().unwrap(), &data).unwrap();
+        assert_eq!(*data.lock().unwrap(), recovered);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("folders.json");
+        let folder_path = directory.path().join("immediate-folder");
+        std::fs::create_dir(&folder_path).unwrap();
+        let store = store.to_str().unwrap();
+        save_folders(store, &[]).unwrap();
+        let first = FoldersPlugin::new_for_path(store);
+        let second = FoldersPlugin::new_for_path(store);
+
+        append_folder(store, folder_path.to_str().unwrap()).unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(
+                plugin
+                    .search("f immediate-folder")
+                    .iter()
+                    .any(|action| { action.action == folder_path.to_string_lossy() })
+            );
+        }
     }
 }

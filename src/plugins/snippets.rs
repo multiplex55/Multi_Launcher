@@ -1,19 +1,27 @@
 use crate::actions::Action;
+use crate::common::json_watch::{JsonWatcher, watch_json};
+use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::plugin::Plugin;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicU64, Ordering},
 };
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
 
 static SNIPPETS_VERSION: AtomicU64 = AtomicU64::new(0);
+static SNIPPETS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static VERSIONED_SNIPPETS: Lazy<Mutex<Option<(PathBuf, Vec<SnippetEntry>)>>> =
+    Lazy::new(|| Mutex::new(None));
+static LIVE_SNIPPETS: Lazy<super::live_snapshot::LiveSnapshotRegistry<SnippetEntry>> =
+    Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SnippetEntry {
     pub alias: String,
     pub text: String,
@@ -21,43 +29,98 @@ pub struct SnippetEntry {
 
 /// Load all snippets from the JSON file at `path`.
 pub fn load_snippets(path: &str) -> anyhow::Result<Vec<SnippetEntry>> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(Vec::new());
+    match load_snippets_typed(path)? {
+        LoadState::Missing | LoadState::Empty => Ok(Vec::new()),
+        LoadState::Loaded(snippets) => Ok(snippets),
     }
-    let list: Vec<SnippetEntry> = serde_json::from_str(&content)?;
-    Ok(list)
+}
+
+pub fn load_snippets_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<SnippetEntry>>, PersistenceError> {
+    load_json(path)
+}
+
+pub(crate) fn load_snippets_for_reload(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<Vec<SnippetEntry>>, PersistenceError> {
+    let _transaction = snippets_transaction_guard();
+    load_snippets_typed(path)
 }
 
 /// Persist `snippets` to `path`.
 pub fn save_snippets(path: &str, snippets: &[SnippetEntry]) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(snippets)?;
-    std::fs::write(path, json)?;
-    bump_snippets_version();
-    Ok(())
+    replace_snippets(path, snippets.to_vec()).map(|_| ())
+}
+
+pub fn replace_snippets(
+    path: &str,
+    replacement: Vec<SnippetEntry>,
+) -> anyhow::Result<Vec<SnippetEntry>> {
+    update_snippets(path, move |snippets| {
+        *snippets = replacement;
+        Ok(true)
+    })
+}
+
+pub fn update_snippets(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<SnippetEntry>) -> anyhow::Result<bool>,
+) -> anyhow::Result<Vec<SnippetEntry>> {
+    update_snippets_with_save(path, mutate, |path, snippets| {
+        save_json_atomic(path, snippets).map_err(Into::into)
+    })
+}
+
+fn update_snippets_with_save(
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<SnippetEntry>) -> anyhow::Result<bool>,
+    save: impl FnOnce(&str, &[SnippetEntry]) -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<SnippetEntry>> {
+    let _transaction = snippets_transaction_guard();
+    let mut snippets = load_snippets(path)?;
+    if mutate(&mut snippets)? {
+        save(path, &snippets)?;
+        LIVE_SNIPPETS.publish(path, &snippets);
+        record_versioned_snippets(path, &snippets);
+    }
+    Ok(snippets)
+}
+
+fn snippets_transaction_guard() -> MutexGuard<'static, ()> {
+    SNIPPETS_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Append or update a snippet entry identified by `alias`.
 pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()> {
-    let mut list = load_snippets(path).unwrap_or_default();
-    if let Some(item) = list.iter_mut().find(|e| e.alias == alias) {
-        item.text = text.to_string();
-    } else {
-        list.push(SnippetEntry {
-            alias: alias.to_string(),
-            text: text.to_string(),
-        });
-    }
-    save_snippets(path, &list)
+    let alias = alias.to_owned();
+    let text = text.to_owned();
+    update_snippets(path, move |list| {
+        if let Some(item) = list.iter_mut().find(|entry| entry.alias == alias) {
+            if item.text == text {
+                return Ok(false);
+            }
+            item.text = text;
+        } else {
+            list.push(SnippetEntry { alias, text });
+        }
+        Ok(true)
+    })?;
+    Ok(())
 }
 
 /// Remove the snippet identified by `alias`.
 pub fn remove_snippet(path: &str, alias: &str) -> anyhow::Result<()> {
-    let mut list = load_snippets(path).unwrap_or_default();
-    if let Some(pos) = list.iter().position(|e| e.alias == alias) {
+    let alias = alias.to_owned();
+    update_snippets(path, move |list| {
+        let Some(pos) = list.iter().position(|entry| entry.alias == alias) else {
+            return Ok(false);
+        };
         list.remove(pos);
-        save_snippets(path, &list)?;
-    }
+        Ok(true)
+    })?;
     Ok(())
 }
 
@@ -69,53 +132,96 @@ fn bump_snippets_version() {
     SNIPPETS_VERSION.fetch_add(1, Ordering::SeqCst);
 }
 
+fn record_versioned_snippets(path: &str, snippets: &[SnippetEntry]) {
+    *VERSIONED_SNIPPETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((PathBuf::from(path), snippets.to_vec()));
+    bump_snippets_version();
+}
+
+fn bump_for_external_snippets(path: &str, snippets: &[SnippetEntry]) {
+    let mut versioned = VERSIONED_SNIPPETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if versioned
+        .as_ref()
+        .is_some_and(|(saved_path, saved)| saved_path == Path::new(path) && saved == snippets)
+    {
+        return;
+    }
+    *versioned = Some((PathBuf::from(path), snippets.to_vec()));
+    bump_snippets_version();
+}
+
 pub struct SnippetsPlugin {
     matcher: SkimMatcherV2,
     data: Arc<Mutex<Vec<SnippetEntry>>>,
     #[allow(dead_code)]
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<JsonWatcher>,
 }
 
 impl SnippetsPlugin {
     /// Create a new snippets plugin instance.
     pub fn new() -> Self {
-        let data = Arc::new(Mutex::new(load_snippets(SNIPPETS_FILE).unwrap_or_default()));
-        let data_clone = data.clone();
-        let path = SNIPPETS_FILE.to_string();
-        let mut watcher = RecommendedWatcher::new(
-            {
-                let path = path.clone();
-                move |res: notify::Result<notify::Event>| {
-                    if let Ok(event) = res
-                        && matches!(
-                            event.kind,
-                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                        )
-                        && let Ok(list) = load_snippets(&path)
-                    {
-                        if let Ok(mut lock) = data_clone.lock() {
-                            *lock = list;
-                        }
-                        bump_snippets_version();
-                    }
+        Self::new_for_path(SNIPPETS_FILE)
+    }
+
+    fn new_for_path(path: &str) -> Self {
+        let data = {
+            let _transaction = snippets_transaction_guard();
+            let startup = match load_snippets(path) {
+                Ok(snippets) => Some(snippets),
+                Err(error) => {
+                    tracing::error!(%error, "snippet startup retained invalid persisted file");
+                    None
                 }
-            },
-            Config::default(),
-        )
-        .ok();
-        if let Some(w) = watcher.as_mut() {
-            let p = std::path::Path::new(&path);
-            if w.watch(p, RecursiveMode::NonRecursive).is_err() {
-                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let _ = w.watch(parent, RecursiveMode::NonRecursive);
+            };
+            let data = LIVE_SNIPPETS.get_or_create(path, startup.clone());
+            if let Some(startup) = startup {
+                *VERSIONED_SNIPPETS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((PathBuf::from(path), startup));
             }
-        }
+            data
+        };
+        let data_clone = data.clone();
+        let path = path.to_string();
+        let watcher = watch_json(&path, {
+            let path = path.clone();
+            move || {
+                if let Err(error) = reload_snippet_snapshot(&path, &data_clone) {
+                    tracing::error!(%error, "invalid snippet reload retained last-good state");
+                }
+            }
+        })
+        .ok();
         Self {
             matcher: SkimMatcherV2::default(),
             data,
             watcher,
         }
     }
+}
+
+fn reload_snippet_snapshot(path: &str, data: &Arc<Mutex<Vec<SnippetEntry>>>) -> anyhow::Result<()> {
+    let _transaction = snippets_transaction_guard();
+    let snippets = match load_snippets_typed(path)? {
+        LoadState::Missing => anyhow::bail!("snippets file was removed; retaining last-good state"),
+        LoadState::Empty => Vec::new(),
+        LoadState::Loaded(snippets) => snippets,
+    };
+    let mut current = data
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *current == snippets {
+        return Ok(());
+    }
+    *current = snippets.clone();
+    drop(current);
+    bump_for_external_snippets(path, &snippets);
+    Ok(())
 }
 
 impl Default for SnippetsPlugin {
@@ -297,5 +403,182 @@ impl Plugin for SnippetsPlugin {
                 args: None,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn snippet(alias: &str, text: &str) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn typed_load_and_pretty_schema_cover_all_file_states() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        assert_eq!(load_snippets_typed(&missing).unwrap(), LoadState::Missing);
+        let empty = directory.path().join("empty.json");
+        std::fs::write(&empty, " \r\n\t").unwrap();
+        assert_eq!(load_snippets_typed(&empty).unwrap(), LoadState::Empty);
+        let expected = vec![snippet("multi", "first\nsecond")];
+        let valid = directory.path().join("valid.json");
+        std::fs::write(&valid, serde_json::to_vec(&expected).unwrap()).unwrap();
+        assert_eq!(
+            load_snippets_typed(&valid).unwrap(),
+            LoadState::Loaded(expected.clone())
+        );
+        let saved = directory.path().join("saved.json");
+        save_snippets(saved.to_str().unwrap(), &expected).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(saved).unwrap(),
+            serde_json::to_string_pretty(&expected).unwrap()
+        );
+        let malformed = directory.path().join("malformed.json");
+        std::fs::write(&malformed, "{broken").unwrap();
+        assert!(matches!(
+            load_snippets_typed(&malformed).unwrap_err(),
+            PersistenceError::MalformedJson { .. }
+        ));
+        assert!(matches!(
+            load_snippets_typed(directory.path()).unwrap_err(),
+            PersistenceError::Read { .. }
+        ));
+    }
+
+    #[test]
+    fn malformed_file_rejects_add_edit_remove_and_replacement_unchanged() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let invalid = b"not snippets JSON";
+        std::fs::write(&path, invalid).unwrap();
+        let path = path.to_str().unwrap();
+        for result in [
+            append_snippet(path, "new", "text"),
+            append_snippet(path, "existing", "edited"),
+            remove_snippet(path, "existing"),
+            save_snippets(path, &[snippet("replacement", "lost")]),
+        ] {
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(path).unwrap(), invalid);
+        }
+    }
+
+    #[test]
+    fn concurrent_mutations_both_survive() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(
+            directory
+                .path()
+                .join("snippets.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let first = {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                append_snippet(&path, "first", "one").unwrap();
+            })
+        };
+        let second = {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                append_snippet(&path, "second", "two").unwrap();
+            })
+        };
+        barrier.wait();
+        first.join().unwrap();
+        second.join().unwrap();
+        let committed = load_snippets(&path).unwrap();
+        assert!(committed.contains(&snippet("first", "one")));
+        assert!(committed.contains(&snippet("second", "two")));
+    }
+
+    #[test]
+    fn failed_save_retains_destination_and_version() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = vec![snippet("saved", "value")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        let version = snippets_version();
+        let result = update_snippets_with_save(
+            path.to_str().unwrap(),
+            |snippets| {
+                snippets.push(snippet("lost", "value"));
+                Ok(true)
+            },
+            |_path, _snippets| anyhow::bail!("deterministic replacement failure"),
+        );
+        assert!(result.is_err());
+        assert_eq!(load_snippets(path.to_str().unwrap()).unwrap(), original);
+        assert_eq!(snippets_version(), version);
+    }
+
+    #[test]
+    fn watcher_retains_invalid_recovers_and_does_not_double_bump_local_save() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path_text = path.to_str().unwrap();
+        let initial = vec![snippet("initial", "value")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&initial).unwrap()).unwrap();
+        let data = Arc::new(Mutex::new(initial.clone()));
+        let local = vec![snippet("local", "value")];
+        save_snippets(path_text, &local).unwrap();
+        let after_local = snippets_version();
+        reload_snippet_snapshot(path_text, &data).unwrap();
+        assert_eq!(*data.lock().unwrap(), local);
+        assert_eq!(snippets_version(), after_local);
+
+        std::fs::write(&path, "invalid").unwrap();
+        assert!(reload_snippet_snapshot(path_text, &data).is_err());
+        assert_eq!(*data.lock().unwrap(), local);
+        assert_eq!(snippets_version(), after_local);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(reload_snippet_snapshot(path_text, &data).is_err());
+        assert_eq!(*data.lock().unwrap(), local);
+        assert_eq!(snippets_version(), after_local);
+
+        let external = vec![snippet("external", "value")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        reload_snippet_snapshot(path_text, &data).unwrap();
+        assert_eq!(*data.lock().unwrap(), external);
+        assert_eq!(snippets_version(), after_local + 1);
+    }
+
+    #[test]
+    fn committed_mutation_is_visible_to_all_instances_without_watcher_delivery() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        save_snippets(path, &[]).unwrap();
+        let first = SnippetsPlugin::new_for_path(path);
+        let second = SnippetsPlugin::new_for_path(path);
+
+        append_snippet(path, "immediate", "published text").unwrap();
+
+        for plugin in [&first, &second] {
+            assert!(plugin.search("cs immediate").iter().any(|action| {
+                action.label == "immediate" && action.action == "clipboard:published text"
+            }));
+        }
     }
 }

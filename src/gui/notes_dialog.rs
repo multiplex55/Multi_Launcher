@@ -1,11 +1,11 @@
 use crate::actions::Action;
 use crate::gui::{ActivationSource, LauncherApp};
 use crate::plugins::note::{
-    Note, delete_template, get_template, list_templates, load_notes, note_backlinks,
-    note_cache_snapshot, reload_templates, save_notes, save_template, template_path,
-    validate_template_name,
+    Note, append_note_content, delete_template, get_template, list_templates, load_notes,
+    note_backlinks, note_cache_snapshot, reload_templates, save_note, save_note_content,
+    save_template, template_path, validate_template_name,
 };
-use crate::plugins::todo::{TODO_FILE, load_todos};
+use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good};
 use chrono::{DateTime, Local};
 use eframe::egui;
 
@@ -99,6 +99,12 @@ pub struct NotesDialog {
     text: String,
     search: String,
     template_manager: TemplateManagerState,
+}
+
+enum PendingNoteSave {
+    New(Note),
+    Existing { identity: String, content: String },
+    Append { identity: String, suffix: String },
 }
 
 #[derive(Default)]
@@ -326,12 +332,32 @@ impl NotesDialog {
             .collect();
     }
 
-    fn save(&mut self, app: &mut LauncherApp) {
-        if let Err(e) = save_notes(&self.entries) {
-            app.report_error_message("ui operation", format!("Failed to save notes: {e}"));
-        } else {
-            app.search();
-            app.focus_input();
+    fn save_note_draft(&mut self, pending: PendingNoteSave, app: &mut LauncherApp) -> bool {
+        let result = match pending {
+            PendingNoteSave::New(mut note) => {
+                save_note(&mut note, true).map(|saved| saved.then_some(note))
+            }
+            PendingNoteSave::Existing { identity, content } => {
+                save_note_content(&identity, &content)
+            }
+            PendingNoteSave::Append { identity, suffix } => append_note_content(&identity, &suffix),
+        };
+        match result {
+            Ok(Some(_)) => {
+                self.entries = cached_notes_or_load();
+                self.rebuild_index();
+                app.search();
+                app.focus_input();
+                true
+            }
+            Ok(None) => {
+                app.report_error_message("ui operation", "The note no longer exists");
+                false
+            }
+            Err(e) => {
+                app.report_error_message("ui operation", format!("Failed to save note: {e}"));
+                false
+            }
         }
     }
 
@@ -340,7 +366,8 @@ impl NotesDialog {
             return;
         }
         let mut close = false;
-        let mut save_now = false;
+        let mut save_edit = false;
+        let mut note_to_save: Option<PendingNoteSave> = None;
         let mut rebuild_idx = false;
         let mut refresh_entries = false;
         let mut wrap_links_slug: Option<String> = None;
@@ -390,10 +417,10 @@ impl NotesDialog {
                             if self.text.trim().is_empty() {
                                 app.report_error_message("ui operation", "Text required");
                             } else {
-                                if idx == self.entries.len() {
+                                if idx >= self.entries.len() {
                                     let title =
                                         self.text.lines().next().unwrap_or("untitled").to_string();
-                                    self.entries.push(Note {
+                                    note_to_save = Some(PendingNoteSave::New(Note {
                                         title,
                                         path: std::path::PathBuf::new(),
                                         content: self.text.clone(),
@@ -403,16 +430,14 @@ impl NotesDialog {
                                         alias: None,
                                         aliases: Vec::new(),
                                         entity_refs: Vec::new(),
+                                    }));
+                                } else if let Some(existing) = self.entries.get(idx) {
+                                    note_to_save = Some(PendingNoteSave::Existing {
+                                        identity: existing.slug.clone(),
+                                        content: self.text.clone(),
                                     });
-                                } else if let Some(e) = self.entries.get_mut(idx) {
-                                    e.content = self.text.clone();
-                                    e.title =
-                                        self.text.lines().next().unwrap_or(&e.title).to_string();
                                 }
-                                rebuild_idx = true;
-                                self.edit_idx = None;
-                                self.text.clear();
-                                save_now = true;
+                                save_edit = true;
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -574,10 +599,8 @@ impl NotesDialog {
                                         }
                                         ui.separator();
                                         ui.label("Link to todo");
-                                        for todo in load_todos(TODO_FILE)
-                                            .unwrap_or_default()
-                                            .into_iter()
-                                            .take(8)
+                                        for todo in
+                                            load_todos_or_last_good(TODO_FILE).into_iter().take(8)
                                         {
                                             let todo_id = if todo.id.is_empty() {
                                                 todo.text.clone()
@@ -588,14 +611,12 @@ impl NotesDialog {
                                                 .button(format!("@todo:{todo_id} {}", todo.text))
                                                 .clicked()
                                             {
-                                                if let Some(target) = self.entries.get_mut(idx_copy)
-                                                {
-                                                    target.content.push_str(&format!(
-                                                        "
-@todo:{todo_id}"
-                                                    ));
+                                                if let Some(target) = self.entries.get(idx_copy) {
+                                                    note_to_save = Some(PendingNoteSave::Append {
+                                                        identity: target.slug.clone(),
+                                                        suffix: format!("\n@todo:{todo_id}"),
+                                                    });
                                                 }
-                                                save_now = true;
                                                 ui.close_menu();
                                             }
                                         }
@@ -607,7 +628,6 @@ impl NotesDialog {
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         rebuild_idx = true;
-                        save_now = true;
                     }
                 }
             });
@@ -621,8 +641,11 @@ impl NotesDialog {
         if rebuild_idx {
             self.rebuild_index();
         }
-        if save_now {
-            self.save(app);
+        if let Some(note) = note_to_save {
+            if self.save_note_draft(note, app) && save_edit {
+                self.edit_idx = None;
+                self.text.clear();
+            }
         }
         if close {
             self.open = false;
@@ -638,7 +661,8 @@ impl NotesDialog {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkbox_count, format_note_timestamp, insert_at_char_boundary, note_action, short_preview,
+        NotesDialog, PendingNoteSave, checkbox_count, format_note_timestamp,
+        insert_at_char_boundary, note_action, short_preview,
     };
     use crate::gui::{LauncherApp, NotePanel};
     use crate::plugins::note::{Note, load_notes, save_note, save_notes};
@@ -801,6 +825,57 @@ mod tests {
         assert_eq!(app.note_panels.len(), 1);
         assert!(app.note_panels[0].open);
         assert_eq!(app.note_panels[0].test_view_mode(), NoteViewMode::Split);
+    }
+
+    #[test]
+    fn stale_quick_notes_edit_retains_a_later_added_note() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
+        save_note(&mut alpha, true).unwrap();
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+
+        let mut beta = note("Beta", "beta", "# Beta\n\nadded later");
+        save_note(&mut beta, true).unwrap();
+        assert!(dialog.save_note_draft(
+            PendingNoteSave::Existing {
+                identity: "alpha".into(),
+                content: "# Alpha\n\nedited".into(),
+            },
+            &mut app,
+        ));
+
+        assert_eq!(dialog.entries.len(), 2);
+        assert!(dialog.entries.iter().any(|note| note.slug == "beta"));
+        assert!(load_notes().unwrap().iter().any(|note| note.slug == "beta"));
+    }
+
+    #[test]
+    fn failed_quick_notes_edit_retains_dialog_and_committed_note() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let (dir, notes_dir, _ctx, mut app) = setup();
+        let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
+        save_note(&mut alpha, true).unwrap();
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        let entries_before = dialog.entries.clone();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block note directory creation").unwrap();
+        unsafe { std::env::set_var("ML_NOTES_DIR", &blocker) };
+
+        let saved = dialog.save_note_draft(
+            PendingNoteSave::Existing {
+                identity: "alpha".into(),
+                content: "# Alpha\n\nshould fail".into(),
+            },
+            &mut app,
+        );
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+
+        assert!(!saved);
+        assert_eq!(dialog.entries, entries_before);
+        assert_eq!(load_notes().unwrap()[0].content, "# Alpha\n\noriginal");
     }
 
     #[test]

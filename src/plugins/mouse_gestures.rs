@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::common::json_watch::watch_json;
 use crate::common::strip_prefix_ci;
 use crate::mouse_gestures::db::{
-    BindingMatchContext, GESTURES_FILE, SharedGestureDb, format_gesture_label,
+    BindingMatchContext, GESTURES_FILE, GestureDb, SharedGestureDb, format_gesture_label,
     format_search_result_label, load_gestures,
 };
 use crate::mouse_gestures::service::{
@@ -194,14 +194,25 @@ struct MouseGestureRuntime {
 
 impl Default for MouseGestureRuntime {
     fn default() -> Self {
-        let db = Arc::new(Mutex::new(load_gestures(GESTURES_FILE).unwrap_or_default()));
+        let initial_db = match load_gestures(GESTURES_FILE) {
+            Ok(db) => db,
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "failed to load mouse gestures; using temporary defaults"
+                );
+                GestureDb::default()
+            }
+        };
+        let db = Arc::new(Mutex::new(initial_db));
         let db_for_watcher = Arc::clone(&db);
 
         let watcher = watch_json(GESTURES_FILE, move || {
-            if let Ok(new_db) = load_gestures(GESTURES_FILE)
-                && let Ok(mut guard) = db_for_watcher.lock()
-            {
-                *guard = new_db;
+            if let Err(error) = reload_shared_gesture_db(GESTURES_FILE, &db_for_watcher) {
+                tracing::error!(
+                    ?error,
+                    "failed to reload mouse gestures; retaining last-good data"
+                );
             }
         })
         .ok();
@@ -213,6 +224,28 @@ impl Default for MouseGestureRuntime {
             watcher,
         }
     }
+}
+
+fn reload_shared_gesture_db(
+    path: impl AsRef<std::path::Path>,
+    shared: &SharedGestureDb,
+) -> anyhow::Result<bool> {
+    let _transaction = crate::mouse_gestures::db::gestures_transaction_guard();
+    let loaded = match crate::mouse_gestures::db::load_gestures_typed(path.as_ref())? {
+        crate::common::persistence::LoadState::Missing => {
+            anyhow::bail!("mouse gesture definitions were removed; retaining last-good state")
+        }
+        crate::common::persistence::LoadState::Empty => GestureDb::default(),
+        crate::common::persistence::LoadState::Loaded(db) => db,
+    };
+    let mut current = shared
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mouse gesture database lock poisoned"))?;
+    if *current == loaded {
+        return Ok(false);
+    }
+    *current = loaded;
+    Ok(true)
 }
 
 impl MouseGestureRuntime {
@@ -259,6 +292,26 @@ where
         Ok(mut guard) => f(&mut guard),
         Err(e) => tracing::error!(?e, "failed to lock mouse gestures runtime"),
     }
+}
+
+fn gesture_db_snapshot() -> GestureDb {
+    let mut snapshot = GestureDb::default();
+    with_service(|service| {
+        if let Ok(db) = service.db.lock() {
+            snapshot = db.clone();
+        }
+    });
+    snapshot
+}
+
+pub fn publish_committed_gesture_db(committed: GestureDb) {
+    with_service(|service| {
+        if let Ok(mut db) = service.db.lock()
+            && *db != committed
+        {
+            *db = committed;
+        }
+    });
 }
 
 pub fn apply_runtime_settings(settings: MouseGestureSettings) {
@@ -336,7 +389,7 @@ impl MouseGesturesPlugin {
     }
 
     fn list_gestures(filter: &str) -> Vec<Action> {
-        let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+        let db = gesture_db_snapshot();
         let matcher = SkimMatcherV2::default();
         let filter = filter.trim().to_lowercase();
         db.gestures
@@ -410,7 +463,7 @@ impl Plugin for MouseGesturesPlugin {
         }
         if let Some(rest) = strip_prefix_ci(trimmed, "mg find") {
             let query = rest.trim();
-            let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+            let db = gesture_db_snapshot();
             return db
                 .search_bindings(query)
                 .into_iter()
@@ -424,7 +477,7 @@ impl Plugin for MouseGesturesPlugin {
         }
         if let Some(rest) = strip_prefix_ci(trimmed, "mg where") {
             let action_prefix = rest.trim();
-            let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+            let db = gesture_db_snapshot();
             return db
                 .find_by_action(action_prefix)
                 .into_iter()
@@ -440,7 +493,7 @@ impl Plugin for MouseGesturesPlugin {
             if !rest.trim().is_empty() {
                 return Vec::new();
             }
-            let db = load_gestures(GESTURES_FILE).unwrap_or_default();
+            let db = gesture_db_snapshot();
             let mut actions = Vec::new();
             for conflict in db.find_conflicts() {
                 let conflict_desc = match conflict.kind {
@@ -740,5 +793,50 @@ fn no_match_behavior_label(value: NoMatchBehavior) -> &'static str {
         NoMatchBehavior::DoNothing => "Do nothing",
         NoMatchBehavior::PassThroughClick => "Pass through right-click",
         NoMatchBehavior::ShowNoMatchHint => "Show no-match hint",
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::mouse_gestures::db::{GestureDb, GestureEntry, SCHEMA_VERSION};
+    use crate::mouse_gestures::engine::DirMode;
+
+    fn db(label: &str) -> GestureDb {
+        GestureDb {
+            schema_version: SCHEMA_VERSION,
+            gestures: vec![GestureEntry {
+                label: label.into(),
+                tokens: "L".into(),
+                dir_mode: DirMode::Four,
+                stroke: Vec::new(),
+                enabled: true,
+                bindings: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn runtime_reload_retains_last_good_recovers_and_deduplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mouse_gestures.json");
+        let initial = db("initial");
+        let shared = Arc::new(Mutex::new(initial.clone()));
+
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(reload_shared_gesture_db(&path, &shared).is_err());
+        assert_eq!(*shared.lock().unwrap(), initial);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(reload_shared_gesture_db(&path, &shared).is_err());
+        assert_eq!(*shared.lock().unwrap(), initial);
+
+        crate::common::persistence::save_json_atomic(&path, &initial).unwrap();
+        assert!(!reload_shared_gesture_db(&path, &shared).unwrap());
+
+        let recovered = db("recovered");
+        crate::common::persistence::save_json_atomic(&path, &recovered).unwrap();
+        assert!(reload_shared_gesture_db(&path, &shared).unwrap());
+        assert_eq!(*shared.lock().unwrap(), recovered);
     }
 }
