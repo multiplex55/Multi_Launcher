@@ -222,6 +222,10 @@ fn table_move_command(
 }
 
 pub(super) fn table_modal_open(d: &MkMacroDialog) -> bool {
+    other_modal_open(d) || d.navigation.search.mode.is_some()
+}
+
+pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {
     d.pending_folder_rename.is_some()
         || d.pending_delete_folder.is_some()
         || d.delete_confirmation.is_open()
@@ -743,7 +747,20 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     // Only route table shortcuts while no modal/editor, focused control, active
     // pointer drag, popup, or context menu owns input.
     let editor_open = d.action_editor.draft.is_some();
-    let wants_keyboard_input = ui.ctx().wants_keyboard_input();
+    let focus_id = super::navigation::table_id(mid);
+    let focus_response = ui.interact(
+        table_response.response.rect,
+        focus_id,
+        eframe::egui::Sense::focusable_noninteractive(),
+    );
+    if d.navigation.focus_table {
+        // A later explicit click/Tab takes precedence over queued navigation.
+        if !ui.input(|i| i.pointer.any_pressed() || i.key_pressed(eframe::egui::Key::Tab)) {
+            focus_response.request_focus();
+        }
+        d.navigation.focus_table = false;
+    }
+    let wants_keyboard_input = ui.ctx().wants_keyboard_input() && !focus_response.has_focus();
     let pointer_in_use = ui.ctx().is_using_pointer();
     let popup_open =
         ui.ctx().memory(|memory| memory.any_popup_open()) || ui.ctx().is_context_menu_open();

@@ -90,7 +90,7 @@ fn delay(p: &MkDelayPayload, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) 
         }
     }
 }
-fn interpolation_syntax(template: &str) -> Result<(), &'static str> {
+pub(crate) fn interpolation_syntax(template: &str) -> Result<(), &'static str> {
     let mut cursor = 0;
     while cursor < template.len() {
         let rest = &template[cursor..];

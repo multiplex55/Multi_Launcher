@@ -1,5 +1,6 @@
 //! Versioned model, validation, compilation, and persistence for the new macro system.
 pub mod asset_authoring;
+pub mod authoring_fields;
 pub mod compiler;
 pub mod coordinates;
 pub mod editor_mutation;

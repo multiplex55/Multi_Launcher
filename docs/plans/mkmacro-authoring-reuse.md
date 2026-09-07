@@ -25,8 +25,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | --- | --- | --- | --- | --- |
 | M01 | Persisted model and schema 12 | baseline | complete | 89fdb753; construction gates passed, behavioral execution tracked in M13/M14 |
 | M02 | Shared identity/mutation operations and analysis invalidation | M01 | complete | 875466b8; construction gates passed; behavioral execution M13 |
-| M03 | Clipboard, drag/drop, folding and step annotations | M02 | complete | construction gates passed; commit being recorded; behavioral execution M13 |
-| M04 | Typed field visitors and navigation/search/replace/outline | M03 | pending | |
+| M03 | Clipboard, drag/drop, folding and step annotations | M02 | complete | 401933ca; construction gates passed; behavioral execution M13 |
+| M04 | Typed field visitors and navigation/search/replace/outline | M03 | complete | construction gates passed; commit being recorded; behavioral execution M13 |
 | M05 | Central reusable/static validation and program compilation | M01, M04 | pending | |
 | M06 | Executor frame ownership with existing behavior parity | M05 | pending | |
 | M07 | Nested calls, typed invocation and Return execution | M06 | pending | |
@@ -140,6 +140,10 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 
 **Late tests / migrations:** M13 spec 42-43 and existing compiler flow tests; keep single macro tests simple. Add root/closure/excluded unrelated plan, own playback/breakpoint metadata, deleted/disabled target, all binding validation and variable-flow cases. Risk: current is_structural semantics include Break/Continue; Return/Call must not accidentally inherit marker retry/selection restrictions. Preserve existing disabled-row validation semantics and document executable-edge decisions.
 
+**Read-only M05 handoff after M03:** current validation checks authored rows even when disabled; retain payload/binding diagnostics, but executable dependency/cycle edges come from enabled Call rows. Disabled block openers skip only the opener, not the body (`disabled_compiled_structural_openers_skip_without_breaking_or_evaluating`); disabled Return and failure-with-Continue cannot prove termination. Extract validated lowering from singleton `compile` instead of calling it per callee or calling compilation from validation. Root admission must include closure findings and global macro-ID ambiguity; migrate GUI `playback_block_reason` as well as compiler admission, retaining document-wide diagnostics display. Move producer/type/shadow facts from `variable_catalog` into the domain, including real parameter sources, Unset, disabled writes, UI reads and document-aware Call outputs. Keep interpolation reads distinct from editable fields: SetVariable strings are literal, metadata has no reads, `$${name}` is escaped, substitutions are nonrecursive, and historical exact Unicode read keys remain supported. Keep cache diagnostic order/content deterministic for semantic/environment subtraction. Planning agent performed read-only investigation; no additional tests ran.
+
+Diagnostic provenance: zero/duplicate macro IDs must form explicit document-global admission failures, without relying on a magic macro ID or message matching. Other signature/action findings retain owner macro/step identity. Missing/disabled targets are findings on the caller's Call step with the target identity retained; filtering only by target ownership would incorrectly omit a failing caller edge.
+
 ## M06 — Executor frame ownership with behavior parity
 
 **Goal / spec:** foundational 23/26/27. Suggested commit `refactor(mkmacro): isolate executor frame and root run state`.
@@ -153,6 +157,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 **Construction gate:** `cargo check`; strategically execute narrow existing executor tests for sequential input cleanup, unowned input and compiled nested control if refactor behavior is uncertain. Record any deferred runtime suite explicitly.
 
 **Late tests / migrations:** M14 existing executor notification/screenshot/interpolation/window/input tests and debugger ordering; preserve behavioral assertions and avoid broad event changes before M08. Risk: borrow-driven duplicated loops, guard dropped during frame pop, condition failures bypassing existing policy, incorrect disabled-marker behavior.
+
+**Read-only M06 handoff after M03:** move plan reference, PC, locals, loop counters, safe variables/step and resumable instruction repetition/attempt/phase into the frame. Keep input/activity guards, control, transition budget, observer/options/backends/waiter/samplers root-owned. Existing `Executor::action` already takes frame macro ID/playback/variables plus the input guard; retain that effect boundary. Preserve pause-before-observer ordering (observer may immediately resume/stop), one breakpoint per instruction before repetitions, disabled rows counting transitions but never updating safe state, unscaled retry backoff, successful-repeat pacing, and StepOutcome before StepFinished. StepFinished currently precedes If/While condition evaluation; publish the safe boundary only after condition/jump success. Fatal/cancelled errors retain prior safe state; Continue errors publish settled failed-step variables. No additional variable clones for Normal runs. Preserve input-guard-before-activity teardown even if moved into fields. Existing `runtime::run_one` lacks a panic boundary and manually releases admission/operation ownership after the result: M07/M14 must cover the requested panic cleanup and worker lifecycle; M06 remains a behavior-preserving extraction. Planner confirmed milestone ordering is viable; no tests ran for this investigation.
 
 ## M07 — Typed invocation, nested Call and Return
 
@@ -369,3 +375,13 @@ Construction/targeted/full verification and review findings are appended by the 
 - Parent final `cargo check --tests` passed (16.83 seconds), `cargo check` passed (16.28 seconds), `cargo fmt --all --check` passed after formatting corrections, and `git diff --check` passed. Parent took over final gates after interrupting the unresumed implementer (`pending_init`); no source changes were discarded.
 - Added tests for cross-macro clipboard/metadata, invalid Cut atomicity, macro-switch state, Duplicate, drag preview/failure/primary preservation, nested folding/selection, exact-marker annotation Apply/Cancel, and clipboard event/release routing. Existing context-menu expectations migrated. Behavioral execution remains deferred to M13.
 - Parent inspected the final source/mutation/input gates/tests. No unresolved substantive M03 finding; no production dependency or worker added. Native GUI smoke remains pending final integration.
+- Commit: `401933ca feat(mkmacro): add structured clipboard and step organization`. Working tree clean immediately after commit. M04 started after commit success.
+
+### M04 construction verification
+
+- Added exhaustive typed author-editable step-field traversal, separating plain text/templates/variable reads/assignments/images/colors/character keys. IDs, numeric values, enum tags and legacy payloads are excluded. Call/Return String sources are templates; SetVariable and condition String values retain literal semantics. Existing exact-key Unicode and escaped interpolation syntax remains compatible.
+- Added transactional replacement previews with readable field paths, original row/macro captions, old/new values, selected-field/all/cancel operations, draft/macro staleness checks, typed image construction, launcher compatibility payload clearing, and rejection of introduced Fatal diagnostics while allowing unrelated existing errors.
+- Added one revision-cached searchable row representation for Find/Jump/Outline and one stable-ID fold/select/scroll/focus navigation owner. Ctrl+F/H/G, F3/Enter navigation, no-match/wrap behavior and text/modal input ownership are integrated. Outline is a separate collapsible right panel (initially collapsed for existing 920px layout); filtered rows/results are cached and virtualized. Search children close with the parent dialog.
+- Implementer final `cargo check --tests` passed (17.52 seconds), `cargo check` passed (7.97 seconds), `cargo fmt --all --check` passed, and `git diff --check` passed. Parent inspected final domain/visitor/payload/UI/focus/cache/lifecycle diffs and independently ran `git diff --check` successfully.
+- Twelve focused tests added: seven typed-field/replacement tests, two navigation/cache/outline tests, and three search/replacement-apply/keyboard tests. Behavioral execution remains deferred to M13; native GUI smoke remains pending integration. Parent review found no unresolved substantive M04 defect.
+- No new dependency, worker, polling loop, filesystem scan or ordinary-frame graph rebuild. Call/Return capability gates remain intentionally in place until M07.

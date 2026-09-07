@@ -17,8 +17,11 @@ mod key_capture;
 pub mod launcher_action_picker;
 mod macro_list;
 mod macro_properties;
+mod navigation;
+mod outline;
 pub mod recorder_controller;
 pub(crate) mod runtime_inspector;
+mod search;
 mod step_table;
 mod toolbar;
 pub mod uia_editor;
@@ -87,6 +90,7 @@ pub struct MkMacroDialog {
     pub selected_macro_id: Option<u64>,
     pub selection: Selection,
     editor_state: editor_operations::EditorState,
+    navigation: navigation::NavigationState,
     pub search: String,
     /// Process-local presentation state; never participates in draft dirty tracking.
     pub collapsed_folders: HashSet<u64>,
@@ -3757,6 +3761,7 @@ impl MkMacroDialog {
             selected_macro_id: None,
             selection: Default::default(),
             editor_state: Default::default(),
+            navigation: Default::default(),
             search: String::new(),
             collapsed_folders: HashSet::new(),
             pending_folder_rename: None,
@@ -4204,6 +4209,7 @@ impl MkMacroDialog {
             self.selection.clear();
             self.editor_state.drag = None;
             self.editor_state.scroll_to = None;
+            self.navigation.focus_table = false;
         }
         self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
         crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
@@ -4505,6 +4511,7 @@ impl MkMacroDialog {
         }
     }
     fn close_children(&mut self) {
+        search::close(self);
         self.cancel_folder_operations();
         self.action_catalog_visible = false;
         self.action_editor.cancel();
@@ -4515,6 +4522,7 @@ impl MkMacroDialog {
         self.launcher_action_picker.cancel();
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
+        search::shortcuts(ui.ctx(), self);
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         for result in crate::mkmacro::runtime::take_pending_recordings() {
             if self
@@ -4540,6 +4548,11 @@ impl MkMacroDialog {
             egui_extras::StripBuilder::new(ui)
                 .size(egui_extras::Size::exact(macro_list::SIDEBAR_WIDTH))
                 .size(egui_extras::Size::remainder())
+                .size(egui_extras::Size::exact(if self.navigation.outline.open {
+                    250.0
+                } else {
+                    30.0
+                }))
                 .horizontal(|mut strip| {
                     strip.cell(|ui| macro_list::show(ui, self));
                     strip.cell(|ui| {
@@ -4549,9 +4562,11 @@ impl MkMacroDialog {
                         ui.separator();
                         step_table::show(ui, self);
                     });
+                    strip.cell(|ui| outline::show(ui, self));
                 });
         }
         action_catalog::show_modal(ui.ctx(), self);
+        search::show(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
         image_crop_editor::show(ui.ctx(), self);
         launcher_action_picker::show(ui.ctx(), self);

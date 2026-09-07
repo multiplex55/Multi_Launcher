@@ -137,6 +137,18 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                         ui.close_menu();
                     }
                 }
+                ui.separator();
+                for (label, mode) in [
+                    ("Find  Ctrl+F", super::search::SearchMode::Find),
+                    ("Replace  Ctrl+H", super::search::SearchMode::Replace),
+                    ("Jump to Step  Ctrl+G", super::search::SearchMode::Jump),
+                ] {
+                    if ui.add_enabled(dialog.selected_macro().is_some(), eframe::egui::Button::new(label)).clicked() {
+                        super::search::open(dialog, mode);
+                        ui.close_menu();
+                    }
+                }
+                ui.checkbox(&mut dialog.navigation.outline.open, "Show Outline");
             });
         });
         if ui
