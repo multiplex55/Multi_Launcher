@@ -74,6 +74,7 @@ fn acquire_named(name: &str) -> anyhow::Result<SingleInstanceAcquire> {
 mod tests {
     use super::{SingleInstanceAcquire, SingleInstanceGuard, acquire_named, mutex_name};
     use crate::platform::app_data::AppDataRoot;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -163,5 +164,33 @@ mod tests {
         let dotted = AppDataRoot::from_settings_path(dotted).unwrap();
 
         assert_eq!(mutex_name(&direct), mutex_name(&dotted));
+    }
+
+    #[test]
+    fn filesystem_aliases_share_mutex_identity() {
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let real_root = temp.path().join("real-root");
+        let alias_root = temp.path().join("alias-root");
+        fs::create_dir(&real_root).expect("create real data root");
+
+        if let Err(error) = std::os::windows::fs::symlink_dir(&real_root, &alias_root) {
+            // Creating symbolic links can require Windows Developer Mode or
+            // elevated privileges. The deterministic AppDataRoot resolver tests
+            // still cover canonical identity selection on such hosts.
+            eprintln!("skipping filesystem alias assertion: {error}");
+            return;
+        }
+
+        let real = AppDataRoot::from_settings_path(real_root.join("settings.json"))
+            .expect("resolve real root");
+        let alias = AppDataRoot::from_settings_path(alias_root.join("settings.json"))
+            .expect("resolve alias root");
+
+        assert_eq!(mutex_name(&real), mutex_name(&alias));
+        let _guard = expect_acquired(SingleInstanceGuard::acquire(&real).unwrap());
+        assert!(matches!(
+            SingleInstanceGuard::acquire(&alias).unwrap(),
+            SingleInstanceAcquire::AlreadyRunning
+        ));
     }
 }
