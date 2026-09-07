@@ -388,14 +388,59 @@ Unless a milestone states otherwise, verification means: focused unit/integratio
 
 ### 13. Performance regression verification
 
-- **Status:** `pending`; **depends on:** 1-12.
+- **Status:** `complete`; **depends on:** 1-12 (`0b96cdf test(storage): complete persistence regression matrix`).
 - **Objective:** prove reliability work preserves the prior startup, first-frame, dashboard idle, cached-search, and test-performance gains.
 - **Repository finding:** existing `performance::Timer` labels and the performance ledger provide comparable startup/first-frame mechanisms; persistence health currently adds no idle scan.
 - **Likely files:** existing performance ledger/instrumentation and this ledger; code only to remediate measured regression.
 - **Design/invariants:** startup does only mutex, pending-recovery descriptor, required settings, and normal existing loads; no automatic health/backup scan. Move nonessential work off startup/UI without weakening corruption protection.
 - **Acceptance/tests:** comparable measurements for `LauncherApp` construction, first usable frame, idle/static dashboard, and common persistence-involved commands; inspect added synchronous settings work; no meaningful regression; record before/after actuals.
 - **Risks:** incomparable measurements, cold-cache noise, hiding regression by weakening durability.
-- **Files/results/commit:** _pending / pending / pending_.
+- **Methodology:** measurements were collected on the same Windows host with the existing
+  `MULTI_LAUNCHER_PERF=1` release instrumentation. Three warm-filesystem runs used a fresh isolated
+  working directory containing the same settings fixture, no `actions.json`, and a log outside the
+  watched data directory. Each run remained on the visible, focused, default static dashboard for
+  12-15 seconds after first publication. Values are compared with the final-HEAD warm sample in
+  `docs/performance-optimization-plan.md`; both are warm-host evidence, not cold-start or maximum
+  frame-time claims. The standard `cargo bench --bench search` retained Criterion's default three
+  second warmup and 100 samples. Because the old performance ledger had no persistence-command
+  workload, a temporary Criterion case (reverted after measurement) exercised the exact synchronous
+  calculator-command history append over an already-full 20-entry bounded history; this establishes
+  a current baseline but cannot support a historical percentage comparison.
+- **Actuals:** settings startup (now including the missing pending-recovery descriptor probe) was
+  1.851/1.769/1.510 ms, median 1.769 ms versus 1.690 ms before the initiative: +0.079 ms (+4.7%),
+  effectively negligible. `LauncherApp` construction was 44.683/60.935/53.572 ms, median 53.572 ms
+  versus 60.327 ms (-11.2%). First usable frame was 392.494/424.753/361.358 ms, median 392.494 ms
+  versus the prior single 372.122 ms sample (+20.372 ms, +5.5%); the current range crosses the old
+  sample and construction improved, so this is classified as warm-host variance rather than a
+  meaningful reliability regression. Asynchronous dashboard publication was
+  627.754/629.147/621.684 ms; it remained entirely after first usability. No run emitted a
+  `runtime.frames` sample after publication, preserving the event-driven static-dashboard result
+  (no recurring scheduled frames versus the original four frames/repaints per second).
+- **Search/command evidence:** the authoritative second standard search run measured the 10k real
+  query cycle at 3.3015 ms versus 3.2608 ms (+1.2%), the deliberately cached 10k repeat at 8.3702 ns
+  versus 8.8567 ns (-5.5%), command-cache lookup at 124.13 us versus 111.99 us (+10.8%), and the
+  1,000-tab cached filter at 205.84 us, within the prior final 193.51-213.80 us interval. Mixed
+  improvements/regressions between two consecutive runs (including a 20.5% cached-repeat
+  improvement and unchanged 10k real cycle) demonstrate host variance rather than a persistence-
+  correlated search regression. The persistence-involved calculator command append measured
+  6.2913 ms with a 6.2327-6.3542 ms interval; it includes typed read/parse, the store transaction,
+  serialization, and replaceable atomic commit without `sync_all`.
+- **Startup/idle audit:** normal startup acquires the named mutex, probes only
+  `recovery/pending.json`, loads required settings/actions and existing runtime stores, and performs
+  recovery catalog/validation work only when a valid descriptor exists. `DataRecoveryDialog::new`
+  retains only root/settings/repaint state; `DataService::start_lazy` and
+  `PersistenceCatalog::new` run on the named worker only after an explicit UI/typed-command request.
+  No health, backup, snapshot-list, or full catalog scan occurs automatically, and no persistence
+  polling/idle worker was introduced. Corruption checks remain intact; no remediation or production
+  source change was justified.
+- **Verification/results:** `cargo build --release` passed (6m03s from a dependency-rebuilding
+  cache state, therefore not compared with the prior warm build); `cargo bench --bench search`
+  passed twice; the temporary focused persistence Criterion run passed; the preceding M12 full
+  Nextest run passed 3,226/3,226 tests with 7 skipped in 38.821s versus the performance initiative's
+  3,022 passed/7 skipped in 41.141s. Focused Nextest passed 10/10 performance, startup-ordering,
+  settings-corruption, and lazy-catalog tests across 70 binaries (3,223 skipped). `cargo fmt --all
+  -- --check`, `cargo check` (25.81s), and `git diff --check` passed. / no production source changes;
+  this ledger only / _pending orchestrator commit_.
 
 ### 14. Independent review and remediation
 
