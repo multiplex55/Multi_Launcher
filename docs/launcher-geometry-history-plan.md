@@ -25,9 +25,9 @@ succeeded.
 | --- | --- | --- | --- |
 | 0. Persist this execution ledger | `complete` | None | `bef14309` |
 | 1. Preserve launcher geometry during restore | `complete` | Milestone 0 complete | `8c8bc31d` |
-| 2. Add launcher query-history navigation | `complete` | Milestone 1 complete | `feat(gui): add launcher query history navigation` |
-| Integration verification | `pending` | Milestones 1 and 2 complete | Not applicable |
-| Independent review and remediation | `pending` | Integration verification passes | Pending if remediation is required |
+| 2. Add launcher query-history navigation | `complete` | Milestone 1 complete | `72ebbb77` |
+| Integration verification | `complete` | Milestones 1 and 2 complete | Not applicable |
+| Independent review and remediation | `in_progress` | Integration verification passes | Pending if remediation is required |
 | Final verification | `pending` | Review has no unresolved substantive findings | Not applicable |
 
 ## Baseline architecture and inventory
@@ -463,25 +463,25 @@ independently testable state machine, without changing ordinary navigation.
 
 ## Integration verification gate
 
-**Status:** `pending`
+**Status:** `complete`
 
 Begins only after Milestones 1 and 2 are complete and committed.
 
 **Acceptance criteria:**
 
-- [ ] Inspect the cumulative diff against the original request and this ledger.
-- [ ] Search every `apply_visibility` call and confirm its policy is explicit and
+- [x] Inspect the cumulative diff against the original request and this ledger.
+- [x] Search every `apply_visibility` call and confirm its policy is explicit and
   correct.
-- [ ] Search for abandoned/duplicate visibility implementations and
+- [x] Search for abandoned/duplicate visibility implementations and
   plugin-specific geometry workarounds.
-- [ ] Confirm launcher-owned restore cannot reapply static position, static size,
+- [x] Confirm launcher-owned restore cannot reapply static position, static size,
   or Follow Mouse placement.
-- [ ] Confirm real startup/show placement and hidden/offscreen behavior remain.
-- [ ] Confirm query-history state is transient and centralized.
-- [ ] Confirm no history disk access, persistence/schema change, worker, polling,
+- [x] Confirm real startup/show placement and hidden/offscreen behavior remain.
+- [x] Confirm query-history state is transient and centralized.
+- [x] Confirm no history disk access, persistence/schema change, worker, polling,
   watcher, cache, per-frame history cloning, or unnecessary integration-test
   binary was introduced.
-- [ ] Confirm all intended milestone changes are committed and no unrelated
+- [x] Confirm all intended milestone changes are committed and no unrelated
   changes are included.
 
 **Required verification:**
@@ -495,17 +495,23 @@ Begins only after Milestones 1 and 2 are complete and committed.
 
 **Actual verification:**
 
-- Cumulative diff and architecture audit: pending
-- `cargo fmt --all --check`: pending
-- `cargo check`: pending
-- `git diff --check`: pending
-- `cargo nextest run --no-fail-fast`: pending (record pass/skip/fail counts)
-- Clippy: pending/not required until established tooling is checked
-- Git status: pending
+- Cumulative diff and architecture audit: passed; ten planned files differ from
+  baseline, every visibility policy is explicit, restore cannot reach configured
+  placement, history snapshotting is lazy/in-memory, and no new persistence,
+  background path, or integration-test binary exists.
+- `cargo fmt --all --check`: passed.
+- `cargo check`: passed.
+- `git diff --check`: passed with only the repository's normal LF-to-CRLF
+  checkout warning for the ledger update.
+- `cargo nextest run --no-fail-fast`: passed; 3,287 tests run, 3,287 passed,
+  7 skipped.
+- Clippy: not required by repository tooling for this initiative.
+- Git status: milestone commits present; only the in-progress ledger update is
+  uncommitted pending review and final closeout.
 
 ## Independent review and remediation gate
 
-**Status:** `pending`
+**Status:** `in_progress`
 
 After integration verification passes, a high-reasoning reviewer who did not
 perform the primary implementation must inspect the original request, this
@@ -535,11 +541,23 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
 
 **Actual review/remediation:**
 
-- Reviewer/task: pending
-- Findings: pending
-- Remediation commits: pending
-- Targeted reruns: pending
-- Full-suite rerun: pending if remediation changes behavior/shared code
+- Reviewer/task: independent review completed; remediation remains in progress.
+- Findings: event routing combined frame-level modifiers with aggregate
+  `key_pressed` state, which could misclassify batched key events; routing tests
+  did not exercise event consumption; and the activation-reset test changed the
+  current query after activation, allowing divergence synchronization to mask a
+  missing central reset.
+- Remediation: exact Ctrl-only history routing now inspects the modifiers on the
+  corresponding pressed `egui::Event::Key` and removes that exact event in
+  place. Focus and bare-arrow behavior remain unchanged, and handled history
+  arrows cannot remain visible to ordinary result navigation. Regression tests
+  exercise this production helper with differing frame/event modifiers and
+  verify consumption. The activation test retains the same recalled query so a
+  fresh post-activation snapshot depends on the central reset.
+- Remediation commits: pending.
+- Targeted reruns: `cargo nextest run query_history` passed; 13 tests run, 13
+  passed, 3,282 skipped.
+- Full-suite rerun: pending because remediation changes shared GUI routing.
 
 ## Final verification gate
 
@@ -574,7 +592,7 @@ ledger, cumulative branch diff, relevant surrounding code, and tests.
 | --- | --- | --- | --- |
 | 0. Execution ledger | `bef14309` | `docs(gui): plan launcher geometry and history navigation` | Ledger inspection and whitespace checks passed |
 | 1. Geometry-preserving restore | `8c8bc31d` | `fix(gui): preserve launcher geometry during restore` | Focused geometry, visibility, lifecycle, format, check, and diff checks passed |
-| 2. Query-history navigation | Pending | `feat(gui): add launcher query history navigation` | Pending |
+| 2. Query-history navigation | `72ebbb77` | `feat(gui): add launcher query history navigation` | Navigator, routing, history, autocomplete, focus, debounce, format, check, and diff checks passed |
 | Review remediation, if needed | Not applicable yet | Pending | Pending |
 
 ## Manual smoke-check record

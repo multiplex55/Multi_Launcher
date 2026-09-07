@@ -24,29 +24,43 @@ impl LauncherApp {
         query_has_focus
     }
 
-    pub(crate) fn query_history_direction(
+    fn consume_query_history_shortcut(
         query_has_focus: bool,
-        modifiers: egui::Modifiers,
-        older_pressed: bool,
-        newer_pressed: bool,
+        input: &mut egui::InputState,
     ) -> Option<QueryHistoryDirection> {
-        // `command` mirrors Ctrl on Windows, so inspect the physical modifier
-        // fields and allow either value of that derived cross-platform flag.
-        if !query_has_focus
-            || !modifiers.ctrl
-            || modifiers.alt
-            || modifiers.shift
-            || modifiers.mac_cmd
-        {
+        if !query_has_focus {
             return None;
         }
-        if older_pressed {
-            Some(QueryHistoryDirection::Older)
-        } else if newer_pressed {
-            Some(QueryHistoryDirection::Newer)
+
+        let matching_event = |key| {
+            input.events.iter().position(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: event_key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if *event_key == key
+                        && modifiers.ctrl
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.mac_cmd
+                )
+            })
+        };
+        let (event_index, direction) = if let Some(index) = matching_event(egui::Key::ArrowUp) {
+            (index, QueryHistoryDirection::Older)
+        } else if let Some(index) = matching_event(egui::Key::ArrowDown) {
+            (index, QueryHistoryDirection::Newer)
         } else {
-            None
-        }
+            return None;
+        };
+
+        // Remove the exact event whose own modifier snapshot matched. Using
+        // `consume_key` here would logically match and consume shifted arrows.
+        input.events.remove(event_index);
+        Some(direction)
     }
 
     fn handle_query_text_changed(&mut self) {
@@ -1252,22 +1266,11 @@ impl eframe::App for LauncherApp {
                     self.handle_query_text_changed();
                 }
 
-                let history_modifiers = ctx.input(|input| input.modifiers);
-                let history_direction = ctx.input(|input| {
-                    Self::query_history_direction(
-                        query_has_focus,
-                        history_modifiers,
-                        input.key_pressed(egui::Key::ArrowUp),
-                        input.key_pressed(egui::Key::ArrowDown),
-                    )
+                let history_direction = ctx.input_mut(|input| {
+                    Self::consume_query_history_shortcut(query_has_focus, input)
                 });
                 if let Some(direction) = history_direction {
                     self.navigate_query_history(direction);
-                    let key = match direction {
-                        QueryHistoryDirection::Older => egui::Key::ArrowUp,
-                        QueryHistoryDirection::Newer => egui::Key::ArrowDown,
-                    };
-                    ctx.input_mut(|input| input.consume_key(history_modifiers, key));
                 }
 
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
@@ -1922,45 +1925,129 @@ mod tests {
             .collect()
     }
 
+    fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
     #[test]
-    fn query_history_shortcuts_require_query_focus_and_exact_ctrl_only_modifiers() {
+    fn query_history_shortcuts_use_event_modifiers_and_require_exact_ctrl_only_focus() {
+        let route = |query_has_focus, frame_modifiers, events| {
+            let ctx = egui::Context::default();
+            ctx.begin_frame(egui::RawInput {
+                modifiers: frame_modifiers,
+                events,
+                ..Default::default()
+            });
+            let direction = ctx.input_mut(|input| {
+                LauncherApp::consume_query_history_shortcut(query_has_focus, input)
+            });
+            let arrows_remain = ctx.input(|input| {
+                input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowDown)
+            });
+            let _ = ctx.end_frame();
+            (direction, arrows_remain)
+        };
+
         assert_eq!(
-            LauncherApp::query_history_direction(true, egui::Modifiers::CTRL, true, false),
+            route(
+                true,
+                egui::Modifiers::SHIFT,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ),
+            (Some(QueryHistoryDirection::Older), false)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::NONE,
+                vec![key_press(egui::Key::ArrowDown, egui::Modifiers::CTRL)],
+            ),
+            (Some(QueryHistoryDirection::Newer), false)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::CTRL,
+                vec![key_press(
+                    egui::Key::ArrowUp,
+                    egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                )],
+            ),
+            (None, true)
+        );
+        assert_eq!(
+            route(
+                false,
+                egui::Modifiers::CTRL,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ),
+            (None, true)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::CTRL,
+                vec![key_press(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            ),
+            (None, true)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::NONE,
+                vec![key_press(
+                    egui::Key::ArrowUp,
+                    egui::Modifiers {
+                        command: true,
+                        ..egui::Modifiers::CTRL
+                    },
+                )],
+            ),
+            (Some(QueryHistoryDirection::Older), false)
+        );
+        assert_eq!(
+            route(
+                true,
+                egui::Modifiers::CTRL,
+                vec![
+                    key_press(
+                        egui::Key::ArrowUp,
+                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                    ),
+                    key_press(egui::Key::ArrowDown, egui::Modifiers::CTRL),
+                ],
+            ),
+            (Some(QueryHistoryDirection::Newer), true)
+        );
+    }
+
+    #[test]
+    fn consumed_query_history_arrow_cannot_reach_result_navigation() {
+        let ctx = egui::Context::default();
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ..Default::default()
+        });
+        let mut app = new_app(&ctx);
+        app.results = two_results();
+        app.selected = Some(1);
+
+        assert_eq!(
+            ctx.input_mut(|input| LauncherApp::consume_query_history_shortcut(true, input)),
             Some(QueryHistoryDirection::Older)
         );
-        assert_eq!(
-            LauncherApp::query_history_direction(true, egui::Modifiers::CTRL, false, true),
-            Some(QueryHistoryDirection::Newer)
-        );
-        assert_eq!(
-            LauncherApp::query_history_direction(
-                true,
-                egui::Modifiers {
-                    command: true,
-                    ..egui::Modifiers::CTRL
-                },
-                true,
-                false
-            ),
-            Some(QueryHistoryDirection::Older)
-        );
-        assert_eq!(
-            LauncherApp::query_history_direction(false, egui::Modifiers::CTRL, true, false),
-            None
-        );
-        assert_eq!(
-            LauncherApp::query_history_direction(
-                true,
-                egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
-                true,
-                false
-            ),
-            None
-        );
-        assert_eq!(
-            LauncherApp::query_history_direction(true, egui::Modifiers::NONE, true, false),
-            None
-        );
+        if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+            app.handle_key(egui::Key::ArrowUp);
+        }
+
+        assert_eq!(app.selected, Some(1));
+        let _ = ctx.end_frame();
     }
 
     #[test]
@@ -2025,7 +2112,7 @@ mod tests {
             None,
             ActivationSource::Enter,
         );
-        app.query = "new draft".into();
+        assert_eq!(app.query, "old snapshot");
         app.navigate_query_history_with(QueryHistoryDirection::Older, || {
             vec!["newly recorded".into()]
         });
