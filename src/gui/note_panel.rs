@@ -1089,24 +1089,11 @@ impl NotePanel {
             return;
         }
         let path = crate::note_ui_state::path_for_settings(Path::new(&app.settings_path));
-        let mut state = match crate::note_ui_state::load(&path) {
-            Ok(state) => state,
-            Err(err) => {
-                self.report_ui_state_error_once(
-                    app,
-                    format!(
-                        "Failed to load note UI state from {}: {err}",
-                        path.display()
-                    ),
-                );
-                return;
-            }
-        };
-        state.set_collapsed_sections(
-            self.note.slug.clone(),
-            self.collapsed_sections.iter().cloned(),
-        );
-        if let Err(err) = crate::note_ui_state::save(&path, &state) {
+        let slug = self.note.slug.clone();
+        let collapsed = self.collapsed_sections.iter().cloned().collect::<Vec<_>>();
+        if let Err(err) = crate::note_ui_state::update(&path, |state| {
+            state.set_collapsed_sections(slug, collapsed);
+        }) {
             self.report_ui_state_error_once(
                 app,
                 format!("Failed to save note UI state to {}: {err}", path.display()),

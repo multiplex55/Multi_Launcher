@@ -1,5 +1,7 @@
 use crate::actions::Action;
-use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
+use crate::common::persistence::{
+    LoadState, PersistenceError, load_json, save_json_atomic, save_json_atomic_replaceable,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -21,6 +23,7 @@ pub struct HistoryEntry {
 const HISTORY_FILE: &str = "history.json";
 pub const HISTORY_PINS_FILE: &str = "history_pins.json";
 static PINS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static HISTORY_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HistoryPin {
@@ -96,11 +99,14 @@ pub fn poison_history_lock() {
 }
 
 fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
-    let content = std::fs::read_to_string(HISTORY_FILE).unwrap_or_default();
-    if content.is_empty() {
-        return Ok(VecDeque::new());
-    }
-    let mut list: Vec<HistoryEntry> = serde_json::from_str(&content)?;
+    load_history_from_path(HISTORY_FILE)
+}
+
+fn load_history_from_path(path: impl AsRef<Path>) -> anyhow::Result<VecDeque<HistoryEntry>> {
+    let mut list: Vec<HistoryEntry> = match load_json(path)? {
+        LoadState::Missing | LoadState::Empty => Vec::new(),
+        LoadState::Loaded(list) => list,
+    };
     for e in &mut list {
         e.query_lc = e.query.to_lowercase();
     }
@@ -109,13 +115,9 @@ fn load_history_internal() -> anyhow::Result<VecDeque<HistoryEntry>> {
 
 /// Save the current HISTORY list to `history.json`.
 pub fn save_history() -> anyhow::Result<()> {
-    let Some(h) = HISTORY.read().ok() else {
-        return Ok(());
-    };
-    let list: Vec<HistoryEntry> = h.iter().cloned().collect();
-    let json = serde_json::to_string_pretty(&list)?;
-    std::fs::write(HISTORY_FILE, json)?;
-    Ok(())
+    let _transaction = history_transaction_guard();
+    let replacement = get_history();
+    update_history_at(HISTORY_FILE, |_| Ok(replacement)).map(|_| ())
 }
 
 /// Append an entry to the history and persist the list. The `limit` parameter
@@ -125,16 +127,18 @@ pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<(
     if entry.timestamp == 0 {
         entry.timestamp = chrono::Utc::now().timestamp();
     }
-    {
-        let Some(mut h) = HISTORY.write().ok() else {
-            return Ok(());
-        };
-        h.push_front(entry);
-        while h.len() > limit {
-            h.pop_back();
+    let _transaction = history_transaction_guard();
+    let committed = update_history_at(HISTORY_FILE, move |mut history| {
+        history.push_front(entry);
+        while history.len() > limit {
+            history.pop_back();
         }
+        Ok(history)
+    })?;
+    if let Ok(mut history) = HISTORY.write() {
+        *history = committed;
     }
-    save_history()
+    Ok(())
 }
 
 /// Run a closure while holding a lock on the history list.
@@ -154,13 +158,33 @@ pub fn get_history() -> VecDeque<HistoryEntry> {
 
 /// Clear all history entries and persist the empty list to `history.json`.
 pub fn clear_history() -> anyhow::Result<()> {
-    {
-        let Some(mut h) = HISTORY.write().ok() else {
-            return Ok(());
-        };
-        h.clear();
+    let _transaction = history_transaction_guard();
+    let committed = update_history_at(HISTORY_FILE, |mut history| {
+        history.clear();
+        Ok(history)
+    })?;
+    if let Ok(mut history) = HISTORY.write() {
+        *history = committed;
     }
-    save_history()
+    Ok(())
+}
+
+fn update_history_at(
+    path: impl AsRef<Path>,
+    mutate: impl FnOnce(VecDeque<HistoryEntry>) -> anyhow::Result<VecDeque<HistoryEntry>>,
+) -> anyhow::Result<VecDeque<HistoryEntry>> {
+    let path = path.as_ref();
+    let current = load_history_from_path(path)?;
+    let next = mutate(current)?;
+    let list: Vec<_> = next.iter().cloned().collect();
+    save_json_atomic_replaceable(path, &list)?;
+    Ok(next)
+}
+
+fn history_transaction_guard() -> MutexGuard<'static, ()> {
+    HISTORY_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn load_pins(path: &str) -> anyhow::Result<Vec<HistoryPin>> {
@@ -524,5 +548,35 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(load_pins(path.to_str().unwrap()).unwrap(), original);
+    }
+
+    #[test]
+    fn missing_history_initializes_but_malformed_update_is_rejected_unchanged() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let entry = HistoryEntry {
+            query: "test".into(),
+            query_lc: "test".into(),
+            action: Action {
+                label: "Test".into(),
+                desc: String::new(),
+                action: "test:run".into(),
+                args: None,
+            },
+            source: None,
+            timestamp: 1,
+        };
+        update_history_at(&path, |mut history| {
+            history.push_front(entry.clone());
+            Ok(history)
+        })
+        .unwrap();
+        assert_eq!(load_history_from_path(&path).unwrap().len(), 1);
+
+        let invalid = b"not query history";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(update_history_at(&path, |_| Ok(VecDeque::new())).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

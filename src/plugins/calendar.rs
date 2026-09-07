@@ -22,6 +22,7 @@ pub const CALENDAR_STATE_FILE: &str = "calendar/state.json";
 static CALENDAR_VERSION: AtomicU64 = AtomicU64::new(0);
 static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
 static CALENDAR_EVENT_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static CALENDAR_STATE_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 #[cfg(test)]
 static CALENDAR_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -203,7 +204,7 @@ pub struct EventInstance {
     pub recurrence: Option<RecurrenceMetadata>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CalendarState {
     #[serde(default, with = "option_naive_datetime_serde")]
     pub last_opened: Option<NaiveDateTime>,
@@ -323,28 +324,38 @@ pub fn refresh_events_from_disk(path: &str) -> anyhow::Result<Vec<CalendarEvent>
 }
 
 pub fn load_state(path: &str) -> anyhow::Result<CalendarState> {
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(CalendarState::default());
-    }
-    let state: CalendarState = serde_json::from_str(&content)?;
-    Ok(state)
+    Ok(match load_state_typed(path)? {
+        LoadState::Missing | LoadState::Empty => CalendarState::default(),
+        LoadState::Loaded(state) => state,
+    })
+}
+
+pub fn load_state_typed(
+    path: impl AsRef<Path>,
+) -> Result<LoadState<CalendarState>, PersistenceError> {
+    load_json(path)
 }
 
 pub fn save_state(path: &str, state: &CalendarState) -> anyhow::Result<()> {
-    ensure_parent_dir(path)?;
-    let json = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    let replacement = state.clone();
+    update_state(path, move |state| {
+        *state = replacement;
+        Ok(())
+    })
+    .map(|_| ())
 }
 
-fn ensure_parent_dir(path: &str) -> anyhow::Result<()> {
-    if let Some(parent) = Path::new(path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(())
+pub fn update_state(
+    path: &str,
+    mutate: impl FnOnce(&mut CalendarState) -> anyhow::Result<()>,
+) -> anyhow::Result<CalendarState> {
+    let _transaction = CALENDAR_STATE_TRANSACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = load_state(path)?;
+    mutate(&mut state)?;
+    crate::common::persistence::save_json_atomic_replaceable(path, &state)?;
+    Ok(state)
 }
 
 fn calendar_event_transaction_guard() -> MutexGuard<'static, ()> {
@@ -1659,5 +1670,26 @@ mod persistence_tests {
         assert_eq!(calendar_version(), version + 1);
         assert_eq!(search_by_title("external"), external);
         restore_calendar_test_data(original);
+    }
+
+    #[test]
+    fn missing_calendar_state_initializes_but_malformed_update_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("calendar").join("state.json");
+        let path = path.to_str().unwrap();
+        update_state(path, |state| {
+            state.last_viewed_day = NaiveDate::from_ymd_opt(2026, 9, 6);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            load_state(path).unwrap().last_viewed_day,
+            NaiveDate::from_ymd_opt(2026, 9, 6)
+        );
+
+        let invalid = b"not calendar state";
+        std::fs::write(path, invalid).unwrap();
+        assert!(update_state(path, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }

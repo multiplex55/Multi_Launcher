@@ -4,7 +4,7 @@
 //! deliberately does not own validation, migration, mutation locking, backup,
 //! or publication of in-memory state.
 
-use crate::common::atomic_file::save_atomic;
+use crate::common::atomic_file::{save_atomic, save_atomic_replaceable};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::error::Error;
@@ -143,6 +143,24 @@ pub fn save_json_atomic<T: Serialize + ?Sized>(
             source,
         })?;
     save_atomic(path, &bytes).map_err(|source| PersistenceError::AtomicWrite {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Pretty-serialize high-frequency, replaceable JSON and commit it with an
+/// atomic replacement that intentionally omits full durability syncs.
+pub fn save_json_atomic_replaceable<T: Serialize + ?Sized>(
+    path: impl AsRef<Path>,
+    value: &T,
+) -> Result<(), PersistenceError> {
+    let path = path.as_ref();
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|source| PersistenceError::SerializeJson {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    save_atomic_replaceable(path, &bytes).map_err(|source| PersistenceError::AtomicWrite {
         path: path.to_path_buf(),
         source,
     })
