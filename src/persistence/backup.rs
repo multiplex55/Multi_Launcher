@@ -58,6 +58,12 @@ pub struct SnapshotResult {
     pub retention_warning: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotRecord {
+    pub path: PathBuf,
+    pub manifest: SnapshotManifest,
+}
+
 pub trait SnapshotClock {
     fn created_unix_millis(&self) -> u128;
     fn base_id(&self) -> String;
@@ -94,17 +100,51 @@ impl<'a> BackupEngine<'a> {
     }
 
     pub fn create_snapshot(&self) -> Result<SnapshotResult> {
-        self.create_snapshot_with(&SystemSnapshotClock, &RealFileCopier)
+        self.create_snapshot_with(&SystemSnapshotClock, &RealFileCopier, &|| false)
     }
 
     pub fn create_snapshot_with_clock(&self, clock: &dyn SnapshotClock) -> Result<SnapshotResult> {
-        self.create_snapshot_with(clock, &RealFileCopier)
+        self.create_snapshot_with(clock, &RealFileCopier, &|| false)
+    }
+
+    /// Create a snapshot while cooperatively checking cancellation between
+    /// catalog stores and recursively copied filesystem entries.
+    pub fn create_snapshot_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<SnapshotResult> {
+        self.create_snapshot_with(&SystemSnapshotClock, &RealFileCopier, cancelled)
+    }
+
+    /// List only snapshots whose directory and manifest are recognized by the
+    /// same validation used for retention. This inspection never creates the
+    /// application data or backup directories.
+    pub fn list_snapshots(&self) -> Result<Vec<SnapshotRecord>> {
+        let backup_root = self.root.path().join(BACKUP_DIRECTORY);
+        if !backup_root.exists() {
+            return Ok(Vec::new());
+        }
+        reject_reparse(self.root.path()).context("validate application data root")?;
+        reject_reparse(&backup_root).context("validate backup directory")?;
+        let canonical_root =
+            fs::canonicalize(self.root.path()).context("resolve application data root")?;
+        let canonical_backup =
+            fs::canonicalize(&backup_root).context("resolve backup directory")?;
+        if !canonical_backup.starts_with(&canonical_root) {
+            bail!("backup directory escapes application data root");
+        }
+        Ok(recognized_snapshots(&canonical_backup)?
+            .into_iter()
+            .take(SNAPSHOT_RETENTION_LIMIT)
+            .map(|(_, _, path, manifest)| SnapshotRecord { path, manifest })
+            .collect())
     }
 
     fn create_snapshot_with(
         &self,
         clock: &dyn SnapshotClock,
         copier: &dyn FileCopier,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<SnapshotResult> {
         fs::create_dir_all(self.root.path()).context("create application data root")?;
         reject_reparse(self.root.path()).context("validate application data root")?;
@@ -127,6 +167,7 @@ impl<'a> BackupEngine<'a> {
             &snapshot_id,
             clock.created_unix_millis(),
             copier,
+            cancelled,
         );
         let manifest = match result {
             Ok(manifest) => manifest,
@@ -165,6 +206,7 @@ impl<'a> BackupEngine<'a> {
         snapshot_id: &str,
         created_unix_millis: u128,
         copier: &dyn FileCopier,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<SnapshotManifest> {
         let mut manifest = SnapshotManifest {
             product: PRODUCT.into(),
@@ -184,6 +226,9 @@ impl<'a> BackupEngine<'a> {
         let mut operational_issue = false;
 
         for store in self.catalog.stores() {
+            if cancelled() {
+                bail!("snapshot creation cancelled");
+            }
             if store.backup_policy != BackupPolicy::Include {
                 let entry = entry(store, None, Some(policy_reason(store.backup_policy)));
                 if store.backup_policy == BackupPolicy::ExcludeExternal {
@@ -228,7 +273,8 @@ impl<'a> BackupEngine<'a> {
                         staging,
                         copier,
                         &mut manifest,
-                    );
+                        cancelled,
+                    )?;
                     operational_issue |= before != (manifest.failed.len(), manifest.skipped.len());
                 }
             }
@@ -281,7 +327,11 @@ fn copy_source(
     staging: &Path,
     copier: &dyn FileCopier,
     manifest: &mut SnapshotManifest,
-) {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    if cancelled() {
+        bail!("snapshot creation cancelled");
+    }
     let metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -294,7 +344,7 @@ fn copy_source(
                     .map(Path::to_path_buf),
                 Some(format!("inspect failed: {error}")),
             ));
-            return;
+            return Ok(());
         }
     };
     if let Err(error) = reject_reparse_metadata(source, &metadata) {
@@ -307,7 +357,7 @@ fn copy_source(
                 .map(Path::to_path_buf),
             Some(format!("unsafe entry rejected: {error}")),
         ));
-        return;
+        return Ok(());
     }
     if metadata.is_dir() {
         if let Err(error) = fs::create_dir_all(destination) {
@@ -320,7 +370,7 @@ fn copy_source(
                     .map(Path::to_path_buf),
                 Some(format!("create destination failed: {error}")),
             ));
-            return;
+            return Ok(());
         }
         let entries = match fs::read_dir(source) {
             Ok(entries) => entries,
@@ -334,7 +384,7 @@ fn copy_source(
                         .map(Path::to_path_buf),
                     Some(format!("read directory failed: {error}")),
                 ));
-                return;
+                return Ok(());
             }
         };
         let mut found = false;
@@ -364,7 +414,8 @@ fn copy_source(
                         staging,
                         copier,
                         manifest,
-                    );
+                        cancelled,
+                    )?;
                 }
                 Err(error) => manifest.failed.push(entry_at(
                     store,
@@ -400,7 +451,7 @@ fn copy_source(
                         .map(Path::to_path_buf),
                     Some(format!("create destination failed: {error}")),
                 ));
-                return;
+                return Ok(());
             }
         }
         match copier.copy(source, destination) {
@@ -439,6 +490,7 @@ fn copy_source(
             Some("unsupported filesystem entry"),
         ));
     }
+    Ok(())
 }
 
 trait FileCopier {
@@ -525,6 +577,16 @@ fn validate_id(id: &str) -> Result<String> {
 }
 
 fn prune_recognized_snapshots(backup_root: &Path) -> Result<()> {
+    let recognized = recognized_snapshots(backup_root)?;
+    for (_, _, path, _) in recognized.into_iter().skip(SNAPSHOT_RETENTION_LIMIT) {
+        fs::remove_dir_all(&path).with_context(|| format!("prune snapshot {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn recognized_snapshots(
+    backup_root: &Path,
+) -> Result<Vec<(u128, String, PathBuf, SnapshotManifest)>> {
     let mut recognized = Vec::new();
     for item in fs::read_dir(backup_root).context("enumerate backup retention directory")? {
         let item = item?;
@@ -546,14 +608,11 @@ fn prune_recognized_snapshots(backup_root: &Path) -> Result<()> {
             && tree_is_reparse_free(&path)
             && fs::canonicalize(&path).is_ok_and(|resolved| resolved.starts_with(backup_root))
         {
-            recognized.push((manifest.created_unix_millis, name, path));
+            recognized.push((manifest.created_unix_millis, name, path, manifest));
         }
     }
     recognized.sort_by(|left, right| (right.0, &right.1).cmp(&(left.0, &left.1)));
-    for (_, _, path) in recognized.into_iter().skip(SNAPSHOT_RETENTION_LIMIT) {
-        fs::remove_dir_all(&path).with_context(|| format!("prune snapshot {}", path.display()))?;
-    }
-    Ok(())
+    Ok(recognized)
 }
 
 /// Cleanup is deliberately best-effort and refuses anything whose identity is
@@ -686,6 +745,17 @@ mod tests {
         }
     }
 
+    struct CancellingCopier<'a> {
+        cancelled: &'a Cell<bool>,
+    }
+    impl FileCopier for CancellingCopier<'_> {
+        fn copy(&self, source: &Path, destination: &Path) -> std::io::Result<()> {
+            fs::copy(source, destination)?;
+            self.cancelled.set(true);
+            Ok(())
+        }
+    }
+
     fn fixture() -> (tempfile::TempDir, AppDataRoot, PersistenceCatalog) {
         let dir = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_settings_path(dir.path().join("settings.json")).unwrap();
@@ -748,6 +818,37 @@ mod tests {
         assert_eq!(
             disk.included[0].source_path,
             dir.path().join("settings.json")
+        );
+
+        let listed = BackupEngine::new(&root, &catalog).list_snapshots().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, result.path);
+        assert_eq!(listed[0].manifest, result.manifest);
+    }
+
+    #[test]
+    fn cancellation_between_files_removes_current_staging_tree() {
+        let (dir, root, catalog) = fixture();
+        fs::write(dir.path().join("settings.json"), b"settings").unwrap();
+        fs::write(dir.path().join("optional.json"), b"actions").unwrap();
+        let cancelled = Cell::new(false);
+        let result = BackupEngine::new(&root, &catalog).create_snapshot_with(
+            &FixedClock {
+                millis: 1,
+                id: "cancelled".into(),
+            },
+            &CancellingCopier {
+                cancelled: &cancelled,
+            },
+            &|| cancelled.get(),
+        );
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        let backup_root = dir.path().join(BACKUP_DIRECTORY);
+        assert!(!backup_root.join("cancelled").exists());
+        assert!(
+            !backup_root
+                .join(format!("{STAGING_PREFIX}cancelled"))
+                .exists()
         );
     }
 
@@ -856,6 +957,7 @@ mod tests {
                     id: "partial".into(),
                 },
                 &copier,
+                &|| false,
             )
             .unwrap();
         assert_eq!(result.manifest.status, SnapshotStatus::Partial);

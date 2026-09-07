@@ -2,6 +2,8 @@
 
 mod backup;
 mod catalog;
+mod data_service;
 
 pub use backup::*;
 pub use catalog::*;
+pub use data_service::*;
