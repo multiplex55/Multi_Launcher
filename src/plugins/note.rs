@@ -290,6 +290,12 @@ type NoteSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send
 #[cfg(test)]
 static NOTE_SAVE_HOOK: Lazy<Mutex<Option<Box<NoteSaveHook>>>> = Lazy::new(|| Mutex::new(None));
 
+#[cfg(test)]
+type NoteRemoveHook = dyn Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync;
+
+#[cfg(test)]
+static NOTE_REMOVE_HOOK: Lazy<Mutex<Option<Box<NoteRemoveHook>>>> = Lazy::new(|| Mutex::new(None));
+
 fn persist_note_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     #[cfg(test)]
     if let Some(hook) = NOTE_SAVE_HOOK
@@ -301,6 +307,19 @@ fn persist_note_file(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()>
     }
 
     crate::common::atomic_file::save_atomic(path, bytes)
+}
+
+fn remove_note_file(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = NOTE_REMOVE_HOOK
+        .lock()
+        .expect("note remove hook lock poisoned")
+        .as_ref()
+    {
+        return hook(path);
+    }
+
+    std::fs::remove_file(path).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1125,10 +1144,31 @@ fn save_note_locked(
     let alias = aliases.first().cloned();
     let tags = extract_tags(&content);
     let entity_refs = extract_entity_refs(&content);
+    let path_changed = !note.path.as_os_str().is_empty() && note.path != path;
+    let overwritten_destination = if path_changed && path.exists() {
+        Some(
+            std::fs::read(&path)
+                .with_context(|| format!("snapshot overwritten note {}", path.display()))?,
+        )
+    } else {
+        None
+    };
     persist_note_file(&path, content.as_bytes())
         .with_context(|| format!("save note {}", path.display()))?;
-    if !note.path.as_os_str().is_empty() && note.path != path {
-        let _ = std::fs::remove_file(&note.path);
+    if path_changed
+        && let Err(error) = remove_note_file(&note.path)
+            .with_context(|| format!("remove renamed note {}", note.path.display()))
+    {
+        let rollback = match overwritten_destination {
+            Some(bytes) => crate::common::atomic_file::save_atomic(&path, &bytes)
+                .with_context(|| format!("restore overwritten note {}", path.display())),
+            None => std::fs::remove_file(&path)
+                .with_context(|| format!("remove rolled-back note {}", path.display())),
+        };
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(error.context(format!("rollback failed: {rollback:#}"))),
+        };
     }
     let committed = note_from_persisted_content(path.clone(), slug.clone(), content);
     let mut next_notes = existing_notes;
@@ -2638,6 +2678,20 @@ mod tests {
 
     fn clear_note_save_hook() {
         *NOTE_SAVE_HOOK.lock().expect("note save hook lock poisoned") = None;
+    }
+
+    fn set_note_remove_hook(
+        hook: impl Fn(&std::path::Path) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        *NOTE_REMOVE_HOOK
+            .lock()
+            .expect("note remove hook lock poisoned") = Some(Box::new(hook));
+    }
+
+    fn clear_note_remove_hook() {
+        *NOTE_REMOVE_HOOK
+            .lock()
+            .expect("note remove hook lock poisoned") = None;
     }
 
     fn set_template_save_hook(
@@ -4235,6 +4289,53 @@ Body",
         } else {
             unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
+    }
+
+    #[test]
+    fn save_note_rename_delete_failure_restores_overwritten_destination_and_cache() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+
+        let old_path = dir.path().join("alpha.md");
+        let destination_path = dir.path().join("beta.md");
+        fs::write(&old_path, "# Alpha\n\noriginal alpha").unwrap();
+        fs::write(&destination_path, "# Beta\n\noriginal beta").unwrap();
+        refresh_cache().unwrap();
+        let cache_before_save = note_cache_snapshot();
+        set_note_remove_hook(|_path| anyhow::bail!("deterministic remove failure"));
+
+        let mut note = Note {
+            title: "Beta replacement".into(),
+            path: old_path.clone(),
+            content: "# Beta replacement\n\nupdated".into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: "beta".into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+        let draft_before_save = note.clone();
+
+        let result = save_note(&mut note, true);
+        clear_note_remove_hook();
+
+        assert!(result.is_err());
+        assert_eq!(note, draft_before_save);
+        assert_eq!(note_cache_snapshot(), cache_before_save);
+        assert_eq!(
+            fs::read_to_string(old_path).unwrap(),
+            "# Alpha\n\noriginal alpha"
+        );
+        assert_eq!(
+            fs::read_to_string(destination_path).unwrap(),
+            "# Beta\n\noriginal beta"
+        );
+        assert_no_bak_files(dir.path());
     }
 
     #[test]
