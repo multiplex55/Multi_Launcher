@@ -20,6 +20,7 @@ mod macro_list;
 mod macro_properties;
 mod navigation;
 mod outline;
+mod package_ui;
 pub(crate) mod parameter_prompt;
 pub mod recorder_controller;
 pub(crate) mod runtime_inspector;
@@ -134,6 +135,7 @@ pub struct MkMacroDialog {
     pub runtime_inspector_is_current_debug_run: bool,
     runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
     runtime_inspector_active_breakpoint: Option<crate::mkmacro::BreakpointOccurrence>,
+    package_ui: package_ui::PackageUiState,
 }
 
 #[cfg(test)]
@@ -3928,6 +3930,7 @@ impl MkMacroDialog {
             runtime_inspector_is_current_debug_run: false,
             runtime_inspector_observed_run: None,
             runtime_inspector_active_breakpoint: None,
+            package_ui: Default::default(),
         }
     }
     pub fn open(&mut self) {
@@ -4426,6 +4429,7 @@ impl MkMacroDialog {
         // draft (especially when the final macro is removed).
         self.action_editor.cancel();
         self.launcher_action_picker.cancel();
+        self.package_ui.close();
         self.draft.macros.remove(index);
         let selected = self
             .draft
@@ -4645,6 +4649,7 @@ impl MkMacroDialog {
         self.window_picker
             .cancel("Window picker closed because the macro dialog closed");
         self.launcher_action_picker.cancel();
+        self.package_ui.close();
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         search::shortcuts(ui.ctx(), self);
@@ -4696,6 +4701,7 @@ impl MkMacroDialog {
         image_crop_editor::show(ui.ctx(), self);
         launcher_action_picker::show(ui.ctx(), self);
         window_picker::show(ui.ctx(), &mut self.window_picker);
+        package_ui::show(ui.ctx(), self);
         if self.window_picker.confirm_ready {
             self.window_picker.confirm_ready = false;
             if let Some((request, matcher)) = self.window_picker.take_confirmation() {

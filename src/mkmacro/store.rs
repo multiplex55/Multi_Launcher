@@ -60,12 +60,18 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
-    pub fn asset_root(&self) -> PathBuf {
+    /// Canonical directory containing the document and its independently
+    /// persisted authoring catalogs.
+    pub(crate) fn data_directory(&self) -> PathBuf {
         self.inner
             .path
             .parent()
             .unwrap_or(Path::new("."))
-            .join(ASSET_DIRECTORY)
+            .to_path_buf()
+    }
+
+    pub fn asset_root(&self) -> PathBuf {
+        self.data_directory().join(ASSET_DIRECTORY)
     }
     /// Enumerates direct regular PNG files in the shared canonical root in
     /// deterministic filename order. Symlinks and nested files are ignored.

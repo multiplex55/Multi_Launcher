@@ -1179,6 +1179,7 @@ fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandid
         Id::DashboardConfig => json!(DashboardConfig::default()),
         Id::MouseGestureDefinitions => json!(GestureDb::default()),
         Id::MkMacroDocument => json!(MkMacroDocument::default()),
+        Id::MkMacroTemplates => json!(crate::mkmacro::MkMacroTemplateCatalog::default()),
         Id::ClipboardModifiers => json!(crate::clipboard_modify::config::default_model()),
         Id::MultiManagerWorkspaces => json!(Vec::<MmWorkspace>::new()),
         Id::Scratchpad => json!(serde_json::json!({ "content": "" })),

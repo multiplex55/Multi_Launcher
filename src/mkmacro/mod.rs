@@ -29,6 +29,7 @@ pub mod runtime;
 pub mod screen;
 pub mod store;
 pub mod structure;
+pub mod templates;
 pub mod uia;
 pub mod validation;
 pub mod variables;
@@ -61,6 +62,7 @@ pub use runtime::{
 pub use screen::*;
 pub use store::*;
 pub use structure::*;
+pub use templates::*;
 pub use uia::*;
 pub use validation::*;
 pub use variables::*;

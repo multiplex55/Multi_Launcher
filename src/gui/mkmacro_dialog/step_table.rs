@@ -226,7 +226,8 @@ pub(super) fn table_modal_open(d: &MkMacroDialog) -> bool {
 }
 
 pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {
-    d.pending_folder_rename.is_some()
+    d.package_ui.is_open()
+        || d.pending_folder_rename.is_some()
         || d.pending_delete_folder.is_some()
         || d.delete_confirmation.is_open()
         || d.folder_delete_confirmation.is_open()

@@ -121,6 +121,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             let result = dialog.save();
             report(dialog, result);
         }
+        ui.add_enabled_ui(
+            dialog.action_editor.draft.is_none()
+                && !super::step_table::table_modal_open(dialog),
+            |ui| super::package_ui::show_toolbar_menu(ui, dialog),
+        );
         ui.add_enabled_ui(dialog.action_editor.draft.is_none() && !super::step_table::table_modal_open(dialog), |ui| {
             ui.menu_button("Edit steps", |ui| {
                 use super::editor_operations::{self, ClipboardCommand};
