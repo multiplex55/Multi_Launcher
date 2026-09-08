@@ -1,6 +1,7 @@
 //! Typed author-editable step fields. IDs, numeric values, enum choices and
 //! migration payloads are deliberately outside this boundary.
 use super::{DiagnosticSeverity, SearchRegion, model::*, variables::*};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
@@ -581,6 +582,38 @@ pub fn step_fields(step: &MkStep) -> Vec<AuthoringField> {
         });
     });
     fields
+}
+
+/// Returns every persisted image reference in a step, including references in
+/// nested conditions and coordinate targets. This shares the exhaustive typed
+/// traversal used by authoring search/replace rather than inspecting JSON.
+pub fn step_image_refs(step: &MkStep) -> BTreeSet<MkImageRef> {
+    let mut images = BTreeSet::new();
+    visit_step_fields(&mut step.clone(), &mut |_path, field| {
+        if field.kind() == FieldKind::Image {
+            images.insert(MkImageRef::from_filename(field.value()));
+        }
+    });
+    images
+}
+
+/// Rewrites every typed image field using exact source filenames.
+pub fn rewrite_step_image_refs(
+    step: &mut MkStep,
+    replacements: &HashMap<String, MkImageRef>,
+) -> Result<(), String> {
+    let mut error = None;
+    visit_step_fields(step, &mut |_path, mut field| {
+        if field.kind() != FieldKind::Image {
+            return;
+        }
+        if let Some(replacement) = replacements.get(field.value()) {
+            if let Err(reason) = field.replace(replacement.filename().to_owned()) {
+                error = Some(reason);
+            }
+        }
+    });
+    error.map_or(Ok(()), Err)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

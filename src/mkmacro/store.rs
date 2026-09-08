@@ -6,6 +6,7 @@ use crate::common::{
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage, codecs::png::PngDecoder};
 use std::io::Cursor;
+use std::io::Write;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -70,6 +71,7 @@ impl MkMacroStore {
     /// deterministic filename order. Symlinks and nested files are ignored.
     pub fn image_refs(&self) -> Result<Vec<MkImageRef>> {
         let directory = self.asset_root();
+        ensure_safe_asset_root(&directory)?;
         let mut refs = Vec::new();
         match fs::read_dir(&directory) {
             Ok(entries) => {
@@ -180,8 +182,10 @@ impl MkMacroStore {
         Ok(saved)
     }
     pub fn image_path(&self, image: &MkImageRef) -> Result<PathBuf> {
-        let path = managed_image_path(&self.asset_root(), image)?;
-        ensure_safe_direct_child(&self.asset_root(), &path)?;
+        let root = self.asset_root();
+        ensure_safe_asset_root(&root)?;
+        let path = managed_image_path(&root, image)?;
+        ensure_safe_direct_child(&root, &path)?;
         Ok(path)
     }
 
@@ -189,6 +193,169 @@ impl MkMacroStore {
         let path = self.image_path(image)?;
         let bytes = fs::read(&path).with_context(|| format!("read image {}", image.filename()))?;
         decode_png(&bytes).with_context(|| format!("decode image {}", image.filename()))
+    }
+
+    pub(crate) fn validate_png_bytes(&self, bytes: &[u8]) -> Result<()> {
+        validate_package_png(bytes)
+    }
+
+    pub(crate) fn package_document_bytes(&self) -> Result<Option<Vec<u8>>> {
+        match fs::read(&self.inner.path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read persisted macro document"),
+        }
+    }
+
+    /// Captures every managed PNG name and its bytes in deterministic order.
+    /// Import uses this as its optimistic asset-state baseline, including
+    /// case-only Windows collisions.
+    pub(crate) fn package_asset_inventory(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut result = Vec::new();
+        for image in self.image_refs()? {
+            let path = self.image_path(&image)?;
+            result.push((
+                image.filename().to_owned(),
+                fs::read(&path).with_context(|| format!("read image {}", image.filename()))?,
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Applies a side-effect-free package plan. The lock order is always
+    /// document transaction, then asset authoring. Watcher reload and ordinary
+    /// image authoring therefore cannot interleave with asset publication,
+    /// document persistence, or the final snapshot publication.
+    pub(crate) fn apply_package_import(
+        &self,
+        plan: &super::package::PackageImportPlan,
+    ) -> Result<Arc<MkMacroDocument>> {
+        self.apply_package_import_transaction(plan, |_| Ok(()))
+    }
+
+    fn apply_package_import_transaction(
+        &self,
+        plan: &super::package::PackageImportPlan,
+        mut after_asset_publication: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Arc<MkMacroDocument>> {
+        let _transaction = self.inner.transaction.lock().unwrap();
+        let _authoring = self.inner.asset_authoring.lock().unwrap();
+        ensure_package_state(
+            self,
+            &plan.expected_persisted,
+            plan.expected_disk_bytes.as_deref(),
+            &plan.expected_assets,
+        )?;
+        let mut repaired = plan.candidate.clone();
+        if repair_ids(&mut repaired) || repaired != plan.candidate {
+            anyhow::bail!("package candidate identities changed before apply")
+        }
+
+        let root = self.asset_root();
+        ensure_safe_asset_root(&root)?;
+        fs::create_dir_all(&root).context("create mkmacro_assets for package import")?;
+        ensure_safe_asset_root(&root)?;
+        let mut staged = Vec::with_capacity(plan.assets_to_create.len());
+        for (asset_index, asset) in plan.assets_to_create.iter().enumerate() {
+            let destination = self.image_path(&asset.image)?;
+            ensure_safe_direct_child(&root, &destination)?;
+            if destination.exists() {
+                anyhow::bail!(
+                    "package asset destination {} now exists",
+                    asset.image.filename()
+                )
+            }
+            let mut file = tempfile::NamedTempFile::new_in(&root)
+                .context("stage package image in mkmacro_assets")?;
+            file.write_all(&asset.bytes)
+                .context("write staged package image")?;
+            file.as_file_mut()
+                .sync_all()
+                .context("sync staged package image")?;
+            staged.push((file, destination, asset_index));
+        }
+
+        ensure_package_state(
+            self,
+            &plan.expected_persisted,
+            plan.expected_disk_bytes.as_deref(),
+            &plan.expected_assets,
+        )?;
+
+        let mut created = Vec::new();
+        let result = (|| -> Result<()> {
+            for (index, (file, destination, asset_index)) in staged.into_iter().enumerate() {
+                file.persist_noclobber(&destination)
+                    .map_err(|error| error.error)
+                    .with_context(|| format!("publish package image {}", destination.display()))?;
+                created.push((destination, asset_index));
+                after_asset_publication(index + 1)?;
+            }
+            ensure_package_document_state(
+                self,
+                &plan.expected_persisted,
+                plan.expected_disk_bytes.as_deref(),
+            )?;
+            let mut expected_assets = plan.expected_assets.clone();
+            expected_assets.extend(created.iter().map(|(_, asset_index)| {
+                let asset = &plan.assets_to_create[*asset_index];
+                (asset.image.filename().to_owned(), asset.bytes.clone())
+            }));
+            expected_assets.sort_by(|left, right| left.0.cmp(&right.0));
+            if self.package_asset_inventory()? != expected_assets {
+                anyhow::bail!("mkmacro assets changed during import; preview the import again")
+            }
+            persist(&self.inner.path, &plan.candidate)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for (path, asset_index) in created.iter().rev() {
+                let owned_bytes = &plan.assets_to_create[*asset_index].bytes;
+                let still_owned = fs::symlink_metadata(path)
+                    .ok()
+                    .filter(|metadata| {
+                        metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+                    })
+                    .and_then(|_| fs::read(path).ok())
+                    .is_some_and(|bytes| bytes == *owned_bytes);
+                if still_owned {
+                    if let Err(rollback_error) = fs::remove_file(path) {
+                        tracing::error!(
+                            path = %path.display(),
+                            error = %rollback_error,
+                            "failed to roll back package-owned image"
+                        );
+                    }
+                }
+            }
+            return Err(error);
+        }
+
+        publish(&self.inner, plan.candidate.clone());
+        Ok(self.snapshot())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_package_import_with_injected_failure(
+        &self,
+        plan: &super::package::PackageImportPlan,
+        fail_after_assets: usize,
+    ) -> Result<Arc<MkMacroDocument>> {
+        self.apply_package_import_transaction(plan, |published| {
+            if published == fail_after_assets {
+                anyhow::bail!("injected package import failure")
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_package_import_with_test_hook(
+        &self,
+        plan: &super::package::PackageImportPlan,
+        after_asset_publication: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Arc<MkMacroDocument>> {
+        self.apply_package_import_transaction(plan, after_asset_publication)
     }
 
     pub fn import_png(&self, source: &Path) -> Result<ImageImportResult> {
@@ -266,6 +433,7 @@ impl MkMacroStore {
             }
         }
         fs::create_dir_all(self.asset_root())?;
+        ensure_safe_asset_root(&self.asset_root())?;
         save_atomic(&destination, bytes)
             .with_context(|| format!("write image {}", requested.filename()))?;
         Ok(ImageImportResult::Imported(requested))
@@ -284,6 +452,75 @@ fn decode_png(bytes: &[u8]) -> Result<RgbaImage> {
     let (width, height) = decoder.dimensions();
     super::asset_authoring::validate_image_dimensions(width, height)?;
     Ok(DynamicImage::from_decoder(decoder)?.to_rgba8())
+}
+
+pub(crate) fn validate_package_png(bytes: &[u8]) -> Result<()> {
+    decode_png(bytes).map(drop)
+}
+
+fn ensure_package_state(
+    store: &MkMacroStore,
+    expected_document: &MkMacroDocument,
+    expected_disk_bytes: Option<&[u8]>,
+    expected_assets: &[(String, Vec<u8>)],
+) -> Result<()> {
+    ensure_package_document_state(store, expected_document, expected_disk_bytes)?;
+    if store.package_asset_inventory()? != expected_assets {
+        anyhow::bail!("mkmacro assets changed; preview the import again")
+    }
+    Ok(())
+}
+
+fn ensure_package_document_state(
+    store: &MkMacroStore,
+    expected_document: &MkMacroDocument,
+    expected_disk_bytes: Option<&[u8]>,
+) -> Result<()> {
+    if store.snapshot().as_ref() != expected_document {
+        anyhow::bail!("persisted macro snapshot changed; preview the import again")
+    }
+    if store.package_document_bytes()?.as_deref() != expected_disk_bytes {
+        anyhow::bail!("persisted macro file changed; preview the import again")
+    }
+    Ok(())
+}
+
+fn ensure_safe_asset_root(root: &Path) -> Result<()> {
+    if root.file_name() != Some(std::ffi::OsStr::new(ASSET_DIRECTORY)) {
+        anyhow::bail!("invalid managed asset root")
+    }
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect mkmacro asset root"),
+    };
+    if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) {
+        anyhow::bail!("mkmacro asset root must not be a symlink, junction, or reparse point")
+    }
+    if !metadata.file_type().is_dir() {
+        anyhow::bail!("mkmacro asset root is not a directory")
+    }
+    let parent = root.parent().context("mkmacro asset root has no parent")?;
+    let canonical_parent = parent
+        .canonicalize()
+        .context("resolve mkmacro asset parent")?;
+    let canonical_root = root.canonicalize().context("resolve mkmacro asset root")?;
+    if canonical_root.parent() != Some(canonical_parent.as_path()) {
+        anyhow::bail!("mkmacro asset root escapes its configured directory")
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn ensure_safe_direct_child(root: &Path, path: &Path) -> Result<()> {
@@ -308,6 +545,7 @@ fn ensure_safe_direct_child(root: &Path, path: &Path) -> Result<()> {
 }
 
 fn direct_root_reference(root: &Path, source: &Path) -> Result<Option<MkImageRef>> {
+    ensure_safe_asset_root(root)?;
     let source_metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
