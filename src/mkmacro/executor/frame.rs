@@ -26,6 +26,7 @@ enum InstructionPhase {
 
 struct ExecutionFrame<'plan> {
     plan: &'plan MkExecutionPlan,
+    macro_name: Arc<str>,
     context: ExecutionFrameContext,
     returned: Option<MkInvocationValues>,
     pc: usize,
@@ -68,6 +69,7 @@ impl<'plan> ExecutionFrame<'plan> {
         });
         Self {
             plan,
+            macro_name: Arc::from(plan.name.as_str()),
             context,
             returned: None,
             pc: 0,
@@ -75,6 +77,14 @@ impl<'plan> ExecutionFrame<'plan> {
             loops: HashMap::new(),
             phase: InstructionPhase::Enter,
             safe_boundary,
+        }
+    }
+
+    fn snapshot(&self) -> ExecutionFrameSnapshot {
+        ExecutionFrameSnapshot {
+            context: self.context,
+            macro_name: self.macro_name.clone(),
+            active_step_id: None,
         }
     }
 
@@ -203,6 +213,10 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
             } else {
                 match self.advance(frame, program) {
                     Ok(Some(child)) => {
+                        (self.observe)(
+                            child.context,
+                            ExecutionEvent::FrameEntered(child.snapshot()),
+                        );
                         if let Some(boundary) = &child.safe_boundary {
                             self.emit_variables(
                                 child.context,
@@ -228,6 +242,17 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
             if let Some(boundary) = &completed.safe_boundary {
                 self.emit_variables(completed.context, boundary, reason);
             }
+            let caller_boundary = frames
+                .last()
+                .and_then(|caller| caller.safe_boundary.as_ref())
+                .map(|boundary| FrameVariableBoundary {
+                    step_id: boundary.step_id,
+                    variables: boundary.variables.clone(),
+                });
+            (self.observe)(
+                completed.context,
+                ExecutionEvent::FrameExited { caller_boundary },
+            );
             let Some(caller) = frames.last_mut() else {
                 return completion.map(|_| ());
             };
@@ -574,7 +599,15 @@ pub(super) fn execute(
         None,
         &MkInvocationValues::new(),
         options,
-        &|_, event| observe(event),
+        &|_, event| {
+            // Preserve the standalone observer contract at its one adapter.
+            if !matches!(
+                event,
+                ExecutionEvent::FrameEntered(_) | ExecutionEvent::FrameExited { .. }
+            ) {
+                observe(event);
+            }
+        },
     )
 }
 
@@ -622,6 +655,10 @@ fn execute_root(
             caller_step_id: None,
             depth: 1,
         },
+    );
+    (session.observe)(
+        frame.context,
+        ExecutionEvent::FrameEntered(frame.snapshot()),
     );
     if let Some(boundary) = &frame.safe_boundary {
         session.emit_variables(frame.context, boundary, DebugSnapshotReason::RunStarted);
@@ -1111,7 +1148,11 @@ mod tests {
                 1
             );
             assert!(matches!(
-                events.last().unwrap(),
+                events
+                    .iter()
+                    .rev()
+                    .find(|event| matches!(event, ExecutionEvent::DebugVariables { .. }))
+                    .unwrap(),
                 ExecutionEvent::DebugVariables {
                     step_id: Some(1),
                     reason: DebugSnapshotReason::RunCancelled,

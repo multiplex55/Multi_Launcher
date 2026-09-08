@@ -1,7 +1,7 @@
 use super::MkMacroDialog;
 use crate::mkmacro::{
-    DebugSnapshotReason, DiagnosticKey, MkMacroDocument, MkValue, RuntimePauseReason,
-    RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState, is_builtin,
+    CompletedStepOutcome, DebugSnapshotReason, MacroStepKey, MkMacroDocument, MkValue,
+    RuntimePauseReason, RuntimeRunMode, RuntimeSnapshot, RuntimeState, is_builtin,
 };
 use eframe::egui;
 
@@ -175,6 +175,7 @@ impl VariableGroups {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepPresentation {
+    pub macro_id: u64,
     pub step_id: u64,
     pub row_number: Option<usize>,
     pub action_name: String,
@@ -201,16 +202,29 @@ pub enum LastOutcomePresentation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallStackPresentation {
+    pub frame_id: u64,
+    pub macro_name: String,
+    pub caller_step: Option<String>,
+    pub current_step: Option<String>,
+    pub depth: usize,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInspectorViewModel {
     pub title: String,
     pub macro_name: String,
     pub status: String,
     pub current_step: Option<StepPresentation>,
     pub last_step: Option<StepPresentation>,
+    pub last_step_macro_name: Option<String>,
+    pub call_stack: Vec<CallStackPresentation>,
     pub breakpoint_pause: bool,
     pub variable_label: String,
     pub snapshot_reason: String,
     pub outcome: Option<LastOutcomePresentation>,
+    pub run_failure: Option<LastOutcomePresentation>,
     pub variables: VariableGroups,
 }
 
@@ -237,35 +251,87 @@ impl RuntimeInspectorViewModel {
             snapshot.pause_reason,
             Some(RuntimePauseReason::Breakpoint { .. })
         );
-        let current_step_id = match snapshot.pause_reason {
-            Some(RuntimePauseReason::Breakpoint { step_id }) => Some(step_id),
+        let current_key = match snapshot.pause_reason {
+            Some(RuntimePauseReason::Breakpoint { step_id, frame }) => {
+                Some(MacroStepKey::new(frame.macro_id, step_id))
+            }
             Some(RuntimePauseReason::User) => None,
             None if matches!(
                 snapshot.state,
                 RuntimeState::Running | RuntimeState::Stopping
             ) =>
             {
-                snapshot.step_id
+                snapshot
+                    .active_macro_id()
+                    .zip(snapshot.active_step_id())
+                    .map(|(macro_id, step_id)| MacroStepKey::new(macro_id, step_id))
             }
             None => None,
         };
-        let current_step =
-            current_step_id.map(|step_id| resolve_step(document, snapshot.macro_id, step_id));
+        let current_step = current_key.map(|key| resolve_step(document, key));
         let last_step = snapshot
-            .last_completed_step_id
-            .filter(|step_id| snapshot.steps.get(step_id) != Some(&StepState::Skipped))
-            .map(|step_id| resolve_step(document, snapshot.macro_id, step_id));
+            .last_completed
+            .as_ref()
+            .map(|completed| resolve_step(document, completed.key));
+        let last_step_macro_name = snapshot
+            .last_completed
+            .as_ref()
+            .map(|completed| completed.macro_name.to_string());
         let outcome = last_outcome(snapshot);
+        let run_failure = snapshot.latest_failure.as_ref().filter(|failure| {
+            snapshot.state == RuntimeState::Failed && !snapshot.last_completed.as_ref().is_some_and(|completed|
+                matches!(&completed.outcome, CompletedStepOutcome::Failure(recorded) if recorded == *failure))
+        }).map(failure_presentation);
+        let call_stack = snapshot
+            .call_stack
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| CallStackPresentation {
+                frame_id: frame.context.frame_id,
+                macro_name: frame.macro_name.to_string(),
+                depth: frame.context.depth,
+                active: index + 1 == snapshot.call_stack.len(),
+                caller_step: frame.context.caller_step_id.and_then(|step_id| {
+                    index.checked_sub(1).map(|parent| {
+                        resolve_step(
+                            document,
+                            MacroStepKey::new(
+                                snapshot.call_stack[parent].context.macro_id,
+                                step_id,
+                            ),
+                        )
+                        .label()
+                    })
+                }),
+                current_step: frame.active_step_id.map(|step_id| {
+                    resolve_step(document, MacroStepKey::new(frame.context.macro_id, step_id))
+                        .label()
+                }),
+            })
+            .collect();
         Self {
             title: match (snapshot.run_mode, current_debug_run) {
                 (RuntimeRunMode::Debug, true) => "Runtime Inspector — Current Debug Run".into(),
                 (RuntimeRunMode::Debug, false) => "Runtime Inspector — Last Debug Run".into(),
                 (RuntimeRunMode::Normal, _) => "Runtime Inspector — Normal Run".into(),
             },
-            macro_name: resolve_macro_name(document, snapshot.macro_id),
+            macro_name: snapshot
+                .call_stack
+                .last()
+                .map(|frame| frame.macro_name.to_string())
+                .or_else(|| {
+                    snapshot
+                        .debug_snapshot
+                        .as_ref()
+                        .map(|debug| debug.macro_name.to_string())
+                })
+                .or_else(|| snapshot.root_macro_name.as_ref().map(ToString::to_string))
+                .unwrap_or_else(|| resolve_macro_name(document, snapshot.macro_id)),
             status: status_text(snapshot),
             current_step,
             last_step,
+            last_step_macro_name,
+            call_stack,
             breakpoint_pause,
             variable_label: variable_label(snapshot, reason),
             snapshot_reason: reason
@@ -273,7 +339,8 @@ impl RuntimeInspectorViewModel {
                 .unwrap_or("No debug snapshot reason published.")
                 .into(),
             outcome,
-            variables: VariableGroups::from_variables(&variables),
+            run_failure,
+            variables: VariableGroups::from_variables(variables),
         }
     }
 }
@@ -290,31 +357,28 @@ fn resolve_macro_name(document: &MkMacroDocument, macro_id: Option<u64>) -> Stri
     }
 }
 
-fn resolve_step(
-    document: &MkMacroDocument,
-    macro_id: Option<u64>,
-    step_id: u64,
-) -> StepPresentation {
-    let step = macro_id.and_then(|macro_id| {
-        document
-            .macros
-            .iter()
-            .find(|macro_| macro_.id == macro_id)
-            .and_then(|macro_| {
-                macro_
-                    .steps
-                    .iter()
-                    .enumerate()
-                    .find(|(_, step)| step.id == step_id)
-            })
-    });
+fn resolve_step(document: &MkMacroDocument, key: MacroStepKey) -> StepPresentation {
+    let MacroStepKey { macro_id, step_id } = key;
+    let step = document
+        .macros
+        .iter()
+        .find(|macro_| macro_.id == macro_id)
+        .and_then(|macro_| {
+            macro_
+                .steps
+                .iter()
+                .enumerate()
+                .find(|(_, step)| step.id == step_id)
+        });
     match step {
         Some((index, step)) => StepPresentation {
+            macro_id,
             step_id,
             row_number: Some(index + 1),
             action_name: super::action_catalog::action_name(&step.action).into(),
         },
         None => StepPresentation {
+            macro_id,
             step_id,
             row_number: None,
             action_name: "Step definition unavailable".into(),
@@ -322,12 +386,12 @@ fn resolve_step(
     }
 }
 
-fn snapshot_variables(snapshot: &RuntimeSnapshot) -> crate::mkmacro::RuntimeVariables {
+fn snapshot_variables(snapshot: &RuntimeSnapshot) -> &crate::mkmacro::RuntimeVariables {
     snapshot
         .debug_snapshot
         .as_ref()
-        .map(|debug| debug.variables.as_ref().clone())
-        .unwrap_or_else(|| snapshot.debug_variables.as_ref().clone())
+        .map(|debug| debug.variables.as_ref())
+        .unwrap_or_else(|| snapshot.debug_variables.as_ref())
 }
 
 fn snapshot_reason(snapshot: &RuntimeSnapshot) -> Option<DebugSnapshotReason> {
@@ -341,6 +405,7 @@ fn snapshot_reason(snapshot: &RuntimeSnapshot) -> Option<DebugSnapshotReason> {
 pub fn debug_snapshot_reason_description(reason: DebugSnapshotReason) -> &'static str {
     match reason {
         DebugSnapshotReason::RunStarted => "Data captured at debug run start.",
+        DebugSnapshotReason::FrameRestored => "Restored the caller’s last safe execution boundary.",
         DebugSnapshotReason::Breakpoint => "Data captured before the breakpoint step.",
         DebugSnapshotReason::StepBoundary => "Data captured at the last safe step boundary.",
         DebugSnapshotReason::RunFinished => "Data captured at successful completion.",
@@ -374,6 +439,9 @@ fn variable_label(snapshot: &RuntimeSnapshot, reason: Option<DebugSnapshotReason
     }
     match reason {
         Some(DebugSnapshotReason::RunStarted) => "Variables at debug run start".into(),
+        Some(DebugSnapshotReason::FrameRestored) => {
+            "Caller variables at its last safe boundary".into()
+        }
         Some(DebugSnapshotReason::Breakpoint) => "Variables before breakpoint step".into(),
         Some(DebugSnapshotReason::StepBoundary) => "Last safe execution boundary".into(),
         Some(DebugSnapshotReason::RunFinished) => "Variables at successful completion".into(),
@@ -383,39 +451,25 @@ fn variable_label(snapshot: &RuntimeSnapshot, reason: Option<DebugSnapshotReason
     }
 }
 
-fn last_outcome(snapshot: &RuntimeSnapshot) -> Option<LastOutcomePresentation> {
-    let step_id = snapshot
-        .last_completed_step_id
-        .filter(|step_id| snapshot.steps.get(step_id) != Some(&StepState::Skipped));
-    let keyed_failure = step_id.and_then(|step_id| {
-        snapshot.failures.get(&DiagnosticKey {
-            run_id: snapshot.run_id,
-            step_id,
-        })
-    });
-    let failed_step =
-        step_id.is_some_and(|step_id| snapshot.steps.get(&step_id) == Some(&StepState::Failed));
-    let failure = (failed_step || snapshot.state == RuntimeState::Failed)
-        .then(|| keyed_failure.or(snapshot.latest_failure.as_ref()))
-        .flatten();
-    if let Some(failure) = failure {
-        return Some(LastOutcomePresentation::Failure {
-            message: failure.message.clone(),
-            context: failure
-                .context
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        });
+fn failure_presentation(failure: &crate::mkmacro::ExecutionDiagnostic) -> LastOutcomePresentation {
+    LastOutcomePresentation::Failure {
+        message: failure.message.clone(),
+        context: failure
+            .context
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
     }
-    step_id.and_then(|step_id| {
-        snapshot
-            .step_outcomes
-            .get(&step_id)
-            .map(|outcome| LastOutcomePresentation::Success {
-                detail: outcome.detail().map(str::to_owned),
-            })
-    })
+}
+
+fn last_outcome(snapshot: &RuntimeSnapshot) -> Option<LastOutcomePresentation> {
+    match &snapshot.last_completed.as_ref()?.outcome {
+        CompletedStepOutcome::Failure(failure) => Some(failure_presentation(failure)),
+        CompletedStepOutcome::Success(Some(outcome)) => Some(LastOutcomePresentation::Success {
+            detail: outcome.detail().map(str::to_owned),
+        }),
+        CompletedStepOutcome::Success(None) => None,
+    }
 }
 
 pub fn inspector_body_height() -> f32 {
@@ -529,6 +583,32 @@ fn render_body(
                 ui.separator();
                 ui.strong(format!("Status: {}", view.status));
             });
+            if view.call_stack.len() > 1 {
+                ui.strong("Call Stack");
+                for frame in &view.call_stack {
+                    ui.horizontal(|ui| {
+                        ui.add_space(frame.depth.saturating_sub(1) as f32 * 12.0);
+                        let label = if frame.active {
+                            format!("▶ {}", frame.macro_name)
+                        } else {
+                            frame.macro_name.clone()
+                        };
+                        let response = if frame.active {
+                            ui.strong(label)
+                        } else {
+                            ui.label(label)
+                        };
+                        response.on_hover_ui(|ui| {
+                            if let Some(step) = &frame.caller_step {
+                                ui.label(format!("Called from {step}"));
+                            }
+                            if let Some(step) = &frame.current_step {
+                                ui.label(format!("Current step: {step}"));
+                            }
+                        });
+                    });
+                }
+            }
             if let Some(step) = &view.current_step {
                 let color = if view.breakpoint_pause {
                     egui::Color32::from_rgb(255, 152, 0)
@@ -544,10 +624,20 @@ fn render_body(
                 );
             }
             if let Some(step) = &view.last_step {
-                ui.label(format!("Last Step: {}", step.label()));
+                ui.label(format!(
+                    "Last Step: {} · {}",
+                    view.last_step_macro_name
+                        .as_deref()
+                        .unwrap_or("Unknown macro"),
+                    step.label()
+                ));
             }
             if let Some(outcome) = &view.outcome {
                 render_outcome(ui, outcome);
+            }
+            if let Some(failure) = &view.run_failure {
+                ui.strong("Run failure");
+                render_outcome(ui, failure);
             }
             ui.small(&view.snapshot_reason);
             ui.separator();
@@ -612,8 +702,8 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        ExecutionDiagnostic, MkAction, MkDelayPayload, MkMacro, MkPoint, MkStep, RuntimeVariables,
-        SCHEMA_VERSION, StepOutcome,
+        CompletedStep, ExecutionDiagnostic, ExecutionFrameContext, MkAction, MkDelayPayload,
+        MkMacro, MkPoint, MkStep, RuntimeVariables, SCHEMA_VERSION, StepOutcome,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -664,6 +754,11 @@ mod tests {
             run_mode: RuntimeRunMode::Debug,
             run_id: 9,
             macro_id: Some(7),
+            call_stack: Arc::new(vec![crate::mkmacro::ExecutionFrameSnapshot {
+                context: ExecutionFrameContext::root(7),
+                macro_name: Arc::from("Demo"),
+                active_step_id: None,
+            }]),
             revision: 3,
             ..RuntimeSnapshot::default()
         }
@@ -892,7 +987,10 @@ mod tests {
 
         let mut breakpoint = running.clone();
         breakpoint.state = RuntimeState::Paused;
-        breakpoint.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id: 202 });
+        breakpoint.pause_reason = Some(RuntimePauseReason::Breakpoint {
+            step_id: 202,
+            frame: crate::mkmacro::ExecutionFrameContext::root(7),
+        });
         breakpoint.step_id = Some(202);
         breakpoint.debug_snapshot_reason = Some(DebugSnapshotReason::Breakpoint);
         let view = RuntimeInspectorViewModel::from_snapshot(&breakpoint, &document());
@@ -952,14 +1050,14 @@ mod tests {
     fn outcomes_use_step_details_or_keyed_failure_context() {
         let mut success = snapshot();
         success.state = RuntimeState::Completed;
-        success.last_completed_step_id = Some(101);
-        success.steps = Arc::new(BTreeMap::from([(101, StepState::Success)]));
-        success.step_outcomes = Arc::new(BTreeMap::from([(
-            101,
-            StepOutcome {
+        success.last_completed = Some(Arc::new(CompletedStep {
+            frame: ExecutionFrameContext::root(7),
+            key: MacroStepKey::new(7, 101),
+            macro_name: Arc::from("Demo"),
+            outcome: CompletedStepOutcome::Success(Some(StepOutcome {
                 last_image_found: Some(true),
-            },
-        )]));
+            })),
+        }));
         assert_eq!(
             RuntimeInspectorViewModel::from_snapshot(&success, &document()).outcome,
             Some(LastOutcomePresentation::Success {
@@ -974,14 +1072,12 @@ mod tests {
                 .context("Variable", "target");
         let mut failed = success.clone();
         failed.state = RuntimeState::Failed;
-        failed.steps = Arc::new(BTreeMap::from([(101, StepState::Failed)]));
-        failed.failures = Arc::new(BTreeMap::from([(
-            DiagnosticKey {
-                run_id: 9,
-                step_id: 101,
-            },
-            diagnostic.clone(),
-        )]));
+        failed.last_completed = Some(Arc::new(CompletedStep {
+            frame: ExecutionFrameContext::root(7),
+            key: MacroStepKey::new(7, 101),
+            macro_name: Arc::from("Demo"),
+            outcome: CompletedStepOutcome::Failure(diagnostic.clone()),
+        }));
         failed.latest_failure = Some(diagnostic);
         assert_eq!(
             RuntimeInspectorViewModel::from_snapshot(&failed, &document()).outcome,
@@ -1000,7 +1096,12 @@ mod tests {
     fn deleted_steps_macros_and_empty_completion_are_safe() {
         let mut missing = snapshot();
         missing.state = RuntimeState::Completed;
-        missing.last_completed_step_id = Some(404);
+        missing.last_completed = Some(Arc::new(CompletedStep {
+            frame: ExecutionFrameContext::root(7),
+            key: MacroStepKey::new(7, 404),
+            macro_name: Arc::from("Demo"),
+            outcome: CompletedStepOutcome::Success(None),
+        }));
         let view = RuntimeInspectorViewModel::from_snapshot(&missing, &document());
         assert_eq!(view.macro_name, "Demo");
         assert!(
@@ -1012,14 +1113,102 @@ mod tests {
         );
 
         missing.macro_id = Some(999);
+        missing.call_stack = Arc::new(Vec::new());
         let view = RuntimeInspectorViewModel::from_snapshot(&missing, &document());
         assert_eq!(view.macro_name, "Removed macro #999");
         assert!(view.last_step.is_some());
 
-        missing.last_completed_step_id = None;
+        missing.last_completed = None;
         let view = RuntimeInspectorViewModel::from_snapshot(&missing, &document());
         assert!(view.last_step.is_none());
         assert!(view.outcome.is_none());
+    }
+
+    #[test]
+    fn last_completion_keeps_callee_identity_after_pop_and_reentry() {
+        let mut document = document();
+        let mut child = document.macros[0].clone();
+        child.id = 8;
+        child.name = "edited child name".into();
+        child.steps[0].action = MkAction::Text(crate::mkmacro::MkTextPayload {
+            text: "child".into(),
+            mode: crate::mkmacro::MkTextMode::Type,
+        });
+        document.macros.push(child);
+        let mut snapshot = snapshot();
+        snapshot.state = RuntimeState::Running;
+        Arc::make_mut(&mut snapshot.call_stack)[0].active_step_id = Some(101);
+        let child_context = ExecutionFrameContext {
+            macro_id: 8,
+            frame_id: 3,
+            caller_step_id: Some(101),
+            depth: 2,
+        };
+        Arc::make_mut(&mut snapshot.call_stack).push(crate::mkmacro::ExecutionFrameSnapshot {
+            context: child_context,
+            macro_name: Arc::from("Child at run time"),
+            active_step_id: Some(101),
+        });
+        let key = MacroStepKey::new(8, 101);
+        let original_failure = ExecutionDiagnostic::new(
+            crate::mkmacro::DiagnosticKind::Backend,
+            "previous invocation result",
+        );
+        snapshot.last_completed = Some(Arc::new(CompletedStep {
+            frame: ExecutionFrameContext {
+                frame_id: 2,
+                ..child_context
+            },
+            key,
+            macro_name: Arc::from("Original child name"),
+            outcome: CompletedStepOutcome::Failure(original_failure),
+        }));
+        snapshot.macro_steps =
+            Arc::new(BTreeMap::from([(key, crate::mkmacro::StepState::Pending)]));
+        snapshot.macro_failures = Arc::new(BTreeMap::from([(
+            crate::mkmacro::MacroDiagnosticKey {
+                run_id: 9,
+                step: key,
+            },
+            ExecutionDiagnostic::new(
+                crate::mkmacro::DiagnosticKind::Backend,
+                "different invocation",
+            ),
+        )]));
+        let view = RuntimeInspectorViewModel::from_snapshot(&snapshot, &document);
+        assert_eq!(view.macro_name, "Child at run time");
+        assert_eq!(view.current_step.as_ref().unwrap().macro_id, 8);
+        assert_eq!(view.last_step.as_ref().unwrap().label(), "#1 Text");
+        assert_eq!(
+            view.last_step_macro_name.as_deref(),
+            Some("Original child name")
+        );
+        assert!(
+            matches!(view.outcome, Some(LastOutcomePresentation::Failure { message, .. }) if message == "previous invocation result")
+        );
+        assert_eq!(view.call_stack.len(), 2);
+        assert!(!view.call_stack[0].active);
+        assert!(view.call_stack[1].active);
+        Arc::make_mut(&mut snapshot.call_stack).pop();
+        let restored = RuntimeInspectorViewModel::from_snapshot(&snapshot, &document);
+        assert_eq!(restored.current_step.as_ref().unwrap().macro_id, 7);
+        assert_eq!(restored.current_step.as_ref().unwrap().label(), "#1 Delay");
+        assert_eq!(restored.last_step.as_ref().unwrap().macro_id, 8);
+        assert_eq!(restored.last_step.as_ref().unwrap().label(), "#1 Text");
+        document.macros.retain(|owner| owner.id == 7);
+        let removed = RuntimeInspectorViewModel::from_snapshot(&snapshot, &document);
+        assert!(
+            removed
+                .last_step
+                .as_ref()
+                .unwrap()
+                .label()
+                .contains("unavailable")
+        );
+        assert_eq!(
+            removed.last_step_macro_name.as_deref(),
+            Some("Original child name")
+        );
     }
 
     #[test]

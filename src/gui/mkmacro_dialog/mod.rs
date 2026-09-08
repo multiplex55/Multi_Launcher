@@ -129,7 +129,7 @@ pub struct MkMacroDialog {
     pub runtime_inspector_snapshot: Option<Arc<crate::mkmacro::RuntimeSnapshot>>,
     pub runtime_inspector_is_current_debug_run: bool,
     runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
-    runtime_inspector_active_breakpoint: Option<(u64, u64)>,
+    runtime_inspector_active_breakpoint: Option<crate::mkmacro::BreakpointOccurrence>,
 }
 
 #[cfg(test)]
@@ -3236,8 +3236,24 @@ mod tests {
             run_mode: crate::mkmacro::RuntimeRunMode::Debug,
             run_id,
             macro_id: Some(7),
+            call_stack: Arc::new(vec![crate::mkmacro::ExecutionFrameSnapshot {
+                context: crate::mkmacro::ExecutionFrameContext::root(7),
+                macro_name: Arc::from("Macro 7"),
+                active_step_id: match pause_reason {
+                    Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id, .. }) => {
+                        Some(step_id)
+                    }
+                    _ => None,
+                },
+            }]),
             pause_reason,
+            breakpoint_sequence: u64::from(matches!(
+                pause_reason,
+                Some(crate::mkmacro::RuntimePauseReason::Breakpoint { .. })
+            )),
             debug_snapshot: Some(Arc::new(crate::mkmacro::DebugSnapshot {
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+                macro_name: Arc::from("Macro 7"),
                 step_id: None,
                 variables: variables.clone(),
                 reason,
@@ -3638,11 +3654,22 @@ mod tests {
             2,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 99,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         );
         dialog.observe_runtime_snapshot(Some(breakpoint.clone()));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 99)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 99)
+            })
+        );
 
         dialog.runtime_inspector_open = false;
         let mut newer_breakpoint = (*breakpoint).clone();
@@ -3653,6 +3680,8 @@ mod tests {
         )]));
         let newer_variables = newer_breakpoint.debug_variables.clone();
         newer_breakpoint.debug_snapshot = Some(Arc::new(crate::mkmacro::DebugSnapshot {
+            frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            macro_name: Arc::from("Macro 7"),
             step_id: Some(99),
             variables: newer_variables,
             reason: crate::mkmacro::DebugSnapshotReason::Breakpoint,
@@ -3672,7 +3701,15 @@ mod tests {
                 .get("answer"),
             Some(&crate::mkmacro::MkValue::Number(84.0))
         );
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 99)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 99)
+            })
+        );
 
         dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
             11,
@@ -3689,10 +3726,21 @@ mod tests {
             5,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 99,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         )));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 99)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 99)
+            })
+        );
 
         dialog.runtime_inspector_open = false;
         dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
@@ -3700,10 +3748,21 @@ mod tests {
             6,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 100 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 100,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         )));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 100)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 100)
+            })
+        );
 
         dialog.runtime_inspector_open = false;
         dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
@@ -3711,10 +3770,59 @@ mod tests {
             1,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 100 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 100,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         )));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((12, 100)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 12,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 100)
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_inspector_reopens_for_unobserved_same_frame_breakpoint_reentry() {
+        let (_dir, mut dialog) = dialog();
+        let paused = synthetic_debug_snapshot(
+            18,
+            1,
+            crate::mkmacro::RuntimeState::Paused,
+            crate::mkmacro::DebugSnapshotReason::Breakpoint,
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 99,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
+        );
+        dialog.observe_runtime_snapshot(Some(paused.clone()));
+        assert!(dialog.runtime_inspector_open);
+        dialog.runtime_inspector_open = false;
+        let mut same_pause = (*paused).clone();
+        same_pause.revision += 1;
+        dialog.observe_runtime_snapshot(Some(Arc::new(same_pause.clone())));
+        assert!(!dialog.runtime_inspector_open);
+        let mut reentered = same_pause;
+        reentered.revision += 2;
+        reentered.breakpoint_sequence += 1;
+        dialog.observe_runtime_snapshot(Some(Arc::new(reentered.clone())));
+        assert!(dialog.runtime_inspector_open);
+        dialog.runtime_inspector_open = false;
+        reentered.revision += 1;
+        dialog.observe_runtime_snapshot(Some(Arc::new(reentered.clone())));
+        assert!(!dialog.runtime_inspector_open);
+        // A new invocation of the same macro and step also has a distinct key.
+        let mut frame = crate::mkmacro::ExecutionFrameContext::root(7);
+        frame.frame_id = 4;
+        reentered.pause_reason =
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99, frame });
+        dialog.observe_runtime_snapshot(Some(Arc::new(reentered)));
+        assert!(dialog.runtime_inspector_open);
     }
 }
 impl MkMacroDialog {
@@ -4475,16 +4583,7 @@ impl MkMacroDialog {
                         | crate::mkmacro::RuntimeState::Paused
                         | crate::mkmacro::RuntimeState::Stopping
                 );
-                let breakpoint = if snapshot.state == crate::mkmacro::RuntimeState::Paused {
-                    match snapshot.pause_reason {
-                        Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id }) => {
-                            Some((snapshot.run_id, step_id))
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+                let breakpoint = snapshot.breakpoint_occurrence();
                 if let Some(breakpoint) = breakpoint {
                     if self.runtime_inspector_active_breakpoint != Some(breakpoint) {
                         self.runtime_inspector_open = true;

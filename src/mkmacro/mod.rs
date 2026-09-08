@@ -51,8 +51,9 @@ pub use recorder_hooks::*;
 pub use recorder_runtime::*;
 pub use recorder_windows::*;
 pub use runtime::{
-    CommandResult, DebugSnapshot, DiagnosticKey, MacroRuntime, RuntimeCommand, RuntimePauseReason,
-    RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState,
+    BreakpointOccurrence, CommandResult, CompletedStep, CompletedStepOutcome, DebugSnapshot,
+    DiagnosticKey, MacroDiagnosticKey, MacroRuntime, MacroStepKey, RuntimeCommand,
+    RuntimePauseReason, RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState,
 };
 pub use screen::*;
 pub use store::*;

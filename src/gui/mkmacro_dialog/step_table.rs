@@ -133,12 +133,12 @@ fn active_breakpoint_status(
 ) -> bool {
     state == StepState::Pending
         && runtime.is_some_and(|snapshot| {
-            snapshot.macro_id == Some(displayed_macro_id)
+            snapshot.active_macro_id() == Some(displayed_macro_id)
                 && snapshot.state == RuntimeState::Paused
                 && matches!(
                     snapshot.pause_reason,
-                    Some(RuntimePauseReason::Breakpoint { step_id: paused_step_id })
-                        if paused_step_id == step_id
+                    Some(RuntimePauseReason::Breakpoint { step_id: paused_step_id, frame })
+                        if paused_step_id == step_id && frame.macro_id == displayed_macro_id && snapshot.active_frame() == Some(frame)
                 )
         })
 }
@@ -672,7 +672,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                     });
                     r.col(|ui| {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
-                            (run.macro_id == Some(mid)).then(|| run.steps.get(&s.id)).flatten()
+                            run.macro_steps.get(&crate::mkmacro::MacroStepKey::new(mid, s.id))
                         }) {
                             let active_breakpoint = active_breakpoint_status(
                                 runtime.as_deref(),
@@ -686,13 +686,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                             } else {
                                 runtime
                                     .as_ref()
-                                    .and_then(|run| run.step_outcomes.get(&s.id))
+                                    .and_then(|run| run.macro_step_outcomes.get(&crate::mkmacro::MacroStepKey::new(mid, s.id)))
                                     .and_then(crate::mkmacro::StepOutcome::detail)
                                     .unwrap_or(full)
                             };
                             let response = ui.colored_label(color, label).on_hover_text(detail);
                             if let Some(run) = runtime.as_ref()
-                                && let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id })
+                                && let Some(failure) = run.macro_failures.get(&crate::mkmacro::MacroDiagnosticKey { run_id: run.run_id, step: crate::mkmacro::MacroStepKey::new(mid, s.id) })
                             {
                                 response.on_hover_ui(|ui| {
                                     ui.strong(&failure.message);
@@ -1889,7 +1889,15 @@ mod layout_tests {
         let mut runtime = RuntimeSnapshot {
             state: RuntimeState::Paused,
             macro_id: Some(7),
-            pause_reason: Some(RuntimePauseReason::Breakpoint { step_id: 22 }),
+            call_stack: std::sync::Arc::new(vec![crate::mkmacro::ExecutionFrameSnapshot {
+                context: crate::mkmacro::ExecutionFrameContext::root(7),
+                macro_name: std::sync::Arc::from("Root"),
+                active_step_id: Some(22),
+            }]),
+            pause_reason: Some(RuntimePauseReason::Breakpoint {
+                step_id: 22,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
             ..RuntimeSnapshot::default()
         };
         assert!(active_breakpoint_status(
@@ -1921,7 +1929,10 @@ mod layout_tests {
             22,
             StepState::Pending
         ));
-        runtime.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id: 22 });
+        runtime.pause_reason = Some(RuntimePauseReason::Breakpoint {
+            step_id: 22,
+            frame: crate::mkmacro::ExecutionFrameContext::root(7),
+        });
         runtime.state = RuntimeState::Running;
         assert!(!active_breakpoint_status(
             Some(&runtime),

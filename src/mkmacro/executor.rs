@@ -107,9 +107,36 @@ pub struct ExecutionFrameContext {
     pub depth: usize,
 }
 
+impl ExecutionFrameContext {
+    pub const fn root(macro_id: u64) -> Self {
+        Self {
+            frame_id: 1,
+            macro_id,
+            caller_step_id: None,
+            depth: 1,
+        }
+    }
+}
+
+/// Owned metadata for one live invocation. Names come from the compiled plan
+/// once per frame; publishing step changes never consults the live document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionFrameSnapshot {
+    pub context: ExecutionFrameContext,
+    pub macro_name: Arc<str>,
+    pub active_step_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameVariableBoundary {
+    pub step_id: Option<u64>,
+    pub variables: RuntimeVariables,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugSnapshotReason {
     RunStarted,
+    FrameRestored,
     Breakpoint,
     StepBoundary,
     RunFinished,
@@ -917,6 +944,10 @@ impl Drop for RunActivityGuard<'_> {
 }
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {
+    FrameEntered(ExecutionFrameSnapshot),
+    FrameExited {
+        caller_boundary: Option<FrameVariableBoundary>,
+    },
     /// A debugger breakpoint has paused execution before the step starts.
     BreakpointHit {
         step_id: u64,

@@ -3,8 +3,8 @@
 pub use super::executor::DebugSnapshotReason;
 use super::executor::{
     Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent,
-    ExecutionFrameContext, ExecutionMode, ExecutionOptions, Executor, RunControl, StepOutcome,
-    production_backends_with_store,
+    ExecutionFrameContext, ExecutionFrameSnapshot, ExecutionMode, ExecutionOptions, Executor,
+    RunControl, StepOutcome, production_backends_with_store,
 };
 use super::{
     MkInvocation, MkInvocationSubset, MkInvocationValues, MkMacroStore, MkValue,
@@ -109,10 +109,15 @@ pub enum RuntimeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimePauseReason {
     User,
-    Breakpoint { step_id: u64 },
+    Breakpoint {
+        step_id: u64,
+        frame: ExecutionFrameContext,
+    },
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DebugSnapshot {
+    pub frame: ExecutionFrameContext,
+    pub macro_name: Arc<str>,
     /// The last immutable variable map published by a Debug execution
     /// boundary. This is always owned by the snapshot and never aliases the
     /// executor's worker-local map.
@@ -133,17 +138,61 @@ pub struct DiagnosticKey {
     pub run_id: u64,
     pub step_id: u64,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MacroStepKey {
+    pub macro_id: u64,
+    pub step_id: u64,
+}
+impl MacroStepKey {
+    pub const fn new(macro_id: u64, step_id: u64) -> Self {
+        Self { macro_id, step_id }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MacroDiagnosticKey {
+    pub run_id: u64,
+    pub step: MacroStepKey,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreakpointOccurrence {
+    pub run_id: u64,
+    pub occurrence: u64,
+    pub frame_id: u64,
+    pub step: MacroStepKey,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletedStepOutcome {
+    Success(Option<StepOutcome>),
+    Failure(ExecutionDiagnostic),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedStep {
+    pub frame: ExecutionFrameContext,
+    pub key: MacroStepKey,
+    pub macro_name: Arc<str>,
+    pub outcome: CompletedStepOutcome,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
     pub state: RuntimeState,
     pub run_mode: RuntimeRunMode,
     pub run_id: u64,
+    /// Root invocation identity, preserved for compatibility.
     pub macro_id: Option<u64>,
+    pub root_macro_name: Option<Arc<str>>,
+    /// Current root step; callees have their own authoritative stack identity.
     pub step_id: Option<u64>,
-    /// Identity of the most recent execution event. Legacy step/debug maps below
-    /// remain root projections; callee events must not overwrite colliding IDs.
-    pub last_event_frame: Option<ExecutionFrameContext>,
+    pub call_stack: Arc<Vec<ExecutionFrameSnapshot>>,
+    pub macro_steps: Arc<BTreeMap<MacroStepKey, StepState>>,
+    pub macro_step_outcomes: Arc<BTreeMap<MacroStepKey, StepOutcome>>,
+    pub macro_failures: Arc<BTreeMap<MacroDiagnosticKey, ExecutionDiagnostic>>,
+    /// This result belongs to an invocation occurrence, independently of maps
+    /// reset when the same callee is invoked again or its frame is popped.
+    pub last_completed: Option<Arc<CompletedStep>>,
     pub pause_reason: Option<RuntimePauseReason>,
+    /// Advances once per executor BreakpointHit, not per snapshot publication.
+    pub breakpoint_sequence: u64,
     /// The most recently published Debug boundary for this run. `None` means
     /// that this run has not published debug data, which is the defined state
     /// for Normal playback, including a manually paused Normal run.
@@ -155,7 +204,7 @@ pub struct RuntimeSnapshot {
     pub debug_variables_step_id: Option<u64>,
     /// Reason associated with `debug_variables`, if a Debug event was seen.
     pub debug_snapshot_reason: Option<DebugSnapshotReason>,
-    /// The last step that reached a terminal outcome. A skipped step is not
+    /// Root-only projection of the last terminal step. A skipped step is not
     /// considered completed because it did not execute.
     pub last_completed_step_id: Option<u64>,
     pub completed_steps: usize,
@@ -163,7 +212,7 @@ pub struct RuntimeSnapshot {
     pub started_at: Option<SystemTime>,
     pub finished_at: Option<SystemTime>,
     pub latest_failure: Option<ExecutionDiagnostic>,
-    /// Transient results, deliberately held outside the persisted macro document.
+    /// Legacy root-only projections of the authoritative compound maps above.
     pub failures: Arc<BTreeMap<DiagnosticKey, ExecutionDiagnostic>>,
     pub steps: Arc<BTreeMap<u64, StepState>>,
     pub step_outcomes: Arc<BTreeMap<u64, StepOutcome>>,
@@ -176,9 +225,15 @@ impl Default for RuntimeSnapshot {
             run_mode: RuntimeRunMode::Normal,
             run_id: 0,
             macro_id: None,
+            root_macro_name: None,
             step_id: None,
-            last_event_frame: None,
+            call_stack: Arc::new(Vec::new()),
+            macro_steps: Arc::new(BTreeMap::new()),
+            macro_step_outcomes: Arc::new(BTreeMap::new()),
+            macro_failures: Arc::new(BTreeMap::new()),
+            last_completed: None,
             pause_reason: None,
+            breakpoint_sequence: 0,
             debug_snapshot: None,
             debug_variables: Arc::new(BTreeMap::new()),
             debug_variables_step_id: None,
@@ -196,6 +251,33 @@ impl Default for RuntimeSnapshot {
         }
     }
 }
+impl RuntimeSnapshot {
+    pub fn active_frame(&self) -> Option<ExecutionFrameContext> {
+        self.call_stack.last().map(|frame| frame.context)
+    }
+    pub fn active_macro_id(&self) -> Option<u64> {
+        self.active_frame().map(|frame| frame.macro_id)
+    }
+    pub fn active_step_id(&self) -> Option<u64> {
+        self.call_stack
+            .last()
+            .and_then(|frame| frame.active_step_id)
+    }
+    pub fn breakpoint_occurrence(&self) -> Option<BreakpointOccurrence> {
+        match (self.state, self.pause_reason) {
+            (RuntimeState::Paused, Some(RuntimePauseReason::Breakpoint { step_id, frame })) => {
+                Some(BreakpointOccurrence {
+                    run_id: self.run_id,
+                    occurrence: self.breakpoint_sequence,
+                    frame_id: frame.frame_id,
+                    step: MacroStepKey::new(frame.macro_id, step_id),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResult {
     Accepted,
@@ -266,9 +348,10 @@ impl MacroRuntime {
         let mut admission = self.shared.admission.lock().unwrap();
         let active = admission.is_some();
         let state = self.snapshot().state;
+        let stopped = self.shared.control.is_stopped();
         let wrong_state = match &c {
-            RuntimeCommand::Pause => !active || state == RuntimeState::Paused,
-            RuntimeCommand::Resume => !active || state != RuntimeState::Paused,
+            RuntimeCommand::Pause => !active || stopped || state == RuntimeState::Paused,
+            RuntimeCommand::Resume => !active || stopped || state != RuntimeState::Paused,
             RuntimeCommand::Stop => !active,
             _ => false,
         };
@@ -355,11 +438,266 @@ impl Drop for MacroRuntime {
 }
 
 fn publish(shared: &Shared, f: impl FnOnce(&mut RuntimeSnapshot)) {
-    let old = shared.snapshot.read().unwrap().as_ref().clone();
-    let mut n = old;
-    f(&mut n);
-    n.revision += 1;
-    *shared.snapshot.write().unwrap() = Arc::new(n)
+    // One owner serializes the transformation, not just the final replacement.
+    // Callers must acquire admission/control before entering this boundary.
+    let mut current = shared.snapshot.write().unwrap();
+    let next = Arc::make_mut(&mut current);
+    f(next);
+    next.revision += 1;
+}
+
+fn controlled_state(control: &RunControl) -> RuntimeState {
+    if control.is_stopped() {
+        RuntimeState::Stopping
+    } else if control.is_paused() {
+        RuntimeState::Paused
+    } else {
+        RuntimeState::Running
+    }
+}
+
+fn frame_name(snapshot: &RuntimeSnapshot, context: ExecutionFrameContext) -> Arc<str> {
+    snapshot
+        .call_stack
+        .last()
+        .filter(|frame| frame.context == context)
+        .map(|frame| frame.macro_name.clone())
+        .unwrap_or_else(|| Arc::from(format!("Macro #{}", context.macro_id)))
+}
+
+fn clear_debug_variables(snapshot: &mut RuntimeSnapshot) {
+    if snapshot.debug_snapshot.is_none()
+        && snapshot.debug_variables.is_empty()
+        && snapshot.debug_variables_step_id.is_none()
+        && snapshot.debug_snapshot_reason.is_none()
+    {
+        return;
+    }
+    snapshot.debug_snapshot = None;
+    snapshot.debug_variables = Arc::new(BTreeMap::new());
+    snapshot.debug_variables_step_id = None;
+    snapshot.debug_snapshot_reason = None;
+}
+
+fn publish_debug_variables(
+    snapshot: &mut RuntimeSnapshot,
+    frame: ExecutionFrameContext,
+    step_id: Option<u64>,
+    variables: RuntimeVariables,
+    reason: DebugSnapshotReason,
+) {
+    let variables = Arc::new(variables);
+    snapshot.debug_snapshot = Some(Arc::new(DebugSnapshot {
+        frame,
+        macro_name: frame_name(snapshot, frame),
+        step_id,
+        variables: variables.clone(),
+        reason,
+    }));
+    snapshot.debug_variables = variables;
+    snapshot.debug_variables_step_id = step_id;
+    snapshot.debug_snapshot_reason = Some(reason);
+}
+
+fn set_step_state(
+    snapshot: &mut RuntimeSnapshot,
+    frame: ExecutionFrameContext,
+    step_id: u64,
+    state: StepState,
+) {
+    Arc::make_mut(&mut snapshot.macro_steps)
+        .insert(MacroStepKey::new(frame.macro_id, step_id), state);
+    if frame.depth == 1 {
+        Arc::make_mut(&mut snapshot.steps).insert(step_id, state);
+    }
+}
+
+fn set_active_step(snapshot: &mut RuntimeSnapshot, context: ExecutionFrameContext, step_id: u64) {
+    if let Some(frame) = snapshot.call_stack.last() {
+        if frame.context == context && frame.active_step_id != Some(step_id) {
+            Arc::make_mut(&mut snapshot.call_stack)
+                .last_mut()
+                .unwrap()
+                .active_step_id = Some(step_id);
+        }
+    }
+    if context.depth == 1 {
+        snapshot.step_id = Some(step_id);
+    }
+}
+
+fn complete_step(
+    snapshot: &mut RuntimeSnapshot,
+    context: ExecutionFrameContext,
+    step_id: u64,
+    outcome: CompletedStepOutcome,
+) {
+    snapshot.last_completed = Some(Arc::new(CompletedStep {
+        frame: context,
+        key: MacroStepKey::new(context.macro_id, step_id),
+        macro_name: frame_name(snapshot, context),
+        outcome,
+    }));
+    if context.depth == 1 {
+        snapshot.last_completed_step_id = Some(step_id);
+    }
+}
+
+fn apply_execution_event(
+    snapshot: &mut RuntimeSnapshot,
+    program: &super::MkCompiledProgram,
+    context: ExecutionFrameContext,
+    event: ExecutionEvent,
+    control_state: RuntimeState,
+) {
+    snapshot.state = control_state;
+    if control_state != RuntimeState::Paused {
+        snapshot.pause_reason = None;
+    } else if snapshot.pause_reason.is_none() {
+        snapshot.pause_reason = Some(RuntimePauseReason::User);
+    }
+    match event {
+        ExecutionEvent::FrameEntered(frame) => {
+            if context.depth == 1 {
+                snapshot.root_macro_name = Some(frame.macro_name.clone());
+            }
+            Arc::make_mut(&mut snapshot.call_stack).push(frame);
+            clear_debug_variables(snapshot);
+            // Only frame entry consults the immutable program. Repeated calls
+            // reset current row state without altering the last completed record.
+            if let Some(plan) = program.plan(context.macro_id) {
+                Arc::make_mut(&mut snapshot.macro_steps)
+                    .retain(|key, _| key.macro_id != context.macro_id);
+                Arc::make_mut(&mut snapshot.macro_step_outcomes)
+                    .retain(|key, _| key.macro_id != context.macro_id);
+                Arc::make_mut(&mut snapshot.macro_failures)
+                    .retain(|key, _| key.step.macro_id != context.macro_id);
+                for instruction in plan.instructions.iter() {
+                    set_step_state(
+                        snapshot,
+                        context,
+                        instruction.step.id,
+                        if instruction.step.enabled {
+                            StepState::Pending
+                        } else {
+                            StepState::Skipped
+                        },
+                    );
+                }
+            }
+        }
+        ExecutionEvent::FrameExited { caller_boundary } => {
+            if snapshot
+                .call_stack
+                .last()
+                .is_some_and(|frame| frame.context == context)
+            {
+                Arc::make_mut(&mut snapshot.call_stack).pop();
+            }
+            if let Some(caller) = snapshot.active_frame() {
+                if caller.depth == 1 {
+                    snapshot.step_id = snapshot.active_step_id();
+                }
+                if let Some(boundary) = caller_boundary {
+                    publish_debug_variables(
+                        snapshot,
+                        caller,
+                        boundary.step_id,
+                        boundary.variables,
+                        DebugSnapshotReason::FrameRestored,
+                    );
+                } else {
+                    clear_debug_variables(snapshot);
+                }
+            }
+        }
+        ExecutionEvent::BreakpointHit { step_id, variables } => {
+            snapshot.breakpoint_sequence += 1;
+            set_active_step(snapshot, context, step_id);
+            set_step_state(snapshot, context, step_id, StepState::Pending);
+            if control_state == RuntimeState::Paused {
+                snapshot.pause_reason = Some(RuntimePauseReason::Breakpoint {
+                    step_id,
+                    frame: context,
+                });
+            }
+            publish_debug_variables(
+                snapshot,
+                context,
+                Some(step_id),
+                variables,
+                DebugSnapshotReason::Breakpoint,
+            );
+        }
+        ExecutionEvent::DebugVariables {
+            step_id,
+            variables,
+            reason,
+        } => {
+            publish_debug_variables(snapshot, context, step_id, variables, reason);
+        }
+        ExecutionEvent::StepStarted(step_id) => {
+            set_active_step(snapshot, context, step_id);
+            set_step_state(snapshot, context, step_id, StepState::Running);
+        }
+        ExecutionEvent::StepFinished(step_id) => {
+            set_step_state(snapshot, context, step_id, StepState::Success);
+            if context.depth == 1 {
+                snapshot.completed_steps += 1;
+            }
+            let outcome = snapshot
+                .macro_step_outcomes
+                .get(&MacroStepKey::new(context.macro_id, step_id))
+                .cloned();
+            complete_step(
+                snapshot,
+                context,
+                step_id,
+                CompletedStepOutcome::Success(outcome),
+            );
+        }
+        ExecutionEvent::StepOutcome(step_id, outcome) => {
+            Arc::make_mut(&mut snapshot.macro_step_outcomes).insert(
+                MacroStepKey::new(context.macro_id, step_id),
+                outcome.clone(),
+            );
+            if context.depth == 1 {
+                Arc::make_mut(&mut snapshot.step_outcomes).insert(step_id, outcome);
+            }
+        }
+        ExecutionEvent::StepSkipped(step_id) => {
+            set_step_state(snapshot, context, step_id, StepState::Skipped)
+        }
+        ExecutionEvent::StepFailed(step_id, diagnostic) => {
+            set_step_state(snapshot, context, step_id, StepState::Failed);
+            snapshot.latest_failure = Some(diagnostic.clone());
+            Arc::make_mut(&mut snapshot.macro_failures).insert(
+                MacroDiagnosticKey {
+                    run_id: snapshot.run_id,
+                    step: MacroStepKey::new(context.macro_id, step_id),
+                },
+                diagnostic.clone(),
+            );
+            if context.depth == 1 {
+                Arc::make_mut(&mut snapshot.failures).insert(
+                    DiagnosticKey {
+                        run_id: snapshot.run_id,
+                        step_id,
+                    },
+                    diagnostic.clone(),
+                );
+            }
+            complete_step(
+                snapshot,
+                context,
+                step_id,
+                CompletedStepOutcome::Failure(diagnostic),
+            );
+        }
+        ExecutionEvent::Paused | ExecutionEvent::Resumed => {
+            // Shared control, read before publication, is authoritative.
+        }
+    }
 }
 
 fn publish_manual_pause(shared: &Shared) {
@@ -367,17 +705,16 @@ fn publish_manual_pause(shared: &Shared) {
 }
 
 fn set_manual_pause(snapshot: &mut RuntimeSnapshot) {
+    if snapshot.state == RuntimeState::Stopping {
+        return;
+    }
     snapshot.state = RuntimeState::Paused;
     // BreakpointHit is the authoritative pause event. A Pause command can
     // already be queued when that event arrives, so manual pause updates
     // must not downgrade the reason while still stopped at that breakpoint.
-    let stopped_at_breakpoint = matches!(
-        (snapshot.pause_reason, snapshot.step_id),
-        (
-            Some(RuntimePauseReason::Breakpoint { step_id }),
-            Some(current_step_id)
-        ) if step_id == current_step_id
-    );
+    let stopped_at_breakpoint = matches!(snapshot.pause_reason,
+        Some(RuntimePauseReason::Breakpoint { step_id, frame })
+            if snapshot.active_frame() == Some(frame) && snapshot.active_step_id() == Some(step_id));
     if !stopped_at_breakpoint {
         snapshot.pause_reason = Some(RuntimePauseReason::User);
     }
@@ -497,147 +834,39 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 "Compiled program root is missing",
             )
         })?;
-        let states = plan
-            .instructions
-            .iter()
-            .map(|x| {
-                (
-                    x.step.id,
-                    if x.step.enabled {
-                        StepState::Pending
-                    } else {
-                        StepState::Skipped
-                    },
-                )
-            })
-            .collect();
         let admission = shared.admission.lock().unwrap();
+        let state = controlled_state(&shared.control);
         publish(shared, |s| {
-            s.state = if shared.control.is_stopped() {
-                RuntimeState::Stopping
-            } else if shared.control.is_paused() {
-                RuntimeState::Paused
-            } else {
-                RuntimeState::Running
+            *s = RuntimeSnapshot {
+                state,
+                run_mode: mode,
+                run_id,
+                macro_id: Some(mid),
+                pause_reason: (state == RuntimeState::Paused).then_some(RuntimePauseReason::User),
+                total_steps: plan.instructions.iter().filter(|x| x.step.enabled).count(),
+                started_at: Some(SystemTime::now()),
+                revision: s.revision,
+                ..RuntimeSnapshot::default()
             };
-            s.run_mode = mode;
-            s.run_id = run_id;
-            s.macro_id = Some(mid);
-            s.step_id = None;
-            s.last_event_frame = None;
-            s.pause_reason = (s.state == RuntimeState::Paused).then_some(RuntimePauseReason::User);
-            s.debug_snapshot = None;
-            s.debug_variables = Arc::new(BTreeMap::new());
-            s.debug_variables_step_id = None;
-            s.debug_snapshot_reason = None;
-            s.last_completed_step_id = None;
-            s.completed_steps = 0;
-            s.total_steps = plan.instructions.iter().filter(|x| x.step.enabled).count();
-            s.started_at = Some(SystemTime::now());
-            s.finished_at = None;
-            s.latest_failure = None;
-            s.failures = Arc::new(BTreeMap::new());
-            s.steps = Arc::new(states);
-            s.step_outcomes = Arc::new(BTreeMap::new())
         });
         drop(admission);
-        let observer = |context: ExecutionFrameContext, ev: ExecutionEvent| {
-            if context.macro_id != mid {
-                // Full frame-aware debugger projections arrive with the Inspector.
-                // Until then retain truthful root maps/locals and identify the
-                // child event separately. A child breakpoint still pauses control.
-                publish(shared, |s| {
-                    s.last_event_frame = Some(context);
-                    if matches!(ev, ExecutionEvent::BreakpointHit { .. }) {
-                        s.state = RuntimeState::Paused;
-                        s.pause_reason = Some(RuntimePauseReason::User);
-                    }
-                });
-                return;
-            }
+        let observer = |context: ExecutionFrameContext, event: ExecutionEvent| {
             #[cfg(test)]
-            shared.test_events.lock().unwrap().push(ev.clone());
-            publish(shared, |s| {
-                s.last_event_frame = Some(context);
-                match ev {
-                    ExecutionEvent::BreakpointHit { step_id, variables } => {
-                        let variables = Arc::new(variables);
-                        s.state = RuntimeState::Paused;
-                        s.step_id = Some(step_id);
-                        s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
-                        s.debug_variables = variables.clone();
-                        s.debug_variables_step_id = Some(step_id);
-                        s.debug_snapshot_reason = Some(DebugSnapshotReason::Breakpoint);
-                        s.debug_snapshot = Some(Arc::new(DebugSnapshot {
-                            step_id: Some(step_id),
-                            variables,
-                            reason: DebugSnapshotReason::Breakpoint,
-                        }));
-                    }
-                    ExecutionEvent::DebugVariables {
-                        step_id,
-                        variables,
-                        reason,
-                    } => {
-                        let variables = Arc::new(variables);
-                        if reason == DebugSnapshotReason::Breakpoint
-                            && let Some(step_id) = step_id
-                        {
-                            s.state = RuntimeState::Paused;
-                            s.step_id = Some(step_id);
-                            s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
-                        }
-                        s.debug_variables = variables.clone();
-                        s.debug_variables_step_id = step_id;
-                        s.debug_snapshot_reason = Some(reason);
-                        s.debug_snapshot = Some(Arc::new(DebugSnapshot {
-                            step_id,
-                            variables,
-                            reason,
-                        }));
-                    }
-                    ExecutionEvent::StepStarted(id) => {
-                        s.step_id = Some(id);
-                        Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
-                    }
-                    ExecutionEvent::StepFinished(id) => {
-                        s.completed_steps += 1;
-                        s.last_completed_step_id = Some(id);
-                        Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
-                    }
-                    ExecutionEvent::StepOutcome(id, outcome) => {
-                        Arc::make_mut(&mut s.step_outcomes).insert(id, outcome);
-                    }
-                    ExecutionEvent::StepSkipped(id) => {
-                        // Skipped steps are intentionally excluded from
-                        // last_completed_step_id: no terminal execution outcome
-                        // was produced for them.
-                        Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
-                    }
-                    ExecutionEvent::StepFailed(id, d) => {
-                        // A failed attempt is terminal for the step, including
-                        // Continue policies, so it is the latest completed
-                        // outcome for correlation with failures.
-                        s.last_completed_step_id = Some(id);
-                        s.latest_failure = Some(d.clone());
-                        Arc::make_mut(&mut s.failures).insert(
-                            DiagnosticKey {
-                                run_id,
-                                step_id: id,
-                            },
-                            d,
-                        );
-                        Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
-                    }
-                    ExecutionEvent::Paused => {
-                        set_manual_pause(s);
-                    }
-                    ExecutionEvent::Resumed => {
-                        s.state = RuntimeState::Running;
-                        s.pause_reason = None;
-                    }
-                }
-            })
+            if context.depth == 1
+                && !matches!(
+                    event,
+                    ExecutionEvent::FrameEntered(_) | ExecutionEvent::FrameExited { .. }
+                )
+            {
+                shared.test_events.lock().unwrap().push(event.clone());
+            }
+            // Serialize state decisions with control commands. Read control
+            // before snapshot publication to preserve the single lock order.
+            let _admission = shared.admission.lock().unwrap();
+            let state = controlled_state(&shared.control);
+            publish(shared, |snapshot| {
+                apply_execution_event(snapshot, &program, context, event, state)
+            });
         };
         let executor = Executor::new(backends.clone(), shared.control.clone());
         let options = match mode {
@@ -669,6 +898,7 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
         .context("macro_id", mid.to_string()))
     });
     run_guard.complete(|| {
+        let stopped = shared.control.is_stopped();
         publish(shared, |s| {
             // Failed preparation still belongs to this admitted run, rather
             // than retaining the identity/status maps of an earlier macro.
@@ -682,12 +912,32 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 };
             }
             match result {
-                Ok(()) => s.state = RuntimeState::Completed,
+                Ok(()) => {
+                    s.state = if stopped {
+                        RuntimeState::Stopped
+                    } else {
+                        RuntimeState::Completed
+                    }
+                }
                 Err(d) if d.kind == DiagnosticKind::Cancelled => s.state = RuntimeState::Stopped,
                 Err(d) => {
                     s.state = RuntimeState::Failed;
                     s.latest_failure = Some(d);
                 }
+            }
+            // A panic can bypass frame-exit events. Terminal snapshots have no
+            // active stack, while the last captured Debug identity stays owned.
+            if !s.call_stack.is_empty() {
+                s.call_stack = Arc::new(Vec::new());
+            }
+            let reason = match s.state {
+                RuntimeState::Completed => DebugSnapshotReason::RunFinished,
+                RuntimeState::Stopped => DebugSnapshotReason::RunCancelled,
+                _ => DebugSnapshotReason::RunFailed,
+            };
+            if let Some(debug) = &mut s.debug_snapshot {
+                Arc::make_mut(debug).reason = reason;
+                s.debug_snapshot_reason = Some(reason);
             }
             s.step_id = None;
             s.pause_reason = None;
@@ -1217,6 +1467,410 @@ mod run_mode_tests {
         }
     }
 
+    #[test]
+    fn frame_debugger_nested_same_ids_resume_stop_and_normal_mode() {
+        use super::super::{
+            MkCallMacroPayload, MkKey, MkMacroParameter, MkSignatureId, MkValueType,
+        };
+        for (mode, stop_at_breakpoint) in [
+            (ExecutionMode::Debug, false),
+            (ExecutionMode::Debug, true),
+            (ExecutionMode::Normal, false),
+        ] {
+            let text = |value: &str| {
+                MkAction::Text(MkTextPayload {
+                    text: value.into(),
+                    mode: MkTextMode::Type,
+                })
+            };
+            let set = |value: &str| MkAction::SetVariable {
+                name: "which".into(),
+                value: MkValue::String(value.into()),
+            };
+            let call = |id| {
+                MkAction::CallMacro(MkCallMacroPayload {
+                    macro_id: id,
+                    ..Default::default()
+                })
+            };
+            let root = test_macro(
+                1,
+                true,
+                vec![
+                    step(1, set("root")),
+                    step(4, MkAction::KeyDown(MkKey::Control)),
+                    step(2, call(2)),
+                    step(3, text("after:${which}")),
+                ],
+            );
+            let child = test_macro(
+                2,
+                true,
+                vec![
+                    step(1, set("child")),
+                    step(2, call(3)),
+                    step(3, text("after:${which}")),
+                ],
+            );
+            let mut leaf_step = step(1, text("${which}:${macro.name}"));
+            leaf_step.breakpoint = true;
+            let mut leaf = test_macro(3, true, vec![leaf_step]);
+            leaf.signature.parameters.push(MkMacroParameter {
+                id: MkSignatureId(1),
+                name: "which".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+                default_value: Some(MkValue::String("leaf".into())),
+            });
+            let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![root, child, leaf]);
+            let mut invocation = MkInvocation::new(1);
+            invocation.mode = mode;
+            assert_eq!(
+                runtime.command(RuntimeCommand::Invoke(invocation)),
+                CommandResult::Accepted
+            );
+            if mode == ExecutionMode::Debug {
+                let paused = wait_for_state(&runtime, RuntimeState::Paused);
+                assert_eq!(paused.macro_id, Some(1));
+                assert_eq!(paused.step_id, Some(2));
+                assert_eq!(paused.active_macro_id(), Some(3));
+                assert_eq!(paused.active_step_id(), Some(1));
+                assert_eq!(
+                    paused
+                        .call_stack
+                        .iter()
+                        .map(|frame| (
+                            frame.context.macro_id,
+                            frame.context.frame_id,
+                            frame.context.depth,
+                            frame.context.caller_step_id
+                        ))
+                        .collect::<Vec<_>>(),
+                    [(1, 1, 1, None), (2, 2, 2, Some(2)), (3, 3, 3, Some(2))]
+                );
+                assert_eq!(
+                    paused
+                        .call_stack
+                        .iter()
+                        .map(|frame| frame.macro_name.as_ref())
+                        .collect::<Vec<_>>(),
+                    ["macro 1", "macro 2", "macro 3"]
+                );
+                assert_eq!(paused.call_stack[0].active_step_id, Some(2));
+                assert_eq!(
+                    paused.macro_steps[&MacroStepKey::new(1, 1)],
+                    StepState::Success
+                );
+                assert_eq!(
+                    paused.macro_steps[&MacroStepKey::new(3, 1)],
+                    StepState::Pending
+                );
+                let debug = paused.debug_snapshot.as_ref().unwrap();
+                assert_eq!(debug.frame.frame_id, 3);
+                assert_eq!(debug.frame.macro_id, 3);
+                assert_eq!(debug.variables["which"], MkValue::String("leaf".into()));
+                assert_eq!(
+                    debug.variables["macro.name"],
+                    MkValue::String("macro 3".into())
+                );
+                assert_eq!(
+                    paused.breakpoint_occurrence().unwrap().step,
+                    MacroStepKey::new(3, 1)
+                );
+                assert_eq!(fake.events(), ["key_down:Control"]);
+                assert_eq!(
+                    runtime.command(if stop_at_breakpoint {
+                        RuntimeCommand::Stop
+                    } else {
+                        RuntimeCommand::Resume
+                    }),
+                    CommandResult::Accepted
+                );
+            }
+            let done = wait_for_terminal(&runtime);
+            assert_eq!(
+                done.state,
+                if stop_at_breakpoint {
+                    RuntimeState::Stopped
+                } else {
+                    RuntimeState::Completed
+                }
+            );
+            assert!(done.call_stack.is_empty());
+            assert_eq!(done.active_frame(), None);
+            if stop_at_breakpoint {
+                assert_eq!(fake.events(), ["key_down:Control", "key_up:Control"]);
+            } else {
+                assert_eq!(
+                    fake.events(),
+                    [
+                        "key_down:Control",
+                        "text:leaf:macro 3",
+                        "text:after:child",
+                        "text:after:root",
+                        "key_up:Control"
+                    ]
+                );
+            }
+            if mode == ExecutionMode::Normal {
+                assert!(done.debug_snapshot.is_none());
+                assert!(done.debug_variables.is_empty());
+            } else {
+                assert_eq!(done.debug_snapshot.as_ref().unwrap().frame.macro_id, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_debugger_snapshot_publication_is_atomic_and_monotonic() {
+        let (_dir, runtime, _guard) = runtime_with(vec![]);
+        let before = runtime.snapshot();
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                let shared = &runtime.shared;
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        publish(shared, |snapshot| {
+                            snapshot.completed_steps += 1;
+                            snapshot.total_steps += 1;
+                        });
+                    }
+                });
+            }
+        });
+        let after = runtime.snapshot();
+        assert_eq!(after.revision, before.revision + 600);
+        assert_eq!((after.completed_steps, after.total_steps), (600, 600));
+        assert_eq!(
+            (before.completed_steps, before.total_steps, before.revision),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn frame_debugger_stop_precedes_pause_resume_while_action_is_pending() {
+        let gate = Arc::new(ControllablePromptBackend::default());
+        let mut backends = Arc::new(FakeBackend::default()).backends();
+        backends.prompt = gate.clone();
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::PromptInput(MkPromptInputPayload {
+                    variable: "answer".into(),
+                    ..Default::default()
+                }),
+            )],
+        );
+        let (_dir, runtime, _guard) = runtime_with_backends(vec![target], backends);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        gate.wait_until_entered();
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(runtime.snapshot().state, RuntimeState::Stopping);
+        for command in [RuntimeCommand::Pause, RuntimeCommand::Resume] {
+            assert!(matches!(
+                runtime.command(command),
+                CommandResult::Rejected(_)
+            ));
+            assert_eq!(runtime.snapshot().state, RuntimeState::Stopping);
+        }
+        assert!(runtime.shared.control.is_stopped());
+        gate.release();
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Stopped);
+    }
+
+    #[test]
+    fn frame_debugger_restores_caller_and_preserves_previous_invocation_outcome() {
+        use super::super::{FrameVariableBoundary, MkCallMacroPayload};
+        let root = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::CallMacro(MkCallMacroPayload {
+                    macro_id: 2,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let child = test_macro(
+            2,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "child".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+        let program = compile_program(
+            &MkMacroDocument {
+                macros: vec![root, child],
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+        let root_context = ExecutionFrameContext::root(1);
+        let child_context = ExecutionFrameContext {
+            frame_id: 2,
+            macro_id: 2,
+            caller_step_id: Some(1),
+            depth: 2,
+        };
+        let metadata = |context: ExecutionFrameContext| ExecutionFrameSnapshot {
+            context,
+            macro_name: Arc::from(program.name(context.macro_id).unwrap()),
+            active_step_id: None,
+        };
+        let mut snapshot = RuntimeSnapshot {
+            macro_id: Some(1),
+            run_id: 9,
+            run_mode: RuntimeRunMode::Debug,
+            ..Default::default()
+        };
+        let apply = |snapshot: &mut RuntimeSnapshot, context, event| {
+            apply_execution_event(snapshot, &program, context, event, RuntimeState::Running)
+        };
+        apply(
+            &mut snapshot,
+            root_context,
+            ExecutionEvent::FrameEntered(metadata(root_context)),
+        );
+        apply(&mut snapshot, root_context, ExecutionEvent::StepStarted(1));
+        apply(
+            &mut snapshot,
+            child_context,
+            ExecutionEvent::FrameEntered(metadata(child_context)),
+        );
+        let failure = ExecutionDiagnostic::new(DiagnosticKind::Backend, "first invocation failed");
+        apply(
+            &mut snapshot,
+            child_context,
+            ExecutionEvent::StepFailed(1, failure.clone()),
+        );
+        let completed = snapshot.last_completed.clone().unwrap();
+        let prior_snapshot = snapshot.clone();
+        apply(
+            &mut snapshot,
+            child_context,
+            ExecutionEvent::FrameExited {
+                caller_boundary: Some(FrameVariableBoundary {
+                    step_id: None,
+                    variables: [("caller".into(), MkValue::String("safe parent".into()))]
+                        .into_iter()
+                        .collect(),
+                }),
+            },
+        );
+        assert_eq!(snapshot.active_frame(), Some(root_context));
+        assert_eq!(snapshot.active_step_id(), Some(1));
+        let debug = snapshot.debug_snapshot.as_ref().unwrap();
+        assert_eq!(debug.frame, root_context);
+        assert_eq!(debug.reason, DebugSnapshotReason::FrameRestored);
+        assert_eq!(
+            debug.variables["caller"],
+            MkValue::String("safe parent".into())
+        );
+        let next_child = ExecutionFrameContext {
+            frame_id: 3,
+            ..child_context
+        };
+        apply(
+            &mut snapshot,
+            next_child,
+            ExecutionEvent::FrameEntered(metadata(next_child)),
+        );
+        assert!(snapshot.debug_snapshot.is_none());
+        assert!(snapshot.debug_variables.is_empty());
+        assert_eq!(
+            snapshot.macro_steps[&MacroStepKey::new(2, 1)],
+            StepState::Pending
+        );
+        assert!(!snapshot.macro_failures.contains_key(&MacroDiagnosticKey {
+            run_id: 9,
+            step: MacroStepKey::new(2, 1)
+        }));
+        assert_eq!(snapshot.last_completed.as_ref().unwrap().frame.frame_id, 2);
+        assert_eq!(completed.outcome, CompletedStepOutcome::Failure(failure));
+        assert_eq!(prior_snapshot.active_frame(), Some(child_context));
+        assert_eq!(
+            prior_snapshot.macro_steps[&MacroStepKey::new(2, 1)],
+            StepState::Failed
+        );
+        apply(&mut snapshot, next_child, ExecutionEvent::StepFinished(1));
+        assert_eq!(snapshot.last_completed.as_ref().unwrap().frame.frame_id, 3);
+        assert!(matches!(
+            completed.outcome,
+            CompletedStepOutcome::Failure(_)
+        ));
+    }
+
+    #[test]
+    fn frame_debugger_stale_breakpoint_publication_cannot_reverse_stop_or_resume() {
+        let program = compile_program(
+            &MkMacroDocument {
+                macros: vec![test_macro(
+                    1,
+                    true,
+                    vec![step(1, MkAction::Delay(MkDelayPayload::default()))],
+                )],
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+        let context = ExecutionFrameContext::root(1);
+        for state in [
+            RuntimeState::Stopping,
+            RuntimeState::Running,
+            RuntimeState::Paused,
+        ] {
+            let mut snapshot = RuntimeSnapshot {
+                macro_id: Some(1),
+                run_id: 1,
+                ..Default::default()
+            };
+            apply_execution_event(
+                &mut snapshot,
+                &program,
+                context,
+                ExecutionEvent::FrameEntered(ExecutionFrameSnapshot {
+                    context,
+                    macro_name: Arc::from("root"),
+                    active_step_id: None,
+                }),
+                state,
+            );
+            apply_execution_event(
+                &mut snapshot,
+                &program,
+                context,
+                ExecutionEvent::BreakpointHit {
+                    step_id: 1,
+                    variables: RuntimeVariables::new(),
+                },
+                state,
+            );
+            assert_eq!(snapshot.state, state);
+            assert_eq!(
+                snapshot.breakpoint_occurrence().is_some(),
+                state == RuntimeState::Paused
+            );
+            if state != RuntimeState::Paused {
+                assert_eq!(snapshot.pause_reason, None);
+            }
+        }
+    }
+
     struct PanickingSound;
     impl super::super::executor::SoundBackend for PanickingSound {
         fn play(&self, _: &str) -> ExecResult {
@@ -1259,6 +1913,8 @@ mod run_mode_tests {
         );
         let failed = wait_for_terminal(&runtime);
         assert_eq!(failed.state, RuntimeState::Failed);
+        assert!(failed.call_stack.is_empty());
+        assert_eq!(failed.active_frame(), None);
         assert_eq!(
             failed.latest_failure.as_ref().unwrap().kind,
             DiagnosticKind::Panic
@@ -1695,7 +2351,10 @@ mod run_mode_tests {
         assert_eq!(first_pause.run_mode, RuntimeRunMode::Debug);
         assert_eq!(
             first_pause.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 2,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         assert_eq!(first_pause.step_id, Some(2));
         assert_eq!(
@@ -1715,7 +2374,10 @@ mod run_mode_tests {
         let second_pause = wait_for_state(&debug, RuntimeState::Paused);
         assert_eq!(
             second_pause.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 4 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 4,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         assert_eq!(second_pause.step_id, Some(4));
         assert_eq!(second_pause.steps[&2], StepState::Success);
@@ -1934,7 +2596,10 @@ mod run_mode_tests {
         let paused = wait_for_state(&runtime, RuntimeState::Paused);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 7 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 7,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
 
         assert_eq!(
@@ -2029,14 +2694,17 @@ mod run_mode_tests {
         );
         let paused = wait_for_state(&runtime, RuntimeState::Paused);
         assert_eq!(
-            paused.revision, 3,
-            "run initialization, RunStarted, and BreakpointHit must each publish one revision"
+            paused.revision, 4,
+            "run initialization, FrameEntered, RunStarted, and BreakpointHit must each publish one revision"
         );
         assert_eq!(paused.step_id, Some(1));
         assert_eq!(paused.steps[&1], StepState::Pending);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 1 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 1,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         let debug = paused.debug_snapshot.as_ref().unwrap();
         assert_eq!(debug.step_id, Some(1));
@@ -2161,7 +2829,10 @@ mod run_mode_tests {
         let paused = wait_for_state(&runtime, RuntimeState::Paused);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 2,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         assert_eq!(paused.step_id, Some(2));
         assert_eq!(paused.steps[&1], StepState::Success);
@@ -2256,7 +2927,10 @@ mod run_mode_tests {
         assert_eq!(paused.state, RuntimeState::Paused);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 19 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 19,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
 
         assert_eq!(
@@ -2463,7 +3137,10 @@ mod run_mode_tests {
             let paused = wait_for_state(&runtime, RuntimeState::Paused);
             assert_eq!(
                 paused.pause_reason,
-                Some(RuntimePauseReason::Breakpoint { step_id: 1 })
+                Some(RuntimePauseReason::Breakpoint {
+                    step_id: 1,
+                    frame: ExecutionFrameContext::root(1)
+                })
             );
             assert_eq!(
                 runtime.command(RuntimeCommand::Resume),
@@ -2965,7 +3642,10 @@ mod runtime_snapshot_tests {
         assert_eq!(paused.step_id, Some(2));
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 2,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         assert!(!paused.steps.contains_key(&1));
         assert_eq!(paused.steps[&2], StepState::Pending);
@@ -3028,7 +3708,10 @@ mod runtime_snapshot_tests {
         assert_eq!(paused.state, RuntimeState::Paused);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 2,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         assert_eq!(
             paused.debug_variables.get("target_point"),
@@ -3221,7 +3904,10 @@ mod runtime_snapshot_tests {
         assert_debug_fields(&paused, Some(2), DebugSnapshotReason::Breakpoint);
         assert_eq!(
             paused.pause_reason,
-            Some(RuntimePauseReason::Breakpoint { step_id: 2 })
+            Some(RuntimePauseReason::Breakpoint {
+                step_id: 2,
+                frame: ExecutionFrameContext::root(1)
+            })
         );
         assert!(!paused.debug_variables.contains_key("after_breakpoint"));
 
