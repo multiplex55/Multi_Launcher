@@ -38,6 +38,8 @@ pub enum FieldPart {
     Path,
     PathOutput,
     Found,
+    MatchedText,
+    MatchCount,
     Point,
     X,
     Y,
@@ -52,6 +54,7 @@ pub enum FieldPart {
     From,
     To,
     Region,
+    Language,
     Condition,
     Not,
     Outputs,
@@ -114,6 +117,8 @@ impl std::fmt::Display for FieldPath {
                         FieldPart::Path => "Path",
                         FieldPart::PathOutput => "Path output",
                         FieldPart::Found => "Found",
+                        FieldPart::MatchedText => "Matched text",
+                        FieldPart::MatchCount => "Match count",
                         FieldPart::Point => "Point",
                         FieldPart::X => "X",
                         FieldPart::Y => "Y",
@@ -128,6 +133,7 @@ impl std::fmt::Display for FieldPath {
                         FieldPart::From => "From",
                         FieldPart::To => "To",
                         FieldPart::Region => "Region",
+                        FieldPart::Language => "Language",
                         FieldPart::Condition => "Condition",
                         FieldPart::Not => "Not",
                         FieldPart::Outputs => "Outputs",
@@ -308,6 +314,9 @@ fn condition(path: &FieldPath, value: &mut MkCondition, visit: &mut Visitor<'_>)
             image(path, &mut search.image, visit);
             region(&path.child(Region), &mut search.region, visit);
         }
+        MkCondition::OcrTextSearch { search, .. } => {
+            ocr_search(path, &mut search.search, visit);
+        }
         MkCondition::PreviousImageResult { image: value, .. } => {
             if let Some(value) = value {
                 image(path, value, visit);
@@ -325,6 +334,19 @@ fn condition(path: &FieldPath, value: &mut MkCondition, visit: &mut Visitor<'_>)
         MkCondition::Not { condition: value } => condition(&path.child(Not), value, visit),
     }
 }
+fn ocr_search(path: &FieldPath, value: &mut MkOcrSearchSpec, visit: &mut Visitor<'_>) {
+    string(
+        path,
+        FieldPart::Text,
+        &mut value.text,
+        FieldKind::Template,
+        visit,
+    );
+    if let MkOcrLanguage::LanguageTag(tag) = &mut value.language {
+        string(path, FieldPart::Language, tag, FieldKind::Text, visit);
+    }
+    region(&path.child(FieldPart::Region), &mut value.region, visit);
+}
 fn outputs(path: &FieldPath, value: &mut MkImageOutputs, visit: &mut Visitor<'_>) {
     use FieldPart::*;
     for (part, value) in [
@@ -332,6 +354,19 @@ fn outputs(path: &FieldPath, value: &mut MkImageOutputs, visit: &mut Visitor<'_>
         (Point, &mut value.point),
         (X, &mut value.x),
         (Y, &mut value.y),
+    ] {
+        optional(path, part, value, FieldKind::VariableWrite, visit);
+    }
+}
+fn ocr_outputs(path: &FieldPath, value: &mut MkOcrOutputs, visit: &mut Visitor<'_>) {
+    use FieldPart::*;
+    for (part, value) in [
+        (Found, &mut value.found),
+        (MatchedText, &mut value.matched_text),
+        (Point, &mut value.point),
+        (X, &mut value.x),
+        (Y, &mut value.y),
+        (MatchCount, &mut value.match_count),
     ] {
         optional(path, part, value, FieldKind::VariableWrite, visit);
     }
@@ -512,6 +547,24 @@ pub fn visit_step_fields(step: &mut MkStep, visit: &mut Visitor<'_>) {
             image(&path, &mut value.image, visit);
             region(&path.child(Region), &mut value.region, visit);
             outputs(&path.child(Outputs), &mut value.outputs, visit);
+        }
+        MkAction::OcrFindText(value) => {
+            ocr_search(&path, &mut value.search, visit);
+            ocr_outputs(&path.child(Outputs), &mut value.outputs, visit);
+        }
+        MkAction::OcrClickText(value) => ocr_search(&path, &mut value.search, visit),
+        MkAction::OcrReadText(value) => {
+            if let MkOcrLanguage::LanguageTag(tag) = &mut value.language {
+                string(&path, Language, tag, FieldKind::Text, visit);
+            }
+            region(&path.child(Region), &mut value.region, visit);
+            string(
+                &path,
+                Variable,
+                &mut value.output_variable,
+                FieldKind::VariableWrite,
+                visit,
+            );
         }
         MkAction::FindPixel(value) => {
             string(&path, Color, &mut value.color, FieldKind::Color, visit);

@@ -6,7 +6,7 @@ use super::window_matcher_editor::matcher_ui;
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::{
     AlphaPolicy, MkCompareOp, MkCondition, MkCoordinateTarget, MkImageRef, MkImageSearchCondition,
-    MkWindowMatcher, ReturnPoint, SearchRegion,
+    MkOcrSearchCondition, MkOcrSearchSpec, MkWindowMatcher, ReturnPoint, SearchRegion,
 };
 use eframe::egui;
 
@@ -29,10 +29,24 @@ pub struct ConditionImageRequest {
     pub path: ConditionPath,
     pub operation: ConditionImageOperation,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConditionOcrOperation {
+    TestOcr,
+    PickRectangle,
+    PickWindow,
+    PreviewRegion,
+    AddActivateWindowBefore,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConditionOcrRequest {
+    pub path: ConditionPath,
+    pub operation: ConditionOcrOperation,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConditionEditorRequest {
     WindowMatcher { path: ConditionPath },
     Image(ConditionImageRequest),
+    Ocr(ConditionOcrRequest),
 }
 
 /// Previous-image-result and other condition result consumers do not own a
@@ -92,6 +106,7 @@ pub enum ConditionKind {
     WindowExists,
     WindowActive,
     ImageSearch,
+    OcrTextSearch,
     PreviousImageResult,
     PixelResult,
     All,
@@ -119,6 +134,15 @@ pub fn default_condition(kind: ConditionKind) -> MkCondition {
                 tolerance: 0,
                 alpha: AlphaPolicy::Compare,
                 return_point: ReturnPoint::Center,
+            },
+            found: true,
+        },
+        ConditionKind::OcrTextSearch => MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: MkOcrSearchSpec {
+                    text: "Text".into(),
+                    ..Default::default()
+                },
             },
             found: true,
         },
@@ -154,6 +178,7 @@ pub fn condition_kind(c: &MkCondition) -> ConditionKind {
         MkCondition::WindowExists { .. } => ConditionKind::WindowExists,
         MkCondition::WindowActive { .. } => ConditionKind::WindowActive,
         MkCondition::ImageSearch { .. } => ConditionKind::ImageSearch,
+        MkCondition::OcrTextSearch { .. } => ConditionKind::OcrTextSearch,
         MkCondition::PreviousImageResult { .. } => ConditionKind::PreviousImageResult,
         MkCondition::PixelResult { .. } => ConditionKind::PixelResult,
         MkCondition::All { .. } => ConditionKind::All,
@@ -231,6 +256,7 @@ pub(super) fn condition_ui_with_assets(
                     ConditionKind::WindowExists,
                     ConditionKind::WindowActive,
                     ConditionKind::ImageSearch,
+                    ConditionKind::OcrTextSearch,
                     ConditionKind::PreviousImageResult,
                     ConditionKind::PixelResult,
                     ConditionKind::All,
@@ -309,6 +335,57 @@ pub(super) fn condition_ui_with_assets(
                 }
                 egui::ComboBox::from_label("Expected")
                     .selected_text(if *found { "Found" } else { "Not Found" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(found, true, "Found");
+                        ui.selectable_value(found, false, "Not found");
+                    });
+            }
+            MkCondition::OcrTextSearch { search, found } => {
+                super::ocr_controls::search_ui(ui, &mut search.search);
+                ui.horizontal(|ui| {
+                    if ui.button("Test OCR").clicked() {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: ConditionPath::root(),
+                            operation: ConditionOcrOperation::TestOcr,
+                        }));
+                    }
+                    if matches!(search.search.region, SearchRegion::Rectangle { .. })
+                        && ui.button("Select rectangle").clicked()
+                    {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: ConditionPath::root(),
+                            operation: ConditionOcrOperation::PickRectangle,
+                        }));
+                    }
+                    if matches!(
+                        search.search.region,
+                        SearchRegion::Window { .. } | SearchRegion::ClientArea { .. }
+                    ) && ui.button("Pick window").clicked()
+                    {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: ConditionPath::root(),
+                            operation: ConditionOcrOperation::PickWindow,
+                        }));
+                    }
+                    if ui.button("Preview region").clicked() {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: ConditionPath::root(),
+                            operation: ConditionOcrOperation::PreviewRegion,
+                        }));
+                    }
+                    if matches!(
+                        search.search.region,
+                        SearchRegion::Window { .. } | SearchRegion::ClientArea { .. }
+                    ) && ui.button("Add Activate Window Before").clicked()
+                    {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: ConditionPath::root(),
+                            operation: ConditionOcrOperation::AddActivateWindowBefore,
+                        }));
+                    }
+                });
+                egui::ComboBox::from_label("Expected")
+                    .selected_text(if *found { "Found" } else { "Not found" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(found, true, "Found");
                         ui.selectable_value(found, false, "Not found");
@@ -544,7 +621,8 @@ fn condition_ui_context_at(
             .map(|mut request| {
                 match &mut request {
                     ConditionEditorRequest::WindowMatcher { path: p }
-                    | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. }) => {
+                    | ConditionEditorRequest::Image(ConditionImageRequest { path: p, .. })
+                    | ConditionEditorRequest::Ocr(ConditionOcrRequest { path: p, .. }) => {
                         *p = path.clone()
                     }
                 }
@@ -593,7 +671,8 @@ fn group_ui(
 fn prepend_request(request: &mut ConditionEditorRequest, branch: ConditionBranch) {
     match request {
         ConditionEditorRequest::WindowMatcher { path }
-        | ConditionEditorRequest::Image(ConditionImageRequest { path, .. }) => path.prepend(branch),
+        | ConditionEditorRequest::Image(ConditionImageRequest { path, .. })
+        | ConditionEditorRequest::Ocr(ConditionOcrRequest { path, .. }) => path.prepend(branch),
     }
 }
 fn kind_label(k: ConditionKind) -> &'static str {
@@ -602,6 +681,7 @@ fn kind_label(k: ConditionKind) -> &'static str {
         ConditionKind::WindowExists => "Window exists",
         ConditionKind::WindowActive => "Window active",
         ConditionKind::ImageSearch => "Search image now",
+        ConditionKind::OcrTextSearch => "Search text now",
         ConditionKind::PreviousImageResult => "Previous image result",
         ConditionKind::PixelResult => "Pixel matches",
         ConditionKind::All => "ALL",
@@ -763,6 +843,30 @@ mod tests {
                 ConditionEditorRequest::Image(ConditionImageRequest {
                     path: expected_path,
                     operation
+                })
+            );
+        }
+        for operation in [
+            ConditionOcrOperation::TestOcr,
+            ConditionOcrOperation::PickRectangle,
+            ConditionOcrOperation::PickWindow,
+            ConditionOcrOperation::PreviewRegion,
+            ConditionOcrOperation::AddActivateWindowBefore,
+        ] {
+            let mut request = ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                path: ConditionPath::root(),
+                operation,
+            });
+            prepend_request(&mut request, ConditionBranch::Not);
+            prepend_request(&mut request, ConditionBranch::Any(2));
+            let mut expected_path = ConditionPath::root();
+            expected_path.prepend(ConditionBranch::Not);
+            expected_path.prepend(ConditionBranch::Any(2));
+            assert_eq!(
+                request,
+                ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                    path: expected_path,
+                    operation,
                 })
             );
         }

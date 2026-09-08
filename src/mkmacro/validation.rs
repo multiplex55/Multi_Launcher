@@ -155,6 +155,156 @@ fn image_outputs(p: &MkImagePayload, m: u64, s: Option<u64>, out: &mut Vec<MkDia
         }
     }
 }
+
+fn ocr_wait(w: &MkWaitOptions, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+    wait(w, m, s, out);
+    if w.poll_interval_ms < 100 {
+        push(
+            out,
+            m,
+            s,
+            "ocr_poll_interval_too_short",
+            "OCR polling interval must be at least 100 ms",
+        );
+    }
+}
+
+fn valid_bcp47_shape(tag: &str) -> bool {
+    tag == tag.trim()
+        && !tag.is_empty()
+        && tag.len() <= 255
+        && tag.split('-').enumerate().all(|(index, subtag)| {
+            !subtag.is_empty()
+                && subtag.len() <= 8
+                && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && (index != 0 || subtag.bytes().all(|byte| byte.is_ascii_alphabetic()))
+        })
+}
+
+fn ocr_language(language: &MkOcrLanguage, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+    if let MkOcrLanguage::LanguageTag(tag) = language
+        && !valid_bcp47_shape(tag)
+    {
+        push(
+            out,
+            m,
+            s,
+            "invalid_ocr_language_tag",
+            format!("OCR language tag '{tag}' is not a structurally valid BCP-47 tag"),
+        );
+    }
+}
+
+fn ocr_region(region: &SearchRegion, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+    match region {
+        SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => push(
+            out,
+            m,
+            s,
+            "invalid_ocr_region",
+            "OCR search rectangle is invalid",
+        ),
+        SearchRegion::Window { matcher: window } | SearchRegion::ClientArea { matcher: window } => {
+            matcher(window, m, s, out)
+        }
+        _ => {}
+    }
+}
+
+fn ocr_search(search: &MkOcrSearchSpec, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+    if search.text.trim().is_empty() {
+        push(
+            out,
+            m,
+            s,
+            "empty_ocr_search_text",
+            "OCR search text must not be empty",
+        );
+    }
+    let syntax_valid = match interpolation_syntax(&search.text) {
+        Ok(()) => true,
+        Err(reason) => {
+            push(
+                out,
+                m,
+                s,
+                "invalid_ocr_search_interpolation",
+                format!("Malformed interpolation in OCR search text: {reason}"),
+            );
+            false
+        }
+    };
+    let has_reference = syntax_valid
+        && super::interpolation::scan_template(&search.text)
+            .any(|part| matches!(part, Ok(super::interpolation::TemplatePart::Reference(_))));
+    if syntax_valid && !has_reference && search.match_mode == MkOcrMatchMode::Regex {
+        if let Ok(pattern) = super::interpolate(&search.text, &RuntimeVariables::default())
+            && let Err(reason) = Regex::new(&pattern)
+        {
+            push(
+                out,
+                m,
+                s,
+                "invalid_ocr_regex",
+                format!("OCR regular expression is invalid: {reason}"),
+            );
+        }
+    }
+    if matches!(search.occurrence, MkOcrOccurrence::Nth(0)) {
+        push(
+            out,
+            m,
+            s,
+            "invalid_ocr_occurrence",
+            "OCR occurrence must be at least 1",
+        );
+    }
+    ocr_language(&search.language, m, s, out);
+    ocr_region(&search.region, m, s, out);
+}
+
+fn ocr_outputs(outputs: &MkOcrOutputs, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+    let slots = [
+        ("found", &outputs.found),
+        ("matched text", &outputs.matched_text),
+        ("point", &outputs.point),
+        ("x", &outputs.x),
+        ("y", &outputs.y),
+        ("match count", &outputs.match_count),
+    ];
+    let mut names = HashSet::new();
+    for (slot, name) in slots {
+        let Some(name) = name else { continue };
+        if let Err(reason) = validate_variable_name(name) {
+            push(
+                out,
+                m,
+                s,
+                "invalid_ocr_output",
+                format!("OCR {slot} output name '{name}' is invalid: {reason}"),
+            );
+        } else if !names.insert(name.as_str()) {
+            push(
+                out,
+                m,
+                s,
+                "duplicate_ocr_output",
+                format!("OCR {slot} output duplicates configured name '{name}'"),
+            );
+        }
+    }
+}
+
+pub fn condition_contains_ocr(condition: &MkCondition) -> bool {
+    match condition {
+        MkCondition::OcrTextSearch { .. } => true,
+        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+            conditions.iter().any(condition_contains_ocr)
+        }
+        MkCondition::Not { condition } => condition_contains_ocr(condition),
+        _ => false,
+    }
+}
 pub fn can_run(ds: &[MkDiagnostic]) -> bool {
     !ds.iter().any(|d| d.severity == DiagnosticSeverity::Fatal)
 }
@@ -446,7 +596,16 @@ fn analyze_document_with_context(
                     wait: w,
                 } => {
                     condition(c, m.id, sid, asset_root, &mut out);
-                    wait(w, m.id, sid, &mut out)
+                    wait(w, m.id, sid, &mut out);
+                    if condition_contains_ocr(c) && w.poll_interval_ms < 100 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "ocr_poll_interval_too_short",
+                            "Wait Until conditions containing OCR must poll no faster than every 100 ms",
+                        );
+                    }
                 }
                 MkAction::WindowActivate(p) | MkAction::WindowWait(p) => {
                     matcher(&p.matcher, m.id, sid, &mut out);
@@ -552,6 +711,45 @@ fn analyze_document_with_context(
                             matcher(window, m.id, sid, &mut out)
                         }
                         _ => {}
+                    }
+                }
+                MkAction::OcrFindText(p) => {
+                    ocr_search(&p.search, m.id, sid, &mut out);
+                    ocr_wait(&p.wait, m.id, sid, &mut out);
+                    ocr_outputs(&p.outputs, m.id, sid, &mut out);
+                }
+                MkAction::OcrClickText(p) => {
+                    ocr_search(&p.search, m.id, sid, &mut out);
+                    ocr_wait(&p.wait, m.id, sid, &mut out);
+                    if p.clicks == 0 {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_ocr_click_count",
+                            "OCR click count must be at least 1",
+                        );
+                    }
+                }
+                MkAction::OcrReadText(p) => {
+                    ocr_language(&p.language, m.id, sid, &mut out);
+                    ocr_region(&p.region, m.id, sid, &mut out);
+                    if p.output_variable.trim().is_empty() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "missing_ocr_read_output",
+                            "OCR Read Text requires an output variable",
+                        );
+                    } else if let Err(reason) = validate_variable_name(&p.output_variable) {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "invalid_ocr_read_output",
+                            format!("OCR Read Text output variable is invalid: {reason}"),
+                        );
                     }
                 }
                 MkAction::FindPixel(p) => {
@@ -1610,6 +1808,137 @@ fn wait(w: &MkWaitOptions, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
 }
 
 #[cfg(test)]
+mod ocr_validation_tests {
+    use super::*;
+
+    fn diagnostics(action: MkAction) -> Vec<MkDiagnostic> {
+        validate_document(
+            &MkMacroDocument {
+                macros: vec![MkMacro {
+                    signature: Default::default(),
+                    id: 1,
+                    name: "OCR validation".into(),
+                    description: String::new(),
+                    enabled: true,
+                    hotkey: None,
+                    hotkey_scope: Default::default(),
+                    folder_id: None,
+                    playback: Default::default(),
+                    steps: vec![MkStep {
+                        metadata: Default::default(),
+                        id: 1,
+                        enabled: true,
+                        breakpoint: false,
+                        repeat: 1,
+                        delay_after_ms: 0,
+                        on_error: Default::default(),
+                        action,
+                    }],
+                }],
+                ..MkMacroDocument::default()
+            },
+            None,
+        )
+    }
+
+    fn search(text: &str) -> MkOcrSearchSpec {
+        MkOcrSearchSpec {
+            text: text.into(),
+            ..MkOcrSearchSpec::default()
+        }
+    }
+
+    #[test]
+    fn validates_static_ocr_shape_without_resolving_dynamic_regex_or_languages() {
+        let mut invalid = search("(");
+        invalid.match_mode = MkOcrMatchMode::Regex;
+        invalid.occurrence = MkOcrOccurrence::Nth(0);
+        invalid.language = MkOcrLanguage::LanguageTag("en--US".into());
+        let found = diagnostics(MkAction::OcrFindText(MkOcrFindPayload {
+            search: invalid,
+            wait: MkWaitOptions {
+                timeout_ms: 500,
+                poll_interval_ms: 50,
+            },
+            outputs: MkOcrOutputs {
+                found: Some("same".into()),
+                matched_text: Some("same".into()),
+                ..MkOcrOutputs::default()
+            },
+            ..MkOcrFindPayload::default()
+        }));
+        for code in [
+            "invalid_ocr_regex",
+            "invalid_ocr_occurrence",
+            "invalid_ocr_language_tag",
+            "ocr_poll_interval_too_short",
+            "duplicate_ocr_output",
+        ] {
+            assert!(
+                found.iter().any(|diagnostic| diagnostic.code == code),
+                "{code}: {found:?}"
+            );
+        }
+
+        let mut dynamic = search("${pattern}");
+        dynamic.match_mode = MkOcrMatchMode::Regex;
+        dynamic.language = MkOcrLanguage::LanguageTag("zh-Hans-CN".into());
+        let found = diagnostics(MkAction::OcrFindText(MkOcrFindPayload {
+            search: dynamic,
+            wait: MkWaitOptions {
+                timeout_ms: 500,
+                poll_interval_ms: 100,
+            },
+            ..MkOcrFindPayload::default()
+        }));
+        assert!(!found.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                "invalid_ocr_regex" | "invalid_ocr_language_tag" | "ocr_poll_interval_too_short"
+            )
+        }));
+    }
+
+    #[test]
+    fn only_ocr_bearing_wait_until_requires_the_minimum_poll_interval() {
+        let wait = MkWaitOptions {
+            timeout_ms: 500,
+            poll_interval_ms: 50,
+        };
+        let ocr = MkCondition::Not {
+            condition: Box::new(MkCondition::Any {
+                conditions: vec![MkCondition::OcrTextSearch {
+                    search: MkOcrSearchCondition {
+                        search: search("ready"),
+                    },
+                    found: false,
+                }],
+            }),
+        };
+        assert!(
+            diagnostics(MkAction::WaitUntil {
+                condition: ocr,
+                wait: wait.clone(),
+            })
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ocr_poll_interval_too_short")
+        );
+        assert!(
+            !diagnostics(MkAction::WaitUntil {
+                condition: MkCondition::Variable {
+                    name: "macro.id".into(),
+                    op: MkCompareOp::Eq,
+                    value: MkValue::Number(1.0),
+                },
+                wait,
+            })
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ocr_poll_interval_too_short")
+        );
+    }
+}
+
+#[cfg(test)]
 mod optional_wait_validation_tests {
     use super::*;
 
@@ -1982,6 +2311,9 @@ fn condition(
                 }
                 _ => {}
             }
+        }
+        MkCondition::OcrTextSearch { search, .. } => {
+            ocr_search(&search.search, m, s, o);
         }
         MkCondition::PreviousImageResult {
             image: Some(image), ..

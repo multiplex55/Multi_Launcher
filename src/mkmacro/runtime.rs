@@ -3730,9 +3730,11 @@ mod step_outcome_tests {
     fn image_match_and_continued_miss_are_distinct_success_details() {
         let matched = StepOutcome {
             last_image_found: Some(true),
+            ..StepOutcome::default()
         };
         let missed = StepOutcome {
             last_image_found: Some(false),
+            ..StepOutcome::default()
         };
         assert_ne!(matched.detail(), missed.detail());
         assert_eq!(matched.last_image_found, Some(true));
@@ -3749,7 +3751,25 @@ mod step_outcome_tests {
     fn unrelated_step_has_no_inherited_image_status() {
         let unrelated = StepOutcome::default();
         assert_eq!(unrelated.last_image_found, None);
+        assert_eq!(unrelated.last_ocr_found, None);
         assert_eq!(unrelated.detail(), None);
+    }
+
+    #[test]
+    fn ocr_match_and_continued_miss_are_distinct_success_details() {
+        let matched = StepOutcome {
+            last_ocr_found: Some(true),
+            ..StepOutcome::default()
+        };
+        let missed = StepOutcome {
+            last_ocr_found: Some(false),
+            ..StepOutcome::default()
+        };
+        assert_eq!(matched.detail(), Some("Success — OCR text found."));
+        assert_eq!(
+            missed.detail(),
+            Some("Success — OCR text not found; continued.")
+        );
     }
 }
 

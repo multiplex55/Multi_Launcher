@@ -379,6 +379,8 @@ fn descriptors_for_action_with_signature(
         MkAction::PromptInput(_) => "Prompt for Input",
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
+        MkAction::OcrFindText(_) => "OCR Find Text",
+        MkAction::OcrReadText(_) => "OCR Read Text",
         MkAction::FindPixel(_) => "Find Pixel",
         MkAction::CaptureScreenshot(_) => "Capture Screenshot",
         MkAction::UiReadValue { .. } => "UI Read Value",
@@ -446,6 +448,17 @@ fn descriptors_for_action_with_signature(
             VariableAvailability::DefinitelyAvailable,
             None,
         ),
+        MkAction::OcrReadText(payload) => add(
+            &payload.output_variable,
+            VariableValueType::Known(MkValueType::String),
+            VariableAvailability::DefinitelyAvailable,
+            None,
+        ),
+        MkAction::OcrFindText(payload) => add_ocr_outputs(
+            &payload.outputs,
+            &mut add,
+            payload.not_found_policy == MkImageNotFoundPolicy::Continue,
+        ),
         MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => add_visual_outputs(
             &payload.outputs,
             &mut add,
@@ -471,6 +484,49 @@ fn descriptors_for_action_with_signature(
         _ => {}
     }
     result
+}
+
+fn add_ocr_outputs(
+    outputs: &super::MkOcrOutputs,
+    add: &mut impl FnMut(&str, VariableValueType, VariableAvailability, Option<&'static str>),
+    can_continue_missing: bool,
+) {
+    let selected_availability = if can_continue_missing {
+        VariableAvailability::PossiblyUnavailable
+    } else {
+        VariableAvailability::DefinitelyAvailable
+    };
+    if let Some(name) = &outputs.found {
+        add(
+            name,
+            VariableValueType::Known(MkValueType::Boolean),
+            VariableAvailability::DefinitelyAvailable,
+            None,
+        );
+    }
+    for (name, value_type) in [
+        (&outputs.matched_text, MkValueType::String),
+        (&outputs.point, MkValueType::Point),
+        (&outputs.x, MkValueType::Number),
+        (&outputs.y, MkValueType::Number),
+    ] {
+        if let Some(name) = name {
+            add(
+                name,
+                VariableValueType::Known(value_type),
+                selected_availability,
+                can_continue_missing.then_some("May be Null if OCR text is not found"),
+            );
+        }
+    }
+    if let Some(name) = &outputs.match_count {
+        add(
+            name,
+            VariableValueType::Known(MkValueType::Number),
+            VariableAvailability::DefinitelyAvailable,
+            None,
+        );
+    }
 }
 
 fn add_visual_outputs(

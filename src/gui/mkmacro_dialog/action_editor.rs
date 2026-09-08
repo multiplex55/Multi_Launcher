@@ -234,8 +234,17 @@ pub struct ActionEditorState {
     /// Typed requests collected by the widget and executed only when Apply confirms the draft.
     pub add_smooth_move: bool,
     pub add_activate_before: bool,
+    activate_before_region: Option<SearchRegion>,
     pub image_authoring: super::image_authoring_job::ImageAuthoringJob,
     pub(crate) image_test: super::image_search_test_job::ImageSearchTestJob,
+    pub(crate) ocr_test: super::ocr_test_job::OcrTestJob,
+    pub(crate) ocr_languages: super::ocr_test_job::OcrLanguageJob,
+    pub(crate) ocr_language_cache: Option<ExecResult<Vec<OcrLanguageInfo>>>,
+    pub(crate) ocr_preview: Option<super::ocr_test_job::OcrAuthoringPreview>,
+    ocr_preview_texture: Option<egui::TextureHandle>,
+    pub(crate) ocr_message: Option<String>,
+    ocr_capture_backend: Arc<dyn ScreenCaptureBackend>,
+    ocr_backend: Arc<dyn OcrBackend>,
     pub(crate) pending_image_import: Option<PendingImageImport>,
     /// Cloneable operation client borrowed from the dialog-wide visual-overlay service.
     /// The editor owns only the operation IDs it starts, not the native service itself.
@@ -296,6 +305,7 @@ pub enum VisualRegionDestination {
     ClickWithinRegion,
     FindPixelSearchRegion,
     ImageActionSearchRegion,
+    OcrActionSearchRegion,
     ImageActionReferenceAsset,
     ConditionSearchRegion(ConditionOperationDestination),
     WaitForVisualChangeRegion,
@@ -308,6 +318,9 @@ enum ExpectedVisualAction {
     FindPixel,
     ImageFind,
     ImageClick,
+    OcrFindText,
+    OcrClickText,
+    OcrReadText,
     Condition,
     WaitForVisualChange,
 }
@@ -488,10 +501,46 @@ fn dispatch_region_preview(
     }
 }
 
+#[cfg(not(windows))]
+struct UnsupportedOcrAuthoringCapture;
+#[cfg(not(windows))]
+impl ScreenCaptureBackend for UnsupportedOcrAuthoringCapture {
+    fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::UnsupportedOperation,
+            "OCR screen capture is unavailable on this platform",
+        ))
+    }
+    fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+        self.virtual_desktop()
+    }
+    fn capture_rect(&self, _: ScreenRect, _: &dyn Fn() -> bool) -> ExecResult<image::RgbaImage> {
+        self.virtual_desktop().map(|_| unreachable!())
+    }
+}
+
+fn production_ocr_authoring_backends() -> (Arc<dyn ScreenCaptureBackend>, Arc<dyn OcrBackend>) {
+    #[cfg(windows)]
+    {
+        (
+            Arc::new(crate::mkmacro::WindowsScreenCaptureBackend::system()),
+            Arc::new(crate::mkmacro::ocr::WindowsOcrBackend::new()),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            Arc::new(UnsupportedOcrAuthoringCapture),
+            Arc::new(UnsupportedOcrBackend),
+        )
+    }
+}
+
 impl ActionEditorState {
     pub fn new(
         visual_overlay: super::visual_capture_workflow::SharedVisualOverlayController,
     ) -> Self {
+        let (ocr_capture_backend, ocr_backend) = production_ocr_authoring_backends();
         Self {
             draft: None,
             owner_macro_id: None,
@@ -509,8 +558,17 @@ impl ActionEditorState {
             image_search: None,
             add_smooth_move: false,
             add_activate_before: false,
+            activate_before_region: None,
             image_authoring: Default::default(),
             image_test: Default::default(),
+            ocr_test: Default::default(),
+            ocr_languages: Default::default(),
+            ocr_language_cache: None,
+            ocr_preview: None,
+            ocr_preview_texture: None,
+            ocr_message: None,
+            ocr_capture_backend,
+            ocr_backend,
             pending_image_import: None,
             visual_overlay,
             visual_capture: None,
@@ -528,6 +586,148 @@ impl ActionEditorState {
             call_target_search: String::new(),
             pending_call_target: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ocr_authoring_backends(
+        &mut self,
+        capture: Arc<dyn ScreenCaptureBackend>,
+        ocr: Arc<dyn OcrBackend>,
+    ) {
+        self.ocr_capture_backend = capture;
+        self.ocr_backend = ocr;
+        self.reset_ocr_authoring();
+    }
+
+    fn reset_ocr_authoring(&mut self) {
+        self.ocr_test.cancel();
+        self.ocr_languages = Default::default();
+        self.ocr_language_cache = None;
+        self.ocr_preview = None;
+        self.ocr_preview_texture = None;
+        self.ocr_message = None;
+    }
+
+    fn ocr_identity(
+        &self,
+        condition_path: Option<super::condition_editor::ConditionPath>,
+    ) -> super::ocr_test_job::OcrDraftIdentity {
+        super::ocr_test_job::OcrDraftIdentity {
+            macro_id: self.owner_macro_id.unwrap_or(0),
+            step_id: self.editing_id,
+            draft_generation: self.draft_generation,
+            condition_path,
+        }
+    }
+
+    fn request_ocr_languages(&mut self) {
+        if !self.ocr_languages.active() {
+            self.ocr_languages.request(self.ocr_backend.clone());
+        }
+    }
+
+    fn poll_ocr_authoring(&mut self) {
+        if let Some(result) = self.ocr_languages.take() {
+            self.ocr_language_cache = Some(result);
+        }
+        if let Some(completion) = self.ocr_test.take() {
+            let identity = &completion.identity;
+            let target_is_current = identity.macro_id == self.owner_macro_id.unwrap_or(0)
+                && identity.step_id == self.editing_id
+                && identity.draft_generation == self.draft_generation
+                && match identity.condition_path.as_ref() {
+                    None => self.draft.as_ref().is_some_and(|step| {
+                        matches!(
+                            step.action,
+                            MkAction::OcrFindText(_)
+                                | MkAction::OcrClickText(_)
+                                | MkAction::OcrReadText(_)
+                        )
+                    }),
+                    Some(path) => self
+                        .ocr_condition_test_request(identity.macro_id, path)
+                        .is_some(),
+                };
+            if !target_is_current {
+                return;
+            }
+            match completion.result {
+                Ok(preview) => {
+                    self.ocr_preview = Some(preview);
+                    self.ocr_preview_texture = None;
+                    self.ocr_message = None;
+                }
+                Err(error) => {
+                    self.ocr_preview = None;
+                    self.ocr_preview_texture = None;
+                    self.ocr_message = Some(error.to_string());
+                }
+            }
+        }
+    }
+
+    fn start_ocr_test(&mut self, request: super::ocr_test_job::OcrTestRequest) {
+        self.ocr_preview = None;
+        self.ocr_preview_texture = None;
+        self.ocr_message = Some("Testing OCR…".into());
+        self.ocr_test.start(
+            self.ocr_capture_backend.clone(),
+            self.ocr_backend.clone(),
+            request,
+        );
+    }
+
+    fn preview_ocr_debug_overlay(&mut self) {
+        let Some(preview) = self.ocr_preview.as_ref() else {
+            return;
+        };
+        let plan = super::visual_overlay::plan_ocr_debug_overlay(
+            preview.recognized.capture.rect(),
+            &preview.recognized.document,
+            preview
+                .search
+                .as_ref()
+                .and_then(|search| search.selected.as_ref()),
+        );
+        self.cancel_owned_passive_overlay();
+        let truncated = plan.truncated_rects;
+        let operation_id = self.visual_overlay.preview_ocr_debug(plan);
+        self.overlay_diagnostic = Some((operation_id, "Unable to show OCR debug overlay".into()));
+        self.ocr_message = Some(if truncated == 0 {
+            "Showing OCR geometry on the desktop".into()
+        } else {
+            format!("Showing OCR geometry; {truncated} rectangles were omitted by the debug cap")
+        });
+    }
+
+    fn ocr_condition_test_request(
+        &self,
+        macro_id: u64,
+        path: &super::condition_editor::ConditionPath,
+    ) -> Option<super::ocr_test_job::OcrTestRequest> {
+        let step = self.draft.as_ref()?;
+        let root = match &step.action {
+            MkAction::If(condition)
+            | MkAction::WhileStart { condition }
+            | MkAction::WaitUntil { condition, .. } => condition,
+            _ => return None,
+        };
+        let MkCondition::OcrTextSearch { search, .. } =
+            super::condition_editor::resolve_condition(root, path)?
+        else {
+            return None;
+        };
+        Some(super::ocr_test_job::OcrTestRequest {
+            identity: super::ocr_test_job::OcrDraftIdentity {
+                macro_id,
+                step_id: self.editing_id,
+                draft_generation: self.draft_generation,
+                condition_path: Some(path.clone()),
+            },
+            region: search.search.region.clone(),
+            language: search.search.language.clone(),
+            search: Some(search.search.clone()),
+        })
     }
 
     fn refresh_variable_catalog(
@@ -682,13 +882,14 @@ impl ActionEditorState {
             | MkAction::WaitUntil { condition: c, .. } => c,
             _ => return false,
         };
-        let Some(MkCondition::ImageSearch { search, .. }) =
+        let Some(condition) =
             super::condition_editor::resolve_condition_mut(root, &destination.path)
         else {
             return false;
         };
-        let applied = match (&destination.operation, result) {
+        let applied = match (condition, &destination.operation, result) {
             (
+                MkCondition::ImageSearch { search, .. },
                 super::condition_editor::ConditionImageOperation::ImportPng
                 | super::condition_editor::ConditionImageOperation::CaptureRectangle,
                 ConditionOperationResult::Asset(id),
@@ -697,6 +898,7 @@ impl ActionEditorState {
                 true
             }
             (
+                MkCondition::ImageSearch { search, .. },
                 super::condition_editor::ConditionImageOperation::PickRectangle,
                 ConditionOperationResult::Rectangle(rect),
             ) if matches!(search.region, SearchRegion::Rectangle { .. }) => {
@@ -704,6 +906,7 @@ impl ActionEditorState {
                 true
             }
             (
+                MkCondition::ImageSearch { search, .. },
                 super::condition_editor::ConditionImageOperation::PickWindow,
                 ConditionOperationResult::Matcher(matcher),
             ) => match &mut search.region {
@@ -713,6 +916,14 @@ impl ActionEditorState {
                 }
                 _ => false,
             },
+            (
+                MkCondition::OcrTextSearch { search, .. },
+                super::condition_editor::ConditionImageOperation::PickRectangle,
+                ConditionOperationResult::Rectangle(rect),
+            ) if matches!(search.search.region, SearchRegion::Rectangle { .. }) => {
+                search.search.region = SearchRegion::Rectangle { rect };
+                true
+            }
             _ => false,
         };
         if applied {
@@ -901,6 +1112,9 @@ impl ActionEditorState {
         let expected_action = match self.draft.as_ref().map(|step| &step.action) {
             Some(MkAction::ImageFind(_)) => ExpectedVisualAction::ImageFind,
             Some(MkAction::ImageClick(_)) => ExpectedVisualAction::ImageClick,
+            Some(MkAction::OcrFindText(_)) => ExpectedVisualAction::OcrFindText,
+            Some(MkAction::OcrClickText(_)) => ExpectedVisualAction::OcrClickText,
+            Some(MkAction::OcrReadText(_)) => ExpectedVisualAction::OcrReadText,
             Some(MkAction::FindPixel(_)) => ExpectedVisualAction::FindPixel,
             Some(MkAction::If(_))
             | Some(MkAction::WhileStart { .. })
@@ -919,6 +1133,12 @@ impl ActionEditorState {
             ) | (
                 VisualRegionDestination::ImageActionSearchRegion,
                 ExpectedVisualAction::ImageFind | ExpectedVisualAction::ImageClick,
+                super::visual_overlay::RectanglePurpose::SearchRegion
+            ) | (
+                VisualRegionDestination::OcrActionSearchRegion,
+                ExpectedVisualAction::OcrFindText
+                    | ExpectedVisualAction::OcrClickText
+                    | ExpectedVisualAction::OcrReadText,
                 super::visual_overlay::RectanglePurpose::SearchRegion
             ) | (
                 VisualRegionDestination::ImageActionReferenceAsset,
@@ -1000,6 +1220,9 @@ impl ActionEditorState {
                     | MkAction::FindPixel(_)
                     | MkAction::WaitForVisualChange(_)
                     | MkAction::CaptureScreenshot(_)
+                    | MkAction::OcrFindText(_)
+                    | MkAction::OcrClickText(_)
+                    | MkAction::OcrReadText(_)
             ) {
                 return false;
             }
@@ -1045,6 +1268,7 @@ impl ActionEditorState {
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
         self.image_test.cancel();
+        self.reset_ocr_authoring();
         self.pending_image_import = None;
         self.capture_filename.clear();
         self.image_import_filename.clear();
@@ -1056,6 +1280,7 @@ impl ActionEditorState {
         self.draft_changed = false;
         self.add_smooth_move = false;
         self.add_activate_before = false;
+        self.activate_before_region = None;
         // The dialog supplies the precise insertion intent immediately after
         // this call. This fallback keeps programmatic callers insertion-safe.
         self.insertion = Some(InsertionIntent::Plain {
@@ -1075,6 +1300,15 @@ impl ActionEditorState {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             MkAction::CaptureScreenshot(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
+            MkAction::OcrFindText(p) => Some(
+                super::image_search_editor::ImageSearchEditorState::from_region(&p.search.region),
+            ),
+            MkAction::OcrClickText(p) => Some(
+                super::image_search_editor::ImageSearchEditorState::from_region(&p.search.region),
+            ),
+            MkAction::OcrReadText(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
             _ => None,
@@ -1101,6 +1335,7 @@ impl ActionEditorState {
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
         self.image_test.cancel();
+        self.reset_ocr_authoring();
         self.pending_image_import = None;
         self.capture_filename.clear();
         self.image_import_filename.clear();
@@ -1112,6 +1347,7 @@ impl ActionEditorState {
         self.draft_changed = false;
         self.add_smooth_move = false;
         self.add_activate_before = false;
+        self.activate_before_region = None;
         self.insertion = Some(InsertionIntent::EditExisting { step_id: step.id });
         self.draft = Some(step.clone());
         self.image_search = match &step.action {
@@ -1127,6 +1363,15 @@ impl ActionEditorState {
             MkAction::CaptureScreenshot(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
             }
+            MkAction::OcrFindText(p) => Some(
+                super::image_search_editor::ImageSearchEditorState::from_region(&p.search.region),
+            ),
+            MkAction::OcrClickText(p) => Some(
+                super::image_search_editor::ImageSearchEditorState::from_region(&p.search.region),
+            ),
+            MkAction::OcrReadText(p) => {
+                Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
+            }
             _ => None,
         };
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
@@ -1137,6 +1382,7 @@ impl ActionEditorState {
         self.pending_visual_region = None;
         self.image_authoring = Default::default();
         self.image_test.cancel();
+        self.reset_ocr_authoring();
         self.pending_image_import = None;
         self.capture_filename.clear();
         self.image_import_filename.clear();
@@ -1156,6 +1402,9 @@ impl ActionEditorState {
         self.insertion = None;
         self.capture_keys = false;
         self.editor = None;
+        self.add_smooth_move = false;
+        self.add_activate_before = false;
+        self.activate_before_region = None;
         self.call_target_search.clear();
         self.pending_call_target = None;
         self.image_search = None;
@@ -1342,6 +1591,15 @@ impl ActionEditorState {
                             ExpectedVisualAction::ImageClick => {
                                 matches!(step.action, MkAction::ImageClick(_))
                             }
+                            ExpectedVisualAction::OcrFindText => {
+                                matches!(step.action, MkAction::OcrFindText(_))
+                            }
+                            ExpectedVisualAction::OcrClickText => {
+                                matches!(step.action, MkAction::OcrClickText(_))
+                            }
+                            ExpectedVisualAction::OcrReadText => {
+                                matches!(step.action, MkAction::OcrReadText(_))
+                            }
                             ExpectedVisualAction::FindPixel => {
                                 matches!(step.action, MkAction::FindPixel(_))
                             }
@@ -1383,6 +1641,25 @@ impl ActionEditorState {
                         if let Some(image) = self.image_search.as_mut() {
                             image.rectangle = rect;
                             image.kind = super::image_search_editor::SearchRegionKind::Rectangle;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VisualRegionDestination::OcrActionSearchRegion => {
+                        if let Some(step) = self.draft.as_mut() {
+                            let region = SearchRegion::Rectangle { rect };
+                            match &mut step.action {
+                                MkAction::OcrFindText(payload) => payload.search.region = region,
+                                MkAction::OcrClickText(payload) => payload.search.region = region,
+                                MkAction::OcrReadText(payload) => payload.region = region,
+                                _ => return,
+                            }
+                            if let Some(editor) = self.image_search.as_mut() {
+                                editor.rectangle = rect;
+                                editor.kind =
+                                    super::image_search_editor::SearchRegionKind::Rectangle;
+                            }
                             true
                         } else {
                             false
@@ -2078,6 +2355,7 @@ impl ActionEditorState {
 fn normalize_optional_outputs(action: &mut MkAction) {
     match action {
         MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => payload.outputs.normalize(),
+        MkAction::OcrFindText(payload) => payload.outputs.normalize(),
         MkAction::FindPixel(payload) => payload.outputs.normalize(),
         MkAction::CaptureScreenshot(payload) => {
             payload.path_output = payload.path_output.take().and_then(|name| {
@@ -2859,6 +3137,30 @@ fn virtual_desktop_number_valid(action: &MkAction) -> bool {
     )
 }
 
+fn ocr_wait_ui(ui: &mut egui::Ui, wait: &mut MkWaitOptions) {
+    ui.horizontal(|ui| {
+        ui.label("Timeout (ms)");
+        ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
+    });
+    ui.small("0 = wait forever");
+    ui.horizontal(|ui| {
+        ui.label("Poll (ms)");
+        ui.add(egui::DragValue::new(&mut wait.poll_interval_ms).clamp_range(100..=86_400_000));
+    });
+}
+
+fn ocr_optional_output(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
+    let mut enabled = value.is_some();
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut enabled, label).changed() {
+            *value = enabled.then(String::new);
+        }
+        if let Some(name) = value {
+            ui.text_edit_singleline(name);
+        }
+    });
+}
+
 fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
@@ -2879,6 +3181,7 @@ fn action_ui(
     Option<super::launcher_action_picker::PickerPurpose>,
     Option<ImageAuthoringRequest>,
     Option<super::condition_editor::ConditionImageRequest>,
+    Option<super::condition_editor::ConditionOcrRequest>,
     Option<PreviewRequest>,
     Option<super::visual_overlay::VisualPointDestination>,
     Option<u64>,
@@ -2892,6 +3195,7 @@ fn action_ui(
     let mut launcher_pick = None;
     let mut image_request = None;
     let mut condition_image_request = None;
+    let mut condition_ocr_request = None;
     let mut preview_request = None;
     let mut point_pick = None;
     let mut open_call_target = None;
@@ -3472,6 +3776,9 @@ fn action_ui(
                     super::condition_editor::ConditionEditorRequest::Image(request) => {
                         condition_image_request = Some(request);
                     }
+                    super::condition_editor::ConditionEditorRequest::Ocr(request) => {
+                        condition_ocr_request = Some(request);
+                    }
                 }
             }
         }
@@ -3490,6 +3797,9 @@ fn action_ui(
                     }
                     super::condition_editor::ConditionEditorRequest::Image(request) => {
                         condition_image_request = Some(request);
+                    }
+                    super::condition_editor::ConditionEditorRequest::Ocr(request) => {
+                        condition_ocr_request = Some(request);
                     }
                 }
             }
@@ -3527,6 +3837,58 @@ fn action_ui(
             }
         }
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => {}
+        MkAction::OcrFindText(p) => {
+            super::ocr_controls::search_match_ui(ui, &mut p.search);
+            ocr_wait_ui(ui, &mut p.wait);
+            egui::ComboBox::from_label("If not found")
+                .selected_text(format!("{:?}", p.not_found_policy))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut p.not_found_policy,
+                        MkImageNotFoundPolicy::Continue,
+                        "Continue",
+                    );
+                    ui.selectable_value(
+                        &mut p.not_found_policy,
+                        MkImageNotFoundPolicy::Fail,
+                        "Fail",
+                    );
+                });
+            ui.collapsing("Output variables", |ui| {
+                ocr_optional_output(ui, "Found", &mut p.outputs.found);
+                ocr_optional_output(ui, "Matched text", &mut p.outputs.matched_text);
+                ocr_optional_output(ui, "Point", &mut p.outputs.point);
+                ocr_optional_output(ui, "X", &mut p.outputs.x);
+                ocr_optional_output(ui, "Y", &mut p.outputs.y);
+                ocr_optional_output(ui, "Match count", &mut p.outputs.match_count);
+            });
+        }
+        MkAction::OcrClickText(p) => {
+            super::ocr_controls::search_match_ui(ui, &mut p.search);
+            ocr_wait_ui(ui, &mut p.wait);
+            egui::ComboBox::from_label("Button")
+                .selected_text(format!("{:?}", p.button))
+                .show_ui(ui, |ui| {
+                    for button in [
+                        MkMouseButton::Left,
+                        MkMouseButton::Right,
+                        MkMouseButton::Middle,
+                        MkMouseButton::X1,
+                        MkMouseButton::X2,
+                    ] {
+                        ui.selectable_value(&mut p.button, button.clone(), format!("{button:?}"));
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.label("Clicks");
+                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
+                ui.label("X offset");
+                ui.add(egui::DragValue::new(&mut p.x_offset));
+                ui.label("Y offset");
+                ui.add(egui::DragValue::new(&mut p.y_offset));
+            });
+        }
+        MkAction::OcrReadText(p) => super::ocr_controls::read_output_ui(ui, p),
         MkAction::WaitForVisualChange(p) => {
             ui.heading("Wait for Visual Change");
             ui.horizontal(|ui| {
@@ -3756,6 +4118,7 @@ fn action_ui(
         launcher_pick,
         image_request,
         condition_image_request,
+        condition_ocr_request,
         preview_request,
         point_pick,
         open_call_target,
@@ -3900,13 +4263,39 @@ pub(crate) fn activation_matcher(region: &SearchRegion) -> Option<MkWindowMatche
     }
 }
 
+fn condition_activation_region(condition: &MkCondition) -> Option<SearchRegion> {
+    match condition {
+        MkCondition::OcrTextSearch { search, .. }
+            if activation_matcher(&search.search.region).is_some() =>
+        {
+            Some(search.search.region.clone())
+        }
+        MkCondition::ImageSearch { search, .. } if activation_matcher(&search.region).is_some() => {
+            Some(search.region.clone())
+        }
+        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+            conditions.iter().find_map(condition_activation_region)
+        }
+        MkCondition::Not { condition } => condition_activation_region(condition),
+        _ => None,
+    }
+}
+
 /// Inserts a normal activation action before the stable search row.
 pub(crate) fn insert_activate_window_before(
     dialog: &mut MkMacroDialog,
     anchor_id: u64,
     payload: &MkImagePayload,
 ) -> bool {
-    let Some(matcher) = activation_matcher(&payload.region) else {
+    insert_activate_window_before_region(dialog, anchor_id, &payload.region)
+}
+
+pub(crate) fn insert_activate_window_before_region(
+    dialog: &mut MkMacroDialog,
+    anchor_id: u64,
+    region: &SearchRegion,
+) -> bool {
+    let Some(matcher) = activation_matcher(region) else {
         return false;
     };
     let Some(macro_) = dialog.selected_macro_mut() else {
@@ -4188,6 +4577,12 @@ fn condition_at_path<'a>(
         MkCondition::WindowExists { matcher } | MkCondition::WindowActive { matcher } => {
             Some(matcher)
         }
+        MkCondition::OcrTextSearch { search, .. } => match &mut search.search.region {
+            SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                Some(matcher)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -4225,6 +4620,24 @@ fn matcher_at_path<'a>(
                 _ => None,
             },
             MkAction::FindPixel(p) => match &mut p.region {
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    Some(matcher)
+                }
+                _ => None,
+            },
+            MkAction::OcrFindText(p) => match &mut p.search.region {
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    Some(matcher)
+                }
+                _ => None,
+            },
+            MkAction::OcrClickText(p) => match &mut p.search.region {
+                SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
+                    Some(matcher)
+                }
+                _ => None,
+            },
+            MkAction::OcrReadText(p) => match &mut p.region {
                 SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
                     Some(matcher)
                 }
@@ -4498,6 +4911,32 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut apply = false;
     let mut cancel = false;
     let mut captured = None;
+    let ocr_editor_open = d
+        .action_editor
+        .draft
+        .as_ref()
+        .is_some_and(|step| match &step.action {
+            MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => true,
+            MkAction::If(condition)
+            | MkAction::WhileStart { condition }
+            | MkAction::WaitUntil { condition, .. } => {
+                crate::mkmacro::validation::condition_contains_ocr(condition)
+            }
+            _ => false,
+        });
+    d.action_editor.poll_ocr_authoring();
+    if ocr_editor_open
+        && d.action_editor.ocr_language_cache.is_none()
+        && !d.action_editor.ocr_languages.active()
+    {
+        d.action_editor.request_ocr_languages();
+    }
+    if d.action_editor.ocr_languages.active() || d.action_editor.ocr_test.active() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    let mut ocr_test_request = None;
+    let mut refresh_ocr_languages = false;
+    let mut show_ocr_debug_overlay = false;
     if d.action_editor.position_capture.is_some() {
         ctx.request_repaint();
         match d.action_editor.picker.poll_event() {
@@ -4514,7 +4953,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let mut wait_visual_region_request = false;
     let mut screenshot_region_request = false;
     let mut find_pixel_region_request = false;
+    let mut ocr_region_request = false;
     let mut condition_image_request = None;
+    let mut condition_ocr_request = None;
     let mut image_test_request: Option<Option<super::image_authoring_destination::ConditionPath>> =
         None;
     let mut preview_request = None;
@@ -4572,6 +5013,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
           egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let state = &mut d.action_editor;
             let draft_generation = state.draft_generation;
+            let ocr_identity = state.ocr_identity(None);
             let point_pick_active = state.active_point_pick.is_some()
                 || state.visual_overlay.operation_id().is_some();
             let step = state.draft.as_mut().unwrap();
@@ -4583,7 +5025,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 assets: &image_refs,
             };
             let caller_id = state.owner_macro_id.or(d.selected_macro_id).unwrap_or(0);
-            let (position, mut window, launcher, image, condition_image, preview, pick_point, open_target)=action_ui(
+            let (position, mut window, launcher, image, condition_image, condition_ocr, preview, pick_point, open_target)=action_ui(
                 ui,
                 step,
                 &mut state.capture_keys,
@@ -4602,18 +5044,142 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             pick_request = position;
             image_request = image;
             condition_image_request = condition_image;
+            condition_ocr_request = condition_ocr;
             preview_request = preview;
             point_pick_request = pick_point;
             open_call_target_request = open_target;
+            let installed_languages = state
+                .ocr_language_cache
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .cloned()
+                .unwrap_or_default();
+            match &mut step.action {
+                MkAction::OcrFindText(payload) => {
+                    super::ocr_controls::installed_language_ui(
+                        ui,
+                        &mut payload.search.language,
+                        &installed_languages,
+                    );
+                }
+                MkAction::OcrClickText(payload) => {
+                    super::ocr_controls::installed_language_ui(
+                        ui,
+                        &mut payload.search.language,
+                        &installed_languages,
+                    );
+                }
+                MkAction::OcrReadText(payload) => {
+                    super::ocr_controls::installed_language_ui(
+                        ui,
+                        &mut payload.language,
+                        &installed_languages,
+                    );
+                }
+                _ => {}
+            }
+            if ocr_editor_open {
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh OCR languages").clicked() {
+                        refresh_ocr_languages = true;
+                    }
+                    if ui.button("Test OCR").clicked() {
+                        let (region, language, search) = match &step.action {
+                            MkAction::OcrFindText(payload) => (
+                                payload.search.region.clone(),
+                                payload.search.language.clone(),
+                                Some(payload.search.clone()),
+                            ),
+                            MkAction::OcrClickText(payload) => (
+                                payload.search.region.clone(),
+                                payload.search.language.clone(),
+                                Some(payload.search.clone()),
+                            ),
+                            MkAction::OcrReadText(payload) => (
+                                payload.region.clone(),
+                                payload.language.clone(),
+                                None,
+                            ),
+                            _ => unreachable!(),
+                        };
+                        ocr_test_request = Some(super::ocr_test_job::OcrTestRequest {
+                            identity: ocr_identity.clone(),
+                            region,
+                            language,
+                            search,
+                        });
+                    }
+                });
+                let ocr_region = match &step.action {
+                    MkAction::OcrFindText(payload) => {
+                        &payload.search.region
+                    }
+                    MkAction::OcrClickText(payload) => {
+                        &payload.search.region
+                    }
+                    MkAction::OcrReadText(payload) => &payload.region,
+                    _ => unreachable!(),
+                };
+                if activation_matcher(ocr_region).is_some()
+                    && ui.button("Add Activate Window Before").clicked()
+                {
+                    state.add_activate_before = true;
+                }
+                if let Some(Err(error)) = &state.ocr_language_cache {
+                    ui.colored_label(ui.visuals().error_fg_color, error.to_string());
+                }
+                if let Some(message) = &state.ocr_message {
+                    ui.label(message);
+                }
+                if let Some(preview) = &state.ocr_preview {
+                    if ui.button("Show OCR Geometry on Desktop").clicked() {
+                        show_ocr_debug_overlay = true;
+                    }
+                    super::ocr_controls::preview_ui(
+                        ui,
+                        preview,
+                        &format!("{}-{}", state.owner_macro_id.unwrap_or(0), draft_generation),
+                        &mut state.ocr_preview_texture,
+                    );
+                }
+            }
             if matches!(
                 step.action,
                 MkAction::FindPixel(_)
                     | MkAction::WaitForVisualChange(_)
                     | MkAction::CaptureScreenshot(_)
+                    | MkAction::OcrFindText(_)
+                    | MkAction::OcrClickText(_)
+                    | MkAction::OcrReadText(_)
             ) {
                 ui.separator(); ui.heading("Region");
                 let is_screenshot = matches!(step.action, MkAction::CaptureScreenshot(_));
                 let is_find_pixel = matches!(step.action, MkAction::FindPixel(_));
+                let is_ocr = matches!(
+                    step.action,
+                    MkAction::OcrFindText(_)
+                        | MkAction::OcrClickText(_)
+                        | MkAction::OcrReadText(_)
+                );
+                if is_ocr {
+                    let payload_region = match &step.action {
+                        MkAction::OcrFindText(payload) => payload.search.region.clone(),
+                        MkAction::OcrClickText(payload) => payload.search.region.clone(),
+                        MkAction::OcrReadText(payload) => payload.region.clone(),
+                        _ => unreachable!(),
+                    };
+                    if state
+                        .image_search
+                        .as_ref()
+                        .is_none_or(|editor| editor.selected_region() != payload_region)
+                    {
+                        state.image_search = Some(
+                            super::image_search_editor::ImageSearchEditorState::from_region(
+                                &payload_region,
+                            ),
+                        );
+                    }
+                }
                 let region_state = state.image_search.as_mut().expect("visual region requires editor state");
                 let before = region_state.selected_region();
                 if let Some(request) = super::image_search_controls::show_search_region_fields(ui, region_state) {
@@ -4625,6 +5191,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                                 screenshot_region_request = true;
                             } else if is_find_pixel {
                                 find_pixel_region_request = true;
+                            } else if is_ocr {
+                                ocr_region_request = true;
                             } else {
                                 wait_visual_region_request = true;
                             }
@@ -4643,6 +5211,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         MkAction::WaitForVisualChange(payload) => payload.region = selected,
                         MkAction::CaptureScreenshot(payload) => payload.region = selected,
                         MkAction::FindPixel(payload) => payload.region = selected,
+                        MkAction::OcrFindText(payload) => payload.search.region = selected,
+                        MkAction::OcrClickText(payload) => payload.search.region = selected,
+                        MkAction::OcrReadText(payload) => payload.region = selected,
                         _ => unreachable!(),
                     }
                     state.draft_changed = true;
@@ -4762,11 +5333,96 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
               related_action_notice = reduce_related_action_request(&mut d.action_editor, request);
           }
         });
+    if refresh_ocr_languages {
+        d.action_editor.ocr_language_cache = None;
+        d.action_editor.request_ocr_languages();
+        ctx.request_repaint();
+    }
+    if let Some(request) = ocr_test_request {
+        d.action_editor.start_ocr_test(request);
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    if show_ocr_debug_overlay {
+        d.action_editor.preview_ocr_debug_overlay();
+    }
     if identify_monitors_request {
         d.action_editor.identify_search_monitors();
     }
     if let Some(notice) = related_action_notice {
         d.queue_ui_notice(notice);
+    }
+    if let Some(request) = condition_ocr_request {
+        use super::condition_editor::ConditionOcrOperation;
+        let macro_id = d.selected_macro_id.unwrap_or(0);
+        match request.operation {
+            ConditionOcrOperation::TestOcr => {
+                if let Some(test) = d
+                    .action_editor
+                    .ocr_condition_test_request(macro_id, &request.path)
+                {
+                    d.action_editor.start_ocr_test(test);
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
+            }
+            ConditionOcrOperation::PreviewRegion => {
+                if let Some(test) = d
+                    .action_editor
+                    .ocr_condition_test_request(macro_id, &request.path)
+                {
+                    d.action_editor.preview_region(test.region);
+                }
+            }
+            ConditionOcrOperation::PickRectangle => {
+                let destination = d.action_editor.condition_destination(
+                    macro_id,
+                    super::condition_editor::ConditionImageRequest {
+                        path: request.path,
+                        operation: super::condition_editor::ConditionImageOperation::PickRectangle,
+                    },
+                );
+                if let Err(error) = d.action_editor.request_rectangle_selection(
+                    macro_id,
+                    super::visual_overlay::RectanglePurpose::SearchRegion,
+                    VisualRegionDestination::ConditionSearchRegion(destination),
+                ) {
+                    d.action_editor.capture_message = Some(error.to_string());
+                }
+            }
+            ConditionOcrOperation::PickWindow => {
+                let indexes = request.path.indexes();
+                let path = super::window_picker::MatcherPath::Condition(indexes);
+                let original = d
+                    .action_editor
+                    .draft
+                    .as_mut()
+                    .and_then(|step| matcher_at_path(&mut step.action, &path))
+                    .cloned();
+                if let Some(original) = original {
+                    d.window_picker
+                        .open(super::window_picker::MatcherEditRequest {
+                            destination: super::window_picker::MatcherDestination::Action {
+                                macro_id,
+                                draft_generation: d.action_editor.draft_generation,
+                                step_id: d.action_editor.editing_id,
+                                path,
+                            },
+                            original,
+                        });
+                }
+            }
+            ConditionOcrOperation::AddActivateWindowBefore => {
+                if let Some(test) = d
+                    .action_editor
+                    .ocr_condition_test_request(macro_id, &request.path)
+                {
+                    d.action_editor.add_activate_before = true;
+                    d.action_editor.activate_before_region = Some(test.region);
+                    d.queue_ui_notice(
+                        "Queued: Activate Window will be added when this action is applied.",
+                    );
+                }
+            }
+        }
     }
     if let Some(request) = condition_image_request.as_ref()
         && matches!(
@@ -4836,6 +5492,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     VisualRegionDestination::CaptureScreenshotRegion
                 } else if find_pixel_region_request {
                     VisualRegionDestination::FindPixelSearchRegion
+                } else if ocr_region_request {
+                    VisualRegionDestination::OcrActionSearchRegion
                 } else if matches!(request, ImageAuthoringRequest::PickClickWithinRegion) {
                     VisualRegionDestination::ClickWithinRegion
                 } else if matches!(request, ImageAuthoringRequest::CaptureRectangle) {
@@ -5016,12 +5674,28 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         let smooth = state.add_smooth_move;
         let activate = state.add_activate_before;
         let shortcut_payload = state.draft.as_ref().and_then(image_payload).cloned();
+        let activation_region = state.activate_before_region.clone().or_else(|| {
+            state.draft.as_ref().and_then(|step| match &step.action {
+                MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => {
+                    Some(payload.region.clone())
+                }
+                MkAction::OcrFindText(payload) => Some(payload.search.region.clone()),
+                MkAction::OcrClickText(payload) => Some(payload.search.region.clone()),
+                MkAction::OcrReadText(payload) => Some(payload.region.clone()),
+                MkAction::If(condition)
+                | MkAction::WhileStart { condition }
+                | MkAction::WaitUntil { condition, .. } => condition_activation_region(condition),
+                _ => None,
+            })
+        });
         let anchor = state.apply(d);
-        if let (Some(anchor), Some(payload)) = (anchor, shortcut_payload.as_ref()) {
+        if let Some(anchor) = anchor {
             if activate {
-                insert_activate_window_before(d, anchor, payload);
+                if let Some(region) = activation_region.as_ref() {
+                    insert_activate_window_before_region(d, anchor, region);
+                }
             }
-            if smooth {
+            if smooth && let Some(payload) = shortcut_payload.as_ref() {
                 insert_smooth_move_after(d, anchor, payload);
             }
         }
@@ -5737,6 +6411,46 @@ mod tests {
         assert!(matches!(steps[0].action, MkAction::WindowActivate(_)));
         assert!(matches!(steps[1].action, MkAction::ImageFind(_)));
         assert!(matches!(steps[2].action, MkAction::MouseMove(_)));
+    }
+
+    #[test]
+    fn ocr_window_activation_is_inserted_only_after_apply() {
+        let (_dir, mut dialog, _fixture) = shared_dialog();
+        let matcher = MkWindowMatcher {
+            title: Some("OCR Target".into()),
+            ..Default::default()
+        };
+        let mut payload = MkOcrFindPayload::default();
+        payload.search.text = "Ready".into();
+        payload.search.region = SearchRegion::Window {
+            matcher: matcher.clone(),
+        };
+        dialog
+            .action_editor
+            .begin_new(MkAction::OcrFindText(payload));
+        dialog.action_editor.add_activate_before = true;
+        assert!(dialog.selected_macro().unwrap().steps.is_empty());
+
+        let mut state = dialog.take_action_editor();
+        let region = match &state.draft.as_ref().unwrap().action {
+            MkAction::OcrFindText(payload) => payload.search.region.clone(),
+            _ => unreachable!(),
+        };
+        let anchor = state.apply(&mut dialog).unwrap();
+        assert!(insert_activate_window_before_region(
+            &mut dialog,
+            anchor,
+            &region
+        ));
+        dialog.action_editor = state;
+
+        let steps = &dialog.selected_macro().unwrap().steps;
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            &steps[0].action,
+            MkAction::WindowActivate(MkWindowPayload { matcher: actual, .. }) if actual == &matcher
+        ));
+        assert!(matches!(steps[1].action, MkAction::OcrFindText(_)));
     }
 
     #[test]
@@ -7734,6 +8448,57 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn ocr_drafts_route_region_state_and_cancel_clears_authoring_state() {
+        let matcher = MkWindowMatcher {
+            title: Some("OCR target".into()),
+            ..Default::default()
+        };
+        let mut payload = MkOcrFindPayload::default();
+        payload.search.region = SearchRegion::ClientArea {
+            matcher: matcher.clone(),
+        };
+        let mut editor = test_editor();
+        editor.begin_new(MkAction::OcrFindText(payload));
+        let region = editor.image_search.as_ref().unwrap().selected_region();
+        assert_eq!(activation_matcher(&region), Some(matcher));
+        editor.ocr_preview = Some(super::super::ocr_test_job::OcrAuthoringPreview {
+            recognized: OcrRegionDocument {
+                capture: CapturedRegion {
+                    image: RgbaImage::new(1, 1),
+                    origin: (0, 0),
+                },
+                document: OcrDocument::default(),
+            },
+            search: None,
+        });
+        editor.cancel();
+        assert!(editor.ocr_preview.is_none());
+        assert!(editor.draft.is_none());
+    }
+
+    #[test]
+    fn recursive_ocr_test_snapshot_keeps_condition_path_identity() {
+        let mut editor = test_editor();
+        editor.begin_new(MkAction::If(MkCondition::Not {
+            condition: Box::new(MkCondition::OcrTextSearch {
+                search: MkOcrSearchCondition {
+                    search: MkOcrSearchSpec {
+                        text: "ready".into(),
+                        ..Default::default()
+                    },
+                },
+                found: true,
+            }),
+        }));
+        editor.bind_owner(Some(42));
+        let path = super::super::condition_editor::ConditionPath::from_indexes(&[0]);
+        let request = editor.ocr_condition_test_request(42, &path).unwrap();
+        assert_eq!(request.identity.macro_id, 42);
+        assert_eq!(request.identity.condition_path, Some(path));
+        assert_eq!(request.search.unwrap().text, "ready");
     }
 
     #[test]

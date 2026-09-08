@@ -28,6 +28,12 @@ siphasher = "0.3"
 urlencoding = "2"
 url = "2"
 windows = { version = "0.58", features = [
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Security_Cryptography",
     "Data_Xml_Dom",
     "UI_Notifications",
     "Foundation",

@@ -85,6 +85,8 @@ pub enum EditorKind {
     Launcher,
     VirtualDesktop,
     Image,
+    OcrSearch,
+    OcrRead,
     Screenshot,
     Pixel,
     Condition,
@@ -142,6 +144,26 @@ fn image_cond(found: bool) -> MkCondition {
             return_point: ReturnPoint::Center,
         },
         found,
+    }
+}
+fn ocr_search() -> MkOcrSearchSpec {
+    MkOcrSearchSpec {
+        text: "Text".into(),
+        ..MkOcrSearchSpec::default()
+    }
+}
+fn ocr_cond(found: bool) -> MkCondition {
+    MkCondition::OcrTextSearch {
+        search: MkOcrSearchCondition {
+            search: ocr_search(),
+        },
+        found,
+    }
+}
+fn ocr_wait() -> MkWaitOptions {
+    MkWaitOptions {
+        timeout_ms: 5_000,
+        poll_interval_ms: 250,
     }
 }
 fn wait() -> MkWaitOptions {
@@ -718,6 +740,63 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
         ),
         d!(
             Visual,
+            "Find Text",
+            "Find recognized text on screen",
+            &["ocr", "text", "recognize", "search"],
+            OcrSearch,
+            MkAction::OcrFindText(MkOcrFindPayload {
+                search: ocr_search(),
+                wait: ocr_wait(),
+                ..MkOcrFindPayload::default()
+            })
+        ),
+        d!(
+            Visual,
+            "Click Text",
+            "Find and click recognized text",
+            &["ocr", "text", "recognize", "click"],
+            OcrSearch,
+            MkAction::OcrClickText(MkOcrClickPayload {
+                search: ocr_search(),
+                wait: ocr_wait(),
+                ..MkOcrClickPayload::default()
+            })
+        ),
+        d!(
+            Visual,
+            "Read Text Into Variable",
+            "Recognize screen text and store it in a variable",
+            &["ocr", "text", "recognize", "read", "variable"],
+            OcrRead,
+            MkAction::OcrReadText(MkOcrReadPayload {
+                output_variable: "text".into(),
+                ..MkOcrReadPayload::default()
+            })
+        ),
+        d!(
+            Visual,
+            "Wait for Text",
+            "Wait until recognized text becomes visible",
+            &["ocr", "text", "wait", "appear", "visible"],
+            Condition,
+            MkAction::WaitUntil {
+                condition: ocr_cond(true),
+                wait: ocr_wait()
+            }
+        ),
+        d!(
+            Visual,
+            "Wait for Text to Disappear",
+            "Wait until recognized text is no longer visible",
+            &["ocr", "text", "wait", "disappear", "gone"],
+            Condition,
+            MkAction::WaitUntil {
+                condition: ocr_cond(false),
+                wait: ocr_wait()
+            }
+        ),
+        d!(
+            Visual,
             "Capture Screenshot",
             "Capture a desktop, monitor, rectangle, window, or client area",
             &["screenshot", "capture", "clipboard", "image"],
@@ -900,6 +979,8 @@ pub fn editor_for_action(action: &MkAction) -> EditorKind {
         | MkAction::Break
         | MkAction::Continue => EditorKind::DirectInsert,
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => EditorKind::Image,
+        MkAction::OcrFindText(_) | MkAction::OcrClickText(_) => EditorKind::OcrSearch,
+        MkAction::OcrReadText(_) => EditorKind::OcrRead,
         MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => EditorKind::Screenshot,
         MkAction::PixelCheck { .. } | MkAction::FindPixel(_) => EditorKind::Pixel,
         MkAction::UiInvoke(_)
@@ -954,6 +1035,8 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::Process
         | EditorKind::Launcher
         | EditorKind::Image
+        | EditorKind::OcrSearch
+        | EditorKind::OcrRead
         | EditorKind::Screenshot
         | EditorKind::Pixel
         | EditorKind::Condition
@@ -1006,6 +1089,12 @@ pub fn descriptor_name_matches_action(descriptor: &ActionDescriptor, action: &Mk
                 "Wait for Image" | "Wait for Image to Disappear",
                 MkAction::WaitUntil {
                     condition: MkCondition::ImageSearch { .. },
+                    ..
+                }
+            ) | (
+                "Wait for Text" | "Wait for Text to Disappear",
+                MkAction::WaitUntil {
+                    condition: MkCondition::OcrTextSearch { .. },
                     ..
                 }
             )
@@ -1082,6 +1171,8 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => {
             Some(EditorContract::Configurable { field_count: 2 })
         }
+        EditorKind::OcrSearch => Some(EditorContract::Configurable { field_count: 10 }),
+        EditorKind::OcrRead => Some(EditorContract::Configurable { field_count: 4 }),
         EditorKind::Screenshot => Some(EditorContract::Configurable { field_count: 6 }),
         EditorKind::MouseDrag | EditorKind::Window => {
             Some(EditorContract::Configurable { field_count: 3 })
@@ -1199,6 +1290,9 @@ pub fn action_name(a: &MkAction) -> &'static str {
         MkAction::Break => "Break",
         MkAction::Continue => "Continue",
         MkAction::ImageFind(_) => "Find Image",
+        MkAction::OcrFindText(_) => "Find Text",
+        MkAction::OcrClickText(_) => "Click Text",
+        MkAction::OcrReadText(_) => "Read Text Into Variable",
         MkAction::FindPixel(_) => "Find Pixel Color",
         MkAction::ImageClick(_) => "Click Image",
         MkAction::PixelCheck { .. } => "Check Pixel Color",
@@ -1330,6 +1424,22 @@ fn action_details_core(a: &MkAction, asset_name: Option<&str>, assets: &[MkImage
         MkAction::RepeatStart { count } => format!("{count} times"),
         MkAction::ImageFind(p) => format_image_details(p, asset_name, assets, false),
         MkAction::ImageClick(p) => format_image_details(p, asset_name, assets, true),
+        MkAction::OcrFindText(p) => format!(
+            "‘{}’ · {} · {}",
+            p.search.text,
+            region_summary(&p.search.region),
+            format_wait_timeout(p.wait.timeout_ms)
+        ),
+        MkAction::OcrClickText(p) => format!(
+            "‘{}’ · {} · {} ×{}",
+            p.search.text,
+            region_summary(&p.search.region),
+            mouse(&p.button),
+            p.clicks
+        ),
+        MkAction::OcrReadText(p) => {
+            format!("{} → {}", region_summary(&p.region), p.output_variable)
+        }
         MkAction::FindPixel(p) => format!(
             "{} ±{} · {} · {}",
             p.color,
@@ -1503,6 +1613,12 @@ fn condition_summary(c: &MkCondition, preferred: Option<&str>, assets: &[MkImage
             if *found { "visible" } else { "not visible" },
             asset_display_name(&search.image, preferred, assets),
             condition_region_summary(&search.region)
+        ),
+        MkCondition::OcrTextSearch { search, found } => format!(
+            "Text {}: ‘{}’ · {}",
+            if *found { "visible" } else { "not visible" },
+            search.search.text,
+            condition_region_summary(&search.search.region)
         ),
         MkCondition::PreviousImageResult { image, found } => format!(
             "Previous image search: {} = {}",

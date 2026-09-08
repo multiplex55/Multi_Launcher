@@ -83,6 +83,10 @@ pub const BUILT_INS: &[&str] = &[
     "last_pixel_found",
     "last_pixel_x",
     "last_pixel_y",
+    "last_ocr_found",
+    "last_ocr_text",
+    "last_ocr_x",
+    "last_ocr_y",
     "last_point.x",
     "last_point.y",
 ];
@@ -104,11 +108,14 @@ pub fn builtin_type(name: &str) -> Option<MkValueType> {
         return None;
     }
     Some(match name {
-        "active_window.title" | "active_window.process" | "macro.name" => MkValueType::String,
+        "active_window.title" | "active_window.process" | "macro.name" | "last_ocr_text" => {
+            MkValueType::String
+        }
         "last_action_success"
         | "last_window_result"
         | "last_image_found"
         | "last_pixel_found"
+        | "last_ocr_found"
         | "last_image_result"
         | "last_pixel_result" => MkValueType::Boolean,
         _ => MkValueType::Number,
@@ -169,5 +176,25 @@ mod tests {
         assert!(validate_variable_name("valid_1").is_ok());
         assert!(validate_variable_name("1bad").is_err());
         assert!(validate_variable_name("mouse.x").is_err())
+    }
+
+    #[test]
+    fn ocr_built_ins_have_stable_types_and_are_read_only() {
+        assert_eq!(builtin_type("last_ocr_found"), Some(MkValueType::Boolean));
+        assert_eq!(builtin_type("last_ocr_text"), Some(MkValueType::String));
+        assert_eq!(builtin_type("last_ocr_x"), Some(MkValueType::Number));
+        assert_eq!(builtin_type("last_ocr_y"), Some(MkValueType::Number));
+        for name in [
+            "last_ocr_found",
+            "last_ocr_text",
+            "last_ocr_x",
+            "last_ocr_y",
+        ] {
+            assert!(is_builtin(name));
+            assert_eq!(
+                validate_variable_name(name),
+                Err("built-in variable is read-only")
+            );
+        }
     }
 }

@@ -19,6 +19,8 @@ pub mod launcher_action_picker;
 mod macro_list;
 mod macro_properties;
 mod navigation;
+pub mod ocr_controls;
+mod ocr_test_job;
 mod outline;
 mod package_ui;
 pub(crate) mod parameter_prompt;
@@ -1885,6 +1887,10 @@ mod tests {
             | MkAction::Break
             | MkAction::Continue => (EditorKind::DirectInsert, true),
             MkAction::ImageFind(_) | MkAction::ImageClick(_) => (EditorKind::Image, true),
+            MkAction::OcrFindText(_) | MkAction::OcrClickText(_) => {
+                (EditorKind::OcrSearch, cfg!(windows))
+            }
+            MkAction::OcrReadText(_) => (EditorKind::OcrRead, cfg!(windows)),
             MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => {
                 (EditorKind::Screenshot, true)
             }

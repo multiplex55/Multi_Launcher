@@ -147,6 +147,7 @@ fn rewrite_condition_pixel_targets(condition: &mut MkCondition, search_ids: &BTr
         | MkCondition::WindowExists { .. }
         | MkCondition::WindowActive { .. }
         | MkCondition::ImageSearch { .. }
+        | MkCondition::OcrTextSearch { .. }
         | MkCondition::PreviousImageResult { .. } => {}
     }
 }
@@ -199,6 +200,9 @@ fn rewrite_action_pixel_targets(action: &mut MkAction, search_ids: &BTreeMap<u64
         | MkAction::Continue
         | MkAction::ImageFind(_)
         | MkAction::ImageClick(_)
+        | MkAction::OcrFindText(_)
+        | MkAction::OcrClickText(_)
+        | MkAction::OcrReadText(_)
         | MkAction::FindPixel(_)
         | MkAction::CaptureScreenshot(_)
         | MkAction::WaitForVisualChange(_)

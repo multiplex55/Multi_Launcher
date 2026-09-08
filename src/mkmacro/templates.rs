@@ -168,7 +168,7 @@ fn decode_catalog(bytes: &[u8]) -> Result<MkMacroTemplateCatalog> {
         TemplateCatalogProbe::Supported => {}
     }
     let source: serde_json::Value = serde_json::from_slice(bytes)?;
-    let catalog: MkMacroTemplateCatalog = serde_json::from_value(source.clone())?;
+    let mut catalog: MkMacroTemplateCatalog = serde_json::from_value(source.clone())?;
     let canonical = serde_json::to_value(&catalog)?;
     ensure!(
         source == canonical,
@@ -181,7 +181,7 @@ fn decode_catalog(bytes: &[u8]) -> Result<MkMacroTemplateCatalog> {
     );
     let mut ids = std::collections::HashSet::new();
     let mut names = std::collections::HashSet::new();
-    for template in &catalog.templates {
+    for template in &mut catalog.templates {
         ensure!(
             template.id != 0 && ids.insert(template.id),
             "duplicate template ID"
@@ -192,7 +192,7 @@ fn decode_catalog(bytes: &[u8]) -> Result<MkMacroTemplateCatalog> {
             names.insert(normalized_template_name(name)),
             "duplicate template name"
         );
-        parse_package(&serde_json::to_vec(&template.package)?)?;
+        template.package = parse_package(&serde_json::to_vec(&template.package)?)?;
     }
     Ok(catalog)
 }

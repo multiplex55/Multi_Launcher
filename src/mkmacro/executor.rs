@@ -1,5 +1,9 @@
 //! Platform-neutral plan executor and injectable effect boundaries.
 mod frame;
+use super::ocr::{
+    OcrBackend, OcrDocument, OcrSearchResult, UnsupportedOcrBackend, recognize_region,
+    search_document,
+};
 use super::{
     CapturedRegion, Jump, MkAction, MkCompareOp, MkCondition, MkCoordinateTarget, MkDelayMode,
     MkExecutionPlan, MkFileCollisionPolicy, MkImageNotFoundPolicy, MkImageOutputs, MkImagePayload,
@@ -280,6 +284,7 @@ pub struct Backends {
     pub prompt: Arc<dyn PromptBackend>,
     pub clipboard: Arc<dyn ClipboardBackend>,
     pub screenshot_capture: Arc<dyn ScreenCaptureBackend>,
+    pub ocr: Arc<dyn OcrBackend>,
     pub screenshot_encoder: Arc<dyn ScreenshotEncoder>,
     pub screenshot_files: Arc<dyn ScreenshotFileSystem>,
     pub virtual_desktop: Arc<dyn super::virtual_desktops::VirtualDesktopBackend>,
@@ -314,6 +319,7 @@ impl Backends {
             screenshot_capture: Arc::new(Unsupported {
                 backend: "screen capture",
             }),
+            ocr: Arc::new(UnsupportedOcrBackend),
             screenshot_encoder: Arc::new(ImageScreenshotEncoder),
             screenshot_files: Arc::new(HostScreenshotFileSystem),
             virtual_desktop: Arc::new(super::virtual_desktops::UnsupportedVirtualDesktopBackend),
@@ -586,6 +592,7 @@ pub fn production_backends() -> Backends {
             prompt: super::prompt::production_prompt_broker(),
             clipboard: Arc::new(ProductionClipboard),
             screenshot_capture: Arc::new(super::screen::WindowsScreenCaptureBackend::system()),
+            ocr: Arc::new(super::ocr::WindowsOcrBackend::new()),
             screenshot_encoder: Arc::new(ImageScreenshotEncoder),
             screenshot_files: Arc::new(HostScreenshotFileSystem),
         }
@@ -979,29 +986,51 @@ pub enum ExecutionEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StepOutcome {
     pub last_image_found: Option<bool>,
+    pub last_ocr_found: Option<bool>,
 }
 
 impl StepOutcome {
     fn for_action(action: &MkAction, variables: &RuntimeVariables) -> Self {
-        let key = match action {
+        let image_key = match action {
             MkAction::ImageFind(_) | MkAction::ImageClick(_) => Some("last_image_found"),
             MkAction::FindPixel(_) => Some("last_pixel_found"),
             _ => None,
         };
+        let reports_ocr = matches!(action, MkAction::OcrFindText(_) | MkAction::OcrClickText(_))
+            || matches!(action, MkAction::WaitUntil { condition, .. } if condition_contains_ocr(condition));
         Self {
-            last_image_found: key.and_then(|key| match variables.get(key) {
+            last_image_found: image_key.and_then(|key| match variables.get(key) {
                 Some(MkValue::Boolean(found)) => Some(*found),
                 _ => None,
             }),
+            last_ocr_found: reports_ocr
+                .then(|| match variables.get("last_ocr_found") {
+                    Some(MkValue::Boolean(found)) => Some(*found),
+                    _ => None,
+                })
+                .flatten(),
         }
     }
 
     pub fn detail(&self) -> Option<&'static str> {
-        match self.last_image_found {
-            Some(true) => Some("Success — image found."),
-            Some(false) => Some("Success — image not found; continued."),
-            None => None,
+        match (self.last_image_found, self.last_ocr_found) {
+            (_, Some(true)) => Some("Success — OCR text found."),
+            (_, Some(false)) => Some("Success — OCR text not found; continued."),
+            (Some(true), None) => Some("Success — image found."),
+            (Some(false), None) => Some("Success — image not found; continued."),
+            (None, None) => None,
         }
+    }
+}
+
+fn condition_contains_ocr(condition: &MkCondition) -> bool {
+    match condition {
+        MkCondition::OcrTextSearch { .. } => true,
+        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+            conditions.iter().any(condition_contains_ocr)
+        }
+        MkCondition::Not { condition } => condition_contains_ocr(condition),
+        _ => false,
     }
 }
 
@@ -4527,6 +4556,76 @@ impl Executor {
                 g.down_button(MkMouseButton::Left)?;
                 g.up_button(MkMouseButton::Left)
             }
+            MkAction::OcrFindText(p) => {
+                let search = self.resolve_ocr_search(&p.search, v, "ocr_find_text.text");
+                Self::clear_ocr_result(v, Some(&p.outputs));
+                let search = search?;
+                self.wait_ocr_search(
+                    &search,
+                    &p.wait,
+                    p.not_found_policy.clone(),
+                    Some(&p.outputs),
+                    v,
+                    "OCR Find Text",
+                )
+                .map(|_| ())
+            }
+            MkAction::OcrClickText(p) => {
+                let search = self.resolve_ocr_search(&p.search, v, "ocr_click_text.text");
+                Self::clear_ocr_result(v, None);
+                let search = search?;
+                let result = self.wait_ocr_search(
+                    &search,
+                    &p.wait,
+                    p.not_found_policy.clone(),
+                    None,
+                    v,
+                    "OCR Click Text",
+                )?;
+                if let Some(found) = result.selected {
+                    let point = MkPoint {
+                        x: found.center.x.checked_add(p.x_offset).ok_or_else(|| {
+                            ExecutionDiagnostic::new(
+                                DiagnosticKind::InvalidTarget,
+                                "OCR click X coordinate overflowed",
+                            )
+                        })?,
+                        y: found.center.y.checked_add(p.y_offset).ok_or_else(|| {
+                            ExecutionDiagnostic::new(
+                                DiagnosticKind::InvalidTarget,
+                                "OCR click Y coordinate overflowed",
+                            )
+                        })?,
+                    };
+                    let point = self.backends.screen.finalize_point(point)?;
+                    self.control.checkpoint()?;
+                    self.click_at(point, p.button.clone(), p.clicks, v, g)?;
+                }
+                Ok(())
+            }
+            MkAction::OcrReadText(p) => {
+                v.remove(&p.output_variable);
+                self.control.checkpoint()?;
+                let recognized = recognize_region(
+                    self.backends.screenshot_capture.as_ref(),
+                    self.backends.ocr.as_ref(),
+                    &p.region,
+                    &p.language,
+                    &|| self.control.is_stopped(),
+                )
+                .map_err(|error| {
+                    error
+                        .context("action", "OCR Read Text")
+                        .context("region", format!("{:?}", p.region))
+                        .context("language", format!("{:?}", p.language))
+                })?;
+                self.control.checkpoint()?;
+                v.insert(
+                    p.output_variable.clone(),
+                    MkValue::String(recognized.document.recognized_text()),
+                );
+                Ok(())
+            }
             MkAction::FindPixel(p) => self.wait_pixel(p, v).map(|_| ()),
             MkAction::CaptureScreenshot(p) => {
                 let path = if p.destination.produces_file() {
@@ -4816,6 +4915,209 @@ impl Executor {
             }
         }
     }
+    fn resolve_ocr_search(
+        &self,
+        search: &super::MkOcrSearchSpec,
+        variables: &RuntimeVariables,
+        field: &'static str,
+    ) -> ExecResult<super::MkOcrSearchSpec> {
+        let mut resolved = search.clone();
+        resolved.text =
+            interpolate(&search.text, variables).map_err(|error| error.context("field", field))?;
+        Ok(resolved)
+    }
+
+    fn ocr_search_once(&self, search: &super::MkOcrSearchSpec) -> ExecResult<OcrSearchResult> {
+        self.control.checkpoint()?;
+        let recognized = recognize_region(
+            self.backends.screenshot_capture.as_ref(),
+            self.backends.ocr.as_ref(),
+            &search.region,
+            &search.language,
+            &|| self.control.is_stopped(),
+        )?;
+        self.control.checkpoint()?;
+        search_document(
+            &recognized.document,
+            &search.text,
+            search.match_mode,
+            search.case_sensitive,
+            search.occurrence,
+        )
+        .map_err(|error| {
+            ExecutionDiagnostic::new(DiagnosticKind::InvalidRegex, error.to_string())
+                .context("backend", "ocr")
+        })
+    }
+
+    fn wait_ocr_search(
+        &self,
+        search: &super::MkOcrSearchSpec,
+        wait: &MkWaitOptions,
+        policy: MkImageNotFoundPolicy,
+        outputs: Option<&super::MkOcrOutputs>,
+        variables: &mut RuntimeVariables,
+        action: &'static str,
+    ) -> ExecResult<OcrSearchResult> {
+        Self::clear_ocr_result(variables, outputs);
+        let started = self.waiter.now();
+        let timeout = wait.timeout_duration();
+        let mut polls = 0u64;
+        loop {
+            self.control.checkpoint()?;
+            polls = polls.saturating_add(1);
+            let result = self.ocr_search_once(search).map_err(|error| {
+                Self::ocr_context(
+                    error,
+                    search,
+                    action,
+                    wait,
+                    polls,
+                    self.waiter.now().saturating_sub(started),
+                )
+            })?;
+            Self::write_ocr_result(variables, outputs, &result);
+            if result.selected.is_some() {
+                return Ok(result);
+            }
+            let elapsed = self.waiter.now().saturating_sub(started);
+            if timeout.is_some_and(|deadline| elapsed >= deadline) {
+                self.control.checkpoint()?;
+                return match policy {
+                    MkImageNotFoundPolicy::Continue => Ok(result),
+                    MkImageNotFoundPolicy::Fail => Err(Self::ocr_context(
+                        ExecutionDiagnostic::new(
+                            DiagnosticKind::Timeout,
+                            format!("OCR text was not found within {} ms", wait.timeout_ms),
+                        )
+                        .context("match_count", result.match_count.to_string()),
+                        search,
+                        action,
+                        wait,
+                        polls,
+                        elapsed,
+                    )),
+                };
+            }
+            let poll_interval = Duration::from_millis(wait.poll_interval_ms.max(1));
+            let sleep = timeout.map_or(poll_interval, |deadline| {
+                poll_interval.min(deadline.saturating_sub(elapsed))
+            });
+            self.wait(sleep)?;
+        }
+    }
+
+    fn ocr_context(
+        error: ExecutionDiagnostic,
+        search: &super::MkOcrSearchSpec,
+        action: &'static str,
+        wait: &MkWaitOptions,
+        polls: u64,
+        elapsed: Duration,
+    ) -> ExecutionDiagnostic {
+        error
+            .context("action", action)
+            .context("query", &search.text)
+            .context("region", format!("{:?}", search.region))
+            .context("language", format!("{:?}", search.language))
+            .context("match_mode", format!("{:?}", search.match_mode))
+            .context("occurrence", format!("{:?}", search.occurrence))
+            .context("timeout_ms", wait.timeout_ms.to_string())
+            .context("poll_interval_ms", wait.poll_interval_ms.to_string())
+            .context("polls", polls.to_string())
+            .context("elapsed_ms", elapsed.as_millis().to_string())
+    }
+
+    fn clear_ocr_result(variables: &mut RuntimeVariables, outputs: Option<&super::MkOcrOutputs>) {
+        for key in [
+            "last_ocr_found",
+            "last_ocr_text",
+            "last_ocr_x",
+            "last_ocr_y",
+        ] {
+            variables.remove(key);
+        }
+        if let Some(outputs) = outputs {
+            for name in [
+                &outputs.found,
+                &outputs.matched_text,
+                &outputs.point,
+                &outputs.x,
+                &outputs.y,
+                &outputs.match_count,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                variables.remove(name);
+            }
+        }
+    }
+
+    fn write_ocr_result(
+        variables: &mut RuntimeVariables,
+        outputs: Option<&super::MkOcrOutputs>,
+        result: &OcrSearchResult,
+    ) {
+        let found = result.selected.is_some();
+        variables.insert("last_ocr_found".into(), MkValue::Boolean(found));
+        if let Some(matched) = result.selected.as_ref() {
+            variables.insert(
+                "last_ocr_text".into(),
+                MkValue::String(matched.text.clone()),
+            );
+            variables.insert(
+                "last_ocr_x".into(),
+                MkValue::Number(matched.center.x.into()),
+            );
+            variables.insert(
+                "last_ocr_y".into(),
+                MkValue::Number(matched.center.y.into()),
+            );
+        } else {
+            for key in ["last_ocr_text", "last_ocr_x", "last_ocr_y"] {
+                variables.remove(key);
+            }
+        }
+        let Some(outputs) = outputs else { return };
+        let selected = result.selected.as_ref();
+        let values = [
+            (&outputs.found, MkValue::Boolean(found)),
+            (
+                &outputs.matched_text,
+                selected
+                    .map(|m| MkValue::String(m.text.clone()))
+                    .unwrap_or(MkValue::Null),
+            ),
+            (
+                &outputs.point,
+                selected
+                    .map(|m| MkValue::Point(m.center))
+                    .unwrap_or(MkValue::Null),
+            ),
+            (
+                &outputs.x,
+                selected
+                    .map(|m| MkValue::Number(m.center.x.into()))
+                    .unwrap_or(MkValue::Null),
+            ),
+            (
+                &outputs.y,
+                selected
+                    .map(|m| MkValue::Number(m.center.y.into()))
+                    .unwrap_or(MkValue::Null),
+            ),
+            (
+                &outputs.match_count,
+                MkValue::Number(result.match_count as f64),
+            ),
+        ];
+        for (name, value) in values {
+            if let Some(name) = name {
+                variables.insert(name.clone(), value);
+            }
+        }
+    }
     fn write_pixel_result(
         v: &mut RuntimeVariables,
         p: &super::MkPixelSearchPayload,
@@ -5011,6 +5313,26 @@ impl Executor {
                 Self::write_image_result(v, &payload, point);
                 Ok(point.is_some() == *found)
             }
+            MkCondition::OcrTextSearch { search, found } => {
+                let search = self.resolve_ocr_search(&search.search, v, "ocr_text_search.text");
+                Self::clear_ocr_result(v, None);
+                let search = search?;
+                let result = self.ocr_search_once(&search).map_err(|error| {
+                    Self::ocr_context(
+                        error,
+                        &search,
+                        "OCR Text Search condition",
+                        &MkWaitOptions {
+                            timeout_ms: 0,
+                            poll_interval_ms: 0,
+                        },
+                        1,
+                        Duration::ZERO,
+                    )
+                })?;
+                Self::write_ocr_result(v, None, &result);
+                Ok(result.selected.is_some() == *found)
+            }
             MkCondition::PreviousImageResult { image, found } => {
                 let key = image
                     .as_ref()
@@ -5053,6 +5375,170 @@ impl Executor {
             }
             MkCondition::Not { condition } => Ok(!self.condition(macro_id, condition, v)?),
         }
+    }
+}
+
+#[cfg(test)]
+mod ocr_execution_tests {
+    use super::{fake::FakeBackend, *};
+    use crate::mkmacro::{
+        MkOcrClickPayload, MkOcrFindPayload, MkOcrLanguage, MkOcrMatchMode, MkOcrOccurrence,
+        MkOcrOutputs, MkOcrReadPayload, MkOcrSearchSpec, OcrLine, OcrWord,
+    };
+
+    struct OcrCapture;
+    impl ScreenCaptureBackend for OcrCapture {
+        fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(0, 0, 500, 500))
+        }
+
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(10, 20, 100, 40))
+        }
+
+        fn capture_rect(
+            &self,
+            rect: ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<image::RgbaImage> {
+            Ok(image::RgbaImage::new(rect.width, rect.height))
+        }
+    }
+
+    fn document(text: &str) -> OcrDocument {
+        OcrDocument {
+            image_width: 100,
+            image_height: 40,
+            lines: vec![OcrLine {
+                text: text.into(),
+                words: text
+                    .split_whitespace()
+                    .enumerate()
+                    .map(|(index, word)| OcrWord {
+                        text: word.into(),
+                        bounds: ScreenRect::new(2 + i32::try_from(index).unwrap() * 25, 3, 20, 10),
+                    })
+                    .collect(),
+            }],
+            ..OcrDocument::default()
+        }
+    }
+
+    fn search(text: &str) -> MkOcrSearchSpec {
+        MkOcrSearchSpec {
+            text: text.into(),
+            language: MkOcrLanguage::Auto,
+            match_mode: MkOcrMatchMode::Contains,
+            ..MkOcrSearchSpec::default()
+        }
+    }
+
+    fn executor(fake: &Arc<FakeBackend>, waiter: Arc<RecordingWaiter>) -> Executor {
+        let mut backends = fake.clone().backends();
+        backends.screenshot_capture = Arc::new(OcrCapture);
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        Executor::with_waiter(backends, control, waiter)
+    }
+
+    #[test]
+    fn nth_miss_preserves_total_count_and_clears_stale_outputs() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(document("target target")));
+        fake.script_ocr(Ok(document("target target")));
+        let executor = executor(&fake, Arc::new(RecordingWaiter::default()));
+        let mut variables = RuntimeVariables::from([
+            ("hit_text".into(), MkValue::String("stale".into())),
+            ("last_ocr_text".into(), MkValue::String("stale".into())),
+        ]);
+        let action = MkAction::OcrFindText(MkOcrFindPayload {
+            search: MkOcrSearchSpec {
+                occurrence: MkOcrOccurrence::Nth(3),
+                ..search("target")
+            },
+            wait: MkWaitOptions {
+                timeout_ms: 1,
+                poll_interval_ms: 1,
+            },
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkOcrOutputs {
+                matched_text: Some("hit_text".into()),
+                match_count: Some("hit_count".into()),
+                ..MkOcrOutputs::default()
+            },
+        });
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+
+        assert_eq!(
+            variables.get("last_ocr_found"),
+            Some(&MkValue::Boolean(false))
+        );
+        assert!(!variables.contains_key("last_ocr_text"));
+        assert_eq!(variables.get("hit_text"), Some(&MkValue::Null));
+        assert_eq!(variables.get("hit_count"), Some(&MkValue::Number(2.0)));
+    }
+
+    #[test]
+    fn click_uses_translated_center_offsets_and_read_replaces_output() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(document("target")));
+        fake.script_ocr(Ok(document("line text")));
+        let executor = executor(&fake, Arc::new(RecordingWaiter::default()));
+        let mut variables =
+            RuntimeVariables::from([("read".into(), MkValue::String("stale".into()))]);
+        let mut guard = InputCleanupGuard::new(fake.clone());
+
+        executor
+            .action(
+                1,
+                &MkAction::OcrClickText(MkOcrClickPayload {
+                    search: search("target"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 1,
+                        poll_interval_ms: 1,
+                    },
+                    button: MkMouseButton::Right,
+                    clicks: 1,
+                    x_offset: 3,
+                    y_offset: -2,
+                    ..MkOcrClickPayload::default()
+                }),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        executor
+            .action(
+                1,
+                &MkAction::OcrReadText(MkOcrReadPayload {
+                    output_variable: "read".into(),
+                    ..MkOcrReadPayload::default()
+                }),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fake.events(),
+            ["move:25,26", "button_down:Right", "button_up:Right"]
+        );
+        assert_eq!(
+            variables.get("read"),
+            Some(&MkValue::String("line text".into()))
+        );
     }
 }
 
@@ -5423,6 +5909,9 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::PixelCheck { .. }
         | MkAction::FindPixel(_) => true,
         MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => true,
+        MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => {
+            cfg!(windows)
+        }
         MkAction::VirtualDesktop(_) => cfg!(windows),
         // Production installs `ProductionVisualSearch`, backed by the same
         // screen capture and matcher used by all visual-search execution.
@@ -5455,6 +5944,7 @@ fn action_name(a: &MkAction) -> &'static str {
         | MkAction::FindPixel(_)
         | MkAction::PixelCheck { .. } => "screen",
         MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => "screen capture",
+        MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => "OCR",
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }
@@ -5574,6 +6064,7 @@ pub mod fake {
         pub window_calls: Mutex<Vec<WindowCall>>,
         pub virtual_desktop_calls: Mutex<Vec<super::super::MkVirtualDesktopAction>>,
         pub image_results: Mutex<HashMap<MkImageRef, VecDeque<ExecResult<Option<MkPoint>>>>>,
+        pub ocr_results: Mutex<VecDeque<ExecResult<OcrDocument>>>,
         pub resolved_variables: Mutex<Vec<RuntimeVariables>>,
         pub finalized_points: Mutex<Vec<MkPoint>>,
     }
@@ -5596,6 +6087,7 @@ pub mod fake {
                 window_calls: Mutex::new(Vec::new()),
                 virtual_desktop_calls: Mutex::new(Vec::new()),
                 image_results: Mutex::new(HashMap::new()),
+                ocr_results: Mutex::new(VecDeque::new()),
                 resolved_variables: Mutex::new(Vec::new()),
                 finalized_points: Mutex::new(Vec::new()),
             }
@@ -5636,6 +6128,7 @@ pub mod fake {
                 screenshot_capture: Arc::new(Unsupported {
                     backend: "fake screen capture",
                 }),
+                ocr: self.clone(),
                 screenshot_encoder: Arc::new(ImageScreenshotEncoder),
                 screenshot_files: Arc::new(HostScreenshotFileSystem),
                 virtual_desktop: self.clone(),
@@ -5653,6 +6146,9 @@ pub mod fake {
                 .entry(image)
                 .or_default()
                 .push_back(result);
+        }
+        pub fn script_ocr(&self, result: ExecResult<OcrDocument>) {
+            self.ocr_results.lock().unwrap().push_back(result);
         }
         pub fn script_condition(&self, name: &str, results: impl IntoIterator<Item = bool>) {
             self.condition_results
@@ -5674,6 +6170,37 @@ pub mod fake {
         fn play(&self, sound: &str) -> ExecResult {
             self.sounds.lock().unwrap().push(sound.to_owned());
             self.event("sound".into())
+        }
+    }
+    impl OcrBackend for FakeBackend {
+        fn available_languages(&self) -> ExecResult<Vec<super::super::ocr::OcrLanguageInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn max_image_dimension(&self) -> ExecResult<u32> {
+            Ok(u32::MAX)
+        }
+
+        fn recognize(
+            &self,
+            image: &image::RgbaImage,
+            _: &super::super::MkOcrLanguage,
+            cancelled: &dyn Fn() -> bool,
+        ) -> ExecResult<OcrDocument> {
+            if cancelled() {
+                return Err(super::super::cancelled_error());
+            }
+            Ok(self
+                .ocr_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .transpose()?
+                .unwrap_or(OcrDocument {
+                    image_width: image.width(),
+                    image_height: image.height(),
+                    ..OcrDocument::default()
+                }))
         }
     }
     impl InputBackend for FakeBackend {

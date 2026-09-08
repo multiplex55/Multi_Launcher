@@ -251,14 +251,27 @@ pub fn parse_package(bytes: &[u8]) -> Result<MkMacroPackage> {
     );
     let source: serde_json::Value =
         serde_json::from_slice(bytes).context("malformed .mkmacro JSON")?;
-    let package: MkMacroPackage =
+    let source_schema = source
+        .pointer("/manifest/schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .context("package manifest has no valid schema version")?;
+    ensure!(
+        matches!(source_schema, 12 | SCHEMA_VERSION),
+        "unsupported macro schema version {source_schema}"
+    );
+    let mut package: MkMacroPackage =
         serde_json::from_value(source.clone()).context("malformed .mkmacro JSON")?;
+    // Canonicality belongs to the package's declared schema. Schema 12 added
+    // no fields that require a content rewrite, so deserialize/serialize it
+    // with its original version before normalizing the in-memory manifest.
     let canonical = serde_json::to_value(&package)?;
     ensure!(
         source == canonical,
         "package contains unknown fields or a non-canonical nested model shape"
     );
     validate_package(&package)?;
+    package.manifest.schema_version = SCHEMA_VERSION;
     Ok(package)
 }
 
@@ -493,7 +506,7 @@ fn validate_package(package: &MkMacroPackage) -> Result<()> {
         manifest.format_version
     );
     ensure!(
-        manifest.schema_version == SCHEMA_VERSION,
+        matches!(manifest.schema_version, 12 | SCHEMA_VERSION),
         "unsupported macro schema version {}",
         manifest.schema_version
     );
@@ -929,6 +942,37 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("too large")
+        );
+    }
+
+    #[test]
+    fn parser_normalizes_canonical_schema_twelve_packages_and_rejects_future_schema() {
+        let mut package = MkMacroPackage {
+            manifest: MkMacroPackageManifest {
+                format_version: PACKAGE_FORMAT_VERSION,
+                schema_version: 12,
+                roots: vec![1],
+                macros: vec![macro_with(
+                    1,
+                    "legacy",
+                    None,
+                    vec![step(1, MkAction::Delay(Default::default()))],
+                )],
+                folders: vec![],
+                dependencies: vec![],
+                asset_filenames: vec![],
+            },
+            assets: vec![],
+        };
+        let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
+        assert_eq!(parsed.manifest.schema_version, SCHEMA_VERSION);
+
+        package.manifest.schema_version = SCHEMA_VERSION + 1;
+        assert!(
+            parse_package(&serde_json::to_vec(&package).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported macro schema")
         );
     }
 

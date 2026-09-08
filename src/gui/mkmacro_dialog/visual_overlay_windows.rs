@@ -42,6 +42,9 @@ const TRANSPARENT_KEY: COLORREF = COLORREF(0x00ff00ff);
 const OUTLINE_COLOR: COLORREF = COLORREF(0x0000ffff); // bright yellow
 const BADGE_COLOR: COLORREF = COLORREF(0x00400000); // dark blue
 const LABEL_COLOR: COLORREF = COLORREF(0x00ffffff);
+const OCR_LINE_COLOR: COLORREF = COLORREF(0x0000a5ff); // orange
+const OCR_WORD_COLOR: COLORREF = COLORREF(0x00ffbf50); // light blue
+const OCR_SELECTED_COLOR: COLORREF = COLORREF(0x0000ff00); // green
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowRole {
@@ -266,6 +269,22 @@ unsafe fn paint_frame(dc: HDC, state: &WindowPaintState) {
             OverlayFramePrimitive::MonitorLabel { bounds, index } => unsafe {
                 draw_label(dc, state.bounds, *bounds, *index)
             },
+            OverlayFramePrimitive::OcrOutline { bounds, style } => {
+                let (color, width) = match style {
+                    OcrDebugStyle::SearchRegion => (OUTLINE_COLOR, 3),
+                    OcrDebugStyle::Line => (OCR_LINE_COLOR, 2),
+                    OcrDebugStyle::Word => (OCR_WORD_COLOR, 1),
+                    OcrDebugStyle::SelectedMatch => (OCR_SELECTED_COLOR, 4),
+                };
+                let styled_pen = unsafe { CreatePen(PS_SOLID, width, color) };
+                let previous = unsafe { SelectObject(dc, HGDIOBJ(styled_pen.0)) };
+                let (left, top, right, bottom) = desktop_to_overlay(*bounds, state.bounds);
+                unsafe {
+                    let _ = Rectangle(dc, left as i32, top as i32, right as i32, bottom as i32);
+                    SelectObject(dc, previous);
+                    let _ = DeleteObject(HGDIOBJ(styled_pen.0));
+                }
+            }
         }
     }
     unsafe { SelectObject(dc, old_brush) };
@@ -351,6 +370,7 @@ impl NativeOverlayRenderer {
             OverlayVisual::Monitor(d) => Some(d.bounds),
             OverlayVisual::Monitors(ds) => monitor_union(ds),
             OverlayVisual::Desktop(_) => None,
+            OverlayVisual::OcrDebug(plan) => Some(plan.region),
         }
     }
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, VisualOverlayError> {
@@ -643,7 +663,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 GetLastError().0
             }));
         }
-        if visual.passive() {
+        if visual.passive() && !matches!(visual, OverlayVisual::OcrDebug(_)) {
             self.operation_id = Some(operation_id);
             self.visual = Some(visual.clone());
             self.show_passive(module, class, operation_id, visual)?;
@@ -661,6 +681,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             // Preserve the descriptor topology: never create a virtual-desktop union window
             // spanning gaps between physical displays.
             OverlayVisual::Desktop(descriptors) => descriptors.iter().map(|d| d.bounds).collect(),
+            OverlayVisual::OcrDebug(plan) => ocr_debug_surface_plan(plan, &physical),
             _ => {
                 let Some(target) = Self::target(visual) else {
                     return self

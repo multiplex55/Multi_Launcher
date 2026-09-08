@@ -664,6 +664,9 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(11) {
         migrate_v11_to_v12(&mut value);
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(12) {
+        migrate_v12_to_v13(&mut value);
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
@@ -729,6 +732,11 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
 /// including malformed signature identities for explicit authoring repair.
 fn migrate_v11_to_v12(value: &mut serde_json::Value) {
     value["schema_version"] = serde_json::json!(12);
+}
+
+/// OCR persistence is additive, so schema-12 documents retain all content.
+fn migrate_v12_to_v13(value: &mut serde_json::Value) {
+    value["schema_version"] = serde_json::json!(13);
 }
 
 /// Filesystem-aware schema-10 migration. The JSON value is rewritten only after
@@ -1564,7 +1572,7 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let (loaded, changed) = read_document(&path).unwrap().unwrap();
         assert!(changed);
-        original.schema_version = 12;
+        original.schema_version = SCHEMA_VERSION;
         assert_eq!(loaded, original);
         persist(&path, &loaded).unwrap();
         let persisted = fs::read(&path).unwrap();
@@ -1573,6 +1581,44 @@ mod tests {
         assert_eq!(again, loaded);
         persist(&path, &again).unwrap();
         assert_eq!(fs::read(&path).unwrap(), persisted);
+    }
+
+    #[test]
+    fn schema_twelve_migration_only_advances_the_document_version() {
+        let mut value = serde_json::json!({
+            "schema_version": 12,
+            "settings": serde_json::to_value(MkMacroSettings::default()).unwrap(),
+            "folders": [{"id": 9, "name": "Preserved"}],
+            "macros": [{
+                "id": 7,
+                "name": "unchanged",
+                "description": "schema twelve content",
+                "steps": [{
+                    "id": 8,
+                    "action": {"type": "delay", "data": {"fixed_ms": 42}}
+                }]
+            }]
+        });
+        let before = value.clone();
+        migrate_v12_to_v13(&mut value);
+        assert_eq!(value["schema_version"], 13);
+        let mut expected = before;
+        expected["schema_version"] = serde_json::json!(13);
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn schema_twelve_document_loads_with_existing_model_semantics_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let expected = document();
+        let mut schema_twelve = serde_json::to_value(&expected).unwrap();
+        schema_twelve["schema_version"] = serde_json::json!(12);
+        fs::write(&path, serde_json::to_vec_pretty(&schema_twelve).unwrap()).unwrap();
+
+        let (loaded, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(loaded, expected);
     }
 
     fn png_bytes(color: [u8; 4]) -> Vec<u8> {
