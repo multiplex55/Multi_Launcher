@@ -981,6 +981,258 @@ mod tests {
     }
 
     #[test]
+    fn call_arguments_keep_ab_order_defaults_builtins_and_same_name_locals_isolated() {
+        use crate::mkmacro::{
+            MkCallArgumentBinding, MkCallOutputBinding, MkMacroOutput, MkMacroParameter,
+            MkReturnPayload, MkReturnValueBinding, MkSignatureId, MkValueSource, MkValueType,
+        };
+        let parameter = |id: u64, name: &str, default_value: Option<MkValue>| MkMacroParameter {
+            id: MkSignatureId(id),
+            name: name.into(),
+            value_type: MkValueType::String,
+            description: String::new(),
+            default_value,
+        };
+        let mut call_b = crate::mkmacro::MkCallMacroPayload {
+            macro_id: 2,
+            ..Default::default()
+        };
+        call_b.arguments = vec![
+            MkCallArgumentBinding {
+                parameter_id: MkSignatureId(1),
+                source: MkValueSource::Literal(MkValue::String("literal:${same}".into())),
+            },
+            MkCallArgumentBinding {
+                parameter_id: MkSignatureId(2),
+                source: MkValueSource::Variable {
+                    name: "same".into(),
+                },
+            },
+            MkCallArgumentBinding {
+                parameter_id: MkSignatureId(4),
+                source: MkValueSource::Variable {
+                    name: "macro.name".into(),
+                },
+            },
+        ];
+        call_b.outputs.push(MkCallOutputBinding {
+            output_id: MkSignatureId(5),
+            caller_variable: "mapped".into(),
+        });
+        let root = macro_with(
+            1,
+            vec![
+                step(1, set("same", "A-local")),
+                step(
+                    2,
+                    MkAction::Text(MkTextPayload {
+                        text: "A-before".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+                step(3, MkAction::CallMacro(call_b)),
+                step(4, text("A-after:${same}:${mapped}")),
+            ],
+        );
+        let mut child = macro_with(
+            2,
+            vec![
+                step(1, text("B:${literal}:${same}:${defaulted}:${source_macro}")),
+                step(2, set("same", "B-mutated")),
+                step(3, text("B-after:${same}")),
+                step(
+                    4,
+                    MkAction::Return(MkReturnPayload {
+                        outputs: vec![
+                            MkReturnValueBinding {
+                                output_id: MkSignatureId(5),
+                                source: MkValueSource::Variable {
+                                    name: "same".into(),
+                                },
+                            },
+                            MkReturnValueBinding {
+                                output_id: MkSignatureId(6),
+                                source: MkValueSource::Literal(MkValue::String("discarded".into())),
+                            },
+                        ],
+                    }),
+                ),
+            ],
+        );
+        child.signature.parameters = vec![
+            parameter(1, "literal", None),
+            parameter(2, "same", None),
+            parameter(
+                3,
+                "defaulted",
+                Some(MkValue::String("default:${same}".into())),
+            ),
+            parameter(4, "source_macro", None),
+        ];
+        child.signature.outputs = vec![
+            MkMacroOutput {
+                id: MkSignatureId(5),
+                name: "mapped".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+            },
+            MkMacroOutput {
+                id: MkSignatureId(6),
+                name: "discarded".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+            },
+        ];
+        let program = program(vec![root, child]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+
+        Executor::new(fake.clone().backends(), control)
+            .execute_program(
+                &program,
+                &MkInvocationValues::new(),
+                ExecutionOptions::normal(),
+                &|_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(
+            fake.events(),
+            [
+                "text:A-before",
+                "text:B:literal:A-local:A-local:default:${same}:macro 1",
+                "text:B-after:B-mutated",
+                "text:A-after:A-local:B-mutated",
+            ]
+        );
+    }
+
+    #[test]
+    fn early_return_and_procedure_fallthrough_resume_the_exact_caller_position() {
+        let root = macro_with(
+            1,
+            vec![
+                step(1, text("A-before")),
+                step(2, call(2)),
+                step(3, text("A-between")),
+                step(4, call(3)),
+                step(5, text("A-after")),
+                step(6, MkAction::Return(Default::default())),
+                step(7, text("root-unreachable")),
+            ],
+        );
+        let child_return = macro_with(
+            2,
+            vec![
+                step(1, text("B-before")),
+                step(2, MkAction::Return(Default::default())),
+                step(3, text("B-unreachable")),
+            ],
+        );
+        let child_fallthrough = macro_with(3, vec![step(1, text("C-natural-end"))]);
+        let program = program(vec![root, child_return, child_fallthrough]);
+        let fake = Arc::new(FakeBackend::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+
+        Executor::new(fake.clone().backends(), control)
+            .execute_program(
+                &program,
+                &MkInvocationValues::new(),
+                ExecutionOptions::normal(),
+                &|_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(
+            fake.events(),
+            [
+                "text:A-before",
+                "text:B-before",
+                "text:A-between",
+                "text:C-natural-end",
+                "text:A-after",
+            ]
+        );
+    }
+
+    #[test]
+    fn continued_child_failure_preserves_caller_locals_outputs_and_root_owned_input() {
+        use crate::mkmacro::{
+            MkCallOutputBinding, MkMacroOutput, MkReturnPayload, MkReturnValueBinding,
+            MkSignatureId, MkValueSource, MkValueType,
+        };
+        let mut call_step = step(3, call(2));
+        call_step.on_error = MkErrorPolicy::Continue;
+        let MkAction::CallMacro(call) = &mut call_step.action else {
+            unreachable!()
+        };
+        call.outputs.push(MkCallOutputBinding {
+            output_id: MkSignatureId(1),
+            caller_variable: "result".into(),
+        });
+        let root = macro_with(
+            1,
+            vec![
+                step(1, MkAction::KeyDown(MkKey::Control)),
+                step(2, set("result", "caller")),
+                call_step,
+                step(4, text("A-after:${result}:${last_action_success}")),
+            ],
+        );
+        let mut child = macro_with(
+            2,
+            vec![
+                step(1, text("B-fails")),
+                step(
+                    2,
+                    MkAction::Return(MkReturnPayload {
+                        outputs: vec![MkReturnValueBinding {
+                            output_id: MkSignatureId(1),
+                            source: MkValueSource::Literal(MkValue::String("child".into())),
+                        }],
+                    }),
+                ),
+            ],
+        );
+        child.signature.outputs.push(MkMacroOutput {
+            id: MkSignatureId(1),
+            name: "result".into(),
+            value_type: MkValueType::String,
+            description: String::new(),
+        });
+        let program = program(vec![root, child]);
+        let fake = Arc::new(FakeBackend::default());
+        fake.fail(
+            "text:B-fails",
+            ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected child failure"),
+        );
+        let control = Arc::new(RunControl::default());
+        control.reset();
+
+        Executor::new(fake.clone().backends(), control.clone())
+            .execute_program(
+                &program,
+                &MkInvocationValues::new(),
+                ExecutionOptions::normal(),
+                &|_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(
+            fake.events(),
+            [
+                "key_down:Control",
+                "text:B-fails",
+                "text:A-after:caller:false",
+                "key_up:Control",
+            ]
+        );
+        assert!(!control.is_active());
+    }
+
+    #[test]
     fn call_retry_and_repetition_use_fresh_parameters_and_callee_playback() {
         use crate::mkmacro::{
             MkCallOutputBinding, MkMacroOutput, MkMacroParameter, MkReturnPayload,

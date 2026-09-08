@@ -450,4 +450,56 @@ mod tests {
         );
         assert!(resolve_source(&MkValueSource::Variable { name: "".into() }, &locals).is_err());
     }
+
+    #[test]
+    fn preparation_accepts_each_persisted_value_type_without_coercion() {
+        let parameters = [
+            (MkValueType::String, MkValue::String("value".into())),
+            (MkValueType::Number, MkValue::Number(42.5)),
+            (MkValueType::Boolean, MkValue::Boolean(true)),
+            (MkValueType::Point, MkValue::Point(MkPoint { x: -4, y: 9 })),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (value_type, value))| {
+            let id = MkSignatureId(index as u64 + 1);
+            (
+                MkMacroParameter {
+                    id,
+                    name: format!("value_{index}"),
+                    value_type,
+                    description: String::new(),
+                    default_value: None,
+                },
+                (id, value),
+            )
+        })
+        .collect::<Vec<_>>();
+        let definitions = parameters
+            .iter()
+            .map(|(parameter, _)| parameter.clone())
+            .collect::<Vec<_>>();
+        let supplied = parameters
+            .iter()
+            .map(|(_, supplied)| supplied.clone())
+            .collect::<MkInvocationValues>();
+
+        let locals = prepare_parameters(&definitions, &[], &supplied)
+            .unwrap()
+            .into_variables(&definitions)
+            .unwrap();
+
+        for (index, (_, (_, value))) in parameters.iter().enumerate() {
+            assert_eq!(locals[&format!("value_{index}")], *value);
+        }
+        for parameter in definitions {
+            let wrong = [(parameter.id, MkValue::Null)].into_iter().collect();
+            assert_eq!(
+                prepare_parameters(&[parameter], &[], &wrong)
+                    .unwrap_err()
+                    .kind,
+                DiagnosticKind::TypeMismatch
+            );
+        }
+    }
 }

@@ -2313,6 +2313,137 @@ mod run_mode_tests {
         }
     }
 
+    #[test]
+    fn active_run_uses_immutable_callee_plan_after_document_publication_changes() {
+        let gate = Arc::new(ControllablePromptBackend::default());
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.clone().backends();
+        backends.prompt = gate.clone();
+        let root = test_macro(
+            1,
+            true,
+            vec![
+                step(
+                    1,
+                    MkAction::PromptInput(MkPromptInputPayload {
+                        title: "compile boundary".into(),
+                        prompt: "wait".into(),
+                        default_value: String::new(),
+                        variable: "answer".into(),
+                        copy_to_clipboard: false,
+                    }),
+                ),
+                step(
+                    2,
+                    MkAction::CallMacro(super::super::MkCallMacroPayload {
+                        macro_id: 2,
+                        ..Default::default()
+                    }),
+                ),
+            ],
+        );
+        let child = test_macro(
+            2,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "captured child".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+        let (_directory, runtime, _guard) = runtime_with_backends(vec![root, child], backends);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        gate.wait_until_entered();
+        let mut changed = (*runtime.store.snapshot()).clone();
+        let MkAction::Text(text) = &mut changed.macros[1].steps[0].action else {
+            unreachable!()
+        };
+        text.text = "newly published child".into();
+        runtime.store.save(changed).unwrap();
+        gate.release();
+
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Completed);
+        assert_eq!(fake.events(), ["text:captured child"]);
+        let published = runtime.store.snapshot();
+        let MkAction::Text(text) = &published.macros[1].steps[0].action else {
+            unreachable!()
+        };
+        assert_eq!(text.text, "newly published child");
+    }
+
+    #[test]
+    fn all_six_runtime_subsets_keep_complete_callee_dependencies() {
+        use super::super::MkCallMacroPayload;
+        for mode in [ExecutionMode::Normal, ExecutionMode::Debug] {
+            for subset in [
+                MkInvocationSubset::Whole,
+                MkInvocationSubset::From(2),
+                MkInvocationSubset::Selected(vec![2]),
+            ] {
+                let text = |value: &str| {
+                    MkAction::Text(MkTextPayload {
+                        text: value.into(),
+                        mode: MkTextMode::Type,
+                    })
+                };
+                let root = test_macro(
+                    1,
+                    true,
+                    vec![
+                        step(1, text("root before")),
+                        step(
+                            2,
+                            MkAction::CallMacro(MkCallMacroPayload {
+                                macro_id: 2,
+                                ..Default::default()
+                            }),
+                        ),
+                        step(3, text("root after")),
+                    ],
+                );
+                let child = test_macro(
+                    2,
+                    true,
+                    vec![step(1, text("child first")), step(2, text("child second"))],
+                );
+                let (_directory, runtime, _guard, fake) = runtime_with_effects(vec![root, child]);
+                let invocation = MkInvocation {
+                    macro_id: 1,
+                    arguments: MkInvocationValues::new(),
+                    mode,
+                    subset: subset.clone(),
+                };
+
+                assert_eq!(
+                    runtime.command(RuntimeCommand::Invoke(invocation)),
+                    CommandResult::Accepted
+                );
+                assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Completed);
+                let expected = match subset {
+                    MkInvocationSubset::Whole => vec![
+                        "text:root before",
+                        "text:child first",
+                        "text:child second",
+                        "text:root after",
+                    ],
+                    MkInvocationSubset::From(_) => {
+                        vec!["text:child first", "text:child second", "text:root after"]
+                    }
+                    MkInvocationSubset::Selected(_) => {
+                        vec!["text:child first", "text:child second"]
+                    }
+                };
+                assert_eq!(fake.events(), expected);
+            }
+        }
+    }
+
     fn failure_for(command: RuntimeCommand, macros: Vec<MkMacro>) -> ExecutionDiagnostic {
         let (_dir, runtime, _guard) = runtime_with(macros);
         assert_eq!(runtime.command(command), CommandResult::Accepted);
