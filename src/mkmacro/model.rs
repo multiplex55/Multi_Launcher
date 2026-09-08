@@ -1317,13 +1317,6 @@ mod reusable_model_tests {
                 .count(),
             2
         );
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == "unsupported_reusable_action")
-                .count(),
-            2
-        );
         assert!(!super::super::validation::can_run(&diagnostics));
     }
 }

@@ -1827,7 +1827,7 @@ mod tests {
     fn expected_action_contract(action: &MkAction) -> (action_catalog::EditorKind, bool) {
         use action_catalog::EditorKind;
         match action {
-            MkAction::CallMacro(_) | MkAction::Return(_) => (EditorKind::General, false),
+            MkAction::CallMacro(_) | MkAction::Return(_) => (EditorKind::General, true),
             MkAction::KeyDown(_)
             | MkAction::KeyUp(_)
             | MkAction::KeyPress(_)
@@ -2795,8 +2795,12 @@ mod tests {
             if descriptor.availability == action_catalog::ActionAvailability::Hidden {
                 assert_eq!(
                     descriptor.category,
-                    action_catalog::ActionCategory::UiAutomation,
-                    "{context}: only explicitly deferred UI Automation actions may be hidden"
+                    if matches!(action, MkAction::CallMacro(_) | MkAction::Return(_)) {
+                        action_catalog::ActionCategory::Logic
+                    } else {
+                        action_catalog::ActionCategory::UiAutomation
+                    },
+                    "{context}: only deferred reusable authoring and UI Automation may be hidden"
                 );
                 assert!(
                     descriptor
@@ -2914,15 +2918,24 @@ mod tests {
                     }
                 }
                 action_catalog::ActionAvailability::Hidden => {
+                    let reusable = matches!(action, MkAction::CallMacro(_) | MkAction::Return(_));
                     assert_eq!(
                         descriptor.category,
-                        action_catalog::ActionCategory::UiAutomation,
-                        "{context}: hidden non-UIA action"
+                        if reusable {
+                            action_catalog::ActionCategory::Logic
+                        } else {
+                            action_catalog::ActionCategory::UiAutomation
+                        },
+                        "{context}: hidden action category"
                     );
                     assert_eq!(
                         descriptor.runtime,
-                        action_catalog::RuntimeAvailability::Unavailable,
-                        "{context}: hidden UIA must remain unavailable until independently complete"
+                        if reusable {
+                            action_catalog::RuntimeAvailability::Supported
+                        } else {
+                            action_catalog::RuntimeAvailability::Unavailable
+                        },
+                        "{context}: reusable execution is supported; UIA remains unavailable"
                     );
                     assert!(
                         !action_catalog::is_available_in_palette(&descriptor),

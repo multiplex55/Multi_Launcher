@@ -2,18 +2,20 @@
 //! action execution and all waits live on the worker.
 pub use super::executor::DebugSnapshotReason;
 use super::executor::{
-    Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent, ExecutionOptions,
-    Executor, RunControl, StepOutcome, production_backends_with_store,
+    Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent,
+    ExecutionFrameContext, ExecutionMode, ExecutionOptions, Executor, RunControl, StepOutcome,
+    production_backends_with_store,
 };
 use super::{
-    MkMacroStore, MkValue, NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot,
-    RecordingResult, RuntimeVariables, SharedOperationGuard, SystemRecorderClock, compile,
-    production_hook_service,
+    MkInvocation, MkInvocationSubset, MkInvocationValues, MkMacroStore, MkValue,
+    NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
+    RuntimeVariables, SharedOperationGuard, SystemRecorderClock, apply_root_subset,
+    compile_program, production_hook_service,
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -23,8 +25,9 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeCommand {
+    Invoke(MkInvocation),
     Run(u64),
     RunFrom(u64, u64),
     RunSelection(u64, Vec<u64>),
@@ -47,8 +50,26 @@ struct RunRequest<'a> {
     starting_step: Option<u64>,
     selection: Option<&'a [u64]>,
     mode: RuntimeRunMode,
+    arguments: Option<&'a MkInvocationValues>,
 }
 fn run_request(command: &RuntimeCommand) -> Option<RunRequest<'_>> {
+    if let RuntimeCommand::Invoke(invocation) = command {
+        let (starting_step, selection) = match &invocation.subset {
+            MkInvocationSubset::Whole => (None, None),
+            MkInvocationSubset::From(id) => (Some(*id), None),
+            MkInvocationSubset::Selected(ids) => (None, Some(ids.as_slice())),
+        };
+        return Some(RunRequest {
+            macro_id: invocation.macro_id,
+            starting_step,
+            selection,
+            mode: match invocation.mode {
+                ExecutionMode::Normal => RuntimeRunMode::Normal,
+                ExecutionMode::Debug => RuntimeRunMode::Debug,
+            },
+            arguments: Some(&invocation.arguments),
+        });
+    }
     let (macro_id, starting_step, selection, mode) = match command {
         RuntimeCommand::Run(id) => (*id, None, None, RuntimeRunMode::Normal),
         RuntimeCommand::RunFrom(id, step_id) => (*id, Some(*step_id), None, RuntimeRunMode::Normal),
@@ -72,6 +93,7 @@ fn run_request(command: &RuntimeCommand) -> Option<RunRequest<'_>> {
         starting_step,
         selection,
         mode,
+        arguments: None,
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +140,9 @@ pub struct RuntimeSnapshot {
     pub run_id: u64,
     pub macro_id: Option<u64>,
     pub step_id: Option<u64>,
+    /// Identity of the most recent execution event. Legacy step/debug maps below
+    /// remain root projections; callee events must not overwrite colliding IDs.
+    pub last_event_frame: Option<ExecutionFrameContext>,
     pub pause_reason: Option<RuntimePauseReason>,
     /// The most recently published Debug boundary for this run. `None` means
     /// that this run has not published debug data, which is the defined state
@@ -152,6 +177,7 @@ impl Default for RuntimeSnapshot {
             run_id: 0,
             macro_id: None,
             step_id: None,
+            last_event_frame: None,
             pause_reason: None,
             debug_snapshot: None,
             debug_variables: Arc::new(BTreeMap::new()),
@@ -235,7 +261,10 @@ impl MacroRuntime {
                 "selection is empty",
             ));
         }
-        let active = self.shared.admission.lock().unwrap().is_some();
+        // Admission serializes terminal publication with control commands and
+        // new-run claims. Lock order is admission -> control/snapshot/operations.
+        let mut admission = self.shared.admission.lock().unwrap();
+        let active = admission.is_some();
         let state = self.snapshot().state;
         let wrong_state = match &c {
             RuntimeCommand::Pause => !active || state == RuntimeState::Paused,
@@ -250,8 +279,7 @@ impl MacroRuntime {
             ));
         }
         if let Some(request) = request {
-            let mut active = self.shared.admission.lock().unwrap();
-            if let Some(a) = *active {
+            if let Some(a) = *admission {
                 return CommandResult::AlreadyRunning { active_macro_id: a };
             }
             if !self.shared.operations.claim(Operation::Playback) {
@@ -260,18 +288,19 @@ impl MacroRuntime {
                     "recording is active",
                 ));
             }
-            *active = Some(request.macro_id);
+            self.shared.control.reset();
+            *admission = Some(request.macro_id);
         }
         match c {
             RuntimeCommand::Pause => {
                 self.shared.control.pause();
-                if self.shared.admission.lock().unwrap().is_some() {
+                if admission.is_some() {
                     publish_manual_pause(&self.shared);
                 }
             }
             RuntimeCommand::Resume => {
                 self.shared.control.resume();
-                if self.shared.admission.lock().unwrap().is_some() {
+                if admission.is_some() {
                     publish(&self.shared, |snapshot| {
                         snapshot.state = RuntimeState::Running;
                         snapshot.pause_reason = None;
@@ -280,7 +309,7 @@ impl MacroRuntime {
             }
             RuntimeCommand::Stop => {
                 self.shared.control.stop();
-                if self.shared.admission.lock().unwrap().is_some() {
+                if admission.is_some() {
                     publish(&self.shared, |snapshot| {
                         snapshot.state = RuntimeState::Stopping;
                         snapshot.pause_reason = None;
@@ -290,8 +319,9 @@ impl MacroRuntime {
             _ => {}
         }
         if self.tx.send(c).is_err() {
-            *self.shared.admission.lock().unwrap() = None;
+            self.shared.control.finish();
             self.shared.operations.release(Operation::Playback);
+            *admission = None;
             return CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::RuntimeUnavailable,
                 "macro worker is shut down",
@@ -371,20 +401,9 @@ fn worker_loop(
                 clear_pause_reason(&shared);
                 break;
             }
-            RuntimeCommand::Pause => {
-                if shared.control.is_active() {
-                    publish_manual_pause(&shared)
-                }
-            }
-            RuntimeCommand::Resume => {
-                if shared.control.is_active() {
-                    publish(&shared, |s| {
-                        s.state = RuntimeState::Running;
-                        s.pause_reason = None;
-                    })
-                }
-            }
-            RuntimeCommand::Stop => {}
+            // Control was already applied synchronously by command(). Replaying
+            // it after a run ends could corrupt the next admitted run's state.
+            RuntimeCommand::Pause | RuntimeCommand::Resume | RuntimeCommand::Stop => {}
             command => {
                 let request = run_request(&command).expect("run commands are classified");
                 run_one(&store, &backends, &shared, request)
@@ -392,21 +411,53 @@ fn worker_loop(
         }
     }
     shared.control.stop();
-    *shared.admission.lock().unwrap() = None;
+    let mut admission = shared.admission.lock().unwrap();
     shared.operations.release(Operation::Playback);
+    *admission = None;
 }
+/// Admission covers compilation and invocation preparation as well as effects.
+/// The executor releases owned input before this root lifecycle releases activity.
+struct RootRunGuard<'a> {
+    shared: &'a Shared,
+    completed: bool,
+}
+impl RootRunGuard<'_> {
+    fn complete(mut self, publish_terminal: impl FnOnce()) {
+        let mut admission = self.shared.admission.lock().unwrap();
+        self.shared.control.finish();
+        publish_terminal();
+        self.shared.operations.release(Operation::Playback);
+        *admission = None;
+        self.completed = true;
+    }
+}
+impl Drop for RootRunGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut admission = self.shared.admission.lock().unwrap();
+            self.shared.control.finish();
+            self.shared.operations.release(Operation::Playback);
+            *admission = None;
+        }
+    }
+}
+
 fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: RunRequest<'_>) {
     let RunRequest {
         macro_id: mid,
         starting_step: from,
         selection,
         mode,
+        arguments,
     } = request;
-    shared.control.reset();
+    let run_guard = RootRunGuard {
+        shared,
+        completed: false,
+    };
     #[cfg(test)]
     shared.test_events.lock().unwrap().clear();
     let run_id = shared.next_run_id.fetch_add(1, Ordering::Relaxed);
-    let result = (|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let doc = store.snapshot();
         let m = doc.macros.iter().find(|m| m.id == mid).ok_or_else(|| {
             ExecutionDiagnostic::new(
@@ -420,83 +471,32 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 "macro is disabled",
             ));
         }
-        let mut plan = compile(m).map_err(|d| {
+        let mut program = compile_program(&doc, mid).map_err(|d| {
             ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidPlan,
                 format!(
                     "macro validation failed: {}",
-                    d.first()
+                    d.iter()
+                        .find(|d| d.severity == super::DiagnosticSeverity::Fatal)
                         .map(|x| x.message.as_str())
                         .unwrap_or("invalid plan")
                 ),
             )
         })?;
-        if let Some(sid) = from {
-            if plan
-                .instructions
-                .iter()
-                .any(|instruction| instruction.step.action.is_structural())
-            {
-                return Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::InvalidSelection,
-                    "run-from cannot enter a structured control-flow plan",
-                ));
-            }
-            let start = *plan.step_to_instruction.get(&sid).ok_or_else(|| {
-                ExecutionDiagnostic::new(
-                    DiagnosticKind::TargetNotFound,
-                    format!("step {sid} was not found"),
-                )
-            })?;
-            plan.instructions = plan.instructions[start..].to_vec().into();
-            plan.step_to_instruction = plan
-                .instructions
-                .iter()
-                .enumerate()
-                .map(|(i, x)| (x.step.id, i))
-                .collect();
-        }
-        if let Some(ids) = selection {
-            let wanted: HashSet<_> = ids.iter().copied().collect();
-            if wanted
-                .iter()
-                .any(|id| !plan.step_to_instruction.contains_key(id))
-            {
-                return Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::TargetNotFound,
-                    "selection contains an unknown step",
-                ));
-            }
-            if plan
-                .instructions
-                .iter()
-                .any(|x| x.step.action.is_structural() && !wanted.contains(&x.step.id))
-                || wanted.iter().any(|id| {
-                    plan.instructions[*plan.step_to_instruction.get(id).unwrap()]
-                        .step
-                        .action
-                        .is_structural()
-                })
-            {
-                return Err(ExecutionDiagnostic::new(
-                    DiagnosticKind::InvalidSelection,
-                    "structural selections must include a complete executable plan",
-                ));
-            }
-            plan.instructions = plan
-                .instructions
-                .iter()
-                .filter(|x| wanted.contains(&x.step.id))
-                .cloned()
-                .collect::<Vec<_>>()
-                .into();
-            plan.step_to_instruction = plan
-                .instructions
-                .iter()
-                .enumerate()
-                .map(|(i, x)| (x.step.id, i))
-                .collect();
-        }
+        let subset = if let Some(id) = from {
+            MkInvocationSubset::From(id)
+        } else if let Some(ids) = selection {
+            MkInvocationSubset::Selected(ids.to_vec())
+        } else {
+            MkInvocationSubset::Whole
+        };
+        apply_root_subset(&mut program, &subset)?;
+        let plan = program.plan(mid).ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidPlan,
+                "Compiled program root is missing",
+            )
+        })?;
         let states = plan
             .instructions
             .iter()
@@ -511,13 +511,21 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
                 )
             })
             .collect();
+        let admission = shared.admission.lock().unwrap();
         publish(shared, |s| {
-            s.state = RuntimeState::Running;
+            s.state = if shared.control.is_stopped() {
+                RuntimeState::Stopping
+            } else if shared.control.is_paused() {
+                RuntimeState::Paused
+            } else {
+                RuntimeState::Running
+            };
             s.run_mode = mode;
             s.run_id = run_id;
             s.macro_id = Some(mid);
             s.step_id = None;
-            s.pause_reason = None;
+            s.last_event_frame = None;
+            s.pause_reason = (s.state == RuntimeState::Paused).then_some(RuntimePauseReason::User);
             s.debug_snapshot = None;
             s.debug_variables = Arc::new(BTreeMap::new());
             s.debug_variables_step_id = None;
@@ -532,85 +540,102 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
             s.steps = Arc::new(states);
             s.step_outcomes = Arc::new(BTreeMap::new())
         });
-        let observer = |ev: ExecutionEvent| {
+        drop(admission);
+        let observer = |context: ExecutionFrameContext, ev: ExecutionEvent| {
+            if context.macro_id != mid {
+                // Full frame-aware debugger projections arrive with the Inspector.
+                // Until then retain truthful root maps/locals and identify the
+                // child event separately. A child breakpoint still pauses control.
+                publish(shared, |s| {
+                    s.last_event_frame = Some(context);
+                    if matches!(ev, ExecutionEvent::BreakpointHit { .. }) {
+                        s.state = RuntimeState::Paused;
+                        s.pause_reason = Some(RuntimePauseReason::User);
+                    }
+                });
+                return;
+            }
             #[cfg(test)]
             shared.test_events.lock().unwrap().push(ev.clone());
-            publish(shared, |s| match ev {
-                ExecutionEvent::BreakpointHit { step_id, variables } => {
-                    let variables = Arc::new(variables);
-                    s.state = RuntimeState::Paused;
-                    s.step_id = Some(step_id);
-                    s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
-                    s.debug_variables = variables.clone();
-                    s.debug_variables_step_id = Some(step_id);
-                    s.debug_snapshot_reason = Some(DebugSnapshotReason::Breakpoint);
-                    s.debug_snapshot = Some(Arc::new(DebugSnapshot {
-                        step_id: Some(step_id),
-                        variables,
-                        reason: DebugSnapshotReason::Breakpoint,
-                    }));
-                }
-                ExecutionEvent::DebugVariables {
-                    step_id,
-                    variables,
-                    reason,
-                } => {
-                    let variables = Arc::new(variables);
-                    if reason == DebugSnapshotReason::Breakpoint
-                        && let Some(step_id) = step_id
-                    {
+            publish(shared, |s| {
+                s.last_event_frame = Some(context);
+                match ev {
+                    ExecutionEvent::BreakpointHit { step_id, variables } => {
+                        let variables = Arc::new(variables);
                         s.state = RuntimeState::Paused;
                         s.step_id = Some(step_id);
                         s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
+                        s.debug_variables = variables.clone();
+                        s.debug_variables_step_id = Some(step_id);
+                        s.debug_snapshot_reason = Some(DebugSnapshotReason::Breakpoint);
+                        s.debug_snapshot = Some(Arc::new(DebugSnapshot {
+                            step_id: Some(step_id),
+                            variables,
+                            reason: DebugSnapshotReason::Breakpoint,
+                        }));
                     }
-                    s.debug_variables = variables.clone();
-                    s.debug_variables_step_id = step_id;
-                    s.debug_snapshot_reason = Some(reason);
-                    s.debug_snapshot = Some(Arc::new(DebugSnapshot {
+                    ExecutionEvent::DebugVariables {
                         step_id,
                         variables,
                         reason,
-                    }));
-                }
-                ExecutionEvent::StepStarted(id) => {
-                    s.step_id = Some(id);
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
-                }
-                ExecutionEvent::StepFinished(id) => {
-                    s.completed_steps += 1;
-                    s.last_completed_step_id = Some(id);
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
-                }
-                ExecutionEvent::StepOutcome(id, outcome) => {
-                    Arc::make_mut(&mut s.step_outcomes).insert(id, outcome);
-                }
-                ExecutionEvent::StepSkipped(id) => {
-                    // Skipped steps are intentionally excluded from
-                    // last_completed_step_id: no terminal execution outcome
-                    // was produced for them.
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
-                }
-                ExecutionEvent::StepFailed(id, d) => {
-                    // A failed attempt is terminal for the step, including
-                    // Continue policies, so it is the latest completed
-                    // outcome for correlation with failures.
-                    s.last_completed_step_id = Some(id);
-                    s.latest_failure = Some(d.clone());
-                    Arc::make_mut(&mut s.failures).insert(
-                        DiagnosticKey {
-                            run_id,
-                            step_id: id,
-                        },
-                        d,
-                    );
-                    Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
-                }
-                ExecutionEvent::Paused => {
-                    set_manual_pause(s);
-                }
-                ExecutionEvent::Resumed => {
-                    s.state = RuntimeState::Running;
-                    s.pause_reason = None;
+                    } => {
+                        let variables = Arc::new(variables);
+                        if reason == DebugSnapshotReason::Breakpoint
+                            && let Some(step_id) = step_id
+                        {
+                            s.state = RuntimeState::Paused;
+                            s.step_id = Some(step_id);
+                            s.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id });
+                        }
+                        s.debug_variables = variables.clone();
+                        s.debug_variables_step_id = step_id;
+                        s.debug_snapshot_reason = Some(reason);
+                        s.debug_snapshot = Some(Arc::new(DebugSnapshot {
+                            step_id,
+                            variables,
+                            reason,
+                        }));
+                    }
+                    ExecutionEvent::StepStarted(id) => {
+                        s.step_id = Some(id);
+                        Arc::make_mut(&mut s.steps).insert(id, StepState::Running);
+                    }
+                    ExecutionEvent::StepFinished(id) => {
+                        s.completed_steps += 1;
+                        s.last_completed_step_id = Some(id);
+                        Arc::make_mut(&mut s.steps).insert(id, StepState::Success);
+                    }
+                    ExecutionEvent::StepOutcome(id, outcome) => {
+                        Arc::make_mut(&mut s.step_outcomes).insert(id, outcome);
+                    }
+                    ExecutionEvent::StepSkipped(id) => {
+                        // Skipped steps are intentionally excluded from
+                        // last_completed_step_id: no terminal execution outcome
+                        // was produced for them.
+                        Arc::make_mut(&mut s.steps).insert(id, StepState::Skipped);
+                    }
+                    ExecutionEvent::StepFailed(id, d) => {
+                        // A failed attempt is terminal for the step, including
+                        // Continue policies, so it is the latest completed
+                        // outcome for correlation with failures.
+                        s.last_completed_step_id = Some(id);
+                        s.latest_failure = Some(d.clone());
+                        Arc::make_mut(&mut s.failures).insert(
+                            DiagnosticKey {
+                                run_id,
+                                step_id: id,
+                            },
+                            d,
+                        );
+                        Arc::make_mut(&mut s.steps).insert(id, StepState::Failed);
+                    }
+                    ExecutionEvent::Paused => {
+                        set_manual_pause(s);
+                    }
+                    ExecutionEvent::Resumed => {
+                        s.state = RuntimeState::Running;
+                        s.pause_reason = None;
+                    }
                 }
             })
         };
@@ -619,36 +644,56 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
             RuntimeRunMode::Normal => ExecutionOptions::normal(),
             RuntimeRunMode::Debug => ExecutionOptions::debug(),
         };
-        executor.execute(&plan, options, &observer)
-    })();
-    match result {
-        Ok(()) => publish(shared, |s| {
-            s.state = RuntimeState::Completed;
+        executor.execute_program(
+            &program,
+            arguments.unwrap_or(&MkInvocationValues::new()),
+            options,
+            &observer,
+        )
+    }))
+    .unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+            })
+            .unwrap_or_else(|| "non-string panic payload".into());
+        tracing::error!(macro_id = mid, %message, "macro execution panicked");
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::Panic,
+            format!("Macro execution panicked: {message}"),
+        )
+        .context("macro_id", mid.to_string()))
+    });
+    run_guard.complete(|| {
+        publish(shared, |s| {
+            // Failed preparation still belongs to this admitted run, rather
+            // than retaining the identity/status maps of an earlier macro.
+            if s.run_id != run_id {
+                *s = RuntimeSnapshot {
+                    run_id,
+                    macro_id: Some(mid),
+                    run_mode: mode,
+                    revision: s.revision,
+                    ..RuntimeSnapshot::default()
+                };
+            }
+            match result {
+                Ok(()) => s.state = RuntimeState::Completed,
+                Err(d) if d.kind == DiagnosticKind::Cancelled => s.state = RuntimeState::Stopped,
+                Err(d) => {
+                    s.state = RuntimeState::Failed;
+                    s.latest_failure = Some(d);
+                }
+            }
             s.step_id = None;
             s.pause_reason = None;
-            s.finished_at = Some(SystemTime::now())
-        }),
-        Err(d) => {
-            let stopped = d.kind == DiagnosticKind::Cancelled;
-            publish(shared, |s| {
-                s.state = if stopped {
-                    RuntimeState::Stopped
-                } else {
-                    RuntimeState::Failed
-                };
-                s.pause_reason = None;
-                s.latest_failure = if stopped {
-                    s.latest_failure.clone()
-                } else {
-                    Some(d)
-                };
-                s.step_id = None;
-                s.finished_at = Some(SystemTime::now())
-            })
-        }
-    };
-    *shared.admission.lock().unwrap() = None;
-    shared.operations.release(Operation::Playback);
+            s.finished_at = Some(SystemTime::now());
+        });
+    });
 }
 
 static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::new(None));
@@ -730,6 +775,9 @@ fn accepted(r: CommandResult) -> Result<()> {
         CommandResult::Accepted => Ok(()),
         x => Err(anyhow!("{x:?}")),
     }
+}
+pub fn invoke(invocation: MkInvocation) -> Result<()> {
+    accepted(global()?.command(RuntimeCommand::Invoke(invocation)))
 }
 pub fn run(id: u64) -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Run(id)))
@@ -1169,6 +1217,217 @@ mod run_mode_tests {
         }
     }
 
+    struct PanickingSound;
+    impl super::super::executor::SoundBackend for PanickingSound {
+        fn play(&self, _: &str) -> ExecResult {
+            panic!("injected sound panic")
+        }
+    }
+
+    #[test]
+    fn backend_panic_releases_root_resources_and_worker_accepts_subsequent_run() {
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.clone().backends();
+        backends.sound = Arc::new(PanickingSound);
+        let panic_macro = test_macro(
+            1,
+            true,
+            vec![
+                step(1, MkAction::KeyDown(super::super::MkKey::Control)),
+                step(2, MkAction::MouseDown(MkMouseButton::Left)),
+                step(
+                    3,
+                    MkAction::PlaySound(super::super::MkPlaySoundPayload::default()),
+                ),
+            ],
+        );
+        let harmless = test_macro(
+            2,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "after panic".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+        let (_dir, runtime, guard) = runtime_with_backends(vec![panic_macro, harmless], backends);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let failed = wait_for_terminal(&runtime);
+        assert_eq!(failed.state, RuntimeState::Failed);
+        assert_eq!(
+            failed.latest_failure.as_ref().unwrap().kind,
+            DiagnosticKind::Panic
+        );
+        assert!(
+            failed
+                .latest_failure
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("injected sound panic")
+        );
+        assert_eq!(
+            fake.events(),
+            [
+                "key_down:Control",
+                "button_down:Left",
+                "button_up:Left",
+                "key_up:Control"
+            ]
+        );
+        // command() shares terminal/admission serialization, so observing terminal
+        // state never leaves a window where Pause can replace it or Run is busy.
+        assert!(matches!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Rejected(_)
+        ));
+        assert_eq!(runtime.snapshot().state, RuntimeState::Failed);
+        assert!(!runtime.shared.control.is_active());
+        assert!(guard.claim(Operation::Playback));
+        guard.release(Operation::Playback);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(2)),
+            CommandResult::Accepted
+        );
+        assert_eq!(
+            wait_for_terminal_after(&runtime, failed.run_id).state,
+            RuntimeState::Completed
+        );
+        assert_eq!(fake.events().last().unwrap(), "text:after panic");
+    }
+
+    #[test]
+    fn early_admission_failure_clears_activity_and_records_current_run_identity() {
+        let (_dir, runtime, guard) = runtime_with(vec![test_macro(1, true, vec![])]);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(999)),
+            CommandResult::Accepted
+        );
+        let failed = wait_for_terminal(&runtime);
+        assert_eq!(failed.state, RuntimeState::Failed);
+        assert_eq!(failed.macro_id, Some(999));
+        assert!(failed.run_id > 0);
+        assert!(matches!(
+            runtime.command(RuntimeCommand::Resume),
+            CommandResult::Rejected(_)
+        ));
+        assert!(matches!(
+            runtime.command(RuntimeCommand::Pause),
+            CommandResult::Rejected(_)
+        ));
+        assert!(!runtime.shared.control.is_active());
+        assert!(guard.claim(Operation::Playback));
+        guard.release(Operation::Playback);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        assert_eq!(
+            wait_for_terminal_after(&runtime, failed.run_id).state,
+            RuntimeState::Completed
+        );
+    }
+
+    #[test]
+    fn typed_root_invocation_applies_arguments_defaults_and_subset_only_to_root() {
+        use super::super::{MkCallMacroPayload, MkMacroParameter, MkSignatureId, MkValueType};
+        let mut root = test_macro(
+            1,
+            true,
+            vec![
+                step(
+                    1,
+                    MkAction::Text(MkTextPayload {
+                        text: "skip root row".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+                step(
+                    2,
+                    MkAction::CallMacro(MkCallMacroPayload {
+                        macro_id: 2,
+                        ..Default::default()
+                    }),
+                ),
+                step(
+                    3,
+                    MkAction::Text(MkTextPayload {
+                        text: "${parameter}:${defaulted}".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+            ],
+        );
+        root.signature.parameters = vec![
+            MkMacroParameter {
+                id: MkSignatureId(1),
+                name: "parameter".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+                default_value: None,
+            },
+            MkMacroParameter {
+                id: MkSignatureId(2),
+                name: "defaulted".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+                default_value: Some(MkValue::String("literal ${missing}".into())),
+            },
+        ];
+        let child = test_macro(
+            2,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "full child".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![root, child]);
+        let invocation = MkInvocation {
+            macro_id: 1,
+            arguments: [(MkSignatureId(1), MkValue::String("supplied".into()))]
+                .into_iter()
+                .collect(),
+            mode: ExecutionMode::Normal,
+            subset: MkInvocationSubset::From(2),
+        };
+        assert_eq!(
+            runtime.command(RuntimeCommand::Invoke(invocation)),
+            CommandResult::Accepted
+        );
+        let done = wait_for_terminal(&runtime);
+        assert_eq!(done.state, RuntimeState::Completed);
+        assert_eq!(
+            fake.events(),
+            ["text:full child", "text:supplied:literal ${missing}"]
+        );
+        assert_eq!(done.completed_steps, 2);
+        assert!(!done.steps.contains_key(&1));
+        assert_eq!(
+            runtime.command(RuntimeCommand::DebugRunSelection(1, vec![3])),
+            CommandResult::Accepted
+        );
+        let missing = wait_for_terminal_after(&runtime, done.run_id);
+        assert_eq!(missing.state, RuntimeState::Failed);
+        assert!(
+            missing
+                .latest_failure
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("Required macro parameters")
+        );
+        assert_eq!(fake.events().len(), 2);
+    }
+
     #[derive(Default)]
     struct PromptGateState {
         entered: bool,
@@ -1335,7 +1594,7 @@ mod run_mode_tests {
 
         for steps in structured_plans {
             let structured = test_macro(1, true, steps);
-            assert!(compile(&structured).is_ok());
+            assert!(super::super::compile(&structured).is_ok());
             let normal = failure_for(RuntimeCommand::RunFrom(1, 2), vec![structured.clone()]);
             let debug = failure_for(RuntimeCommand::DebugRunFrom(1, 2), vec![structured]);
             assert_eq!(normal, debug);

@@ -97,6 +97,16 @@ impl ExecutionOptions {
     }
 }
 
+/// Identity for one invocation occurrence. Root-only compatibility observers
+/// need no allocation; program observers can distinguish colliding step IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionFrameContext {
+    pub frame_id: u64,
+    pub macro_id: u64,
+    pub caller_step_id: Option<u64>,
+    pub depth: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugSnapshotReason {
     RunStarted,
@@ -830,6 +840,10 @@ impl RunControl {
         };
         self.wake.notify_all()
     }
+    pub(crate) fn finish(&self) {
+        self.state.lock().unwrap().active = false;
+        self.wake.notify_all();
+    }
     pub fn pause(&self) {
         self.state.lock().unwrap().paused = true;
         self.wake.notify_all()
@@ -844,6 +858,9 @@ impl RunControl {
     }
     pub fn is_active(&self) -> bool {
         self.state.lock().unwrap().active
+    }
+    pub(crate) fn is_paused(&self) -> bool {
+        self.state.lock().unwrap().paused
     }
     pub fn is_stopped(&self) -> bool {
         self.state.lock().unwrap().stopped
@@ -895,9 +912,7 @@ impl RunControl {
 struct RunActivityGuard<'a>(&'a RunControl);
 impl Drop for RunActivityGuard<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap();
-        state.active = false;
-        self.0.wake.notify_all();
+        self.0.finish();
     }
 }
 #[derive(Debug, Clone)]
@@ -4233,6 +4248,16 @@ impl Executor {
         frame::execute(self, plan, options, observe)
     }
 
+    pub fn execute_program(
+        &self,
+        program: &super::MkCompiledProgram,
+        arguments: &super::MkInvocationValues,
+        options: ExecutionOptions,
+        observe: &dyn Fn(ExecutionFrameContext, ExecutionEvent),
+    ) -> ExecResult {
+        frame::execute_program(self, program, arguments, options, observe)
+    }
+
     fn action(
         &self,
         macro_id: u64,
@@ -4242,8 +4267,10 @@ impl Executor {
         g: &mut InputCleanupGuard,
     ) -> ExecResult {
         match a {
-            MkAction::CallMacro(_) => unsupported_context("macro executor", "Call Macro"),
-            MkAction::Return(_) => unsupported_context("macro executor", "Return"),
+            MkAction::CallMacro(_) | MkAction::Return(_) => Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidPlan,
+                "Reusable action bypassed the frame engine",
+            )),
             MkAction::KeyDown(k) => g.down_key(k),
             MkAction::KeyUp(k) => g.up_key(k),
             MkAction::KeyPress(k) => {
@@ -5319,7 +5346,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
     // executor match. Mouse support includes the wired WindowsScreenBackend
     // coordinate resolver and SendInput paths (including drag).
     match action {
-        MkAction::CallMacro(_) | MkAction::Return(_) => false,
+        MkAction::CallMacro(_) | MkAction::Return(_) => true,
         MkAction::UiInvoke(_)
         | MkAction::UiSetValue { .. }
         | MkAction::UiReadValue { .. }

@@ -46,10 +46,6 @@ impl AnalysisCache {
         self.environment_pending = self.environment_document.as_ref() != Some(document);
         let analysis = crate::mkmacro::analyze_document(document);
         let mut diagnostics = analysis.diagnostics;
-        crate::mkmacro::validation::append_runtime_capability_diagnostics(
-            document,
-            &mut diagnostics,
-        );
         self.graph = analysis.graph;
         self.root_failures.clear();
         // Do not display an environment result for a removed or edited action.

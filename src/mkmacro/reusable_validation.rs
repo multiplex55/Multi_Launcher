@@ -4,13 +4,21 @@ use super::{authoring_analysis::*, call_graph::CallGraph, model::*, validation::
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn signature(owner_id: u64, signature: &MkMacroSignature, out: &mut Vec<MkDiagnostic>) {
+    signature_parts(owner_id, &signature.parameters, &signature.outputs, out);
+}
+
+pub(crate) fn signature_parts(
+    owner_id: u64,
+    parameters: &[MkMacroParameter],
+    outputs: &[MkMacroOutput],
+    out: &mut Vec<MkDiagnostic>,
+) {
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
-    for (id, name) in signature
-        .parameters
+    for (id, name) in parameters
         .iter()
         .map(|p| (p.id, &p.name))
-        .chain(signature.outputs.iter().map(|o| (o.id, &o.name)))
+        .chain(outputs.iter().map(|o| (o.id, &o.name)))
     {
         if id.0 == 0 || !ids.insert(id) {
             push(
@@ -40,7 +48,7 @@ pub(crate) fn signature(owner_id: u64, signature: &MkMacroSignature, out: &mut V
             );
         }
     }
-    for parameter in &signature.parameters {
+    for parameter in parameters {
         if parameter
             .default_value
             .as_ref()

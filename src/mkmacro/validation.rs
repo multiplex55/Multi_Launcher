@@ -171,13 +171,10 @@ pub fn validate_document_with_context(
     doc: &MkMacroDocument,
     context: ValidationContext<'_>,
 ) -> Vec<MkDiagnostic> {
-    let mut analysis = analyze_document_with_context(doc, context);
-    append_runtime_capability_diagnostics(doc, &mut analysis.diagnostics);
-    analysis.diagnostics
+    analyze_document_with_context(doc, context).diagnostics
 }
 
-/// Semantic analysis is independent of runtime support. Execution entry points
-/// retain the capability guard until reusable execution is installed.
+/// Semantic analysis shared by authoring and compiled-program admission.
 pub struct DocumentAnalysis {
     pub graph: super::call_graph::CallGraph,
     pub diagnostics: Vec<MkDiagnostic>,
@@ -191,25 +188,6 @@ pub fn analyze_document(doc: &MkMacroDocument) -> DocumentAnalysis {
             monitors: MonitorValidation::NotRequested,
         },
     )
-}
-
-pub(crate) fn append_runtime_capability_diagnostics(
-    doc: &MkMacroDocument,
-    out: &mut Vec<MkDiagnostic>,
-) {
-    for owner in &doc.macros {
-        for step in &owner.steps {
-            if matches!(step.action, MkAction::CallMacro(_) | MkAction::Return(_)) {
-                push(
-                    out,
-                    owner.id,
-                    Some(step.id),
-                    "unsupported_reusable_action",
-                    "Reusable macro actions cannot execute in this version",
-                );
-            }
-        }
-    }
 }
 
 fn analyze_document_with_context(

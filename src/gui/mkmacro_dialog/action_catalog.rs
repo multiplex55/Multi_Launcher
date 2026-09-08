@@ -263,7 +263,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Call a reusable macro",
             &["call"],
             General,
-            "Reusable macro execution and editing are not yet available",
+            "Reusable macro editing is not yet available",
             MkAction::CallMacro(MkCallMacroPayload::default())
         ),
         d!(
@@ -273,7 +273,7 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
             "Return from the current macro",
             &["return"],
             General,
-            "Reusable macro execution and editing are not yet available",
+            "Reusable macro editing is not yet available",
             MkAction::Return(MkReturnPayload::default())
         ),
         d!(

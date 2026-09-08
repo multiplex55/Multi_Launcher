@@ -21,15 +21,18 @@ pub struct MkInstruction {
 #[derive(Debug, Clone)]
 pub struct MkExecutionPlan {
     pub macro_id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub signature: MkCompiledSignature,
     pub playback: MkPlayback,
     pub instructions: Arc<[MkInstruction]>,
     pub step_to_instruction: HashMap<u64, usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MkCompiledSignature {
-    pub parameters: Arc<[MkMacroParameter]>,
-    pub outputs: Arc<[MkMacroOutput]>,
+    parameters: Arc<[MkMacroParameter]>,
+    outputs: Arc<[MkMacroOutput]>,
     parameter_indices: HashMap<MkSignatureId, usize>,
     output_indices: HashMap<MkSignatureId, usize>,
 }
@@ -52,6 +55,12 @@ impl MkCompiledSignature {
                 .collect(),
         }
     }
+    pub fn parameters(&self) -> &[MkMacroParameter] {
+        &self.parameters
+    }
+    pub fn outputs(&self) -> &[MkMacroOutput] {
+        &self.outputs
+    }
     pub fn parameter(&self, id: MkSignatureId) -> Option<&MkMacroParameter> {
         self.parameter_indices
             .get(&id)
@@ -69,8 +78,6 @@ pub struct MkCompiledProgram {
     pub root_macro_id: u64,
     order: Arc<[u64]>,
     plans: HashMap<u64, Arc<MkExecutionPlan>>,
-    signatures: HashMap<u64, MkCompiledSignature>,
-    names: HashMap<u64, String>,
 }
 impl MkCompiledProgram {
     pub fn macro_ids(&self) -> &[u64] {
@@ -79,17 +86,19 @@ impl MkCompiledProgram {
     pub fn plan(&self, id: u64) -> Option<&Arc<MkExecutionPlan>> {
         self.plans.get(&id)
     }
+    pub(crate) fn root_plan_mut(&mut self) -> Option<&mut MkExecutionPlan> {
+        self.plans.get_mut(&self.root_macro_id).map(Arc::make_mut)
+    }
     pub fn signature(&self, id: u64) -> Option<&MkCompiledSignature> {
-        self.signatures.get(&id)
+        self.plans.get(&id).map(|plan| &plan.signature)
     }
     pub fn name(&self, id: u64) -> Option<&str> {
-        self.names.get(&id).map(String::as_str)
+        self.plans.get(&id).map(|plan| plan.name.as_str())
     }
 }
 
-/// Builds a semantically validated program. Runtime capability admission stays
-/// at the existing execution entry point (`compile`) until reusable execution
-/// is supported; this API does not imply that a program can yet be executed.
+/// Builds the immutable, semantically validated closure for one root run.
+/// Every callee retains its full plan and its own signature and playback.
 pub fn compile_program(
     document: &MkMacroDocument,
     root_macro_id: u64,
@@ -128,23 +137,17 @@ pub fn compile_program(
         super::call_graph::DependencyPolicy::EnabledCalls,
     );
     let mut plans = HashMap::new();
-    let mut signatures = HashMap::new();
-    let mut names = HashMap::new();
     for id in &order {
         let owner = &document.macros[analysis
             .graph
             .macro_index(*id)
             .expect("validated dependency identity")];
         plans.insert(*id, Arc::new(lower_validated_macro(owner)));
-        signatures.insert(*id, MkCompiledSignature::new(&owner.signature));
-        names.insert(*id, owner.name.clone());
     }
     Ok(MkCompiledProgram {
         root_macro_id,
         order: order.into(),
         plans,
-        signatures,
-        names,
     })
 }
 
@@ -218,6 +221,9 @@ fn lower_validated_macro(m: &MkMacro) -> MkExecutionPlan {
     }
     MkExecutionPlan {
         macro_id: m.id,
+        name: m.name.clone(),
+        enabled: m.enabled,
+        signature: MkCompiledSignature::new(&m.signature),
         playback: m.playback.clone(),
         instructions: ins.into(),
         step_to_instruction: map,
@@ -309,12 +315,12 @@ mod tests {
         assert_eq!(program.name(2), Some("child"));
         assert_eq!(program.plan(2).unwrap().instructions.len(), 1);
         assert_eq!(program.plan(2).unwrap().playback.speed_percent, 175);
-        // The runtime's existing entry point still rejects unsupported actions.
+        // Singleton compilation cannot resolve a document-owned callee.
         assert!(
             compile(&doc.macros[0])
                 .unwrap_err()
                 .iter()
-                .any(|d| d.code == "unsupported_reusable_action")
+                .any(|d| d.code == "missing_call_target")
         );
     }
 
@@ -398,11 +404,17 @@ mod tests {
             // Cover every field so future plan additions must be checked here too.
             let MkExecutionPlan {
                 macro_id,
+                name,
+                enabled,
+                signature,
                 playback,
                 instructions,
                 step_to_instruction,
             } = compile(&document.macros[0]).unwrap();
             assert_eq!(macro_id, expected.macro_id);
+            assert_eq!(name, expected.name);
+            assert_eq!(enabled, expected.enabled);
+            assert_eq!(signature, expected.signature);
             assert_eq!(playback, expected.playback);
             assert_eq!(step_to_instruction, expected.step_to_instruction);
             assert_eq!(instructions.len(), expected.instructions.len());
