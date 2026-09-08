@@ -2584,34 +2584,7 @@ pub(super) fn value_ui(ui: &mut egui::Ui, value: &mut MkValue) {
             _ => MkValue::Null,
         };
     }
-    match value {
-        MkValue::String(text) => {
-            ui.horizontal(|ui| {
-                ui.label("Value");
-                ui.text_edit_singleline(text);
-            });
-        }
-        MkValue::Number(number) => {
-            ui.horizontal(|ui| {
-                ui.label("Value");
-                ui.add(egui::DragValue::new(number));
-            });
-        }
-        MkValue::Boolean(boolean) => {
-            ui.checkbox(boolean, "Value");
-        }
-        MkValue::Point(point) => {
-            ui.horizontal(|ui| {
-                ui.label("X");
-                ui.add(egui::DragValue::new(&mut point.x));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut point.y));
-            });
-        }
-        MkValue::Null => {
-            ui.small("Null has no value.");
-        }
-    }
+    super::typed_value::value_controls(ui, value);
 }
 
 // These ranges keep normal authoring responsive while leaving an out-of-range

@@ -1,5 +1,7 @@
 //! Worker-owned macro runtime.  The public methods only exchange messages and snapshots;
 //! action execution and all waits live on the worker.
+#[cfg(test)]
+use super::compile_program;
 pub use super::executor::DebugSnapshotReason;
 use super::executor::{
     Backends, DiagnosticKind, ExecResult, ExecutionDiagnostic, ExecutionEvent,
@@ -9,8 +11,7 @@ use super::executor::{
 use super::{
     MkInvocation, MkInvocationSubset, MkInvocationValues, MkMacroStore, MkValue,
     NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
-    RuntimeVariables, SharedOperationGuard, SystemRecorderClock, apply_root_subset,
-    compile_program, production_hook_service,
+    RuntimeVariables, SharedOperationGuard, SystemRecorderClock, production_hook_service,
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
@@ -18,7 +19,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -51,6 +52,25 @@ struct RunRequest<'a> {
     selection: Option<&'a [u64]>,
     mode: RuntimeRunMode,
     arguments: Option<&'a MkInvocationValues>,
+}
+impl RunRequest<'_> {
+    fn to_invocation(self) -> MkInvocation {
+        MkInvocation {
+            macro_id: self.macro_id,
+            arguments: self.arguments.cloned().unwrap_or_default(),
+            mode: match self.mode {
+                RuntimeRunMode::Normal => ExecutionMode::Normal,
+                RuntimeRunMode::Debug => ExecutionMode::Debug,
+            },
+            subset: if let Some(id) = self.starting_step {
+                MkInvocationSubset::From(id)
+            } else if let Some(ids) = self.selection {
+                MkInvocationSubset::Selected(ids.to_vec())
+            } else {
+                MkInvocationSubset::Whole
+            },
+        }
+    }
 }
 fn run_request(command: &RuntimeCommand) -> Option<RunRequest<'_>> {
     if let RuntimeCommand::Invoke(invocation) = command {
@@ -284,6 +304,11 @@ pub enum CommandResult {
     AlreadyRunning { active_macro_id: u64 },
     Rejected(ExecutionDiagnostic),
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationDisposition {
+    Submitted,
+    AwaitingInput { request_id: u64 },
+}
 
 struct Shared {
     snapshot: RwLock<Arc<RuntimeSnapshot>>,
@@ -294,14 +319,142 @@ struct Shared {
     #[cfg(test)]
     test_events: Mutex<Vec<ExecutionEvent>>,
 }
+struct WorkerMessage {
+    command: RuntimeCommand,
+    program: Option<super::MkCompiledProgram>,
+}
+static RUNTIME_GENERATIONS: AtomicU64 = AtomicU64::new(1);
 pub struct MacroRuntime {
-    tx: mpsc::Sender<RuntimeCommand>,
+    tx: mpsc::Sender<WorkerMessage>,
+    store: Arc<MkMacroStore>,
+    generation: u64,
+    available: AtomicBool,
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
     test_commands: Mutex<Vec<RuntimeCommand>>,
 }
 impl MacroRuntime {
+    fn ensure_available(&self) -> ExecResult {
+        let admission = self.shared.admission.lock().unwrap();
+        if !self.available.load(Ordering::Acquire) {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::RuntimeUnavailable,
+                "The macro runtime was replaced or closed",
+            ));
+        }
+        if let Some(id) = *admission {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::RuntimeUnavailable,
+                format!("Macro {id} is already running"),
+            ));
+        }
+        if self.shared.operations.active(Operation::Recording) {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "recording is active",
+            ));
+        }
+        Ok(())
+    }
+    /// Direct callers prepare on their own thread, without reserving a worker
+    /// while the user considers input. Final submission retains atomic admission.
+    pub fn prepare_invocation(
+        self: &Arc<Self>,
+        invocation: MkInvocation,
+        broker: &Arc<super::invocation_prompt::InvocationPromptBroker>,
+    ) -> ExecResult<InvocationDisposition> {
+        self.prepare_direct_command(RuntimeCommand::Invoke(invocation), broker)
+    }
+    fn prepare_direct_command(
+        self: &Arc<Self>,
+        command: RuntimeCommand,
+        broker: &Arc<super::invocation_prompt::InvocationPromptBroker>,
+    ) -> ExecResult<InvocationDisposition> {
+        self.ensure_available()?;
+        broker.ensure_idle()?;
+        let request = run_request(&command).ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "Expected a direct invocation",
+            )
+        })?;
+        let mut invocation = request.to_invocation();
+        let document = self.store.snapshot();
+        let program = super::invocation::compile_invocation_program(&document, &invocation)?;
+        let target = document
+            .macros
+            .iter()
+            .find(|m| m.id == invocation.macro_id)
+            .ok_or_else(|| {
+                ExecutionDiagnostic::new(DiagnosticKind::TargetNotFound, "Macro was not found")
+            })?;
+        let prepared = super::prepare_parameters(
+            &target.signature.parameters,
+            &target.signature.outputs,
+            &invocation.arguments,
+        )?;
+        if !prepared.missing.is_empty() {
+            let request_id = broker.enqueue(
+                self,
+                super::invocation_prompt::InvocationPromptRequest {
+                    id: 0,
+                    runtime_generation: self.generation,
+                    invocation,
+                    macro_name: target.name.clone(),
+                    macro_description: target.description.clone(),
+                    parameters: target.signature.parameters.clone(),
+                    prepared_values: prepared.values,
+                },
+            )?;
+            return Ok(InvocationDisposition::AwaitingInput { request_id });
+        }
+        invocation.arguments = prepared.values;
+        // Keep the existing empty-argument command contract for compatibility.
+        let command = if invocation.arguments.is_empty() {
+            command
+        } else {
+            RuntimeCommand::Invoke(invocation)
+        };
+        command_result(self.submit_command(command, Some(program)))?;
+        Ok(InvocationDisposition::Submitted)
+    }
+    pub(crate) fn confirm_invocation(
+        &self,
+        request: &super::invocation_prompt::InvocationPromptRequest,
+        values: MkInvocationValues,
+    ) -> ExecResult {
+        self.ensure_available()?;
+        if request.runtime_generation != self.generation {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::RuntimeUnavailable,
+                "The macro runtime changed while input was pending",
+            ));
+        }
+        let mut invocation = request.invocation.clone();
+        invocation.arguments = values;
+        let document = self.store.snapshot();
+        let program = super::invocation::compile_invocation_program(&document, &invocation)?;
+        let plan = program.plan(invocation.macro_id).ok_or_else(|| {
+            ExecutionDiagnostic::new(DiagnosticKind::InvalidPlan, "Program root is missing")
+        })?;
+        super::invocation::validate_parameter_assumptions(
+            &request.parameters,
+            plan.signature.parameters(),
+        )?;
+        let prepared = super::prepare_parameters(
+            plan.signature.parameters(),
+            plan.signature.outputs(),
+            &invocation.arguments,
+        )?;
+        // The shared preparation boundary owns missing/type errors, including
+        // callers outside egui that submit an incomplete response.
+        prepared
+            .clone()
+            .into_variables(plan.signature.parameters())?;
+        invocation.arguments = prepared.values;
+        command_result(self.submit_command(RuntimeCommand::Invoke(invocation), Some(program)))
+    }
     pub fn new(store: Arc<MkMacroStore>, backends: Backends) -> Self {
         Self::with_guard(store, backends, Arc::new(SharedOperationGuard::default()))
     }
@@ -321,12 +474,16 @@ impl MacroRuntime {
             test_events: Mutex::new(Vec::new()),
         });
         let s = shared.clone();
+        let worker_store = store.clone();
         let worker = thread::Builder::new()
             .name("mkmacro-runtime".into())
-            .spawn(move || worker_loop(store, backends, rx, s))
+            .spawn(move || worker_loop(worker_store, backends, rx, s))
             .expect("spawn macro runtime");
         Self {
             tx,
+            store,
+            generation: RUNTIME_GENERATIONS.fetch_add(1, Ordering::Relaxed),
+            available: AtomicBool::new(true),
             shared,
             worker: Mutex::new(Some(worker)),
             #[cfg(test)]
@@ -334,6 +491,13 @@ impl MacroRuntime {
         }
     }
     pub fn command(&self, c: RuntimeCommand) -> CommandResult {
+        self.submit_command(c, None)
+    }
+    fn submit_command(
+        &self,
+        c: RuntimeCommand,
+        program: Option<super::MkCompiledProgram>,
+    ) -> CommandResult {
         #[cfg(test)]
         self.test_commands.lock().unwrap().push(c.clone());
         let request = run_request(&c);
@@ -346,6 +510,12 @@ impl MacroRuntime {
         // Admission serializes terminal publication with control commands and
         // new-run claims. Lock order is admission -> control/snapshot/operations.
         let mut admission = self.shared.admission.lock().unwrap();
+        if !self.available.load(Ordering::Acquire) {
+            return CommandResult::Rejected(ExecutionDiagnostic::new(
+                DiagnosticKind::RuntimeUnavailable,
+                "macro worker is shut down",
+            ));
+        }
         let active = admission.is_some();
         let state = self.snapshot().state;
         let stopped = self.shared.control.is_stopped();
@@ -401,7 +571,14 @@ impl MacroRuntime {
             }
             _ => {}
         }
-        if self.tx.send(c).is_err() {
+        if self
+            .tx
+            .send(WorkerMessage {
+                command: c,
+                program,
+            })
+            .is_err()
+        {
             self.shared.control.finish();
             self.shared.operations.release(Operation::Playback);
             *admission = None;
@@ -424,8 +601,15 @@ impl MacroRuntime {
         std::mem::take(&mut *self.shared.test_events.lock().unwrap())
     }
     pub fn shutdown(&self) {
-        self.shared.control.stop();
-        let _ = self.tx.send(RuntimeCommand::Shutdown);
+        {
+            let _admission = self.shared.admission.lock().unwrap();
+            self.available.store(false, Ordering::Release);
+            self.shared.control.stop();
+            let _ = self.tx.send(WorkerMessage {
+                command: RuntimeCommand::Shutdown,
+                program: None,
+            });
+        }
         if let Some(h) = self.worker.lock().unwrap().take() {
             let _ = h.join();
         }
@@ -729,11 +913,11 @@ fn clear_pause_reason(shared: &Shared) {
 fn worker_loop(
     store: Arc<MkMacroStore>,
     backends: Backends,
-    rx: mpsc::Receiver<RuntimeCommand>,
+    rx: mpsc::Receiver<WorkerMessage>,
     shared: Arc<Shared>,
 ) {
-    while let Ok(cmd) = rx.recv() {
-        match cmd {
+    while let Ok(WorkerMessage { command, program }) = rx.recv() {
+        match command {
             RuntimeCommand::Shutdown => {
                 clear_pause_reason(&shared);
                 break;
@@ -743,7 +927,7 @@ fn worker_loop(
             RuntimeCommand::Pause | RuntimeCommand::Resume | RuntimeCommand::Stop => {}
             command => {
                 let request = run_request(&command).expect("run commands are classified");
-                run_one(&store, &backends, &shared, request)
+                run_one(&store, &backends, &shared, request, program)
             }
         }
     }
@@ -779,13 +963,18 @@ impl Drop for RootRunGuard<'_> {
     }
 }
 
-fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: RunRequest<'_>) {
+fn run_one(
+    store: &MkMacroStore,
+    backends: &Backends,
+    shared: &Shared,
+    request: RunRequest<'_>,
+    prepared_program: Option<super::MkCompiledProgram>,
+) {
     let RunRequest {
         macro_id: mid,
-        starting_step: from,
-        selection,
         mode,
         arguments,
+        ..
     } = request;
     let run_guard = RootRunGuard {
         shared,
@@ -795,39 +984,13 @@ fn run_one(store: &MkMacroStore, backends: &Backends, shared: &Shared, request: 
     shared.test_events.lock().unwrap().clear();
     let run_id = shared.next_run_id.fetch_add(1, Ordering::Relaxed);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let doc = store.snapshot();
-        let m = doc.macros.iter().find(|m| m.id == mid).ok_or_else(|| {
-            ExecutionDiagnostic::new(
-                DiagnosticKind::TargetNotFound,
-                format!("macro {mid} was not found"),
-            )
-        })?;
-        if !m.enabled {
-            return Err(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidTarget,
-                "macro is disabled",
-            ));
-        }
-        let mut program = compile_program(&doc, mid).map_err(|d| {
-            ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidPlan,
-                format!(
-                    "macro validation failed: {}",
-                    d.iter()
-                        .find(|d| d.severity == super::DiagnosticSeverity::Fatal)
-                        .map(|x| x.message.as_str())
-                        .unwrap_or("invalid plan")
-                ),
-            )
-        })?;
-        let subset = if let Some(id) = from {
-            MkInvocationSubset::From(id)
-        } else if let Some(ids) = selection {
-            MkInvocationSubset::Selected(ids.to_vec())
-        } else {
-            MkInvocationSubset::Whole
+        let program = match prepared_program {
+            Some(program) => program,
+            None => {
+                let invocation = request.to_invocation();
+                super::invocation::compile_invocation_program(&store.snapshot(), &invocation)?
+            }
         };
-        apply_root_subset(&mut program, &subset)?;
         let plan = program.plan(mid).ok_or_else(|| {
             ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidPlan,
@@ -1020,6 +1183,25 @@ fn global() -> Result<Arc<MacroRuntime>> {
         .clone()
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))
 }
+fn command_result(result: CommandResult) -> ExecResult {
+    match result {
+        CommandResult::Accepted => Ok(()),
+        CommandResult::Rejected(diagnostic) => Err(diagnostic),
+        CommandResult::AlreadyRunning { active_macro_id } => Err(ExecutionDiagnostic::new(
+            DiagnosticKind::RuntimeUnavailable,
+            format!("Macro {active_macro_id} is already running"),
+        )),
+    }
+}
+/// Success includes a queued parameter request; no execution is admitted until
+/// complete typed values have been confirmed.
+fn prepare_direct(command: RuntimeCommand) -> Result<()> {
+    global()?.prepare_direct_command(
+        command,
+        &super::invocation_prompt::production_invocation_prompt_broker(),
+    )?;
+    Ok(())
+}
 fn accepted(r: CommandResult) -> Result<()> {
     match r {
         CommandResult::Accepted => Ok(()),
@@ -1027,25 +1209,25 @@ fn accepted(r: CommandResult) -> Result<()> {
     }
 }
 pub fn invoke(invocation: MkInvocation) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::Invoke(invocation)))
+    prepare_direct(RuntimeCommand::Invoke(invocation))
 }
 pub fn run(id: u64) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::Run(id)))
+    prepare_direct(RuntimeCommand::Run(id))
 }
 pub fn run_from(macro_id: u64, step_id: u64) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::RunFrom(macro_id, step_id)))
+    prepare_direct(RuntimeCommand::RunFrom(macro_id, step_id))
 }
 pub fn run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::RunSelection(macro_id, ids)))
+    prepare_direct(RuntimeCommand::RunSelection(macro_id, ids))
 }
 pub fn debug_run(macro_id: u64) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::DebugRun(macro_id)))
+    prepare_direct(RuntimeCommand::DebugRun(macro_id))
 }
 pub fn debug_run_from(macro_id: u64, step_id: u64) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::DebugRunFrom(macro_id, step_id)))
+    prepare_direct(RuntimeCommand::DebugRunFrom(macro_id, step_id))
 }
 pub fn debug_run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
-    accepted(global()?.command(RuntimeCommand::DebugRunSelection(macro_id, ids)))
+    prepare_direct(RuntimeCommand::DebugRunSelection(macro_id, ids))
 }
 pub fn pause() -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Pause))

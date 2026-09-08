@@ -12,6 +12,7 @@ pub mod image_search;
 pub mod input;
 pub mod interpolation;
 pub mod invocation;
+pub mod invocation_prompt;
 pub mod launcher_command;
 pub mod launcher_query;
 pub mod model;

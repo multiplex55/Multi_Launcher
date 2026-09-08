@@ -237,6 +237,64 @@ fn binding_error(message: impl Into<String>) -> ExecutionDiagnostic {
     ExecutionDiagnostic::new(DiagnosticKind::InvalidPlan, message)
 }
 
+/// Captures one document version for admission. Execution uses this same
+/// immutable program even if authoring publishes a newer document afterward.
+pub(crate) fn compile_invocation_program(
+    document: &MkMacroDocument,
+    invocation: &MkInvocation,
+) -> ExecResult<MkCompiledProgram> {
+    let target = document
+        .macros
+        .iter()
+        .find(|m| m.id == invocation.macro_id)
+        .ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::TargetNotFound,
+                format!("macro {} was not found", invocation.macro_id),
+            )
+        })?;
+    if !target.enabled {
+        return Err(ExecutionDiagnostic::new(
+            DiagnosticKind::InvalidTarget,
+            "macro is disabled",
+        ));
+    }
+    let mut program =
+        super::compile_program(document, invocation.macro_id).map_err(|diagnostics| {
+            binding_error(format!(
+                "macro validation failed: {}",
+                diagnostics
+                    .iter()
+                    .find(|d| d.severity == super::DiagnosticSeverity::Fatal)
+                    .map(|d| d.message.as_str())
+                    .unwrap_or("invalid plan")
+            ))
+        })?;
+    apply_root_subset(&mut program, &invocation.subset)?;
+    Ok(program)
+}
+
+/// Names, descriptions and ordering are presentation. IDs, types and default
+/// assumptions are the contract the user saw when input was requested.
+pub(crate) fn validate_parameter_assumptions(
+    previous: &[MkMacroParameter],
+    current: &[MkMacroParameter],
+) -> ExecResult {
+    let current: BTreeMap<_, _> = current.iter().map(|p| (p.id, p)).collect();
+    if previous.len() != current.len()
+        || previous.iter().any(|old| {
+            current.get(&old.id).is_none_or(|new| {
+                new.value_type != old.value_type || new.default_value != old.default_value
+            })
+        })
+    {
+        return Err(binding_error(
+            "Macro parameters changed while input was pending; run the macro again",
+        ));
+    }
+    Ok(())
+}
+
 /// Restricts only the root, preserving the historical rejection of structured
 /// subsets and all complete callee plans captured by compilation.
 pub fn apply_root_subset(
