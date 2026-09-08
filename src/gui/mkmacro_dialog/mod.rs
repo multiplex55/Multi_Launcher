@@ -43,7 +43,7 @@ use crate::mkmacro::{
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
+pub use step_table::Selection;
 use visual_capture_workflow::SharedVisualOverlayController;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -66,17 +66,6 @@ impl Selection {
         self.ids = ids.into_iter().collect();
     }
 }
-// Compatibility forwards for existing public callers. UI commands use the
-// fallible domain API directly so invalid drafts receive a useful error.
-pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> BTreeSet<u64> {
-    crate::mkmacro::editor_mutation::duplicate_selection(steps, ids).unwrap_or_default()
-}
-pub fn duplicate_steps(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) {
-    let _ = duplicate_steps_with_ids(steps, ids);
-}
-pub fn move_steps(steps: &mut [MkStep], ids: &BTreeSet<u64>, down: bool) {
-    let _ = crate::mkmacro::editor_mutation::move_selection(steps, ids, down);
-}
 use crate::mkmacro::editor_mutation::{
     delete_selection, move_selection as move_selection_structurally,
 };
@@ -1357,7 +1346,9 @@ mod layout_tests {
         let mut rows = vec![delay(1), delay(2)];
         rows[0].breakpoint = true;
 
-        let duplicated_ids = duplicate_steps_with_ids(&mut rows, &BTreeSet::from([1]));
+        let duplicated_ids =
+            crate::mkmacro::editor_mutation::duplicate_selection(&mut rows, &BTreeSet::from([1]))
+                .unwrap();
 
         assert_eq!(duplicated_ids.len(), 1);
         assert_ne!(rows[1].id, rows[0].id);

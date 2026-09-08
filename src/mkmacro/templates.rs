@@ -15,6 +15,10 @@ use std::{fs, path::PathBuf};
 pub const MKMACRO_TEMPLATES_FILE: &str = "mkmacro_templates.json";
 pub const TEMPLATE_CATALOG_VERSION: u32 = 1;
 
+fn normalized_template_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MkMacroTemplate {
@@ -79,11 +83,12 @@ impl MkMacroStore {
         let name = name.trim();
         ensure!(!name.is_empty(), "template name cannot be empty");
         let mut catalog = self.load_template_catalog()?;
+        let normalized_name = normalized_template_name(name);
         ensure!(
             !catalog
                 .templates
                 .iter()
-                .any(|template| template.name.eq_ignore_ascii_case(name)),
+                .any(|template| normalized_template_name(&template.name) == normalized_name),
             "a template named \"{name}\" already exists"
         );
         let bytes = export_package(self, document, &[root_id])?;
@@ -183,7 +188,10 @@ fn decode_catalog(bytes: &[u8]) -> Result<MkMacroTemplateCatalog> {
         );
         let name = template.name.trim();
         ensure!(!name.is_empty(), "template name cannot be empty");
-        ensure!(names.insert(name.to_lowercase()), "duplicate template name");
+        ensure!(
+            names.insert(normalized_template_name(name)),
+            "duplicate template name"
+        );
         parse_package(&serde_json::to_vec(&template.package)?)?;
     }
     Ok(catalog)
@@ -277,6 +285,26 @@ mod tests {
         let loaded = store.load_template_catalog().unwrap();
         assert_eq!(loaded, saved);
         assert_eq!(*store.snapshot(), MkMacroDocument::default());
+    }
+
+    #[test]
+    fn unicode_case_collision_is_rejected_without_changing_catalog_or_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let source = document();
+        let catalog = store
+            .save_macro_template(&source, 1, "Straße", "Original")
+            .unwrap();
+        let path = store.template_catalog_path();
+        let bytes = fs::read(&path).unwrap();
+
+        let error = store
+            .save_macro_template(&source, 1, "STRAẞE", "Collision")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(store.load_template_catalog().unwrap(), catalog);
     }
 
     #[test]

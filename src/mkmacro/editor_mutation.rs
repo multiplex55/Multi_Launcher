@@ -1,5 +1,8 @@
 //! Atomic editor operations. Step identity is local to the destination macro.
-use super::{MkStep, StructureAnalysis, analyze_structure, model::next_unused_id};
+use super::{
+    MkAction, MkCondition, MkCoordinateTarget, MkStep, StructureAnalysis, analyze_structure,
+    model::next_unused_id,
+};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 
@@ -123,10 +126,97 @@ pub struct ClonedFragment {
     pub inserted_ids: Vec<u64>,
 }
 
-/// Canonical identity boundary for copied steps. Pixel search IDs name result
-/// variables (including references embedded in variable strings), not steps.
-/// Preserve these and external macro/signature/image references verbatim.
-/// There are currently no action payload references to step IDs.
+fn rewrite_pixel_target(target: &mut MkCoordinateTarget, search_ids: &BTreeMap<u64, u64>) {
+    if let MkCoordinateTarget::Pixel { search_id, .. } = target
+        && let Some(fresh) = search_ids.get(search_id)
+    {
+        *search_id = *fresh;
+    }
+}
+
+fn rewrite_condition_pixel_targets(condition: &mut MkCondition, search_ids: &BTreeMap<u64, u64>) {
+    match condition {
+        MkCondition::PixelResult { target, .. } => rewrite_pixel_target(target, search_ids),
+        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+            for condition in conditions {
+                rewrite_condition_pixel_targets(condition, search_ids);
+            }
+        }
+        MkCondition::Not { condition } => rewrite_condition_pixel_targets(condition, search_ids),
+        MkCondition::Variable { .. }
+        | MkCondition::WindowExists { .. }
+        | MkCondition::WindowActive { .. }
+        | MkCondition::ImageSearch { .. }
+        | MkCondition::PreviousImageResult { .. } => {}
+    }
+}
+
+fn rewrite_action_pixel_targets(action: &mut MkAction, search_ids: &BTreeMap<u64, u64>) {
+    match action {
+        MkAction::MouseMove(payload) => rewrite_pixel_target(&mut payload.target, search_ids),
+        MkAction::MouseClick(payload) => rewrite_pixel_target(&mut payload.target, search_ids),
+        MkAction::MouseDrag(payload) => {
+            rewrite_pixel_target(&mut payload.from, search_ids);
+            rewrite_pixel_target(&mut payload.to, search_ids);
+        }
+        MkAction::PixelCheck { target, .. } => rewrite_pixel_target(target, search_ids),
+        MkAction::WaitUntil { condition, .. }
+        | MkAction::If(condition)
+        | MkAction::WhileStart { condition } => {
+            rewrite_condition_pixel_targets(condition, search_ids);
+        }
+        MkAction::CallMacro(_)
+        | MkAction::Return(_)
+        | MkAction::KeyDown(_)
+        | MkAction::KeyUp(_)
+        | MkAction::KeyPress(_)
+        | MkAction::Hotkey(_)
+        | MkAction::Text(_)
+        | MkAction::Notify(_)
+        | MkAction::PlaySound(_)
+        | MkAction::ClickWithinRegion(_)
+        | MkAction::MouseDown(_)
+        | MkAction::MouseUp(_)
+        | MkAction::MouseScroll { .. }
+        | MkAction::Delay(_)
+        | MkAction::Process(_)
+        | MkAction::LauncherCommand(_)
+        | MkAction::WindowActivate(_)
+        | MkAction::WindowClose(_)
+        | MkAction::WindowWait(_)
+        | MkAction::WindowMoveResize(_)
+        | MkAction::WindowState { .. }
+        | MkAction::VirtualDesktop(_)
+        | MkAction::SetVariable { .. }
+        | MkAction::UnsetVariable { .. }
+        | MkAction::PromptInput(_)
+        | MkAction::Else
+        | MkAction::EndIf
+        | MkAction::RepeatStart { .. }
+        | MkAction::RepeatEnd
+        | MkAction::WhileEnd
+        | MkAction::Break
+        | MkAction::Continue
+        | MkAction::ImageFind(_)
+        | MkAction::ImageClick(_)
+        | MkAction::FindPixel(_)
+        | MkAction::CaptureScreenshot(_)
+        | MkAction::WaitForVisualChange(_)
+        | MkAction::UiInvoke(_)
+        | MkAction::UiSetValue { .. }
+        | MkAction::UiReadValue { .. }
+        | MkAction::UiToggle(_)
+        | MkAction::UiSelect(_)
+        | MkAction::UiFocus(_)
+        | MkAction::UiWait(_) => {}
+    }
+}
+
+/// Canonical identity boundary for copied steps. Step IDs and Find Pixel result
+/// slots are local to the destination macro. Consumers copied with their
+/// producer follow its fresh slot; references to producers outside the copied
+/// fragment remain unchanged. External macro/signature/image references are
+/// preserved verbatim.
 pub fn clone_fragment(
     fragment: &[MkStep],
     destination: &[MkStep],
@@ -152,6 +242,38 @@ pub fn clone_fragment(
         result.id_map.insert(step.id, fresh);
         step.id = fresh;
         result.inserted_ids.push(fresh);
+    }
+
+    let mut used_search_ids: HashSet<_> = destination
+        .iter()
+        .filter_map(|step| match &step.action {
+            MkAction::FindPixel(payload) if payload.search_id != 0 => Some(payload.search_id),
+            _ => None,
+        })
+        .collect();
+    let mut next_search_id = used_search_ids
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .unwrap_or(1);
+    let mut search_id_map = BTreeMap::new();
+    for step in &mut result.steps {
+        if let MkAction::FindPixel(payload) = &mut step.action {
+            let old = payload.search_id;
+            let fresh = next_unused_id(&used_search_ids, &mut next_search_id)
+                .ok_or(MutationError::IdExhausted)?;
+            used_search_ids.insert(fresh);
+            payload.search_id = fresh;
+            // Invalid source fragments can contain duplicate producer IDs. The
+            // first producer deterministically owns ambiguous copied consumers;
+            // every producer still receives a distinct valid destination ID.
+            search_id_map.entry(old).or_insert(fresh);
+        }
+    }
+    for step in &mut result.steps {
+        rewrite_action_pixel_targets(&mut step.action, &search_id_map);
     }
     Ok(result)
 }
@@ -397,7 +519,11 @@ pub fn unwrap_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkAction, MkCondition, MkDelayPayload};
+    use crate::mkmacro::{
+        DiagnosticSeverity, MkAction, MkCondition, MkCoordinateTarget, MkDelayPayload, MkMacro,
+        MkMacroDocument, MkMouseMovePayload, MkPixelSearchPayload, MkWaitOptions,
+        validate_document,
+    };
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -413,6 +539,54 @@ mod tests {
     }
     fn delay(id: u64) -> MkStep {
         step(id, MkAction::Delay(MkDelayPayload::default()))
+    }
+    fn pixel_search(step_id: u64, search_id: u64) -> MkStep {
+        step(
+            step_id,
+            MkAction::FindPixel(MkPixelSearchPayload {
+                search_id,
+                color: "#FFFFFF".into(),
+                tolerance: 0,
+                region: Default::default(),
+                wait: Default::default(),
+                not_found_policy: Default::default(),
+                outputs: Default::default(),
+            }),
+        )
+    }
+    fn pixel_consumer(step_id: u64, search_id: u64) -> MkStep {
+        step(
+            step_id,
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Pixel {
+                    search_id,
+                    offset: Default::default(),
+                },
+                duration_ms: 0,
+            }),
+        )
+    }
+    fn assert_no_fatal(steps: Vec<MkStep>) {
+        let document = MkMacroDocument {
+            macros: vec![MkMacro {
+                id: 1,
+                name: "Pixel copy".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
+                playback: Default::default(),
+                signature: Default::default(),
+                steps,
+            }],
+            ..Default::default()
+        };
+        let fatal: Vec<_> = validate_document(&document, None)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Fatal)
+            .collect();
+        assert!(fatal.is_empty(), "unexpected fatal diagnostics: {fatal:?}");
     }
     fn nested() -> Vec<MkStep> {
         vec![
@@ -489,36 +663,136 @@ mod tests {
     }
 
     #[test]
-    fn cloning_preserves_pixel_producer_and_consumer_result_slot() {
-        use crate::mkmacro::{MkCoordinateTarget, MkMouseMovePayload, MkPixelSearchPayload};
+    fn cloning_remaps_multiple_producers_and_nested_consumers_deterministically() {
         let source = vec![
+            pixel_search(1, 7),
+            pixel_search(2, 9),
             step(
-                42,
-                MkAction::FindPixel(MkPixelSearchPayload {
-                    search_id: 42,
-                    color: "#FFFFFF".into(),
-                    tolerance: 0,
-                    region: Default::default(),
-                    wait: Default::default(),
-                    not_found_policy: Default::default(),
-                    outputs: Default::default(),
-                }),
-            ),
-            step(
-                43,
-                MkAction::MouseMove(MkMouseMovePayload {
-                    target: MkCoordinateTarget::Pixel {
-                        search_id: 42,
-                        offset: Default::default(),
+                3,
+                MkAction::WaitUntil {
+                    condition: MkCondition::All {
+                        conditions: vec![
+                            MkCondition::PixelResult {
+                                target: MkCoordinateTarget::Pixel {
+                                    search_id: 7,
+                                    offset: Default::default(),
+                                },
+                                color: "#FFFFFF".into(),
+                                tolerance: 0,
+                            },
+                            MkCondition::Not {
+                                condition: Box::new(MkCondition::PixelResult {
+                                    target: MkCoordinateTarget::Pixel {
+                                        search_id: 9,
+                                        offset: Default::default(),
+                                    },
+                                    color: "#000000".into(),
+                                    tolerance: 0,
+                                }),
+                            },
+                        ],
                     },
-                    duration_ms: 0,
-                }),
+                    wait: MkWaitOptions::default(),
+                },
             ),
         ];
-        let cloned = clone_fragment(&source, &[]).unwrap();
-        assert_ne!(cloned.steps[0].id, 42);
-        assert_eq!(cloned.steps[0].action, source[0].action);
-        assert_eq!(cloned.steps[1].action, source[1].action);
+        let destination = vec![pixel_search(10, u64::MAX)];
+        let cloned = clone_fragment(&source, &destination).unwrap();
+        let producer_ids: Vec<_> = cloned
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::FindPixel(payload) => Some(payload.search_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            producer_ids,
+            [1, 2],
+            "allocation must wrap deterministically"
+        );
+        let MkAction::WaitUntil { condition, .. } = &cloned.steps[2].action else {
+            panic!("expected copied wait condition")
+        };
+        let MkCondition::All { conditions } = condition else {
+            panic!("expected nested copied conditions")
+        };
+        let MkCondition::PixelResult { target, .. } = &conditions[0] else {
+            panic!("expected first pixel consumer")
+        };
+        assert!(matches!(
+            target,
+            MkCoordinateTarget::Pixel { search_id: 1, .. }
+        ));
+        let MkCondition::Not { condition } = &conditions[1] else {
+            panic!("expected nested pixel consumer")
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            MkCondition::PixelResult {
+                target: MkCoordinateTarget::Pixel { search_id: 2, .. },
+                ..
+            }
+        ));
+        let mut combined = destination;
+        combined.extend(cloned.steps);
+        assert_no_fatal(combined);
+    }
+
+    #[test]
+    fn same_macro_producer_only_duplicate_gets_fresh_slot_and_preserves_external_consumer() {
+        let mut steps = vec![pixel_search(1, 42), pixel_consumer(2, 42)];
+        let inserted = duplicate_selection(&mut steps, &BTreeSet::from([1])).unwrap();
+        assert_eq!(inserted.len(), 1);
+        let copied_search_id = match &steps[1].action {
+            MkAction::FindPixel(payload) => payload.search_id,
+            action => panic!("expected copied producer, got {action:?}"),
+        };
+        assert_ne!(copied_search_id, 42);
+        assert!(matches!(
+            steps[2].action,
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Pixel { search_id: 42, .. },
+                ..
+            })
+        ));
+        assert_no_fatal(steps);
+    }
+
+    #[test]
+    fn copied_consumer_without_its_producer_preserves_the_external_slot() {
+        let mut steps = vec![pixel_search(1, 42), pixel_consumer(2, 42)];
+        let fragment = copy_fragment(&steps, &BTreeSet::from([2])).unwrap();
+        insert_fragment(&mut steps, &fragment, InsertionAnchor::End).unwrap();
+
+        assert!(matches!(
+            steps[2].action,
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Pixel { search_id: 42, .. },
+                ..
+            })
+        ));
+        assert_no_fatal(steps);
+    }
+
+    #[test]
+    fn noncontiguous_producer_and_consumer_duplicate_share_the_fresh_slot() {
+        let mut steps = vec![pixel_search(1, 42), delay(2), pixel_consumer(3, 42)];
+        let inserted = duplicate_selection(&mut steps, &BTreeSet::from([1, 3])).unwrap();
+        assert_eq!(inserted.len(), 2);
+        let copied_search_id = match &steps[3].action {
+            MkAction::FindPixel(payload) => payload.search_id,
+            action => panic!("expected copied producer, got {action:?}"),
+        };
+        assert_ne!(copied_search_id, 42);
+        assert!(matches!(
+            steps[4].action,
+            MkAction::MouseMove(MkMouseMovePayload {
+                target: MkCoordinateTarget::Pixel { search_id, .. },
+                ..
+            }) if search_id == copied_search_id
+        ));
+        assert_no_fatal(steps);
     }
 
     #[test]
