@@ -6,6 +6,7 @@ use crate::common::{
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageDecoder, ImageFormat, RgbaImage, codecs::png::PngDecoder};
 use std::io::Cursor;
+use std::io::Write;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -59,17 +60,24 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
-    pub fn asset_root(&self) -> PathBuf {
+    /// Canonical directory containing the document and its independently
+    /// persisted authoring catalogs.
+    pub(crate) fn data_directory(&self) -> PathBuf {
         self.inner
             .path
             .parent()
             .unwrap_or(Path::new("."))
-            .join(ASSET_DIRECTORY)
+            .to_path_buf()
+    }
+
+    pub fn asset_root(&self) -> PathBuf {
+        self.data_directory().join(ASSET_DIRECTORY)
     }
     /// Enumerates direct regular PNG files in the shared canonical root in
     /// deterministic filename order. Symlinks and nested files are ignored.
     pub fn image_refs(&self) -> Result<Vec<MkImageRef>> {
         let directory = self.asset_root();
+        ensure_safe_asset_root(&directory)?;
         let mut refs = Vec::new();
         match fs::read_dir(&directory) {
             Ok(entries) => {
@@ -180,8 +188,10 @@ impl MkMacroStore {
         Ok(saved)
     }
     pub fn image_path(&self, image: &MkImageRef) -> Result<PathBuf> {
-        let path = managed_image_path(&self.asset_root(), image)?;
-        ensure_safe_direct_child(&self.asset_root(), &path)?;
+        let root = self.asset_root();
+        ensure_safe_asset_root(&root)?;
+        let path = managed_image_path(&root, image)?;
+        ensure_safe_direct_child(&root, &path)?;
         Ok(path)
     }
 
@@ -189,6 +199,169 @@ impl MkMacroStore {
         let path = self.image_path(image)?;
         let bytes = fs::read(&path).with_context(|| format!("read image {}", image.filename()))?;
         decode_png(&bytes).with_context(|| format!("decode image {}", image.filename()))
+    }
+
+    pub(crate) fn validate_png_bytes(&self, bytes: &[u8]) -> Result<()> {
+        validate_package_png(bytes)
+    }
+
+    pub(crate) fn package_document_bytes(&self) -> Result<Option<Vec<u8>>> {
+        match fs::read(&self.inner.path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read persisted macro document"),
+        }
+    }
+
+    /// Captures every managed PNG name and its bytes in deterministic order.
+    /// Import uses this as its optimistic asset-state baseline, including
+    /// case-only Windows collisions.
+    pub(crate) fn package_asset_inventory(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut result = Vec::new();
+        for image in self.image_refs()? {
+            let path = self.image_path(&image)?;
+            result.push((
+                image.filename().to_owned(),
+                fs::read(&path).with_context(|| format!("read image {}", image.filename()))?,
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Applies a side-effect-free package plan. The lock order is always
+    /// document transaction, then asset authoring. Watcher reload and ordinary
+    /// image authoring therefore cannot interleave with asset publication,
+    /// document persistence, or the final snapshot publication.
+    pub(crate) fn apply_package_import(
+        &self,
+        plan: &super::package::PackageImportPlan,
+    ) -> Result<Arc<MkMacroDocument>> {
+        self.apply_package_import_transaction(plan, |_| Ok(()))
+    }
+
+    fn apply_package_import_transaction(
+        &self,
+        plan: &super::package::PackageImportPlan,
+        mut after_asset_publication: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Arc<MkMacroDocument>> {
+        let _transaction = self.inner.transaction.lock().unwrap();
+        let _authoring = self.inner.asset_authoring.lock().unwrap();
+        ensure_package_state(
+            self,
+            &plan.expected_persisted,
+            plan.expected_disk_bytes.as_deref(),
+            &plan.expected_assets,
+        )?;
+        let mut repaired = plan.candidate.clone();
+        if repair_ids(&mut repaired) || repaired != plan.candidate {
+            anyhow::bail!("package candidate identities changed before apply")
+        }
+
+        let root = self.asset_root();
+        ensure_safe_asset_root(&root)?;
+        fs::create_dir_all(&root).context("create mkmacro_assets for package import")?;
+        ensure_safe_asset_root(&root)?;
+        let mut staged = Vec::with_capacity(plan.assets_to_create.len());
+        for (asset_index, asset) in plan.assets_to_create.iter().enumerate() {
+            let destination = self.image_path(&asset.image)?;
+            ensure_safe_direct_child(&root, &destination)?;
+            if destination.exists() {
+                anyhow::bail!(
+                    "package asset destination {} now exists",
+                    asset.image.filename()
+                )
+            }
+            let mut file = tempfile::NamedTempFile::new_in(&root)
+                .context("stage package image in mkmacro_assets")?;
+            file.write_all(&asset.bytes)
+                .context("write staged package image")?;
+            file.as_file_mut()
+                .sync_all()
+                .context("sync staged package image")?;
+            staged.push((file, destination, asset_index));
+        }
+
+        ensure_package_state(
+            self,
+            &plan.expected_persisted,
+            plan.expected_disk_bytes.as_deref(),
+            &plan.expected_assets,
+        )?;
+
+        let mut created = Vec::new();
+        let result = (|| -> Result<()> {
+            for (index, (file, destination, asset_index)) in staged.into_iter().enumerate() {
+                file.persist_noclobber(&destination)
+                    .map_err(|error| error.error)
+                    .with_context(|| format!("publish package image {}", destination.display()))?;
+                created.push((destination, asset_index));
+                after_asset_publication(index + 1)?;
+            }
+            ensure_package_document_state(
+                self,
+                &plan.expected_persisted,
+                plan.expected_disk_bytes.as_deref(),
+            )?;
+            let mut expected_assets = plan.expected_assets.clone();
+            expected_assets.extend(created.iter().map(|(_, asset_index)| {
+                let asset = &plan.assets_to_create[*asset_index];
+                (asset.image.filename().to_owned(), asset.bytes.clone())
+            }));
+            expected_assets.sort_by(|left, right| left.0.cmp(&right.0));
+            if self.package_asset_inventory()? != expected_assets {
+                anyhow::bail!("mkmacro assets changed during import; preview the import again")
+            }
+            persist(&self.inner.path, &plan.candidate)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for (path, asset_index) in created.iter().rev() {
+                let owned_bytes = &plan.assets_to_create[*asset_index].bytes;
+                let still_owned = fs::symlink_metadata(path)
+                    .ok()
+                    .filter(|metadata| {
+                        metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+                    })
+                    .and_then(|_| fs::read(path).ok())
+                    .is_some_and(|bytes| bytes == *owned_bytes);
+                if still_owned {
+                    if let Err(rollback_error) = fs::remove_file(path) {
+                        tracing::error!(
+                            path = %path.display(),
+                            error = %rollback_error,
+                            "failed to roll back package-owned image"
+                        );
+                    }
+                }
+            }
+            return Err(error);
+        }
+
+        publish(&self.inner, plan.candidate.clone());
+        Ok(self.snapshot())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_package_import_with_injected_failure(
+        &self,
+        plan: &super::package::PackageImportPlan,
+        fail_after_assets: usize,
+    ) -> Result<Arc<MkMacroDocument>> {
+        self.apply_package_import_transaction(plan, |published| {
+            if published == fail_after_assets {
+                anyhow::bail!("injected package import failure")
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_package_import_with_test_hook(
+        &self,
+        plan: &super::package::PackageImportPlan,
+        after_asset_publication: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Arc<MkMacroDocument>> {
+        self.apply_package_import_transaction(plan, after_asset_publication)
     }
 
     pub fn import_png(&self, source: &Path) -> Result<ImageImportResult> {
@@ -266,6 +439,7 @@ impl MkMacroStore {
             }
         }
         fs::create_dir_all(self.asset_root())?;
+        ensure_safe_asset_root(&self.asset_root())?;
         save_atomic(&destination, bytes)
             .with_context(|| format!("write image {}", requested.filename()))?;
         Ok(ImageImportResult::Imported(requested))
@@ -284,6 +458,75 @@ fn decode_png(bytes: &[u8]) -> Result<RgbaImage> {
     let (width, height) = decoder.dimensions();
     super::asset_authoring::validate_image_dimensions(width, height)?;
     Ok(DynamicImage::from_decoder(decoder)?.to_rgba8())
+}
+
+pub(crate) fn validate_package_png(bytes: &[u8]) -> Result<()> {
+    decode_png(bytes).map(drop)
+}
+
+fn ensure_package_state(
+    store: &MkMacroStore,
+    expected_document: &MkMacroDocument,
+    expected_disk_bytes: Option<&[u8]>,
+    expected_assets: &[(String, Vec<u8>)],
+) -> Result<()> {
+    ensure_package_document_state(store, expected_document, expected_disk_bytes)?;
+    if store.package_asset_inventory()? != expected_assets {
+        anyhow::bail!("mkmacro assets changed; preview the import again")
+    }
+    Ok(())
+}
+
+fn ensure_package_document_state(
+    store: &MkMacroStore,
+    expected_document: &MkMacroDocument,
+    expected_disk_bytes: Option<&[u8]>,
+) -> Result<()> {
+    if store.snapshot().as_ref() != expected_document {
+        anyhow::bail!("persisted macro snapshot changed; preview the import again")
+    }
+    if store.package_document_bytes()?.as_deref() != expected_disk_bytes {
+        anyhow::bail!("persisted macro file changed; preview the import again")
+    }
+    Ok(())
+}
+
+fn ensure_safe_asset_root(root: &Path) -> Result<()> {
+    if root.file_name() != Some(std::ffi::OsStr::new(ASSET_DIRECTORY)) {
+        anyhow::bail!("invalid managed asset root")
+    }
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect mkmacro asset root"),
+    };
+    if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) {
+        anyhow::bail!("mkmacro asset root must not be a symlink, junction, or reparse point")
+    }
+    if !metadata.file_type().is_dir() {
+        anyhow::bail!("mkmacro asset root is not a directory")
+    }
+    let parent = root.parent().context("mkmacro asset root has no parent")?;
+    let canonical_parent = parent
+        .canonicalize()
+        .context("resolve mkmacro asset parent")?;
+    let canonical_root = root.canonicalize().context("resolve mkmacro asset root")?;
+    if canonical_root.parent() != Some(canonical_parent.as_path()) {
+        anyhow::bail!("mkmacro asset root escapes its configured directory")
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn ensure_safe_direct_child(root: &Path, path: &Path) -> Result<()> {
@@ -308,6 +551,7 @@ fn ensure_safe_direct_child(root: &Path, path: &Path) -> Result<()> {
 }
 
 fn direct_root_reference(root: &Path, source: &Path) -> Result<Option<MkImageRef>> {
+    ensure_safe_asset_root(root)?;
     let source_metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -417,6 +661,9 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(10) {
         migrate_v10_to_v11(&mut value, path)?;
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(11) {
+        migrate_v11_to_v12(&mut value);
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
@@ -442,7 +689,7 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
     if input_version > SCHEMA_VERSION {
         return Ok(DocumentProbe::Unsupported(input_version));
     }
-    if input_version == SCHEMA_VERSION {
+    if input_version >= 11 {
         serde_json::from_value::<MkMacroDocument>(value)?;
         return Ok(DocumentProbe::Supported);
     }
@@ -476,6 +723,12 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
         "schema 10 macros must be objects"
     );
     Ok(DocumentProbe::Supported)
+}
+
+/// Schema 12 additions are serde-defaulted. Preserve all existing data,
+/// including malformed signature identities for explicit authoring repair.
+fn migrate_v11_to_v12(value: &mut serde_json::Value) {
+    value["schema_version"] = serde_json::json!(12);
 }
 
 /// Filesystem-aware schema-10 migration. The JSON value is rewritten only after
@@ -1256,29 +1509,71 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
     changed
 }
 
-/// Returns the next unused positive ID and advances the cursor. Wrapping to 1
-/// after `u64::MAX` makes a saturated high-water mark safe when lower IDs are
-/// available, while the cycle check prevents an exhausted namespace from
-/// spinning forever.
-fn next_unused_id(used: &HashSet<u64>, next: &mut u64) -> Option<u64> {
-    let start = (*next).max(1);
-    let mut candidate = start;
-    loop {
-        if !used.contains(&candidate) {
-            *next = candidate.checked_add(1).unwrap_or(1);
-            return Some(candidate);
-        }
-        candidate = candidate.checked_add(1).unwrap_or(1);
-        if candidate == start {
-            return None;
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mkmacro::{AlphaPolicy, MkPoint, ReturnPoint, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn schema_eleven_migration_adds_defaults_and_preserves_historical_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let mut original = document();
+        original.schema_version = 11;
+        let m = &mut original.macros[0];
+        m.description = "Preserve this authoring state".into();
+        m.hotkey = Some(MkHotkey {
+            key: MkKey::Function(3),
+            modifiers: vec![MkKey::Alt],
+        });
+        m.hotkey_scope = MkHotkeyScope::ActiveWindow(MkWindowMatcher {
+            title: Some("Editor".into()),
+            ..Default::default()
+        });
+        m.folder_id = Some(7);
+        m.playback = MkPlayback {
+            speed_percent: 135,
+            random_delay_ms: 12,
+            random_offset_px: 3,
+        };
+        m.steps[0].breakpoint = true;
+        m.steps[0].enabled = false;
+        m.steps[0].repeat = 3;
+        m.steps[0].delay_after_ms = 77;
+        m.steps[0].on_error = MkErrorPolicy::Continue;
+        m.steps[0].action = MkAction::ImageFind(
+            serde_json::from_value(serde_json::json!({
+                "image": "preserved_button.png", "wait": {"timeout_ms": 20, "poll_interval_ms": 10}
+            }))
+            .unwrap(),
+        );
+        original.folders.push(MkMacroFolder {
+            id: 7,
+            name: "Tools".into(),
+        });
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        for m in legacy["macros"].as_array_mut().unwrap() {
+            m.as_object_mut().unwrap().remove("signature");
+            for s in m["steps"].as_array_mut().unwrap() {
+                s.as_object_mut().unwrap().remove("metadata");
+            }
+        }
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        assert_eq!(probe_document(&bytes).unwrap(), DocumentProbe::Supported);
+        fs::write(&path, &bytes).unwrap();
+        let (loaded, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        original.schema_version = 12;
+        assert_eq!(loaded, original);
+        persist(&path, &loaded).unwrap();
+        let persisted = fs::read(&path).unwrap();
+        let (again, changed) = read_document(&path).unwrap().unwrap();
+        assert!(!changed);
+        assert_eq!(again, loaded);
+        persist(&path, &again).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), persisted);
+    }
 
     fn png_bytes(color: [u8; 4]) -> Vec<u8> {
         let mut output = std::io::Cursor::new(Vec::new());
@@ -1324,6 +1619,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 7,
                 name: "x".into(),
                 description: String::new(),
@@ -1333,6 +1629,7 @@ mod tests {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 9,
                     enabled: true,
                     breakpoint: false,
@@ -1857,7 +2154,7 @@ mod tests {
         assert!(disk.macros.is_empty());
     }
     #[test]
-    fn old_migrates_and_schema_newer_than_ten_is_rejected() {
+    fn old_migrates_and_future_schema_is_rejected() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(MKMACROS_FILE);
         let mut v = serde_json::to_value(document()).unwrap();
@@ -1873,10 +2170,16 @@ mod tests {
         .unwrap();
         let (_, disposition) = MkMacroStore::open(d.path()).unwrap();
         let LoadDisposition::NeedsUserRecovery { error } = disposition else {
-            panic!("schema 12 should require user recovery")
+            panic!("future schema should require user recovery")
         };
-        assert!(error.contains("schema version 12"), "{error}");
-        assert!(error.contains("supported version 11"), "{error}");
+        assert!(
+            error.contains(&format!("schema version {}", SCHEMA_VERSION + 1)),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("supported version {SCHEMA_VERSION}")),
+            "{error}"
+        );
     }
     #[test]
     fn version_one_mouse_move_migrates_once_to_payload() {
@@ -2183,7 +2486,7 @@ mod tests {
         );
         let persisted: serde_json::Value =
             serde_json::from_slice(&fs::read(d.path().join(MKMACROS_FILE)).unwrap()).unwrap();
-        assert_eq!(persisted["schema_version"], 11);
+        assert_eq!(persisted["schema_version"], SCHEMA_VERSION);
         assert_eq!(persisted, json);
     }
 
@@ -2341,7 +2644,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_seven_load_runs_all_migrations_and_round_trips_as_ten() {
+    fn schema_seven_load_runs_all_migrations_and_round_trips_as_current() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MKMACROS_FILE);
         let value = schema_v7_document(vec![
@@ -2458,12 +2761,12 @@ mod tests {
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let loaded = store.snapshot();
-        assert_eq!(loaded.schema_version, 11);
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert!(loaded.macros[0].steps.iter().all(|step| !step.breakpoint));
 
         let rewritten: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(rewritten["schema_version"], 11);
+        assert_eq!(rewritten["schema_version"], SCHEMA_VERSION);
         for (index, original_step) in original_steps.iter().enumerate() {
             let loaded_step = &loaded.macros[0].steps[index];
             if index == 2 {

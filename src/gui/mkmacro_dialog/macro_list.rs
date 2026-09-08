@@ -636,6 +636,7 @@ mod tests {
 
     fn macro_entry(id: u64, name: &str, folder_id: Option<u64>) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id,
             name: name.into(),
             description: String::new(),

@@ -326,6 +326,7 @@ fn legacy_parent_invokes_scoped_child_without_foreground_match() {
             settings: Default::default(),
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 702,
                 name: "Firefox child".into(),
                 description: String::new(),
@@ -341,6 +342,7 @@ fn legacy_parent_invokes_scoped_child_without_foreground_match() {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 1,
                     enabled: true,
                     breakpoint: false,

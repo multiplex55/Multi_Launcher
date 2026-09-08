@@ -114,10 +114,48 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
     crate::mkmacro::runtime::set_recording_options(dialog.recorder_options.clone());
     let state = state(dialog);
     ui.horizontal(|ui| {
+        if ui.button("Refresh checks").on_hover_text("Check external image files and connected monitors").clicked() {
+            dialog.refresh_environment();
+        }
         if ui.button("Save").clicked() {
             let result = dialog.save();
             report(dialog, result);
         }
+        ui.add_enabled_ui(
+            dialog.action_editor.draft.is_none()
+                && !super::step_table::table_modal_open(dialog),
+            |ui| super::package_ui::show_toolbar_menu(ui, dialog),
+        );
+        ui.add_enabled_ui(dialog.action_editor.draft.is_none() && !super::step_table::table_modal_open(dialog), |ui| {
+            ui.menu_button("Edit steps", |ui| {
+                use super::editor_operations::{self, ClipboardCommand};
+                let selected = dialog.selected_macro().is_some() && !dialog.selection.ids.is_empty();
+                for (label, command, enabled) in [
+                    ("Copy  Ctrl+C", ClipboardCommand::Copy, selected),
+                    ("Cut  Ctrl+X", ClipboardCommand::Cut, selected),
+                    ("Paste  Ctrl+V", ClipboardCommand::Paste, dialog.selected_macro().is_some() && !dialog.editor_state.clipboard.is_empty()),
+                    ("Duplicate  Ctrl+D", ClipboardCommand::Duplicate, selected),
+                ] {
+                    if ui.add_enabled(enabled, eframe::egui::Button::new(label)).clicked() {
+                        let result = editor_operations::clipboard(dialog, command);
+                        report(dialog, result);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                for (label, mode) in [
+                    ("Find  Ctrl+F", super::search::SearchMode::Find),
+                    ("Replace  Ctrl+H", super::search::SearchMode::Replace),
+                    ("Jump to Step  Ctrl+G", super::search::SearchMode::Jump),
+                ] {
+                    if ui.add_enabled(dialog.selected_macro().is_some(), eframe::egui::Button::new(label)).clicked() {
+                        super::search::open(dialog, mode);
+                        ui.close_menu();
+                    }
+                }
+                ui.checkbox(&mut dialog.navigation.outline.open, "Show Outline");
+            });
+        });
         if ui
             .add_enabled(
                 dialog.selected_macro().is_some(),

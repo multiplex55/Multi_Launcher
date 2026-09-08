@@ -15,6 +15,7 @@ fn legacy_and_mkmacro_routes_coexist_and_disable_independently() {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 55,
                 name: "stable".into(),
                 description: String::new(),
@@ -48,6 +49,7 @@ fn rename_keeps_id_based_launcher_action() {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 99,
                 name: name.into(),
                 description: String::new(),

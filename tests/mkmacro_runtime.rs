@@ -8,6 +8,7 @@ use std::{
 use tempfile::tempdir;
 fn s(id: u64, a: MkAction) -> MkStep {
     MkStep {
+        metadata: Default::default(),
         id,
         enabled: true,
         breakpoint: false,
@@ -47,6 +48,7 @@ fn run_window_action(
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 99,
                 name: "window routing".into(),
                 description: String::new(),
@@ -102,6 +104,7 @@ fn notification_sequence(policy: MkErrorPolicy) -> MkMacro {
     );
     notify.on_error = policy;
     MkMacro {
+        signature: Default::default(),
         id: 700,
         name: "notification sequence".into(),
         description: String::new(),
@@ -251,6 +254,7 @@ fn image_find_result_drives_following_mouse_move_without_platform_effects() {
             folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 70,
                 name: "image sequence".into(),
                 description: String::new(),
@@ -305,6 +309,7 @@ fn prompt_request_result_and_following_step_form_one_runtime_transaction() {
             folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 7,
                 name: "prompt plumbing".into(),
                 description: String::new(),
@@ -383,6 +388,7 @@ fn cancelled_prompt_honors_stop_and_has_no_later_side_effect() {
             folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 8,
                 name: "cancel".into(),
                 description: String::new(),
@@ -606,6 +612,7 @@ fn window_wait_is_cancellable_without_window_mutation() {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 100,
                 name: "cancel wait".into(),
                 description: String::new(),
@@ -686,6 +693,7 @@ fn fake_backed_end_to_end_has_exact_events_and_row_states() {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 1,
                 name: "e2e".into(),
                 description: String::new(),
@@ -791,6 +799,7 @@ fn stop_during_held_key_wakes_and_cleans_up() {
             schema_version: SCHEMA_VERSION,
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 2,
                 name: "stop".into(),
                 description: String::new(),
@@ -842,6 +851,7 @@ fn explicit_run_commands_execute_despite_unmatched_hotkey_scope() {
             settings: Default::default(),
             folders: vec![],
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 701,
                 name: "Firefox hotkey only".into(),
                 description: String::new(),

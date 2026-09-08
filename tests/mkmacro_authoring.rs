@@ -790,6 +790,7 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
         "Unavailable UI Automation action (saved target preserved)"
     );
     let plan = compile(&MkMacro {
+        signature: Default::default(),
         id: 1,
         name: "uia".into(),
         description: String::new(),
@@ -799,6 +800,7 @@ fn serialized_uia_remains_presentable_and_reports_missing_backend() {
         folder_id: None,
         playback: Default::default(),
         steps: vec![MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,

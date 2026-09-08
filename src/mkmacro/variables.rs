@@ -10,6 +10,50 @@ pub enum MkValue {
     Point(MkPoint),
     Null,
 }
+
+/// Types that may be declared in reusable macro signatures. Null is a runtime sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkValueType {
+    String,
+    Number,
+    Boolean,
+    Point,
+}
+
+impl MkValue {
+    pub fn value_type(&self) -> Option<MkValueType> {
+        match self {
+            Self::String(_) => Some(MkValueType::String),
+            Self::Number(_) => Some(MkValueType::Number),
+            Self::Boolean(_) => Some(MkValueType::Boolean),
+            Self::Point(_) => Some(MkValueType::Point),
+            Self::Null => None,
+        }
+    }
+}
+
+impl MkValueType {
+    pub fn accepts(self, value: &MkValue) -> bool {
+        value.value_type() == Some(self)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::String => "String",
+            Self::Number => "Number",
+            Self::Boolean => "Boolean",
+            Self::Point => "Point",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum MkValueSource {
+    Literal(MkValue),
+    Variable { name: String },
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MkPoint {
     pub x: i32,
@@ -45,6 +89,31 @@ pub const BUILT_INS: &[&str] = &[
 pub fn is_builtin(name: &str) -> bool {
     BUILT_INS.contains(&name)
 }
+/// Reads resolve exact runtime keys, including built-ins and historical Unicode
+/// names. Assignment identifier restrictions must not narrow that contract.
+pub fn validate_variable_reference(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        Err("variable reference cannot be empty")
+    } else {
+        Ok(())
+    }
+}
+
+pub fn builtin_type(name: &str) -> Option<MkValueType> {
+    if !is_builtin(name) {
+        return None;
+    }
+    Some(match name {
+        "active_window.title" | "active_window.process" | "macro.name" => MkValueType::String,
+        "last_action_success"
+        | "last_window_result"
+        | "last_image_found"
+        | "last_pixel_found"
+        | "last_image_result"
+        | "last_pixel_result" => MkValueType::Boolean,
+        _ => MkValueType::Number,
+    })
+}
 pub fn validate_variable_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
         return Err("variable name cannot be empty");
@@ -67,6 +136,34 @@ pub fn validate_variable_name(name: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn declared_types_accept_only_matching_non_null_values() {
+        let values = [
+            MkValue::String("text".into()),
+            MkValue::Number(3.5),
+            MkValue::Boolean(true),
+            MkValue::Point(MkPoint { x: -1, y: 2 }),
+        ];
+        let types = [
+            MkValueType::String,
+            MkValueType::Number,
+            MkValueType::Boolean,
+            MkValueType::Point,
+        ];
+        for (type_index, value_type) in types.iter().copied().enumerate() {
+            assert!(!value_type.accepts(&MkValue::Null));
+            for (value_index, value) in values.iter().enumerate() {
+                assert_eq!(value_type.accepts(value), type_index == value_index);
+            }
+            assert_eq!(
+                serde_json::from_value::<MkValueType>(serde_json::to_value(value_type).unwrap())
+                    .unwrap(),
+                value_type
+            );
+        }
+        assert_eq!(MkValue::Null.value_type(), None);
+        assert!(serde_json::from_str::<MkValueType>("\"null\"").is_err());
+    }
     #[test]
     fn names() {
         assert!(validate_variable_name("valid_1").is_ok());

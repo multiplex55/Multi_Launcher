@@ -669,7 +669,13 @@ impl MkMacroHotkeyService {
             active_window_backend,
             reserved,
             Arc::new(|id| {
-                let _ = crate::mkmacro::runtime::run(id);
+                if let Err(error) = crate::mkmacro::runtime::run(id) {
+                    let message = format!("Macro {id} hotkey invocation failed: {error}");
+                    tracing::error!(macro_id = id, error = %error, "mkmacro hotkey invocation failed");
+                    crate::toast_log::append_toast_log(&message);
+                    super::invocation_prompt::production_invocation_prompt_broker()
+                        .report_error(message);
+                }
             }),
         )
     }
@@ -884,6 +890,7 @@ mod tests {
     };
     fn mac(id: u64, on: bool) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id,
             name: id.to_string(),
             description: String::new(),
@@ -2124,6 +2131,7 @@ mod tests {
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
         let mut macro_ = process_mac(9, "firefox.exe");
         macro_.steps = vec![MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,
@@ -2744,6 +2752,7 @@ mod tests {
     fn breakpoint_macro(id: u64) -> MkMacro {
         let mut macro_ = mac(id, true);
         macro_.steps = vec![MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: true,

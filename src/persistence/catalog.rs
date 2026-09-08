@@ -37,6 +37,7 @@ pub enum PersistentStoreId {
     MouseGestureDefinitions,
     MkMacroDocument,
     MkMacroAssets,
+    MkMacroTemplates,
     ClipboardModifiers,
     MultiManagerWorkspaces,
     Notes,
@@ -58,7 +59,7 @@ pub enum PersistentStoreId {
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -75,6 +76,7 @@ impl PersistentStoreId {
         Self::MouseGestureDefinitions,
         Self::MkMacroDocument,
         Self::MkMacroAssets,
+        Self::MkMacroTemplates,
         Self::ClipboardModifiers,
         Self::MultiManagerWorkspaces,
         Self::Notes,
@@ -499,6 +501,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             false,
             ProbeKind::AssetsDirectory,
         ),
+        Id::MkMacroTemplates => s(
+            "MkMacro templates",
+            File,
+            Critical,
+            Sensitive,
+            Low,
+            true,
+            ProbeKind::Json(probe_mkmacro_templates),
+        ),
         Id::ClipboardModifiers => s(
             "Clipboard Modify configuration",
             File,
@@ -752,6 +763,10 @@ fn descriptor_for(
         Id::MouseGestureDefinitions => cwd(current_dir, crate::mouse_gestures::db::GESTURES_FILE),
         Id::MkMacroDocument => cwd(current_dir, crate::mkmacro::store::MKMACROS_FILE),
         Id::MkMacroAssets => cwd(current_dir, crate::mkmacro::store::ASSET_DIRECTORY),
+        Id::MkMacroTemplates => cwd(
+            current_dir,
+            crate::mkmacro::templates::MKMACRO_TEMPLATES_FILE,
+        ),
         Id::QueryHistory => cwd(current_dir, "history.json"),
         Id::ClipboardHistory => cwd(current_dir, crate::plugins::clipboard::CLIPBOARD_FILE),
         Id::CalculatorHistory => cwd(current_dir, crate::plugins::calc_history::CALC_HISTORY_FILE),
@@ -974,6 +989,16 @@ fn probe_mkmacro(_: &Path, bytes: &[u8]) -> ProbeResult {
     }
 }
 
+fn probe_mkmacro_templates(_: &Path, bytes: &[u8]) -> ProbeResult {
+    match crate::mkmacro::templates::probe_template_catalog(bytes) {
+        Ok(crate::mkmacro::templates::TemplateCatalogProbe::Supported) => ProbeResult::Healthy,
+        Ok(crate::mkmacro::templates::TemplateCatalogProbe::Unsupported(version)) => {
+            ProbeResult::UnsupportedSchema(version.to_string())
+        }
+        Err(_) => ProbeResult::Malformed,
+    }
+}
+
 fn probe_clipboard_modifiers(_: &Path, bytes: &[u8]) -> ProbeResult {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return ProbeResult::Malformed;
@@ -1148,6 +1173,42 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PersistentStoreId>(r#""NotesAssets""#).unwrap(),
             PersistentStoreId::NotesAssets
+        );
+    }
+
+    #[test]
+    fn mkmacro_templates_are_sensitive_recoverable_and_version_probed_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = test_catalog(directory.path(), &Settings::default());
+        let templates = catalog.get(PersistentStoreId::MkMacroTemplates);
+        assert_eq!(
+            templates.path,
+            directory
+                .path()
+                .join(crate::mkmacro::templates::MKMACRO_TEMPLATES_FILE)
+        );
+        assert_eq!(templates.kind, StoreKind::File);
+        assert_eq!(templates.criticality, StoreCriticality::Critical);
+        assert_eq!(templates.privacy, StorePrivacy::Sensitive);
+        assert_eq!(templates.backup_policy, BackupPolicy::Include);
+        assert!(templates.restore_eligible && templates.reset_eligible);
+
+        let healthy =
+            serde_json::to_vec_pretty(&crate::mkmacro::MkMacroTemplateCatalog::default()).unwrap();
+        std::fs::write(&templates.path, &healthy).unwrap();
+        assert_eq!(templates.probe(), StoreHealth::Healthy);
+        let before = std::fs::read(&templates.path).unwrap();
+        std::fs::write(&templates.path, br#"{"format_version":99,"templates":[]}"#).unwrap();
+        assert_eq!(
+            templates.probe(),
+            StoreHealth::UnsupportedSchema {
+                version: "99".into()
+            }
+        );
+        assert_ne!(std::fs::read(&templates.path).unwrap(), before);
+        assert_eq!(
+            std::fs::read(&templates.path).unwrap(),
+            br#"{"format_version":99,"templates":[]}"#
         );
     }
 
@@ -1529,6 +1590,16 @@ mod tests {
                 probe_mkmacro,
             ),
             (
+                "mkmacros-v11.json",
+                br#"{"schema_version":11,"macros":[{"id":1,"name":"Legacy","steps":[]}]}"#,
+                probe_mkmacro,
+            ),
+            (
+                "mkmacros-v12.json",
+                br#"{"schema_version":12,"macros":[{"id":1,"name":"Current","signature":{"parameters":[],"outputs":[]},"steps":[]}]}"#,
+                probe_mkmacro,
+            ),
+            (
                 "clipboard_modifiers.json",
                 br#"{"schema_version":0}"#,
                 probe_clipboard_modifiers,
@@ -1561,6 +1632,20 @@ mod tests {
             StoreHealth::Malformed { .. }
         ));
         assert_eq!(std::fs::read(&invalid_mkmacro).unwrap(), invalid_bytes);
+        for version in [11, 12] {
+            let invalid_bytes = format!(
+                r#"{{"schema_version":{version},"macros":[{{"id":1,"name":"Bad","steps":[{{"action":{{"type":"unknown_action"}}}}]}}]}}"#
+            );
+            std::fs::write(&invalid_mkmacro, &invalid_bytes).unwrap();
+            assert!(matches!(
+                json_descriptor(&invalid_mkmacro, probe_mkmacro).probe(),
+                StoreHealth::Malformed { .. }
+            ));
+            assert_eq!(
+                std::fs::read(&invalid_mkmacro).unwrap(),
+                invalid_bytes.as_bytes()
+            );
+        }
     }
 
     #[test]

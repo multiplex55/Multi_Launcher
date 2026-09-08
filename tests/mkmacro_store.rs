@@ -10,6 +10,7 @@ fn invalid_doc() -> MkMacroDocument {
         schema_version: SCHEMA_VERSION,
         folders: vec![],
         macros: vec![MkMacro {
+            signature: Default::default(),
             id: 7,
             name: "recover me".into(),
             description: String::new(),
@@ -19,6 +20,7 @@ fn invalid_doc() -> MkMacroDocument {
             folder_id: None,
             playback: Default::default(),
             steps: vec![MkStep {
+                metadata: Default::default(),
                 id: 8,
                 enabled: true,
                 breakpoint: false,
@@ -76,6 +78,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
         settings: settings.clone(),
         macros: vec![
             MkMacro {
+                signature: Default::default(),
                 id: 101,
                 name: "First durable macro".into(),
                 description: String::new(),
@@ -85,6 +88,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 201,
                     enabled: true,
                     breakpoint: false,
@@ -98,6 +102,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 }],
             },
             MkMacro {
+                signature: Default::default(),
                 id: 102,
                 name: "Second durable macro".into(),
                 description: String::new(),
@@ -107,6 +112,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
                 folder_id: None,
                 playback: Default::default(),
                 steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 202,
                     enabled: true,
                     breakpoint: false,
@@ -308,6 +314,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
         .cloned()
         .enumerate()
         .map(|(i, action)| MkStep {
+            metadata: Default::default(),
             id: i as u64 + 1,
             enabled: true,
             breakpoint: false,
@@ -323,6 +330,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
             folders: vec![],
             settings: Default::default(),
             macros: vec![MkMacro {
+                signature: Default::default(),
                 id: 77,
                 name: "backup".into(),
                 description: String::new(),
@@ -350,7 +358,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
 }
 
 #[test]
-fn schema_eight_migrates_through_store_and_persists_canonical_schema_eleven() {
+fn schema_eight_migrates_through_store_and_persists_canonical_schema_twelve() {
     let dir = tempdir().unwrap();
     let path = dir.path().join(MKMACROS_FILE);
     let fixture = include_str!("fixtures/mkmacros_v8.json");
@@ -360,7 +368,7 @@ fn schema_eight_migrates_through_store_and_persists_canonical_schema_eleven() {
     assert!(matches!(disposition, LoadDisposition::Loaded));
     let first = (*store.snapshot()).clone();
     assert_eq!(first.schema_version, SCHEMA_VERSION);
-    assert_eq!(first.schema_version, 11);
+    assert_eq!(first.schema_version, 12);
     assert!(first.folders.is_empty());
     for mac in &first.macros {
         assert_eq!(mac.hotkey_scope, MkHotkeyScope::AnyWindow);
@@ -376,19 +384,20 @@ fn schema_eight_migrates_through_store_and_persists_canonical_schema_eleven() {
         })
     );
 
-    // Start with the literal legacy fixture and change only the schema-9 and
-    // schema-10 fields.
+    // Start with the literal legacy fixture and add only the migrated fields.
     // Full JSON equality also protects IDs, ordering, executable content, and
     // nondefault macro/step options from accidental normalization or loss.
     let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
-    expected["schema_version"] = serde_json::json!(11);
+    expected["schema_version"] = serde_json::json!(SCHEMA_VERSION);
     expected["folders"] = serde_json::json!([]);
     for mac in expected["macros"].as_array_mut().unwrap() {
+        mac["signature"] = serde_json::json!({"parameters": [], "outputs": []});
         mac["hotkey_scope"] = serde_json::json!({"type": "any_window"});
         mac["folder_id"] = serde_json::Value::Null;
         mac.as_object_mut().unwrap().remove("image_assets");
         for step in mac["steps"].as_array_mut().unwrap() {
             step["breakpoint"] = serde_json::Value::Bool(false);
+            step["metadata"] = serde_json::json!({"label": "", "comment": "", "accent": "default", "bookmarked": false});
         }
     }
     expected["macros"][0]["steps"][0]["action"]["data"] = serde_json::json!({
@@ -457,12 +466,14 @@ fn schema_nine_load_adds_breakpoints_and_repairs_only_dangling_folder_membership
     // Verify the on-load repair reaches disk without changing anything else,
     // including the deliberately unsorted arrays and the unused folder.
     let mut expected_json: serde_json::Value = serde_json::from_str(fixture).unwrap();
-    expected_json["schema_version"] = serde_json::json!(11);
+    expected_json["schema_version"] = serde_json::json!(SCHEMA_VERSION);
     expected_json["macros"][1]["folder_id"] = serde_json::Value::Null;
     for mac in expected_json["macros"].as_array_mut().unwrap() {
+        mac["signature"] = serde_json::json!({"parameters": [], "outputs": []});
         mac.as_object_mut().unwrap().remove("image_assets");
         for step in mac["steps"].as_array_mut().unwrap() {
             step["breakpoint"] = serde_json::Value::Bool(false);
+            step["metadata"] = serde_json::json!({"label": "", "comment": "", "accent": "default", "bookmarked": false});
         }
     }
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -546,7 +557,7 @@ fn schema_nine_normal_documents_load_through_public_store_without_manual_migrati
         let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
         let loaded = store.snapshot();
-        assert_eq!(loaded.schema_version, 11);
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert_eq!(
             loaded.macros.len(),
             original["macros"].as_array().unwrap().len()
@@ -586,7 +597,7 @@ fn schema_nine_normal_documents_load_through_public_store_without_manual_migrati
 
         let persisted: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted["schema_version"], 11);
+        assert_eq!(persisted["schema_version"], SCHEMA_VERSION);
         assert!(
             persisted["macros"]
                 .as_array()
@@ -604,7 +615,7 @@ fn schema_nine_normal_documents_load_through_public_store_without_manual_migrati
         drop(store);
         let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
-        assert_eq!(reopened.snapshot().schema_version, 11);
+        assert_eq!(reopened.snapshot().schema_version, SCHEMA_VERSION);
         assert_eq!(fs::read(&path).unwrap(), persisted_bytes);
     }
 }
@@ -661,6 +672,7 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
         ],
         macros: vec![
             MkMacro {
+                signature: Default::default(),
                 id: 81,
                 name: "Valid first folder".into(),
                 description: "Keep this reference".into(),
@@ -672,6 +684,7 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 steps: vec![],
             },
             MkMacro {
+                signature: Default::default(),
                 id: 12,
                 name: "Dangling folder".into(),
                 description: "Only clear the membership".into(),
@@ -683,6 +696,7 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 steps: vec![],
             },
             MkMacro {
+                signature: Default::default(),
                 id: 42,
                 name: "Valid second folder".into(),
                 description: "Keep this membership".into(),
@@ -694,6 +708,7 @@ fn folder_metadata_round_trips_with_repairs_and_excludes_dialog_ui_state() {
                 steps: vec![],
             },
             MkMacro {
+                signature: Default::default(),
                 id: 3,
                 name: "Already unfiled".into(),
                 description: "Keep unfiled membership".into(),
@@ -751,6 +766,127 @@ fn schema_newer_than_current_is_rejected() {
         matches!(disposition, LoadDisposition::NeedsUserRecovery { error } if error.contains(&expected))
     );
     assert!(store.snapshot().macros.is_empty());
+}
+
+#[test]
+fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let legacy = serde_json::json!({
+        "schema_version": 11,
+        "folders": [{"id": 5, "name": "Reusable"}],
+        "settings": serde_json::to_value(MkMacroSettings::default()).unwrap(),
+        "macros": [{
+            "id": 11,
+            "name": "Legacy",
+            "description": "preserved",
+            "enabled": false,
+            "hotkey": null,
+            "hotkey_scope": {"type": "any_window"},
+            "folder_id": 5,
+            "playback": {"speed_percent": 140, "random_delay_ms": 3, "random_offset_px": 2},
+            "steps": [{
+                "id": 77,
+                "enabled": false,
+                "breakpoint": true,
+                "repeat": 4,
+                "delay_after_ms": 12,
+                "on_error": "continue",
+                "action": {"type": "text", "data": {"text": "keep me", "mode": "paste"}}
+            }]
+        }]
+    });
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    let migrated = store.snapshot();
+    let owner = &migrated.macros[0];
+    assert_eq!(migrated.schema_version, 12);
+    assert_eq!(owner.signature, MkMacroSignature::default());
+    assert_eq!(owner.description, "preserved");
+    assert!(!owner.enabled);
+    assert_eq!(owner.folder_id, Some(5));
+    assert_eq!(owner.playback.speed_percent, 140);
+    assert_eq!(owner.steps[0].metadata, MkStepMetadata::default());
+    assert!(owner.steps[0].breakpoint);
+    assert_eq!(owner.steps[0].repeat, 4);
+    assert_eq!(owner.steps[0].on_error, MkErrorPolicy::Continue);
+
+    let parameter_id = MkSignatureId(101);
+    let output_id = MkSignatureId(102);
+    let mut current = (*migrated).clone();
+    current.macros[0].signature = MkMacroSignature {
+        parameters: vec![MkMacroParameter {
+            id: parameter_id,
+            name: "message".into(),
+            value_type: MkValueType::String,
+            description: "typed input".into(),
+            default_value: Some(MkValue::String("default".into())),
+        }],
+        outputs: vec![MkMacroOutput {
+            id: output_id,
+            name: "result".into(),
+            value_type: MkValueType::Boolean,
+            description: "typed output".into(),
+        }],
+    };
+    current.macros[0].steps[0].metadata = MkStepMetadata {
+        label: "Reusable call".into(),
+        comment: "round trip metadata".into(),
+        accent: MkStepAccent::Purple,
+        bookmarked: true,
+    };
+    current.macros[0].steps[0].action = MkAction::CallMacro(MkCallMacroPayload {
+        macro_id: 22,
+        arguments: vec![MkCallArgumentBinding {
+            parameter_id,
+            source: MkValueSource::Literal(MkValue::String("bound".into())),
+        }],
+        outputs: vec![MkCallOutputBinding {
+            output_id,
+            caller_variable: "answer".into(),
+        }],
+    });
+    let mut callee = current.macros[0].clone();
+    callee.id = 22;
+    callee.name = "Callee".into();
+    callee.signature = current.macros[0].signature.clone();
+    callee.steps = vec![MkStep {
+        id: 88,
+        metadata: MkStepMetadata {
+            label: "Return".into(),
+            ..Default::default()
+        },
+        enabled: true,
+        breakpoint: false,
+        repeat: 1,
+        delay_after_ms: 0,
+        on_error: MkErrorPolicy::Stop,
+        action: MkAction::Return(MkReturnPayload {
+            outputs: vec![MkReturnValueBinding {
+                output_id,
+                source: MkValueSource::Literal(MkValue::Boolean(true)),
+            }],
+        }),
+    }];
+    current.macros.push(callee);
+    store.save(current.clone()).unwrap();
+    drop(migrated);
+    drop(store);
+
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(reopened.snapshot().as_ref(), &current);
+    let persisted: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(persisted["schema_version"], 12);
+    assert_eq!(
+        persisted["macros"][0]["steps"][0]["action"]["type"],
+        "call_macro"
+    );
+    assert_eq!(
+        persisted["macros"][1]["steps"][0]["action"]["type"],
+        "return"
+    );
 }
 
 #[test]

@@ -1,26 +1,35 @@
 //! Versioned model, validation, compilation, and persistence for the new macro system.
 pub mod asset_authoring;
+pub mod authoring_analysis;
+pub mod authoring_fields;
+pub mod call_graph;
 pub mod compiler;
 pub mod coordinates;
+pub mod editor_mutation;
 pub mod executor;
 pub mod hotkeys;
 pub mod image_search;
 pub mod input;
 pub mod interpolation;
+pub mod invocation;
+pub mod invocation_prompt;
 pub mod launcher_command;
 pub mod launcher_query;
 pub mod model;
 pub mod notifications;
+pub mod package;
 pub mod prompt;
 pub mod recorder;
 pub mod recorder_hooks;
 pub mod recorder_hotkeys;
 pub mod recorder_runtime;
 pub mod recorder_windows;
+mod reusable_validation;
 pub mod runtime;
 pub mod screen;
 pub mod store;
 pub mod structure;
+pub mod templates;
 pub mod uia;
 pub mod validation;
 pub mod variables;
@@ -34,22 +43,26 @@ pub use coordinates::*;
 pub use executor::*;
 pub use image_search::*;
 pub use interpolation::*;
+pub use invocation::*;
 pub use launcher_command::*;
 pub use launcher_query::*;
 pub use model::*;
 pub use notifications::*;
+pub use package::*;
 pub use prompt::*;
 pub use recorder::*;
 pub use recorder_hooks::*;
 pub use recorder_runtime::*;
 pub use recorder_windows::*;
 pub use runtime::{
-    CommandResult, DebugSnapshot, DiagnosticKey, MacroRuntime, RuntimeCommand, RuntimePauseReason,
-    RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState,
+    BreakpointOccurrence, CommandResult, CompletedStep, CompletedStepOutcome, DebugSnapshot,
+    DiagnosticKey, MacroDiagnosticKey, MacroRuntime, MacroStepKey, RuntimeCommand,
+    RuntimePauseReason, RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState,
 };
 pub use screen::*;
 pub use store::*;
 pub use structure::*;
+pub use templates::*;
 pub use uia::*;
 pub use validation::*;
 pub use variables::*;

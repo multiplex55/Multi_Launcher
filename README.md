@@ -25,6 +25,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Modify](#clipboard-modify)
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
+- [MkMacro authoring and reuse](#mkmacro-authoring-and-reuse)
 - [Layouts](#layouts)
 - [MultiManager](#multimanager)
 - [Calendar](#calendar)
@@ -594,6 +595,30 @@ Screenshot behavior is controlled by settings:
 
 ---
 
+## MkMacro authoring and reuse
+
+Open **Mouse/Keyboard Macros** and use its **Reuse** menu for packages, libraries,
+templates, and the complete in-app MkMacro help.
+
+- `Ctrl+C`, `Ctrl+X`, `Ctrl+V`, and `Ctrl+D` operate on complete structured step
+  selections. Drag the primary selected row to move a multi-selection together.
+- `Ctrl+F`, `Ctrl+H`, and `Ctrl+G` open Find, schema-aware Replace, and Jump to
+  Step. Blocks can be folded, and steps can carry labels, comments, accent colors,
+  bookmarks, and breakpoints; the Outline provides structural navigation.
+- Reusable macros declare typed parameters and named typed outputs. **Call Macro**
+  uses explicit argument bindings and output mappings; **Return** publishes declared
+  outputs. Calls have isolated local-variable frames, may nest, and appear in the
+  Runtime Inspector. Stable IDs keep references intact across rename/reorder, while
+  recursive call cycles are rejected.
+- Exporting a macro or explicit multi-root library captures all authored Call
+  dependencies and referenced images. Import shows additions, conflict-driven
+  renames, asset reuse, and hotkey conflicts before an explicit Apply. Imported
+  authored hotkeys are retained.
+- A saved template is an independent package snapshot. Every instance receives
+  fresh macro/folder/step/signature identities and independent dependencies/assets;
+  all copied hotkeys are cleared. Sources, templates, and instances never maintain
+  live links.
+
 ## Configuration
 
 ### `settings.json`
@@ -718,6 +743,9 @@ These are created/updated as you use the app (typically in the working directory
 * `folders.json` — saved folders
 * `snippets.json` — snippets database
 * `macros.json` — macro definitions
+* `mkmacros.json` — MkMacro documents
+* `mkmacro_templates.json` — versioned user-created MkMacro templates
+* `mkmacro_assets/` — images referenced by MkMacro documents and packages
 * `todo.json` — todo list
 * `alarms.json` — timers/alarms
 * `history.json` — command history

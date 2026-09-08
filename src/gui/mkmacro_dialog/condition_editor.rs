@@ -218,7 +218,7 @@ pub(super) fn condition_ui_with_assets(
     authoring_busy: bool,
     test_busy: bool,
 ) -> Option<ConditionEditorRequest> {
-    let assets = context.store.image_refs().unwrap_or_default();
+    let assets = context.assets;
     let mut requested = None;
     ui.group(|ui| {
         let kind = condition_kind(condition);
@@ -392,6 +392,7 @@ pub fn condition_ui_with_context(
 ) -> Option<ConditionEditorRequest> {
     let target_context = TargetEditorContext {
         store: context.store,
+        assets: context.assets,
     };
     condition_ui_context_at(
         ui,
@@ -432,7 +433,7 @@ fn condition_ui_context_at(
                     );
                 });
             super::image_asset_picker::show(ui, path.indexes(), context, &mut search.image);
-            let assets = context.store.image_refs().unwrap_or_default();
+            let assets = context.assets;
             if let Some(operation) = super::image_search_controls::show_shared_fields(
                 ui,
                 &mut search.image,

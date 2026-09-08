@@ -4,10 +4,11 @@ use crate::mkmacro::{MkImageRef, MkMacroStore};
 use eframe::egui;
 
 /// Everything the picker may inspect. Entries always come from the store's
-/// direct flat-root enumeration, not from a macro-owned catalog.
+/// cached direct flat-root enumeration, refreshed by the authoring owner.
 #[derive(Clone, Copy)]
 pub struct ImageAssetUiContext<'a> {
     pub store: &'a MkMacroStore,
+    pub assets: &'a [MkImageRef],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,7 +100,7 @@ pub fn show_browser(
     ui.ctx()
         .data_mut(|data| data.insert_temp(id, query.clone()));
 
-    let assets = context.store.image_refs().unwrap_or_default();
+    let assets = context.assets;
     if !image.filename().is_empty() && selected_asset(&assets, image).is_none() {
         ui.colored_label(
             ui.visuals().warn_fg_color,

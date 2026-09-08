@@ -995,6 +995,7 @@ impl eframe::App for LauncherApp {
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.poll_macro_prompt(ctx);
+        self.macro_parameter_prompt.show(ctx);
 
         // tracing::debug!("LauncherApp::update called");
         if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
@@ -1817,6 +1818,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.macro_parameter_prompt.shutdown();
         self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
         self.clipboard_modify_immediate.cancel_pending();

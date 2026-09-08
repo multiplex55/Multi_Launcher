@@ -660,6 +660,7 @@ pub fn to_macro_steps(
         for (i, action) in actions.into_iter().enumerate() {
             next_id += 1;
             result.push(MkStep {
+                metadata: Default::default(),
                 id: next_id,
                 enabled: true,
                 breakpoint: false,

@@ -7,6 +7,78 @@
 
 use super::{DiagnosticKind, ExecResult, ExecutionDiagnostic, MkValue, RuntimeVariables};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplatePart<'a> {
+    Text(&'a str),
+    Reference(&'a str),
+    EscapedReference(&'a str),
+}
+
+/// Shared streaming grammar for runtime expansion, validation and static reads.
+/// Reference keys are exact. A later parse error never overtakes an earlier
+/// resolution error, and the scanner itself adds no allocation.
+pub fn scan_template(template: &str) -> TemplateScanner<'_> {
+    TemplateScanner {
+        template,
+        cursor: 0,
+        finished: false,
+    }
+}
+
+pub struct TemplateScanner<'a> {
+    template: &'a str,
+    cursor: usize,
+    finished: bool,
+}
+
+impl<'a> Iterator for TemplateScanner<'a> {
+    type Item = Result<TemplatePart<'a>, &'static str>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished || self.cursor == self.template.len() {
+            return None;
+        }
+        let start = self.cursor;
+        while self.cursor < self.template.len() {
+            let rest = &self.template[self.cursor..];
+            let escaped = rest.starts_with("$${");
+            if escaped || rest.starts_with("${") {
+                if start < self.cursor {
+                    return Some(Ok(TemplatePart::Text(&self.template[start..self.cursor])));
+                }
+                let name_start = self.cursor + if escaped { 3 } else { 2 };
+                let Some(end) = self.template[name_start..]
+                    .find('}')
+                    .map(|end| name_start + end)
+                else {
+                    self.finished = true;
+                    return Some(Err(if escaped {
+                        "unclosed escaped interpolation placeholder"
+                    } else {
+                        "unclosed interpolation placeholder"
+                    }));
+                };
+                if end == name_start {
+                    self.finished = true;
+                    return Some(Err(if escaped {
+                        "empty escaped interpolation placeholder"
+                    } else {
+                        "empty interpolation placeholder"
+                    }));
+                }
+                self.cursor = end + 1;
+                let name = &self.template[name_start..end];
+                return Some(Ok(if escaped {
+                    TemplatePart::EscapedReference(name)
+                } else {
+                    TemplatePart::Reference(name)
+                }));
+            }
+            self.cursor += rest.chars().next().unwrap().len_utf8();
+        }
+        Some(Ok(TemplatePart::Text(&self.template[start..self.cursor])))
+    }
+}
+
 /// Formats a runtime value for interpolation and UI previews.
 ///
 /// Strings are unchanged, numbers use Rust's locale-independent display,
@@ -29,48 +101,24 @@ pub fn format_interpolation_value(name: &str, value: &MkValue) -> ExecResult<Str
 /// Expands runtime variables in `template` in one left-to-right pass.
 pub fn interpolate(template: &str, variables: &RuntimeVariables) -> ExecResult<String> {
     let mut output = String::with_capacity(template.len());
-    let mut cursor = 0;
-    while cursor < template.len() {
-        let rest = &template[cursor..];
-        if rest.starts_with("$${") {
-            let name_start = cursor + 3;
-            let Some(relative_end) = template[name_start..].find('}') else {
-                return Err(malformed("unclosed escaped interpolation placeholder"));
-            };
-            let end = name_start + relative_end;
-            if end == name_start {
-                return Err(malformed("empty escaped interpolation placeholder"));
+    for part in scan_template(template) {
+        match part.map_err(malformed)? {
+            TemplatePart::Text(text) => output.push_str(text),
+            TemplatePart::EscapedReference(name) => {
+                output.push_str("${");
+                output.push_str(name);
+                output.push('}');
             }
-            output.push_str("${");
-            output.push_str(&template[name_start..end]);
-            output.push('}');
-            cursor = end + 1;
-        } else if rest.starts_with("${") {
-            let name_start = cursor + 2;
-            let Some(relative_end) = template[name_start..].find('}') else {
-                return Err(malformed("unclosed interpolation placeholder"));
-            };
-            let end = name_start + relative_end;
-            if end == name_start {
-                return Err(malformed("empty interpolation placeholder"));
+            TemplatePart::Reference(name) => {
+                let value = variables.get(name).ok_or_else(|| {
+                    ExecutionDiagnostic::new(
+                        DiagnosticKind::InvalidTarget,
+                        "interpolation variable is undefined",
+                    )
+                    .context("variable", name)
+                })?;
+                output.push_str(&format_interpolation_value(name, value)?);
             }
-            let name = &template[name_start..end];
-            let value = variables.get(name).ok_or_else(|| {
-                ExecutionDiagnostic::new(
-                    DiagnosticKind::InvalidTarget,
-                    "interpolation variable is undefined",
-                )
-                .context("variable", name)
-            })?;
-            output.push_str(&format_interpolation_value(name, value)?);
-            cursor = end + 1;
-        } else {
-            let ch = rest
-                .chars()
-                .next()
-                .expect("cursor is on a character boundary");
-            output.push(ch);
-            cursor += ch.len_utf8();
         }
     }
     Ok(output)
@@ -124,6 +172,22 @@ mod tests {
             Some("missing")
         );
         assert!(!error.message.contains("${missing}"));
+    }
+
+    #[test]
+    fn streaming_scanner_preserves_first_resolution_error_and_exact_reads() {
+        let error = interpolate("${missing} ${", &variables()).unwrap_err();
+        assert_eq!(
+            error.context.get("variable").map(String::as_str),
+            Some("missing")
+        );
+        let reads: Vec<_> = scan_template("$${escaped} ${挨拶} ${mouse.x} ${ exact }")
+            .filter_map(|part| match part.unwrap() {
+                TemplatePart::Reference(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reads, ["挨拶", "mouse.x", " exact "]);
     }
 
     #[test]

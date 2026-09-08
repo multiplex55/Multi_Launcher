@@ -1,6 +1,10 @@
 pub mod action_catalog;
 pub mod action_editor;
+mod analysis_cache;
+mod call_editor;
 pub mod condition_editor;
+mod editor_operations;
+mod folding;
 pub mod image_asset_picker;
 pub mod image_authoring;
 pub mod image_authoring_destination;
@@ -14,10 +18,17 @@ mod key_capture;
 pub mod launcher_action_picker;
 mod macro_list;
 mod macro_properties;
+mod navigation;
+mod outline;
+mod package_ui;
+pub(crate) mod parameter_prompt;
 pub mod recorder_controller;
 pub(crate) mod runtime_inspector;
+mod search;
+mod signature_editor;
 mod step_table;
 mod toolbar;
+pub(crate) mod typed_value;
 pub mod uia_editor;
 pub mod variable_catalog;
 pub mod visual_capture_workflow;
@@ -32,7 +43,7 @@ use crate::mkmacro::{
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-pub use step_table::{Selection, duplicate_steps, duplicate_steps_with_ids, move_steps};
+pub use step_table::Selection;
 use visual_capture_workflow::SharedVisualOverlayController;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,12 +84,18 @@ pub struct MkMacroDialog {
     pub authoring_context: MkMacroAuthoringContext,
     /// Authoritative client keeping the dialog-wide native overlay service alive.
     pub(crate) visual_overlay: SharedVisualOverlayController,
+    /// Direct external edits must call mark_dirty before reading cached analysis.
     pub draft: MkMacroDocument,
+    draft_revision: u64,
+    revision_document: MkMacroDocument,
+    analysis_cache: std::cell::RefCell<analysis_cache::AnalysisCache>,
     baseline: Arc<MkMacroDocument>,
     pub dirty: bool,
     pub conflict: bool,
     pub selected_macro_id: Option<u64>,
     pub selection: Selection,
+    editor_state: editor_operations::EditorState,
+    navigation: navigation::NavigationState,
     pub search: String,
     /// Process-local presentation state; never participates in draft dirty tracking.
     pub collapsed_folders: HashSet<u64>,
@@ -117,7 +134,8 @@ pub struct MkMacroDialog {
     pub runtime_inspector_snapshot: Option<Arc<crate::mkmacro::RuntimeSnapshot>>,
     pub runtime_inspector_is_current_debug_run: bool,
     runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
-    runtime_inspector_active_breakpoint: Option<(u64, u64)>,
+    runtime_inspector_active_breakpoint: Option<crate::mkmacro::BreakpointOccurrence>,
+    package_ui: package_ui::PackageUiState,
 }
 
 #[cfg(test)]
@@ -143,6 +161,7 @@ mod tests {
             folders: vec![],
             macros: (1..=5)
                 .map(|id| MkMacro {
+                    signature: Default::default(),
                     id,
                     name: format!("Macro {id}"),
                     description: String::new(),
@@ -189,6 +208,58 @@ mod tests {
     }
 
     #[test]
+    fn analysis_revision_tracks_mutations_save_repair_reload_and_presentation() {
+        let (_dir, mut d) = dialog();
+        d.create_macro();
+        let initial = d.draft_revision();
+        let diagnostics = d.cached_diagnostics();
+        d.mark_dirty();
+        d.selection.clear();
+        d.toggle_folder_collapsed(123);
+        assert_eq!(d.draft_revision(), initial);
+        assert!(Arc::ptr_eq(&diagnostics, &d.cached_diagnostics()));
+        d.selected_macro_mut().unwrap().steps.push(MkStep {
+            id: 0,
+            action: MkAction::Delay(Default::default()),
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            metadata: Default::default(),
+        });
+        d.mark_dirty();
+        assert_eq!(d.draft_revision(), initial + 1);
+        assert!(!Arc::ptr_eq(&diagnostics, &d.cached_diagnostics()));
+        d.save().unwrap();
+        assert_eq!(d.draft_revision(), initial + 2);
+        assert!(!d.dirty);
+        assert_ne!(d.selected_macro().unwrap().steps[0].id, 0);
+        let saved = d.draft_revision();
+        d.selected_macro_mut().unwrap().steps[0].metadata.comment = "changed".into();
+        d.mark_dirty();
+        d.mark_dirty();
+        assert_eq!(d.draft_revision(), saved + 1);
+        assert!(d.dirty);
+        d.reload_with_decision(DirtyDecision::Discard);
+        assert_eq!(d.draft_revision(), saved + 2);
+        assert!(!d.dirty);
+        assert!(
+            d.selected_macro().unwrap().steps[0]
+                .metadata
+                .comment
+                .is_empty()
+        );
+        let mut external = d.draft.clone();
+        external.macros[0].name = "External".into();
+        d.store.save(external).unwrap();
+        d.sync_external();
+        assert_eq!(d.draft_revision(), saved + 3);
+        assert!(!d.dirty);
+        assert_eq!(d.selected_macro().unwrap().name, "External");
+    }
+
+    #[test]
     fn debug_execution_methods_match_normal_admission_rejections() {
         let (_dir, mut d) = dialog();
         assert_eq!(
@@ -213,6 +284,7 @@ mod tests {
 
         d.selected_macro_mut().unwrap().enabled = true;
         d.selected_macro_mut().unwrap().steps.push(MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,
@@ -249,6 +321,7 @@ mod tests {
         d.create_macro();
         d.selected_macro_mut().unwrap().steps = vec![
             MkStep {
+                metadata: Default::default(),
                 id: 11,
                 enabled: true,
                 breakpoint: false,
@@ -258,6 +331,7 @@ mod tests {
                 action: MkAction::Delay(MkDelayPayload::default()),
             },
             MkStep {
+                metadata: Default::default(),
                 id: 22,
                 enabled: true,
                 breakpoint: false,
@@ -267,6 +341,7 @@ mod tests {
                 action: MkAction::Delay(MkDelayPayload::default()),
             },
             MkStep {
+                metadata: Default::default(),
                 id: 33,
                 enabled: true,
                 breakpoint: false,
@@ -445,6 +520,7 @@ mod tests {
         d.draft.macros[2].folder_id = Some(42);
         d.draft.macros[2].description = "Preserve macro contents".into();
         d.draft.macros[2].steps.push(MkStep {
+            metadata: Default::default(),
             id: 11,
             enabled: true,
             breakpoint: false,
@@ -486,6 +562,7 @@ mod tests {
         ] {
             let (_dir, mut d) = folder_dialog();
             d.draft.folders[0].name = stored.into();
+            d.mark_dirty();
             assert_eq!(d.rename_folder(42, proposed), Ok(true));
             assert_eq!(d.draft.folders[0].name, expected);
             assert!(d.dirty);
@@ -540,6 +617,7 @@ mod tests {
         });
         m.steps = (11..=13)
             .map(|id| MkStep {
+                metadata: Default::default(),
                 id,
                 enabled: true,
                 breakpoint: false,
@@ -617,6 +695,7 @@ mod tests {
         d.draft.macros = five_macros().macros;
         d.save().unwrap();
         d.draft.macros[2].folder_id = Some(999);
+        d.mark_dirty();
         let mut expected = d.draft.clone();
         expected.macros[2].folder_id = None;
         assert!(d.move_macro_to_folder(3, None));
@@ -726,6 +805,7 @@ mod tests {
             m.playback.random_offset_px = 7;
             m.steps = (1..=3)
                 .map(|offset| MkStep {
+                    metadata: Default::default(),
                     id: m.id * 10 + offset,
                     enabled: offset != 2,
                     breakpoint: false,
@@ -1000,6 +1080,7 @@ mod tests {
             assert!(d.folder_delete_confirmation.is_open());
             assert_eq!(d.folder_error.as_deref(), Some("Existing validation error"));
         }
+        d.draft.folders[0].name = "Dirty Utilities".into();
         d.mark_dirty();
         d.toggle_folder_collapsed(42);
         assert!(
@@ -1069,6 +1150,7 @@ mod tests {
         let (_dir, mut d) = folder_dialog();
         d.begin_folder_rename(42);
         d.request_delete_folder(42);
+        d.draft.folders[0].name = "Dirty Utilities".into();
         d.mark_dirty();
         assert!(!d.reload_with_decision(DirtyDecision::KeepEditing));
         assert!(!d.close_with_decision(DirtyDecision::KeepEditing));
@@ -1170,6 +1252,7 @@ mod tests {
 
     fn picker_macro(id: u64, hotkey_scope: MkHotkeyScope) -> MkMacro {
         MkMacro {
+            signature: Default::default(),
             id,
             name: format!("Macro {id}"),
             description: format!("Description {id}"),
@@ -1324,6 +1407,7 @@ mod tests {
         let steps = &mut d.selected_macro_mut().unwrap().steps;
         steps.extend([
             MkStep {
+                metadata: Default::default(),
                 id: 11,
                 enabled: true,
                 breakpoint: false,
@@ -1333,6 +1417,7 @@ mod tests {
                 action: MkAction::RepeatStart { count: 2 },
             },
             MkStep {
+                metadata: Default::default(),
                 id: 12,
                 enabled: true,
                 breakpoint: false,
@@ -1342,6 +1427,7 @@ mod tests {
                 action: MkAction::ImageFind(payload.clone()),
             },
             MkStep {
+                metadata: Default::default(),
                 id: 13,
                 enabled: true,
                 breakpoint: false,
@@ -1388,6 +1474,7 @@ mod tests {
         assert_eq!(
             created,
             &MkMacro {
+                signature: Default::default(),
                 id: created.id,
                 name: "New Macro".into(),
                 description: String::new(),
@@ -1481,6 +1568,7 @@ mod tests {
             source.steps = [17, 18]
                 .into_iter()
                 .map(|id| MkStep {
+                    metadata: Default::default(),
                     id,
                     enabled: true,
                     breakpoint: false,
@@ -1542,6 +1630,7 @@ mod tests {
             modifiers: vec![MkKey::Control],
         });
         d.selected_macro_mut().unwrap().steps.push(MkStep {
+            metadata: Default::default(),
             id: 0,
             enabled: true,
             breakpoint: false,
@@ -1748,6 +1837,8 @@ mod tests {
     fn expected_action_contract(action: &MkAction) -> (action_catalog::EditorKind, bool) {
         use action_catalog::EditorKind;
         match action {
+            MkAction::CallMacro(_) => (EditorKind::CallMacro, true),
+            MkAction::Return(_) => (EditorKind::Return, true),
             MkAction::KeyDown(_)
             | MkAction::KeyUp(_)
             | MkAction::KeyPress(_)
@@ -1851,6 +1942,7 @@ mod tests {
         let mut document = five_macros();
         document.macros.truncate(1);
         document.macros[0].steps.push(MkStep {
+            metadata: Default::default(),
             id: 1,
             enabled: true,
             breakpoint: false,
@@ -2459,6 +2551,7 @@ mod tests {
             .iter()
             .cloned()
             .map(|action| MkStep {
+                metadata: Default::default(),
                 id: 0,
                 enabled: true,
                 breakpoint: false,
@@ -2642,7 +2735,29 @@ mod tests {
             // document validator used by save and run.
             let (_dir, mut dialog) = dialog();
             dialog.create_macro();
+            let caller_id = dialog.selected_macro_id.unwrap();
+            let call_target = if matches!(action, MkAction::CallMacro(_)) {
+                dialog.create_macro();
+                let target = dialog.selected_macro_id.unwrap();
+                dialog.rename_selected("Call Target");
+                dialog.set_selected_macro(Some(caller_id));
+                Some(target)
+            } else {
+                None
+            };
             assert!(action_catalog::select_descriptor(&mut dialog, &descriptor));
+            if let Some(target) = call_target {
+                let MkAction::CallMacro(call) = &mut dialog
+                    .action_editor
+                    .draft
+                    .as_mut()
+                    .expect("Call opens a transaction")
+                    .action
+                else {
+                    unreachable!()
+                };
+                call.macro_id = target;
+            }
             let draft_contract = action_catalog::draft_validation_contract(&action);
             if configurable
                 && draft_contract == action_catalog::DraftValidationContract::CommitReady
@@ -2714,7 +2829,7 @@ mod tests {
                 assert_eq!(
                     descriptor.category,
                     action_catalog::ActionCategory::UiAutomation,
-                    "{context}: only explicitly deferred UI Automation actions may be hidden"
+                    "{context}: only UI Automation may be hidden"
                 );
                 assert!(
                     descriptor
@@ -2835,12 +2950,12 @@ mod tests {
                     assert_eq!(
                         descriptor.category,
                         action_catalog::ActionCategory::UiAutomation,
-                        "{context}: hidden non-UIA action"
+                        "{context}: hidden action category"
                     );
                     assert_eq!(
                         descriptor.runtime,
                         action_catalog::RuntimeAvailability::Unavailable,
-                        "{context}: hidden UIA must remain unavailable until independently complete"
+                        "{context}: hidden UIA remains unavailable"
                     );
                     assert!(
                         !action_catalog::is_available_in_palette(&descriptor),
@@ -3141,8 +3256,24 @@ mod tests {
             run_mode: crate::mkmacro::RuntimeRunMode::Debug,
             run_id,
             macro_id: Some(7),
+            call_stack: Arc::new(vec![crate::mkmacro::ExecutionFrameSnapshot {
+                context: crate::mkmacro::ExecutionFrameContext::root(7),
+                macro_name: Arc::from("Macro 7"),
+                active_step_id: match pause_reason {
+                    Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id, .. }) => {
+                        Some(step_id)
+                    }
+                    _ => None,
+                },
+            }]),
             pause_reason,
+            breakpoint_sequence: u64::from(matches!(
+                pause_reason,
+                Some(crate::mkmacro::RuntimePauseReason::Breakpoint { .. })
+            )),
             debug_snapshot: Some(Arc::new(crate::mkmacro::DebugSnapshot {
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+                macro_name: Arc::from("Macro 7"),
                 step_id: None,
                 variables: variables.clone(),
                 reason,
@@ -3267,6 +3398,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();
         let set_variable = |id: u64, name: &str, value: MkValue| MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -3283,6 +3415,7 @@ mod tests {
                 schema_version: SCHEMA_VERSION,
                 macros: vec![
                     MkMacro {
+                        signature: Default::default(),
                         id: 1,
                         name: "First debug run".into(),
                         description: String::new(),
@@ -3300,6 +3433,7 @@ mod tests {
                         ],
                     },
                     MkMacro {
+                        signature: Default::default(),
                         id: 2,
                         name: "Second debug run".into(),
                         description: String::new(),
@@ -3540,11 +3674,22 @@ mod tests {
             2,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 99,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         );
         dialog.observe_runtime_snapshot(Some(breakpoint.clone()));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 99)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 99)
+            })
+        );
 
         dialog.runtime_inspector_open = false;
         let mut newer_breakpoint = (*breakpoint).clone();
@@ -3555,6 +3700,8 @@ mod tests {
         )]));
         let newer_variables = newer_breakpoint.debug_variables.clone();
         newer_breakpoint.debug_snapshot = Some(Arc::new(crate::mkmacro::DebugSnapshot {
+            frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            macro_name: Arc::from("Macro 7"),
             step_id: Some(99),
             variables: newer_variables,
             reason: crate::mkmacro::DebugSnapshotReason::Breakpoint,
@@ -3574,7 +3721,15 @@ mod tests {
                 .get("answer"),
             Some(&crate::mkmacro::MkValue::Number(84.0))
         );
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 99)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 99)
+            })
+        );
 
         dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
             11,
@@ -3591,10 +3746,21 @@ mod tests {
             5,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 99,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         )));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 99)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 99)
+            })
+        );
 
         dialog.runtime_inspector_open = false;
         dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
@@ -3602,10 +3768,21 @@ mod tests {
             6,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 100 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 100,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         )));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((11, 100)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 11,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 100)
+            })
+        );
 
         dialog.runtime_inspector_open = false;
         dialog.observe_runtime_snapshot(Some(synthetic_debug_snapshot(
@@ -3613,10 +3790,59 @@ mod tests {
             1,
             crate::mkmacro::RuntimeState::Paused,
             crate::mkmacro::DebugSnapshotReason::Breakpoint,
-            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 100 }),
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 100,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
         )));
         assert!(dialog.runtime_inspector_open);
-        assert_eq!(dialog.runtime_inspector_active_breakpoint, Some((12, 100)));
+        assert_eq!(
+            dialog.runtime_inspector_active_breakpoint,
+            Some(crate::mkmacro::BreakpointOccurrence {
+                occurrence: 1,
+                run_id: 12,
+                frame_id: 1,
+                step: crate::mkmacro::MacroStepKey::new(7, 100)
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_inspector_reopens_for_unobserved_same_frame_breakpoint_reentry() {
+        let (_dir, mut dialog) = dialog();
+        let paused = synthetic_debug_snapshot(
+            18,
+            1,
+            crate::mkmacro::RuntimeState::Paused,
+            crate::mkmacro::DebugSnapshotReason::Breakpoint,
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint {
+                step_id: 99,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
+        );
+        dialog.observe_runtime_snapshot(Some(paused.clone()));
+        assert!(dialog.runtime_inspector_open);
+        dialog.runtime_inspector_open = false;
+        let mut same_pause = (*paused).clone();
+        same_pause.revision += 1;
+        dialog.observe_runtime_snapshot(Some(Arc::new(same_pause.clone())));
+        assert!(!dialog.runtime_inspector_open);
+        let mut reentered = same_pause;
+        reentered.revision += 2;
+        reentered.breakpoint_sequence += 1;
+        dialog.observe_runtime_snapshot(Some(Arc::new(reentered.clone())));
+        assert!(dialog.runtime_inspector_open);
+        dialog.runtime_inspector_open = false;
+        reentered.revision += 1;
+        dialog.observe_runtime_snapshot(Some(Arc::new(reentered.clone())));
+        assert!(!dialog.runtime_inspector_open);
+        // A new invocation of the same macro and step also has a distinct key.
+        let mut frame = crate::mkmacro::ExecutionFrameContext::root(7);
+        frame.frame_id = 4;
+        reentered.pause_reason =
+            Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id: 99, frame });
+        dialog.observe_runtime_snapshot(Some(Arc::new(reentered)));
+        assert!(dialog.runtime_inspector_open);
     }
 }
 impl MkMacroDialog {
@@ -3661,6 +3887,9 @@ impl MkMacroDialog {
         Self {
             open: false,
             draft: (*baseline).clone(),
+            draft_revision: 0,
+            revision_document: (*baseline).clone(),
+            analysis_cache: Default::default(),
             baseline,
             store,
             authoring_context,
@@ -3672,6 +3901,8 @@ impl MkMacroDialog {
             conflict: false,
             selected_macro_id: None,
             selection: Default::default(),
+            editor_state: Default::default(),
+            navigation: Default::default(),
             search: String::new(),
             collapsed_folders: HashSet::new(),
             pending_folder_rename: None,
@@ -3703,10 +3934,12 @@ impl MkMacroDialog {
             runtime_inspector_is_current_debug_run: false,
             runtime_inspector_observed_run: None,
             runtime_inspector_active_breakpoint: None,
+            package_ui: Default::default(),
         }
     }
     pub fn open(&mut self) {
         self.sync_external();
+        self.refresh_environment();
         self.open = true;
         crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
         crate::mkmacro::runtime::set_recording_options(self.recorder_options.clone());
@@ -3734,6 +3967,7 @@ impl MkMacroDialog {
                 self.conflict = true;
             } else {
                 self.draft = (*current).clone();
+                self.record_draft_revision();
                 self.baseline = current;
                 self.cancel_folder_operations();
                 if self.selected_macro().is_none() {
@@ -3745,13 +3979,59 @@ impl MkMacroDialog {
     }
     pub fn save(&mut self) -> anyhow::Result<()> {
         repair_ids(&mut self.draft);
+        self.record_draft_revision();
+        self.refresh_environment();
         self.baseline = self.store.save(self.draft.clone())?;
         self.dirty = false;
         self.conflict = false;
         Ok(())
     }
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        if self.record_draft_revision() {
+            self.dirty = true;
+        }
+    }
+
+    fn record_draft_revision(&mut self) -> bool {
+        if self.revision_document == self.draft {
+            return false;
+        }
+        self.draft_revision = self.draft_revision.wrapping_add(1);
+        self.revision_document = self.draft.clone();
+        self.editor_state.folds.retain_document(&self.draft);
+        if let Some(m) = self.selected_macro() {
+            let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
+            self.selection.reconcile(&rows);
+        }
+        true
+    }
+
+    pub fn draft_revision(&self) -> u64 {
+        self.draft_revision
+    }
+
+    /// Refresh external image and monitor state without dirtying the document.
+    pub fn refresh_environment(&mut self) {
+        self.record_draft_revision();
+        self.action_editor.image_refs_cache = None;
+        self.analysis_cache
+            .borrow_mut()
+            .refresh_environment(&self.draft, &self.store.asset_root());
+    }
+
+    pub(super) fn cached_diagnostics(&self) -> Arc<Vec<crate::mkmacro::MkDiagnostic>> {
+        self.analysis_cache
+            .borrow_mut()
+            .diagnostics(&self.draft, self.draft_revision)
+    }
+
+    pub(super) fn cached_structure(
+        &self,
+        macro_id: u64,
+    ) -> Option<Arc<crate::mkmacro::StructureAnalysis>> {
+        self.analysis_cache
+            .borrow_mut()
+            .structure(&self.draft, self.draft_revision, macro_id)
     }
 
     pub fn create_folder(&mut self) -> u64 {
@@ -4012,6 +4292,7 @@ impl MkMacroDialog {
         if self.dirty {
             let current = self.store.snapshot();
             self.draft = (*current).clone();
+            self.record_draft_revision();
             self.baseline = current;
             self.dirty = false;
             self.conflict = false;
@@ -4030,6 +4311,7 @@ impl MkMacroDialog {
         }
         let current = self.store.snapshot();
         self.draft = (*current).clone();
+        self.record_draft_revision();
         self.baseline = current;
         self.dirty = false;
         self.conflict = false;
@@ -4043,25 +4325,20 @@ impl MkMacroDialog {
         macro_id: u64,
         recorded: &[RecordedStep],
     ) -> Result<Vec<u64>, String> {
-        let next = self
-            .draft
-            .macros
-            .iter()
-            .flat_map(|m| &m.steps)
-            .map(|s| s.id)
-            .max()
-            .unwrap_or(0);
-        let inserted = crate::mkmacro::to_macro_steps(recorded, next, true);
-        let ids = inserted.iter().map(|s| s.id).collect::<Vec<_>>();
         let m = self
             .draft
             .macros
             .iter_mut()
             .find(|m| m.id == macro_id)
             .ok_or("recording target no longer exists")?;
-        m.steps.extend(inserted);
-        repair_ids(&mut self.draft);
-        self.selection.ids = ids.iter().copied().collect();
+        // Recorder output gets temporary local IDs; the canonical allocator
+        // assigns checked destination IDs, including after u64::MAX.
+        let recorded_steps = crate::mkmacro::to_macro_steps(recorded, 0, true);
+        let inserted = crate::mkmacro::editor_mutation::clone_fragment(&recorded_steps, &m.steps)
+            .map_err(|error| error.to_string())?;
+        let ids = inserted.inserted_ids;
+        m.steps.extend(inserted.steps);
+        self.selection.replace(ids.iter().copied());
         self.mark_dirty();
         Ok(ids)
     }
@@ -4070,6 +4347,12 @@ impl MkMacroDialog {
         self.draft.macros.iter().find(|m| m.id == id)
     }
     pub fn set_selected_macro(&mut self, id: Option<u64>) {
+        if self.selected_macro_id != id {
+            self.selection.clear();
+            self.editor_state.drag = None;
+            self.editor_state.scroll_to = None;
+            self.navigation.focus_table = false;
+        }
         self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
         crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
     }
@@ -4088,6 +4371,7 @@ impl MkMacroDialog {
             return false;
         }
         self.draft.macros.push(MkMacro {
+            signature: Default::default(),
             id: 0,
             name: "New Macro".into(),
             description: String::new(),
@@ -4114,8 +4398,12 @@ impl MkMacroDialog {
         copy.id = 0;
         copy.name.push_str(" Copy");
         copy.hotkey = None;
-        for step in &mut copy.steps {
-            step.id = 0;
+        match crate::mkmacro::editor_mutation::clone_fragment(&source.steps, &[]) {
+            Ok(fragment) => copy.steps = fragment.steps,
+            Err(error) => {
+                self.command_error = Some(error.to_string());
+                return;
+            }
         }
         debug_assert_eq!(
             copy.folder_id, source.folder_id,
@@ -4145,6 +4433,7 @@ impl MkMacroDialog {
         // draft (especially when the final macro is removed).
         self.action_editor.cancel();
         self.launcher_action_picker.cancel();
+        self.package_ui.close();
         self.draft.macros.remove(index);
         let selected = self
             .draft
@@ -4173,10 +4462,9 @@ impl MkMacroDialog {
         }) {
             return Some("Another playback operation is active".into());
         }
-        let d = validate_document(&self.draft, None);
-        d.iter()
-            .find(|x| x.severity == DiagnosticSeverity::Fatal)
-            .map(|x| x.message.clone())
+        self.analysis_cache
+            .borrow_mut()
+            .root_failure(&self.draft, self.draft_revision, m.id)
     }
 
     fn prepare_execution(&mut self) -> anyhow::Result<u64> {
@@ -4188,6 +4476,7 @@ impl MkMacroDialog {
     }
 
     fn prepare_execution_checked(&mut self) -> anyhow::Result<u64> {
+        self.refresh_environment();
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
@@ -4219,6 +4508,7 @@ impl MkMacroDialog {
     }
 
     fn prepare_from_step(&mut self, original_step_id: u64) -> anyhow::Result<(u64, u64)> {
+        self.refresh_environment();
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
@@ -4246,6 +4536,7 @@ impl MkMacroDialog {
     }
 
     fn prepare_selected_steps(&mut self) -> anyhow::Result<(u64, Vec<u64>)> {
+        self.refresh_environment();
         if let Some(reason) = self.playback_block_reason() {
             anyhow::bail!(reason);
         }
@@ -4314,16 +4605,7 @@ impl MkMacroDialog {
                         | crate::mkmacro::RuntimeState::Paused
                         | crate::mkmacro::RuntimeState::Stopping
                 );
-                let breakpoint = if snapshot.state == crate::mkmacro::RuntimeState::Paused {
-                    match snapshot.pause_reason {
-                        Some(crate::mkmacro::RuntimePauseReason::Breakpoint { step_id }) => {
-                            Some((snapshot.run_id, step_id))
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+                let breakpoint = snapshot.breakpoint_occurrence();
                 if let Some(breakpoint) = breakpoint {
                     if self.runtime_inspector_active_breakpoint != Some(breakpoint) {
                         self.runtime_inspector_open = true;
@@ -4362,6 +4644,7 @@ impl MkMacroDialog {
         }
     }
     fn close_children(&mut self) {
+        search::close(self);
         self.cancel_folder_operations();
         self.action_catalog_visible = false;
         self.action_editor.cancel();
@@ -4370,8 +4653,10 @@ impl MkMacroDialog {
         self.window_picker
             .cancel("Window picker closed because the macro dialog closed");
         self.launcher_action_picker.cancel();
+        self.package_ui.close();
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
+        search::shortcuts(ui.ctx(), self);
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         for result in crate::mkmacro::runtime::take_pending_recordings() {
             if self
@@ -4397,6 +4682,11 @@ impl MkMacroDialog {
             egui_extras::StripBuilder::new(ui)
                 .size(egui_extras::Size::exact(macro_list::SIDEBAR_WIDTH))
                 .size(egui_extras::Size::remainder())
+                .size(egui_extras::Size::exact(if self.navigation.outline.open {
+                    250.0
+                } else {
+                    30.0
+                }))
                 .horizontal(|mut strip| {
                     strip.cell(|ui| macro_list::show(ui, self));
                     strip.cell(|ui| {
@@ -4406,13 +4696,16 @@ impl MkMacroDialog {
                         ui.separator();
                         step_table::show(ui, self);
                     });
+                    strip.cell(|ui| outline::show(ui, self));
                 });
         }
         action_catalog::show_modal(ui.ctx(), self);
+        search::show(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
         image_crop_editor::show(ui.ctx(), self);
         launcher_action_picker::show(ui.ctx(), self);
         window_picker::show(ui.ctx(), &mut self.window_picker);
+        package_ui::show(ui.ctx(), self);
         if self.window_picker.confirm_ready {
             self.window_picker.confirm_ready = false;
             if let Some((request, matcher)) = self.window_picker.take_confirmation() {

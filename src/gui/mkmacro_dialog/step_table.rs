@@ -1,23 +1,32 @@
 use super::MkMacroDialog;
+use super::editor_operations::{self, ClipboardCommand};
+use crate::mkmacro::editor_mutation::InsertionAnchor;
 use crate::mkmacro::{
-    MkDelayPayload, MkStep, MonitorValidation, RuntimePauseReason, RuntimeSnapshot, RuntimeState,
-    StepState, ValidationContext, validate_document_with_context,
+    MkDelayPayload, MkStep, RuntimePauseReason, RuntimeSnapshot, RuntimeState, StepState,
 };
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Default, Debug, Clone)]
 pub struct Selection {
     pub ids: BTreeSet<u64>,
-    anchor: Option<usize>,
+    pub anchor: Option<u64>,
+    pub primary: Option<u64>,
 }
 impl Selection {
     pub fn clear(&mut self) {
         self.ids.clear();
         self.anchor = None;
+        self.primary = None;
     }
     pub fn click(&mut self, rows: &[u64], index: usize, ctrl: bool, shift: bool) {
+        let Some(&clicked) = rows.get(index) else {
+            return;
+        };
         if shift {
-            let a = self.anchor.unwrap_or(index);
+            let a = self
+                .anchor
+                .and_then(|id| rows.iter().position(|row| *row == id))
+                .unwrap_or(index);
             if !ctrl {
                 self.ids.clear();
             }
@@ -33,66 +42,33 @@ impl Selection {
             } else {
                 self.ids.insert(rows[index]);
             }
-            self.anchor = Some(index);
+            self.anchor = Some(clicked);
+        }
+        self.primary = self.ids.contains(&clicked).then_some(clicked);
+        self.reconcile(rows);
+    }
+    /// Retain stable anchors across reordering, with deterministic source-order fallback.
+    pub fn reconcile(&mut self, rows: &[u64]) {
+        self.ids.retain(|id| rows.contains(id));
+        // Folding can give a hidden selection a visible opener as its primary
+        // without adding that entire block to the selected fragment.
+        if self.ids.is_empty() || self.primary.is_none_or(|id| !rows.contains(&id)) {
+            self.primary = rows.iter().find(|id| self.ids.contains(id)).copied();
+        }
+        if self.anchor.is_none_or(|id| !rows.contains(&id)) {
+            self.anchor = self.primary;
         }
     }
-}
-pub fn duplicate_steps_with_ids(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> BTreeSet<u64> {
-    let mut copies: Vec<_> = steps
-        .iter()
-        .filter(|s| ids.contains(&s.id))
-        .cloned()
-        .collect();
-    for s in &mut copies {
-        s.id = 0;
-    }
-    let insert_at = steps
-        .iter()
-        .rposition(|s| ids.contains(&s.id))
-        .map_or(steps.len(), |i| i + 1);
-    steps.splice(insert_at..insert_at, copies);
-    let mut d = crate::mkmacro::MkMacroDocument {
-        settings: Default::default(),
-        schema_version: crate::mkmacro::SCHEMA_VERSION,
-        macros: vec![crate::mkmacro::MkMacro {
-            id: 1,
-            name: "draft".into(),
-            description: String::new(),
-            enabled: true,
-            hotkey: None,
-            hotkey_scope: Default::default(),
-            folder_id: None,
-            playback: Default::default(),
-            steps: steps.clone(),
-        }],
-        folders: vec![],
-    };
-    crate::mkmacro::repair_ids(&mut d);
-    *steps = d.macros.remove(0).steps;
-    steps[insert_at..]
-        .iter()
-        .take(ids.len())
-        .map(|s| s.id)
-        .collect()
-}
-pub fn duplicate_steps(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) {
-    let _ = duplicate_steps_with_ids(steps, ids);
-}
-pub fn move_steps(steps: &mut [MkStep], ids: &BTreeSet<u64>, down: bool) {
-    if down {
-        for i in (0..steps.len().saturating_sub(1)).rev() {
-            if ids.contains(&steps[i].id) && !ids.contains(&steps[i + 1].id) {
-                steps.swap(i, i + 1);
-            }
-        }
-    } else {
-        for i in 1..steps.len() {
-            if ids.contains(&steps[i].id) && !ids.contains(&steps[i - 1].id) {
-                steps.swap(i, i - 1);
-            }
-        }
+    pub fn replace(&mut self, ids: impl IntoIterator<Item = u64>) {
+        let ids: Vec<_> = ids.into_iter().collect();
+        self.primary = ids.first().copied();
+        self.anchor = self.primary;
+        self.ids = ids.into_iter().collect();
     }
 }
+use crate::mkmacro::editor_mutation::{
+    delete_selection, move_selection as move_selection_structurally,
+};
 
 const BREAKPOINT_COLUMN_WIDTH: f32 = 26.0;
 const BREAKPOINT_HOVER_TEXT: &str = "Breakpoint\nPauses before this step during Debug runs.\nNormal Run and macro hotkeys ignore breakpoints.";
@@ -146,12 +122,12 @@ fn active_breakpoint_status(
 ) -> bool {
     state == StepState::Pending
         && runtime.is_some_and(|snapshot| {
-            snapshot.macro_id == Some(displayed_macro_id)
+            snapshot.active_macro_id() == Some(displayed_macro_id)
                 && snapshot.state == RuntimeState::Paused
                 && matches!(
                     snapshot.pause_reason,
-                    Some(RuntimePauseReason::Breakpoint { step_id: paused_step_id })
-                        if paused_step_id == step_id
+                    Some(RuntimePauseReason::Breakpoint { step_id: paused_step_id, frame })
+                        if paused_step_id == step_id && frame.macro_id == displayed_macro_id && snapshot.active_frame() == Some(frame)
                 )
         })
 }
@@ -179,7 +155,12 @@ fn status_visual(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Edit(u64),
+    EditAnnotations(u64),
+    Fold(u64),
     ToggleBreakpoint(u64),
+    Copy,
+    Cut,
+    Paste,
     Duplicate,
     Toggle,
     Up,
@@ -229,8 +210,13 @@ fn table_move_command(
     }
 }
 
-fn table_modal_open(d: &MkMacroDialog) -> bool {
-    d.pending_folder_rename.is_some()
+pub(super) fn table_modal_open(d: &MkMacroDialog) -> bool {
+    other_modal_open(d) || d.navigation.search.mode.is_some()
+}
+
+pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {
+    d.package_ui.is_open()
+        || d.pending_folder_rename.is_some()
         || d.pending_delete_folder.is_some()
         || d.delete_confirmation.is_open()
         || d.folder_delete_confirmation.is_open()
@@ -282,7 +268,7 @@ fn toggle_breakpoint_entry(id: u64, locked: bool) -> MenuEntry {
 
 /// Pure description of a row menu. Structural markers are deliberately resolved
 /// through the analysis rather than inferred from their spelling or position.
-fn menu_model(
+fn base_menu_model(
     step: &MkStep,
     selection: &BTreeSet<u64>,
     steps: &[MkStep],
@@ -367,30 +353,122 @@ fn menu_model(
 }
 const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
 
+fn menu_model(
+    step: &MkStep,
+    selection: &BTreeSet<u64>,
+    steps: &[MkStep],
+    analysis: &crate::mkmacro::StructureAnalysis,
+    breakpoint_locked: bool,
+) -> Vec<MenuEntry> {
+    let mut entries = base_menu_model(step, selection, steps, analysis, breakpoint_locked);
+    let ids = if selection.contains(&step.id) {
+        selection.clone()
+    } else {
+        BTreeSet::from([step.id])
+    };
+    let safe = crate::mkmacro::editor_mutation::normalize_selection(steps, &ids).is_ok();
+    entries.extend([
+        MenuEntry::separator(),
+        MenuEntry::action("Copy", Command::Copy, safe),
+        MenuEntry::action("Cut", Command::Cut, safe),
+        MenuEntry::action("Paste", Command::Paste, true),
+        MenuEntry::action("Edit annotations", Command::EditAnnotations(step.id), true),
+    ]);
+    if step.action.is_block_marker() {
+        entries.push(MenuEntry::action("Duplicate", Command::Duplicate, safe));
+    }
+    if let Some(block) = analysis.block_for_marker(step.id)
+        && super::folding::foldable_block(analysis, block.opener_id).is_some()
+    {
+        entries.push(MenuEntry::action(
+            "Expand / collapse block",
+            Command::Fold(block.opener_id),
+            true,
+        ));
+    }
+    entries
+}
+
 /// Uses all height assigned to the step area; the number of rows is deliberately
 /// irrelevant because rows belong to the table's scroll area.
 fn table_viewport_height(available_height: f32) -> f32 {
     available_height.max(MIN_TABLE_VIEWPORT_HEIGHT)
 }
 
+fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
+    use eframe::egui::{Color32, RichText};
+    let diagnostics = d.cached_diagnostics();
+    let mut target = None;
+    if diagnostics.is_empty() {
+        return false;
+    }
+    eframe::egui::CollapsingHeader::new(format!("Diagnostics ({})", diagnostics.len()))
+        .id_source("mkmacro_document_diagnostics")
+        .show(ui, |ui| {
+            eframe::egui::ScrollArea::vertical()
+                .id_source("mkmacro_diagnostics_scroll")
+                .max_height(150.0)
+                .show_rows(
+                    ui,
+                    ui.text_style_height(&eframe::egui::TextStyle::Body),
+                    diagnostics.len(),
+                    |ui, range| {
+                        for index in range {
+                            let diagnostic = &diagnostics[index];
+                            let (severity, color) = match diagnostic.severity {
+                                crate::mkmacro::DiagnosticSeverity::Fatal => {
+                                    ("Error", Color32::RED)
+                                }
+                                crate::mkmacro::DiagnosticSeverity::Warning => {
+                                    ("Warning", Color32::YELLOW)
+                                }
+                            };
+                            let owner = d
+                                .draft
+                                .macros
+                                .iter()
+                                .find(|m| m.id == diagnostic.macro_id)
+                                .map(|m| m.name.as_str())
+                                .unwrap_or("Document");
+                            let text = format!("{severity} · {owner}: {}", diagnostic.message);
+                            if ui
+                                .add(
+                                    eframe::egui::Label::new(RichText::new(text).color(color))
+                                        .truncate(true)
+                                        .sense(eframe::egui::Sense::click()),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\nCode: {}",
+                                    diagnostic.message, diagnostic.code
+                                ))
+                                .clicked()
+                            {
+                                target = Some(index);
+                            }
+                        }
+                    },
+                );
+        });
+    if let Some(index) = target {
+        return super::navigation::navigate_diagnostic(d, &diagnostics[index]);
+    }
+    false
+}
+
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
+    if show_diagnostics(ui, d) {
+        return;
+    }
     let Some(mid) = d.selected_macro_id else {
         ui.label("Select a macro");
         return;
     };
-    let monitor_result = crate::mkmacro::monitor_descriptors();
-    let monitor_validation = match &monitor_result {
-        Ok(descriptors) => MonitorValidation::Available(descriptors),
-        Err(_) => MonitorValidation::EnumerationFailed,
-    };
-    let asset_root = d.store.asset_root();
-    let diagnostics = validate_document_with_context(
-        &d.draft,
-        ValidationContext {
-            asset_root: Some(&asset_root),
-            monitors: monitor_validation,
-        },
-    );
+    let diagnostics = d.cached_diagnostics();
+    if d.analysis_cache.borrow().environment_pending {
+        ui.weak(
+            "External image and monitor checks need refresh. Save and Run refresh automatically.",
+        );
+    }
     let mut row_diagnostics = HashMap::<u64, Vec<_>>::new();
     for diagnostic in diagnostics.iter().filter(|x| x.macro_id == mid) {
         if let Some(step_id) = diagnostic.step_id {
@@ -414,32 +492,61 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         return;
     };
     let rows: Vec<u64> = m.steps.iter().map(|s| s.id).collect();
-    let depths = super::action_catalog::action_depths(m);
-    let structure = crate::mkmacro::analyze_structure(&m.steps);
+    let Some(structure) = d.cached_structure(mid) else {
+        return;
+    };
+    if let Some(primary) = d.selection.primary {
+        d.selection.primary = Some(
+            d.editor_state
+                .folds
+                .visible_primary(mid, primary, &structure),
+        );
+    }
+    if d.editor_state
+        .drag
+        .as_ref()
+        .is_some_and(|drag| drag.macro_id != mid)
+    {
+        d.editor_state.drag = None;
+    }
+    let visible = d.editor_state.folds.visible_rows(mid, &structure);
+    let scroll_row = d
+        .editor_state
+        .scroll_to
+        .take()
+        .filter(|(macro_id, _)| *macro_id == mid)
+        .and_then(|(_, id)| visible.iter().position(|i| rows[*i] == id));
+    let depths: Vec<_> = structure.steps.iter().map(|s| s.depth).collect();
     let mut clicked = None;
+    let mut diagnostic_target = None;
     let mut changed = false;
     let mut updates = Vec::new();
     let mut breakpoint_toggles = Vec::new();
     let mut command = None;
+    let mut drag_start = None;
+    let mut drop_rows = Vec::new();
+    let interaction_blocked = d.action_editor.draft.is_some() || table_modal_open(d);
     let table_height = table_viewport_height(ui.available_height());
-    ui.allocate_ui_with_layout(
+    let table_response = ui.allocate_ui_with_layout(
         eframe::egui::vec2(ui.available_width(), table_height),
         eframe::egui::Layout::top_down(eframe::egui::Align::Min),
         |ui| {
+    ui.push_id(("mkmacro_steps", mid), |ui| {
     let max_scroll_height = ui.available_height().max(MIN_TABLE_VIEWPORT_HEIGHT);
-    egui_extras::TableBuilder::new(ui)
+    let mut table = egui_extras::TableBuilder::new(ui)
         .striped(true)
         .auto_shrink([false, false])
         .max_scroll_height(max_scroll_height)
         .column(egui_extras::Column::exact(BREAKPOINT_COLUMN_WIDTH))
-        .column(egui_extras::Column::exact(28.0))
+        .column(egui_extras::Column::exact(38.0))
         .column(egui_extras::Column::exact(55.0))
         .column(egui_extras::Column::initial(100.0))
         .column(egui_extras::Column::remainder())
         .column(egui_extras::Column::exact(50.0))
         .column(egui_extras::Column::exact(55.0))
-        .column(egui_extras::Column::initial(90.0))
-        .header(20.0, |mut h| {
+        .column(egui_extras::Column::initial(90.0));
+    if let Some(row) = scroll_row { table = table.scroll_to_row(row, Some(eframe::egui::Align::Center)); }
+    table.header(20.0, |mut h| {
             for x in [
                 "●", "#", "Enabled", "Action", "Details", "Repeat", "Delay", "Status",
             ] {
@@ -449,9 +556,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             }
         })
         .body(|mut body| {
-            for (i, source) in m.steps.iter().enumerate() {
+            for &i in &visible {
+                let source = &m.steps[i];
                 let mut s = source.clone();
                 body.row(22.0, |mut r| {
+                    r.set_selected(d.selection.ids.contains(&s.id) || d.selection.primary == Some(s.id));
                     r.col(|ui| {
                         let visual = breakpoint_visual(s.breakpoint);
                         let response = ui.add_enabled(
@@ -471,13 +580,15 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         }
                     });
                     r.col(|ui| {
-                        if ui
-                            .selectable_label(d.selection.ids.contains(&s.id), (i + 1).to_string())
-                            .clicked()
-                        {
+                        let response = ui.push_id((mid, s.id, "step_drag"), |ui| ui.add(
+                            eframe::egui::Label::new(format!("⠿ {}", i + 1))
+                                .sense(eframe::egui::Sense::click_and_drag())
+                        )).inner.on_hover_text("Select or drag this step; selected steps move together");
+                        if response.clicked() {
                             let mods = ui.input(|x| x.modifiers);
                             clicked = Some((i, mods.ctrl, mods.shift));
                         }
+                        if !interaction_blocked && response.drag_started() { drag_start = Some(s.id); }
                     });
                     r.col(|ui| {
                         changed |= ui.add_enabled(
@@ -486,31 +597,62 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         ).changed();
                     });
                     r.col(|ui| {
+                        ui.horizontal(|ui| {
+                        if let Some(block) = super::folding::foldable_block(&structure, s.id) {
+                            let collapsed = d.editor_state.folds.is_collapsed(mid, s.id);
+                            let response = ui.small_button(if collapsed { "▶" } else { "▼" })
+                                .on_hover_text(if collapsed { "Expand block" } else { "Collapse block" });
+                            if response.clicked() { command = Some(Command::Fold(s.id)); }
+                            response.on_hover_text(format!("{} steps in this block", block.closer_index - block.opener_index));
+                        }
                         let structural = matches!(s.action, crate::mkmacro::MkAction::Else|crate::mkmacro::MkAction::EndIf|crate::mkmacro::MkAction::RepeatEnd|crate::mkmacro::MkAction::WhileEnd);
                         let label = format!("{}{}", "  ".repeat(depths[i]), super::action_catalog::action_name(&s.action));
                         let response=if structural { ui.strong(label) } else { ui.label(label) };
                         if response.double_clicked(){command=Some(Command::Edit(s.id));}
                         if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }
-                        let menu = menu_model(
+                        response.context_menu(|ui| {
+                            let menu = menu_model(
                             &s,
                             &d.selection.ids,
                             &m.steps,
                             &structure,
                             breakpoint_locked,
-                        );
-                        response.context_menu(|ui| render_context_menu(ui, &menu, &mut command));
+                            );
+                            render_context_menu(ui, &menu, &mut command);
+                        });
                         if let Some(items) = row_diagnostics.get(&s.id) {
-                            let first = items[0];
+                            let first = items.iter().copied().find(|diagnostic| diagnostic.severity == crate::mkmacro::DiagnosticSeverity::Fatal).unwrap_or(items[0]);
                             let color = match first.severity {
                                 crate::mkmacro::DiagnosticSeverity::Fatal => eframe::egui::Color32::RED,
                                 crate::mkmacro::DiagnosticSeverity::Warning => eframe::egui::Color32::YELLOW,
                             };
                             let hover = items.iter().map(|x| format!("{}\nCode: {}", x.message, x.code)).collect::<Vec<_>>().join("\n\n");
-                            ui.colored_label(color, format!("⚠ {}", first.message)).on_hover_text(hover);
+                            if ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(format!("⚠ {}", first.message)).color(color)).sense(eframe::egui::Sense::click())).on_hover_text(hover).clicked() {
+                                if !interaction_blocked { diagnostic_target = Some(s.id); }
+                            }
                         }
+                        });
                     });
                     r.col(|ui| {
-                        let full=super::action_catalog::action_details(&s.action); let short=if full.chars().count()>80 {format!("{}…",full.chars().take(80).collect::<String>())}else{full.clone()}; let response=ui.label(short).on_hover_text(full);if response.double_clicked(){command=Some(Command::Edit(s.id));}if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure, breakpoint_locked);response.context_menu(|ui|render_context_menu(ui, &menu, &mut command));
+                        ui.horizontal(|ui| {
+                            if let Some(color) = super::action_editor::accent_color(s.metadata.accent) { ui.colored_label(color, "●").on_hover_text("Step accent"); }
+                            if s.metadata.bookmarked { ui.label("★").on_hover_text("Bookmarked step"); }
+                            if !s.metadata.comment.is_empty() { ui.label("≡").on_hover_text(&s.metadata.comment); }
+                            let details = super::action_catalog::action_details(&s.action);
+                            let details = if d.editor_state.folds.is_collapsed(mid, s.id) {
+                                super::folding::foldable_block(&structure, s.id)
+                                    .map_or(details.clone(), |b| format!("{details} — {} hidden steps", b.closer_index - b.opener_index))
+                            } else { details };
+                            let full = if s.metadata.label.is_empty() { details } else { format!("{} — {details}", s.metadata.label) };
+                            let short = if full.chars().count() > 80 { format!("{}…", full.chars().take(80).collect::<String>()) } else { full.clone() };
+                            let response = ui.label(short).on_hover_text(full);
+                            if response.double_clicked() { command = Some(Command::Edit(s.id)); }
+                            if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }
+                            response.context_menu(|ui| {
+                                let menu = menu_model(&s, &d.selection.ids, &m.steps, &structure, breakpoint_locked);
+                                render_context_menu(ui, &menu, &mut command);
+                            });
+                        });
                     });
                     r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
@@ -520,7 +662,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                     });
                     r.col(|ui| {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
-                            (run.macro_id == Some(mid)).then(|| run.steps.get(&s.id)).flatten()
+                            run.macro_steps.get(&crate::mkmacro::MacroStepKey::new(mid, s.id))
                         }) {
                             let active_breakpoint = active_breakpoint_status(
                                 runtime.as_deref(),
@@ -534,13 +676,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                             } else {
                                 runtime
                                     .as_ref()
-                                    .and_then(|run| run.step_outcomes.get(&s.id))
+                                    .and_then(|run| run.macro_step_outcomes.get(&crate::mkmacro::MacroStepKey::new(mid, s.id)))
                                     .and_then(crate::mkmacro::StepOutcome::detail)
                                     .unwrap_or(full)
                             };
                             let response = ui.colored_label(color, label).on_hover_text(detail);
                             if let Some(run) = runtime.as_ref()
-                                && let Some(failure) = run.failures.get(&crate::mkmacro::DiagnosticKey { run_id: run.run_id, step_id: s.id })
+                                && let Some(failure) = run.macro_failures.get(&crate::mkmacro::MacroDiagnosticKey { run_id: run.run_id, step: crate::mkmacro::MacroStepKey::new(mid, s.id) })
                             {
                                 response.on_hover_ui(|ui| {
                                     ui.strong(&failure.message);
@@ -552,12 +694,84 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                             }
                         }
                     });
+                    let after = if d.editor_state.folds.is_collapsed(mid, s.id) {
+                        super::folding::foldable_block(&structure, s.id).map_or(s.id, |b| b.closer_id)
+                    } else { s.id };
+                    drop_rows.push((r.response().rect, InsertionAnchor::Before(s.id), InsertionAnchor::After(after)));
                 });
                 updates.push((s.id,s.enabled,s.repeat,s.delay_after_ms));
             }
         });
+    });
         },
     );
+    if let Some(id) = drag_start {
+        let result = editor_operations::begin_drag(d, id);
+        report_command(d, result);
+    }
+    if d.editor_state.drag.is_some() {
+        let cancelled =
+            interaction_blocked || ui.input(|i| i.key_pressed(eframe::egui::Key::Escape));
+        if cancelled {
+            d.editor_state.drag = None;
+        } else {
+            let target = ui.input(|i| i.pointer.hover_pos()).and_then(|pointer| {
+                if !table_response
+                    .response
+                    .rect
+                    .intersect(ui.clip_rect())
+                    .contains(pointer)
+                {
+                    return None;
+                }
+                drop_rows
+                    .iter()
+                    .find(|(rect, _, _)| pointer.y <= rect.bottom())
+                    .map(|(rect, before, after)| {
+                        if pointer.y < rect.center().y {
+                            (*before, rect.top(), *rect)
+                        } else {
+                            (*after, rect.bottom(), *rect)
+                        }
+                    })
+                    .or_else(|| {
+                        drop_rows
+                            .last()
+                            .map(|(rect, _, after)| (*after, rect.bottom(), *rect))
+                    })
+            });
+            if let Some((anchor, y, rect)) = target {
+                let result = editor_operations::preview_drop(d, anchor);
+                let color = if result.is_ok() {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    eframe::egui::Color32::RED
+                };
+                ui.painter().line_segment(
+                    [
+                        eframe::egui::pos2(rect.left(), y),
+                        eframe::egui::pos2(rect.right(), y),
+                    ],
+                    eframe::egui::Stroke::new(2.0_f32, color),
+                );
+                if ui.input(|i| i.pointer.any_released()) {
+                    let result = editor_operations::finish_drag(d, anchor);
+                    report_command(d, result);
+                } else if let Err(reason) = result {
+                    eframe::egui::show_tooltip_at_pointer(
+                        ui.ctx(),
+                        eframe::egui::Id::new("mkmacro_drop_error"),
+                        |ui| {
+                            ui.label(reason);
+                        },
+                    );
+                }
+            } else if ui.input(|i| i.pointer.any_released()) {
+                d.editor_state.drag = None;
+                d.command_error = Some("Drop cancelled: choose a step insertion boundary".into());
+            }
+        }
+    }
     if !matches!(command, Some(Command::ToggleBreakpoint(_))) {
         if let Some((i, ctrl, shift)) = clicked {
             d.selection.click(&rows, i, ctrl, shift);
@@ -586,29 +800,57 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         }
         d.mark_dirty();
     }
+    if let Some(step_id) = diagnostic_target {
+        super::navigation::navigate(d, mid, step_id);
+    }
     // Only route table shortcuts while no modal/editor, focused control, active
     // pointer drag, popup, or context menu owns input.
     let editor_open = d.action_editor.draft.is_some();
-    let wants_keyboard_input = ui.ctx().wants_keyboard_input();
+    let focus_id = super::navigation::table_id(mid);
+    let focus_response = ui.interact(
+        table_response.response.rect,
+        focus_id,
+        eframe::egui::Sense::focusable_noninteractive(),
+    );
+    if d.navigation.focus_table {
+        // A later explicit click/Tab takes precedence over queued navigation.
+        if !ui.input(|i| i.pointer.any_pressed() || i.key_pressed(eframe::egui::Key::Tab)) {
+            focus_response.request_focus();
+        }
+        d.navigation.focus_table = false;
+    }
+    let wants_keyboard_input = ui.ctx().wants_keyboard_input() && !focus_response.has_focus();
     let pointer_in_use = ui.ctx().is_using_pointer();
     let popup_open =
         ui.ctx().memory(|memory| memory.any_popup_open()) || ui.ctx().is_context_menu_open();
     let modal_open = table_modal_open(d);
-    if d.action_editor.draft.is_none()
+    let table_owns_input = d.action_editor.draft.is_none()
         && !wants_keyboard_input
         && !pointer_in_use
         && !popup_open
-        && !modal_open
-    {
+        && !modal_open;
+    let clipboard_command = ui.input_mut(|input| {
+        editor_operations::clipboard_shortcut(
+            input,
+            table_owns_input,
+            &mut d.editor_state.shortcut_state,
+        )
+    });
+    if let Some(clipboard_command) = clipboard_command {
+        command = Some(match clipboard_command {
+            ClipboardCommand::Copy => Command::Copy,
+            ClipboardCommand::Cut => Command::Cut,
+            ClipboardCommand::Paste => Command::Paste,
+            ClipboardCommand::Duplicate => Command::Duplicate,
+        });
+    } else if table_owns_input && command.is_none() {
         ui.input(|i| {
             if i.key_pressed(eframe::egui::Key::Enter) {
-                if let Some(id) = d.selection.ids.iter().next() {
-                    command = Some(Command::Edit(*id))
+                if let Some(id) = d.selection.primary {
+                    command = Some(Command::Edit(id))
                 }
             } else if i.key_pressed(eframe::egui::Key::Delete) {
                 command = Some(Command::Delete)
-            } else if i.modifiers.ctrl && i.key_pressed(eframe::egui::Key::D) {
-                command = Some(Command::Duplicate)
             } else {
                 let pressed_keys = [eframe::egui::Key::ArrowUp, eframe::egui::Key::ArrowDown]
                     .into_iter()
@@ -628,6 +870,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     }
     if let Some(c) = command {
         apply_command(d, c, breakpoint_locked);
+    }
+    if d.editor_state.scroll_to.is_some() || matches!(command, Some(Command::Fold(_))) {
+        ui.ctx().request_repaint();
     }
 }
 
@@ -664,6 +909,7 @@ fn debug_this_step(d: &mut MkMacroDialog, id: u64) -> anyhow::Result<()> {
     d.selection = Selection {
         ids: BTreeSet::from([id]),
         anchor: None,
+        primary: Some(id),
     };
     let result = d.debug_selected_steps();
     d.selection = selection_before_debug;
@@ -671,6 +917,44 @@ fn debug_this_step(d: &mut MkMacroDialog, id: u64) -> anyhow::Result<()> {
 }
 
 fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
+    let clipboard = match c {
+        Command::Copy => Some(ClipboardCommand::Copy),
+        Command::Cut => Some(ClipboardCommand::Cut),
+        Command::Paste => Some(ClipboardCommand::Paste),
+        Command::Duplicate => Some(ClipboardCommand::Duplicate),
+        _ => None,
+    };
+    if let Some(command) = clipboard {
+        let result = editor_operations::clipboard(d, command);
+        report_command(d, result);
+        return;
+    }
+    if let Command::Fold(id) = c {
+        if let Some(mid) = d.selected_macro_id
+            && let Some(analysis) = d.cached_structure(mid)
+        {
+            d.editor_state.folds.toggle(mid, id, &analysis);
+            if let Some(primary) = d.selection.primary {
+                d.selection.primary = Some(
+                    d.editor_state
+                        .folds
+                        .visible_primary(mid, primary, &analysis),
+                );
+            }
+        }
+        return;
+    }
+    if let Command::EditAnnotations(id) = c {
+        if let Some(step) = d
+            .selected_macro()
+            .and_then(|m| m.steps.iter().find(|s| s.id == id))
+            .cloned()
+        {
+            d.action_editor
+                .begin_edit_in_macro(d.selected_macro_id, &step);
+        }
+        return;
+    }
     let selection_before_command = d.selection.clone();
     if let Command::ToggleBreakpoint(id) = c {
         if breakpoint_locked {
@@ -686,8 +970,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     }
     if let Command::DeleteBlock(id) | Command::DeleteRow(id) | Command::UnwrapBlock(id) = c {
         if !d.selection.ids.contains(&id) {
-            d.selection.ids = BTreeSet::from([id]);
-            d.selection.anchor = None;
+            d.selection.replace([id]);
         }
     }
     if let Command::Edit(id) = c {
@@ -732,7 +1015,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
                         .into(),
                 );
             } else {
-                d.action_editor.begin_edit(&s);
+                d.action_editor.begin_edit_in_macro(d.selected_macro_id, &s);
             }
         }
         return;
@@ -775,9 +1058,6 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     let movement_before = matches!(c, Command::Up | Command::Down).then(|| d.draft.clone());
     if let Some(m) = d.selected_macro_mut() {
         match c {
-            Command::Duplicate => {
-                new_selection = Some(duplicate_steps_with_ids(&mut m.steps, &ids))
-            }
             Command::Toggle => {
                 for s in &mut m.steps {
                     if ids.contains(&s.id) && s.action.can_be_disabled() {
@@ -809,6 +1089,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
                 m.steps.insert(
                     i,
                     MkStep {
+                        metadata: Default::default(),
                         id: 0,
                         enabled: true,
                         breakpoint: false,
@@ -826,13 +1107,22 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
         }
     }
     if let Some(error) = mutation_error {
-        d.command_error = Some(error);
+        d.selection = selection_before_command;
+        d.command_error = Some(error.to_string());
         return;
     }
     crate::mkmacro::repair_ids(&mut d.draft);
     if let Some(s) = new_selection {
-        d.selection.ids = s;
-        d.selection.anchor = None;
+        if let Some(m) = d.selected_macro() {
+            let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
+            if matches!(c, Command::Up | Command::Down) {
+                d.selection.ids = s;
+                d.selection.reconcile(&rows);
+            } else {
+                d.selection
+                    .replace(rows.into_iter().filter(|id| s.contains(id)));
+            }
+        }
     }
     if movement_before
         .as_ref()
@@ -840,122 +1130,6 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
     {
         d.mark_dirty();
     }
-}
-
-fn delete_selection(steps: &mut Vec<MkStep>, ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
-    if ids.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let analysis = crate::mkmacro::analyze_structure(steps);
-    let mut remove = BTreeSet::new();
-    for id in ids {
-        let Some((i, s)) = steps.iter().enumerate().find(|(_, s)| s.id == *id) else {
-            continue;
-        };
-        if s.action.is_block_marker() {
-            let b = analysis
-                .block_for_marker(*id)
-                .ok_or_else(|| format!("Step {id} is not part of a complete block"))?;
-            remove.extend(b.range.clone());
-        } else {
-            remove.insert(i);
-        }
-    }
-    if remove.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let first = *remove.first().unwrap();
-    let last = *remove.last().unwrap();
-    let next = (last + 1..steps.len())
-        .find(|i| !remove.contains(i))
-        .map(|i| steps[i].id);
-    let prev = (0..first)
-        .rev()
-        .find(|i| !remove.contains(i))
-        .map(|i| steps[i].id);
-    let mut i = 0;
-    steps.retain(|_| {
-        let keep = !remove.contains(&i);
-        i += 1;
-        keep
-    });
-    Ok(next
-        .or(prev)
-        .map(|id| BTreeSet::from([id]))
-        .unwrap_or_default())
-}
-
-fn expanded_move_ids(steps: &[MkStep], ids: &BTreeSet<u64>) -> Result<BTreeSet<u64>, String> {
-    let a = crate::mkmacro::analyze_structure(steps);
-    let mut out = ids.clone();
-    for id in ids {
-        if let Some(s) = steps.iter().find(|s| s.id == *id)
-            && s.action.is_block_marker()
-        {
-            let b = a
-                .block_for_marker(*id)
-                .ok_or_else(|| format!("Step {id} is not part of a complete block"))?;
-            out.extend(steps[b.range.clone()].iter().map(|s| s.id));
-        }
-    }
-    Ok(out)
-}
-fn move_selection_structurally(
-    steps: &mut [MkStep],
-    ids: &BTreeSet<u64>,
-    down: bool,
-) -> Result<BTreeSet<u64>, String> {
-    let expanded = expanded_move_ids(steps, ids)?;
-    let analysis = crate::mkmacro::analyze_structure(steps);
-    let before = analysis.diagnostics.len();
-    let structural_context: Vec<_> = ids
-        .iter()
-        .filter_map(|id| {
-            let step = steps.iter().find(|step| step.id == *id)?;
-            if !step.action.is_block_marker() {
-                return None;
-            }
-            let block = analysis.block_for_marker(*id)?;
-            Some((
-                *id,
-                block.opener_id,
-                analysis
-                    .containing_block(block.opener_id)
-                    .map(|parent| parent.opener_id),
-            ))
-        })
-        .collect();
-    let mut candidate = steps.to_vec();
-    loop {
-        let previous = candidate.clone();
-        move_steps(&mut candidate, &expanded, down);
-        if candidate == previous {
-            break;
-        }
-        let candidate_analysis = crate::mkmacro::analyze_structure(&candidate);
-        let crossed_neighbor = structural_context.iter().any(|(id, block_id, parent)| {
-            let Some(block) = candidate_analysis.block_for_marker(*id) else {
-                return true;
-            };
-            block.opener_id != *block_id
-                || candidate_analysis
-                    .containing_block(block.opener_id)
-                    .map(|candidate_parent| candidate_parent.opener_id)
-                    != *parent
-        });
-        if !crossed_neighbor {
-            break;
-        }
-    }
-    if crate::mkmacro::analyze_structure(&candidate)
-        .diagnostics
-        .len()
-        > before
-    {
-        return Err("The move would invalidate block nesting".into());
-    }
-    steps.clone_from_slice(&candidate);
-    Ok(expanded)
 }
 
 pub(super) fn apply_confirmed_unwrap(d: &mut MkMacroDialog, id: u64) {
@@ -970,8 +1144,7 @@ pub(super) fn apply_confirmed_unwrap(d: &mut MkMacroDialog, id: u64) {
                 .first_preserved_body_id
                 .or(r.following_id)
                 .or(r.preceding_id);
-            d.selection.ids = selected.map(|x| BTreeSet::from([x])).unwrap_or_default();
-            d.selection.anchor = None;
+            d.selection.replace(selected);
             d.mark_dirty();
         }
         Err(e) => d.command_error = Some(e),
@@ -982,8 +1155,97 @@ mod layout_tests {
     use super::*;
     use crate::mkmacro::{MkAction, MkCondition, MkErrorPolicy};
 
+    #[test]
+    fn selection_anchors_follow_stable_ids_after_reorder() {
+        let mut selection = Selection::default();
+        selection.click(&[40, 10, 30, 20], 1, false, false);
+        selection.reconcile(&[10, 40, 30, 20]);
+        selection.click(&[10, 40, 30, 20], 2, false, true);
+        assert_eq!(selection.ids, BTreeSet::from([10, 40, 30]));
+        assert_eq!(selection.anchor, Some(10));
+        assert_eq!(selection.primary, Some(30));
+        selection.reconcile(&[40, 20]);
+        assert_eq!(selection.ids, BTreeSet::from([40]));
+        assert_eq!(selection.anchor, Some(40));
+        assert_eq!(selection.primary, Some(40));
+    }
+
+    #[test]
+    fn fold_keeps_hidden_selection_and_visible_primary_without_dirtying() {
+        let (_directory, mut d) = dialog_with_steps(vec![
+            step(1, MkAction::If(MkCondition::All { conditions: vec![] })),
+            delay(2),
+            step(3, MkAction::Else),
+            delay(4),
+            step(5, MkAction::EndIf),
+        ]);
+        d.mark_dirty();
+        d.dirty = false;
+        let before = d.draft.clone();
+        let revision = d.draft_revision();
+        d.selection.replace([4]);
+        apply_command(&mut d, Command::Fold(1), false);
+        assert_eq!(d.selection.ids, BTreeSet::from([4]));
+        assert_eq!(d.selection.primary, Some(1));
+        d.selection.reconcile(&[1, 2, 3, 4, 5]);
+        assert_eq!(d.selection.primary, Some(1));
+        assert_eq!(d.selection.ids, BTreeSet::from([4]));
+        assert_eq!(d.draft_revision(), revision);
+        assert_eq!(d.draft, before);
+        assert!(!d.dirty);
+        apply_command(&mut d, Command::Copy, false);
+        assert_eq!(
+            d.editor_state
+                .clipboard
+                .iter()
+                .map(|s| s.id)
+                .collect::<Vec<_>>(),
+            [4]
+        );
+        apply_command(&mut d, Command::Fold(1), false);
+        assert_eq!(d.selection.ids, BTreeSet::from([4]));
+        assert!(!d.dirty);
+    }
+
+    #[test]
+    fn annotations_edit_the_exact_marker_transactionally() {
+        let (_directory, mut d) = dialog_with_steps(vec![
+            step(1, MkAction::RepeatStart { count: 2 }),
+            delay(2),
+            step(3, MkAction::RepeatEnd),
+        ]);
+        d.mark_dirty();
+        d.dirty = false;
+        let original = d.selected_macro().unwrap().steps.clone();
+        apply_command(&mut d, Command::EditAnnotations(3), false);
+        d.action_editor.draft.as_mut().unwrap().metadata.label = "End of loop".into();
+        assert_eq!(d.selected_macro().unwrap().steps, original);
+        assert!(!d.dirty);
+        d.action_editor.cancel();
+        assert_eq!(d.selected_macro().unwrap().steps, original);
+        apply_command(&mut d, Command::EditAnnotations(3), false);
+        let metadata = crate::mkmacro::MkStepMetadata {
+            label: "End of loop".into(),
+            comment: "Repeat marker\nwith notes".into(),
+            bookmarked: true,
+            accent: crate::mkmacro::MkStepAccent::Blue,
+        };
+        d.action_editor.draft.as_mut().unwrap().metadata = metadata.clone();
+        let replacement =
+            super::super::action_editor::ActionEditorState::new(d.visual_overlay.clone());
+        let mut editor = std::mem::replace(&mut d.action_editor, replacement);
+        assert_eq!(editor.apply(&mut d), Some(3));
+        d.action_editor = editor;
+        assert_eq!(d.selected_macro().unwrap().steps[2].metadata, metadata);
+        let mut expected = original;
+        expected[2].metadata = metadata;
+        assert_eq!(d.selected_macro().unwrap().steps, expected);
+        assert!(d.dirty);
+    }
+
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
@@ -1084,7 +1346,9 @@ mod layout_tests {
         let mut rows = vec![delay(1), delay(2)];
         rows[0].breakpoint = true;
 
-        let duplicated_ids = duplicate_steps_with_ids(&mut rows, &BTreeSet::from([1]));
+        let duplicated_ids =
+            crate::mkmacro::editor_mutation::duplicate_selection(&mut rows, &BTreeSet::from([1]))
+                .unwrap();
 
         assert_eq!(duplicated_ids.len(), 1);
         assert_ne!(rows[1].id, rows[0].id);
@@ -1422,6 +1686,11 @@ mod layout_tests {
                 ("Move Up", true),
                 ("Move Down", true),
                 ("Delete", true),
+                ("", false),
+                ("Copy", true),
+                ("Cut", true),
+                ("Paste", true),
+                ("Edit annotations", true),
             ]
         );
         for action in [MkAction::Break, MkAction::Continue] {
@@ -1447,6 +1716,13 @@ mod layout_tests {
             ("", false),
             ("Delete Block", true),
             ("Unwrap Block", true),
+            ("", false),
+            ("Copy", true),
+            ("Cut", true),
+            ("Paste", true),
+            ("Edit annotations", true),
+            ("Duplicate", true),
+            ("Expand / collapse block", true),
         ];
         for id in [1, 3, 5] {
             assert_eq!(labels(&if_rows, id), if_expected);
@@ -1477,7 +1753,16 @@ mod layout_tests {
         assert_eq!(malformed_menu[0], ("Edit", false));
         assert_eq!(
             &malformed_menu[8..],
-            &[("Delete Block", false), ("Unwrap Block", false)]
+            &[
+                ("Delete Block", false),
+                ("Unwrap Block", false),
+                ("", false),
+                ("Copy", false),
+                ("Cut", false),
+                ("Paste", true),
+                ("Edit annotations", true),
+                ("Duplicate", false)
+            ]
         );
     }
 
@@ -1562,6 +1847,7 @@ mod layout_tests {
         let selection = Selection {
             ids: BTreeSet::from([11, 33]),
             anchor: Some(2),
+            primary: Some(2),
         };
         let selection_before = selection.clone();
 
@@ -1596,7 +1882,15 @@ mod layout_tests {
         let mut runtime = RuntimeSnapshot {
             state: RuntimeState::Paused,
             macro_id: Some(7),
-            pause_reason: Some(RuntimePauseReason::Breakpoint { step_id: 22 }),
+            call_stack: std::sync::Arc::new(vec![crate::mkmacro::ExecutionFrameSnapshot {
+                context: crate::mkmacro::ExecutionFrameContext::root(7),
+                macro_name: std::sync::Arc::from("Root"),
+                active_step_id: Some(22),
+            }]),
+            pause_reason: Some(RuntimePauseReason::Breakpoint {
+                step_id: 22,
+                frame: crate::mkmacro::ExecutionFrameContext::root(7),
+            }),
             ..RuntimeSnapshot::default()
         };
         assert!(active_breakpoint_status(
@@ -1628,7 +1922,10 @@ mod layout_tests {
             22,
             StepState::Pending
         ));
-        runtime.pause_reason = Some(RuntimePauseReason::Breakpoint { step_id: 22 });
+        runtime.pause_reason = Some(RuntimePauseReason::Breakpoint {
+            step_id: 22,
+            frame: crate::mkmacro::ExecutionFrameContext::root(7),
+        });
         runtime.state = RuntimeState::Running;
         assert!(!active_breakpoint_status(
             Some(&runtime),

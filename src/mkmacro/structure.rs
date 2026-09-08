@@ -193,52 +193,11 @@ pub struct MutationResult {
     pub first_preserved_body_id: Option<u64>,
 }
 
-fn resolved(steps: &[MkStep], marker_id: u64) -> Result<StructuralBlock, String> {
-    analyze_structure(steps)
-        .block_for_marker(marker_id)
-        .cloned()
-        .ok_or_else(|| format!("Step {marker_id} is not part of a complete block"))
-}
 pub fn delete_block(steps: &mut Vec<MkStep>, marker_id: u64) -> Result<MutationResult, String> {
-    let b = resolved(steps, marker_id)?;
-    let first = b.opener_index;
-    let following_id = steps.get(b.closer_index + 1).map(|s| s.id);
-    let preceding_id = first
-        .checked_sub(1)
-        .and_then(|i| steps.get(i))
-        .map(|s| s.id);
-    steps.drain(b.range);
-    Ok(MutationResult {
-        first_removed_index: first,
-        following_id,
-        preceding_id,
-        first_preserved_body_id: None,
-    })
+    super::editor_mutation::delete_block(steps, marker_id).map_err(|e| e.to_string())
 }
 pub fn unwrap_block(steps: &mut Vec<MkStep>, marker_id: u64) -> Result<MutationResult, String> {
-    let b = resolved(steps, marker_id)?;
-    let first = b.opener_index;
-    let marker_ids = [
-        Some(b.opener_id),
-        b.else_marker.map(|x| x.0),
-        Some(b.closer_id),
-    ];
-    let first_preserved_body_id = steps[b.opener_index + 1..b.closer_index]
-        .iter()
-        .find(|s| !marker_ids.contains(&Some(s.id)))
-        .map(|s| s.id);
-    let following_id = steps.get(b.closer_index + 1).map(|s| s.id);
-    let preceding_id = first
-        .checked_sub(1)
-        .and_then(|i| steps.get(i))
-        .map(|s| s.id);
-    steps.retain(|s| !marker_ids.contains(&Some(s.id)));
-    Ok(MutationResult {
-        first_removed_index: first,
-        following_id,
-        preceding_id,
-        first_preserved_body_id,
-    })
+    super::editor_mutation::unwrap_block(steps, marker_id).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -247,6 +206,7 @@ mod tests {
     use crate::mkmacro::{MkCondition, MkErrorPolicy};
     fn s(id: u64, a: MkAction) -> MkStep {
         MkStep {
+            metadata: Default::default(),
             id,
             enabled: true,
             breakpoint: false,
