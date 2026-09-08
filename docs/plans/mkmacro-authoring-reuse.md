@@ -36,8 +36,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | M11 | Versioned package export and transactional import | M02, M05, M10 | complete | 6128a96c; construction gates and focused package/store/field tests passed (final 54/54); broader coverage M13 |
 | M12 | Library/template workflows and user help | M11 | complete | 44618b22; construction gates and focused template/UI/catalog tests passed 8/8; broader coverage M13 |
 | M13 | Model/editor/analysis/package regression coverage | M12 | complete | c691dc78; focused library groups 129/129 and 484/484; integrations 27/27 |
-| M14 | Runtime/debug/invocation regression coverage and focused verification | M13 | complete | runtime library 220/220, prompt 5/5, five integrations 34/34 |
-| M15 | Independent review, remediation and authoritative full verification | M14 | pending | |
+| M14 | Runtime/debug/invocation regression coverage and focused verification | M13 | complete | 2ca26453; runtime library 220/220, prompt 5/5, five integrations 34/34 |
+| M15 | Independent review, remediation and authoritative full verification | M14 | complete | 84c8b5a5; review findings remediated; final full suite passed 3404/3404 |
 
 ## Verified baseline architecture and required migrations
 
@@ -513,3 +513,17 @@ Construction/targeted/full verification and review findings are appended by the 
 - Audited the runtime/debug/invocation matrix against existing M06-M09 tests, then added six focused tests in existing library modules: A/B argument ordering with literal/variable/default/builtin sources and same-name local isolation; early/root Return plus procedure fallthrough and exact caller resumption; Continue after child failure with caller locals/output mapping/input ownership preserved; all four persisted parameter value types without coercion; immutable callee execution after document publication changes; and all six Normal/Debug Whole/From/Selected paths retaining complete callee closure.
 - No production defect or source behavior change was required. Existing coverage supplies nested/retry/playback/depth/transition/input panic, compound debugger stack/breakpoint/control and admission/facade/hotkey cases. No new binary or dependency was added. Native GUI smoke was not run because no safe interactive application session was established and real macro input was deliberately not automated; fake backend and UI-model coverage is authoritative for this gate.
 - Final `cargo check` passed (8.67 seconds), `cargo check --tests` passed (17.02 seconds), `cargo fmt --all -- --check` and `git diff --check` passed. Required executor/runtime/invocation/hotkey library group passed 220/220 (2621 skipped); invocation-prompt lifecycle group passed 5/5 (2836 skipped); existing `mkmacro_runtime`, `mkmacro_launcher_integration`, `mkmacro_plugin`, `mkmacro_recorder` and `mkmacro_visual` binaries passed 34/34 with none skipped. Parent inspected the test-only diff and found no unresolved M14 gap.
+- Commit: `2ca26453 test(mkmacro): verify reusable runtime and debug lifecycle`. Working tree clean immediately after commit; M15 pre-review integration verification started after commit success.
+
+### M15 pre-review integration gate
+
+- `cargo fmt --all -- --check`, `cargo check` and `git diff --check` passed. The first complete `cargo nextest run --no-fail-fast` built the full graph and ran 3400 tests: 3399 passed, one unrelated bookmarks native-watcher timing test failed, and 7 were skipped. That exact test passed 1/1 immediately in isolation.
+- The required complete warm rerun `cargo nextest run --no-fail-fast` passed 3400/3400 with 7 skipped in 41.211 seconds. No source change was needed for the transient watcher failure. Independent cumulative review started only after this successful complete gate.
+
+### M15 independent review, remediation and final verification
+
+- Independent cumulative review found two important correctness defects: copied `FindPixel` producers retained destination-conflicting result-slot IDs, and template save/load used inconsistent ASCII versus Unicode case normalization. It also identified three unused public step-table compatibility forwards, two of which silently discarded structural errors. No other substantive defect was found across schema migration, structured authoring, typed replacement, validation/compiler closure, runtime call frames, debugger identity, invocation prompts, packages, templates or performance constraints.
+- Copy/duplicate now allocates deterministic fresh nonzero pixel result-slot IDs against the destination, rewrites only copied internal consumers (including nested conditions), and preserves external references. Template save and load now share trimmed Unicode lowercase normalization, with atomic byte-preservation coverage for rejected Unicode collisions. The stale compatibility forwards were removed and their remaining test caller migrated to the fallible domain owner. Focused remediation Nextest passed 5/5; `cargo check --tests`, `cargo check`, `cargo fmt --all --check`, `git diff --check` and the stale-symbol search passed.
+- Commit: `84c8b5a5 fix(mkmacro): preserve copied result identities`.
+- Post-review `cargo fmt --all -- --check`, `cargo check` and `git diff --check` passed. The authoritative `cargo nextest run --no-fail-fast` compiled the final graph and passed 3404/3404 tests with 7 skipped in 55.215 seconds of test execution.
+- Native GUI smoke could not be performed: the available computer-control environment exposed browser surfaces only and explicitly disabled native computer APIs. No real input-producing macro was automated. Fake-backend, UI-model and complete integration coverage provide the executable verification for this environment.
