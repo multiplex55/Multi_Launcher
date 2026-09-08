@@ -960,7 +960,8 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
             .and_then(|m| m.steps.iter().find(|s| s.id == id))
             .cloned()
         {
-            d.action_editor.begin_edit(&step);
+            d.action_editor
+                .begin_edit_in_macro(d.selected_macro_id, &step);
         }
         return;
     }
@@ -1024,7 +1025,7 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
                         .into(),
                 );
             } else {
-                d.action_editor.begin_edit(&s);
+                d.action_editor.begin_edit_in_macro(d.selected_macro_id, &s);
             }
         }
         return;

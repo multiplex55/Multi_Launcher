@@ -1,6 +1,7 @@
 pub mod action_catalog;
 pub mod action_editor;
 mod analysis_cache;
+mod call_editor;
 pub mod condition_editor;
 mod editor_operations;
 mod folding;
@@ -23,6 +24,7 @@ pub(crate) mod parameter_prompt;
 pub mod recorder_controller;
 pub(crate) mod runtime_inspector;
 mod search;
+mod signature_editor;
 mod step_table;
 mod toolbar;
 pub(crate) mod typed_value;
@@ -1829,7 +1831,8 @@ mod tests {
     fn expected_action_contract(action: &MkAction) -> (action_catalog::EditorKind, bool) {
         use action_catalog::EditorKind;
         match action {
-            MkAction::CallMacro(_) | MkAction::Return(_) => (EditorKind::General, true),
+            MkAction::CallMacro(_) => (EditorKind::CallMacro, true),
+            MkAction::Return(_) => (EditorKind::Return, true),
             MkAction::KeyDown(_)
             | MkAction::KeyUp(_)
             | MkAction::KeyPress(_)
@@ -2726,7 +2729,29 @@ mod tests {
             // document validator used by save and run.
             let (_dir, mut dialog) = dialog();
             dialog.create_macro();
+            let caller_id = dialog.selected_macro_id.unwrap();
+            let call_target = if matches!(action, MkAction::CallMacro(_)) {
+                dialog.create_macro();
+                let target = dialog.selected_macro_id.unwrap();
+                dialog.rename_selected("Call Target");
+                dialog.set_selected_macro(Some(caller_id));
+                Some(target)
+            } else {
+                None
+            };
             assert!(action_catalog::select_descriptor(&mut dialog, &descriptor));
+            if let Some(target) = call_target {
+                let MkAction::CallMacro(call) = &mut dialog
+                    .action_editor
+                    .draft
+                    .as_mut()
+                    .expect("Call opens a transaction")
+                    .action
+                else {
+                    unreachable!()
+                };
+                call.macro_id = target;
+            }
             let draft_contract = action_catalog::draft_validation_contract(&action);
             if configurable
                 && draft_contract == action_catalog::DraftValidationContract::CommitReady
@@ -2797,12 +2822,8 @@ mod tests {
             if descriptor.availability == action_catalog::ActionAvailability::Hidden {
                 assert_eq!(
                     descriptor.category,
-                    if matches!(action, MkAction::CallMacro(_) | MkAction::Return(_)) {
-                        action_catalog::ActionCategory::Logic
-                    } else {
-                        action_catalog::ActionCategory::UiAutomation
-                    },
-                    "{context}: only deferred reusable authoring and UI Automation may be hidden"
+                    action_catalog::ActionCategory::UiAutomation,
+                    "{context}: only UI Automation may be hidden"
                 );
                 assert!(
                     descriptor
@@ -2920,24 +2941,15 @@ mod tests {
                     }
                 }
                 action_catalog::ActionAvailability::Hidden => {
-                    let reusable = matches!(action, MkAction::CallMacro(_) | MkAction::Return(_));
                     assert_eq!(
                         descriptor.category,
-                        if reusable {
-                            action_catalog::ActionCategory::Logic
-                        } else {
-                            action_catalog::ActionCategory::UiAutomation
-                        },
+                        action_catalog::ActionCategory::UiAutomation,
                         "{context}: hidden action category"
                     );
                     assert_eq!(
                         descriptor.runtime,
-                        if reusable {
-                            action_catalog::RuntimeAvailability::Supported
-                        } else {
-                            action_catalog::RuntimeAvailability::Unavailable
-                        },
-                        "{context}: reusable execution is supported; UIA remains unavailable"
+                        action_catalog::RuntimeAvailability::Unavailable,
+                        "{context}: hidden UIA remains unavailable"
                     );
                     assert!(
                         !action_catalog::is_available_in_palette(&descriptor),

@@ -204,6 +204,14 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             )
             .changed();
     });
+    let _ = m;
+    super::signature_editor::show(ui, d, macro_id);
+    let m = d
+        .draft
+        .macros
+        .iter_mut()
+        .find(|m| m.id == macro_id)
+        .expect("selected macro remains present while rendering properties");
     if clear {
         changed |= clear_hotkey(&mut m.hotkey);
     }

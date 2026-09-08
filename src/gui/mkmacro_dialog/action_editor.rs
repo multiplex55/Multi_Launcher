@@ -28,6 +28,147 @@ fn apply_launcher_query_change(payload: &mut MkLauncherCommandPayload, changed: 
 }
 
 #[cfg(test)]
+mod reusable_authoring_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn document() -> MkMacroDocument {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": crate::mkmacro::SCHEMA_VERSION,
+            "macros": [
+                {"id": 1, "name": "caller", "steps": [{"id": 10, "action": {"type": "call_macro", "data": {"macro_id": 2, "arguments": [{"parameter_id": 7, "source": {"type": "literal", "data": {"type": "string", "value": "ok"}}}]}}}]},
+                {"id": 2, "name": "target", "signature": {"parameters": [{"id": 7, "name": "input", "value_type": "string"}], "outputs": []}}
+            ]
+        })).unwrap()
+    }
+
+    fn dialog() -> (tempfile::TempDir, MkMacroDialog) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store.save(document()).unwrap();
+        (directory, MkMacroDialog::new(Arc::new(store)))
+    }
+
+    #[test]
+    fn apply_uses_captured_macro_identity_not_current_selection() {
+        let (_directory, mut dialog) = dialog();
+        dialog.set_selected_macro(Some(1));
+        let source = dialog.selected_macro().unwrap().steps[0].clone();
+        let mut editor = dialog.take_action_editor();
+        editor.begin_edit_in_macro(Some(1), &source);
+        dialog.set_selected_macro(Some(2));
+        assert_eq!(editor.apply(&mut dialog), Some(10));
+        assert_eq!(dialog.selected_macro_id, Some(1));
+        assert!(matches!(
+            dialog.draft.macros[0].steps[0].action,
+            MkAction::CallMacro(_)
+        ));
+    }
+
+    #[test]
+    fn stale_replacement_and_invalid_reusable_draft_remain_transactional() {
+        let (_directory, mut dialog) = dialog();
+        dialog.set_selected_macro(Some(1));
+        let source = dialog.selected_macro().unwrap().steps[0].clone();
+        let mut editor = dialog.take_action_editor();
+        editor.begin_edit_in_macro(Some(1), &source);
+        dialog.draft.macros[0].steps[0].action = MkAction::Return(Default::default());
+        assert_eq!(editor.apply(&mut dialog), None);
+        assert!(editor.draft.is_some());
+        assert!(
+            editor
+                .capture_message
+                .as_deref()
+                .is_some_and(|message| message.contains("changed outside"))
+        );
+
+        editor.cancel();
+        editor.begin_new(MkAction::CallMacro(Default::default()));
+        editor.bind_owner(Some(1));
+        assert_eq!(editor.apply(&mut dialog), None);
+        assert!(editor.draft.is_some());
+        assert!(
+            editor
+                .capture_message
+                .as_deref()
+                .is_some_and(|message| message.contains("target"))
+        );
+    }
+
+    #[test]
+    fn central_apply_validation_preserves_incompatible_and_duplicate_bindings() {
+        let document = document();
+        let mut draft = document.macros[0].steps[0].clone();
+        let MkAction::CallMacro(call) = &mut draft.action else {
+            unreachable!()
+        };
+        call.arguments[0].source = MkValueSource::Literal(MkValue::Number(42.0));
+        call.arguments.push(call.arguments[0].clone());
+        let before = call.arguments.clone();
+        let error = reusable_apply_error(
+            &document,
+            1,
+            &draft,
+            &InsertionIntent::EditExisting { step_id: 10 },
+        )
+        .expect("incompatible duplicate binding is fatal");
+        assert!(error.contains("bound more than once") || error.contains("must be String"));
+        let MkAction::CallMacro(call) = draft.action else {
+            unreachable!()
+        };
+        assert_eq!(call.arguments, before);
+
+        let empty_return = MkStep {
+            action: MkAction::Return(Default::default()),
+            ..document.macros[0].steps[0].clone()
+        };
+        assert!(
+            reusable_apply_error(
+                &document,
+                1,
+                &empty_return,
+                &InsertionIntent::EditExisting { step_id: 10 }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn apply_and_open_never_discards_invalid_edits_or_opens_the_wrong_target() {
+        let (_directory, mut dialog) = dialog();
+        dialog.set_selected_macro(Some(1));
+        let source = dialog.selected_macro().unwrap().steps[0].clone();
+        dialog.action_editor.begin_edit_in_macro(Some(1), &source);
+        assert!(!apply_and_open_call_target(&mut dialog, 1));
+        assert_eq!(dialog.selected_macro_id, Some(1));
+        assert!(dialog.action_editor.draft.is_some());
+        let MkAction::CallMacro(call) = &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        call.arguments.clear();
+        assert!(!apply_and_open_call_target(&mut dialog, 2));
+        assert_eq!(dialog.selected_macro_id, Some(1));
+        assert!(dialog.action_editor.draft.is_some());
+        let MkAction::CallMacro(committed) = &dialog.draft.macros[0].steps[0].action else {
+            unreachable!()
+        };
+        assert_eq!(committed.arguments.len(), 1);
+        let MkAction::CallMacro(call) = &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        call.arguments.push(MkCallArgumentBinding {
+            parameter_id: MkSignatureId(7),
+            source: MkValueSource::Literal(MkValue::String("fixed".into())),
+        });
+        assert!(apply_and_open_call_target(&mut dialog, 2));
+        assert_eq!(dialog.selected_macro_id, Some(2));
+        assert!(dialog.action_editor.draft.is_none());
+    }
+}
+
+#[cfg(test)]
 mod launcher_query_editor_tests {
     use super::*;
     use crate::actions::Action;
@@ -71,6 +212,10 @@ mod launcher_query_editor_tests {
 
 pub struct ActionEditorState {
     pub draft: Option<MkStep>,
+    /// Stable transaction owner. Selection is presentation and may change while
+    /// this modal is open; it is never authority for Apply.
+    owner_macro_id: Option<u64>,
+    source_step: Option<MkStep>,
     /// `None` means insert a new row; otherwise replace this stable step id.
     pub editing_id: Option<u64>,
     /// Captured when the editor opens, so applying cannot accidentally use a
@@ -111,6 +256,8 @@ pub struct ActionEditorState {
     pub(super) image_refs_cache: Option<(u64, Arc<Vec<MkImageRef>>)>,
     variable_consumer_index: usize,
     variable_consumer_id: Option<u64>,
+    call_target_search: String,
+    pending_call_target: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -347,6 +494,8 @@ impl ActionEditorState {
     ) -> Self {
         Self {
             draft: None,
+            owner_macro_id: None,
+            source_step: None,
             editing_id: None,
             insertion: None,
             capture_keys: false,
@@ -376,6 +525,8 @@ impl ActionEditorState {
             image_refs_cache: None,
             variable_consumer_index: 0,
             variable_consumer_id: None,
+            call_target_search: String::new(),
+            pending_call_target: None,
         }
     }
 
@@ -900,6 +1051,8 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
+        self.owner_macro_id = None;
+        self.source_step = None;
         self.draft_changed = false;
         self.add_smooth_move = false;
         self.add_activate_before = false;
@@ -909,6 +1062,8 @@ impl ActionEditorState {
             after_step_id: None,
         });
         self.editor = Some(editor);
+        self.call_target_search.clear();
+        self.pending_call_target = None;
         self.image_search = match &action {
             MkAction::ImageFind(p) | MkAction::ImageClick(p) => {
                 Some(super::image_search_editor::ImageSearchEditorState::from_region(&p.region))
@@ -935,7 +1090,13 @@ impl ActionEditorState {
             action,
         });
     }
+    pub fn bind_owner(&mut self, owner_macro_id: Option<u64>) {
+        self.owner_macro_id = owner_macro_id;
+    }
     pub fn begin_edit(&mut self, step: &MkStep) {
+        self.begin_edit_in_macro(None, step);
+    }
+    pub fn begin_edit_in_macro(&mut self, owner_macro_id: Option<u64>, step: &MkStep) {
         self.cancel_owned_passive_overlay();
         self.cancel_visual_capture();
         self.image_authoring = Default::default();
@@ -946,6 +1107,8 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
+        self.owner_macro_id = owner_macro_id;
+        self.source_step = Some(step.clone());
         self.draft_changed = false;
         self.add_smooth_move = false;
         self.add_activate_before = false;
@@ -967,6 +1130,8 @@ impl ActionEditorState {
             _ => None,
         };
         self.editor = Some(super::action_catalog::editor_for_action(&step.action));
+        self.call_target_search.clear();
+        self.pending_call_target = None;
     }
     pub fn cancel(&mut self) {
         self.pending_visual_region = None;
@@ -985,10 +1150,14 @@ impl ActionEditorState {
         self.cancel_owned_passive_overlay();
         self.stop_position_capture();
         self.draft = None;
+        self.owner_macro_id = None;
+        self.source_step = None;
         self.editing_id = None;
         self.insertion = None;
         self.capture_keys = false;
         self.editor = None;
+        self.call_target_search.clear();
+        self.pending_call_target = None;
         self.image_search = None;
     }
 
@@ -1502,6 +1671,69 @@ impl ActionEditorState {
         if !virtual_desktop_number_valid(&self.draft.as_ref()?.action) {
             return None;
         }
+        let owner_id = self.owner_macro_id.or(dialog.selected_macro_id)?;
+        if !dialog.draft.macros.iter().any(|m| m.id == owner_id) {
+            self.capture_message = Some("The macro being edited no longer exists.".into());
+            return None;
+        }
+        let intent = self
+            .insertion
+            .clone()
+            .unwrap_or_else(|| match self.editing_id {
+                Some(step_id) => InsertionIntent::EditExisting { step_id },
+                None => InsertionIntent::Plain {
+                    after_step_id: None,
+                },
+            });
+        if let InsertionIntent::EditExisting { step_id } = intent {
+            let current = dialog
+                .draft
+                .macros
+                .iter()
+                .find(|m| m.id == owner_id)
+                .and_then(|m| m.steps.iter().find(|s| s.id == step_id));
+            if current.is_none()
+                || self
+                    .source_step
+                    .as_ref()
+                    .is_some_and(|source| current != Some(source))
+            {
+                self.capture_message = Some(
+                    "This action changed outside the editor. Cancel and reopen it before applying."
+                        .into(),
+                );
+                return None;
+            }
+        } else if let InsertionIntent::Plain {
+            after_step_id: Some(step_id),
+        } = intent
+            && !dialog
+                .draft
+                .macros
+                .iter()
+                .find(|m| m.id == owner_id)
+                .is_some_and(|m| m.steps.iter().any(|step| step.id == step_id))
+        {
+            self.capture_message = Some(
+                "The insertion anchor changed outside the editor. Cancel and reopen it before applying."
+                    .into(),
+            );
+            return None;
+        }
+        if matches!(
+            self.draft.as_ref().map(|s| &s.action),
+            Some(MkAction::CallMacro(_) | MkAction::Return(_))
+        ) {
+            if let Some(message) = reusable_apply_error(
+                &dialog.draft,
+                owner_id,
+                self.draft.as_ref().unwrap(),
+                &intent,
+            ) {
+                self.capture_message = Some(message);
+                return None;
+            }
+        }
         self.image_authoring = Default::default();
         self.pending_image_import = None;
         self.capture_filename.clear();
@@ -1525,7 +1757,10 @@ impl ActionEditorState {
                 after_step_id: None,
             },
         });
+        self.owner_macro_id = None;
+        self.source_step = None;
         self.editor = None;
+        dialog.set_selected_macro(Some(owner_id));
         // New block openers are inserted together with their mandatory closing
         // marker, while the configured step settings remain on the opener.
         if !matches!(intent, InsertionIntent::EditExisting { .. })
@@ -1542,7 +1777,7 @@ impl ActionEditorState {
                 }
             };
         }
-        let m = dialog.selected_macro_mut()?;
+        let m = dialog.draft.macros.iter_mut().find(|m| m.id == owner_id)?;
         let index = if let InsertionIntent::EditExisting { step_id: id } = intent {
             let i = m.steps.iter().position(|s| s.id == id)?;
             step.id = id;
@@ -1561,7 +1796,8 @@ impl ActionEditorState {
             i
         };
         crate::mkmacro::repair_ids(&mut dialog.draft);
-        let id = dialog.selected_macro()?.steps[index].id;
+        let id = dialog.draft.macros.iter().find(|m| m.id == owner_id)?.steps[index].id;
+        dialog.set_selected_macro(Some(owner_id));
         dialog.selection.replace([id]);
         dialog.mark_dirty();
         Some(id)
@@ -2122,7 +2358,7 @@ impl<'a> TargetUiOptions<'a> {
 const RUNTIME_SCOPE_TOOLTIP: &str = "Runtime outputs are available when the producing and consuming steps execute in the same macro run.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct VariablePickerModel {
+pub(super) struct VariablePickerModel {
     suggestions: Vec<VariableDescriptor>,
 }
 
@@ -2169,7 +2405,7 @@ fn variable_detail_text(descriptor: &VariableDescriptor) -> String {
 
 /// Editable variable consumer with a deliberately optional suggestion popup.
 /// The predicate keeps this reusable for consumers accepting multiple types.
-fn variable_picker_ui(
+pub(super) fn variable_picker_ui(
     ui: &mut egui::Ui,
     id_source: impl std::hash::Hash,
     buffer: &mut String,
@@ -2633,6 +2869,10 @@ fn action_ui(
     point_pick_active: bool,
     authoring_busy: bool,
     test_busy: bool,
+    document: &MkMacroDocument,
+    caller_id: u64,
+    call_target_search: &mut String,
+    pending_call_target: &mut Option<u64>,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -2641,6 +2881,7 @@ fn action_ui(
     Option<super::condition_editor::ConditionImageRequest>,
     Option<PreviewRequest>,
     Option<super::visual_overlay::VisualPointDestination>,
+    Option<u64>,
 ) {
     let target_context = TargetEditorContext {
         store: image_context.store,
@@ -2653,8 +2894,31 @@ fn action_ui(
     let mut condition_image_request = None;
     let mut preview_request = None;
     let mut point_pick = None;
+    let mut open_call_target = None;
     let draft_id = step.id;
     match &mut step.action {
+        MkAction::CallMacro(call) => {
+            open_call_target = super::call_editor::call_ui(
+                ui,
+                call,
+                document,
+                caller_id,
+                variable_catalog,
+                call_target_search,
+                pending_call_target,
+            )
+            .open_target;
+        }
+        MkAction::Return(payload) => {
+            let signature = document
+                .macros
+                .iter()
+                .find(|m| m.id == caller_id)
+                .map(|m| &m.signature)
+                .cloned()
+                .unwrap_or_default();
+            super::call_editor::return_ui(ui, payload, &signature, variable_catalog);
+        }
         MkAction::KeyPress(k) | MkAction::KeyDown(k) | MkAction::KeyUp(k) => {
             ui.label(format!("Captured: {}", key_name(k)));
             if ui.button("Capture next key or chord").clicked() {
@@ -3494,6 +3758,7 @@ fn action_ui(
         condition_image_request,
         preview_request,
         point_pick,
+        open_call_target,
     )
 }
 
@@ -3821,6 +4086,50 @@ fn draft_apply_valid(
             .is_none()
 }
 
+/// Validate the exact prospective Call/Return document through the central
+/// authoring analyzer. This is checked inside `apply`, so no custom caller can
+/// bypass the same fatal-diagnostic boundary used by the document.
+fn reusable_apply_error(
+    document: &MkMacroDocument,
+    owner_id: u64,
+    draft: &MkStep,
+    intent: &InsertionIntent,
+) -> Option<String> {
+    let mut candidate = document.clone();
+    let owner = candidate.macros.iter_mut().find(|m| m.id == owner_id)?;
+    let candidate_id = match intent {
+        InsertionIntent::EditExisting { step_id } => {
+            let index = owner.steps.iter().position(|s| s.id == *step_id)?;
+            let mut replacement = draft.clone();
+            replacement.id = *step_id;
+            owner.steps[index] = replacement;
+            *step_id
+        }
+        InsertionIntent::Plain { after_step_id } => {
+            let mut inserted = draft.clone();
+            inserted.id = 0;
+            let index = after_step_id
+                .and_then(|id| owner.steps.iter().position(|s| s.id == id))
+                .map_or(owner.steps.len(), |index| index + 1);
+            owner.steps.insert(index, inserted);
+            crate::mkmacro::repair_ids(&mut candidate);
+            candidate.macros.iter().find(|m| m.id == owner_id)?.steps[index].id
+        }
+        InsertionIntent::Wrap { .. } => {
+            return Some("Call and Return cannot wrap a selection".into());
+        }
+    };
+    crate::mkmacro::analyze_document(&candidate)
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| {
+            diagnostic.severity == crate::mkmacro::DiagnosticSeverity::Fatal
+                && diagnostic.macro_id == owner_id
+                && diagnostic.step_id == Some(candidate_id)
+        })
+        .map(|diagnostic| diagnostic.message)
+}
+
 fn reduce_related_action_request(
     state: &mut ActionEditorState,
     request: super::image_search_editor::ImageEditorRequest,
@@ -3994,6 +4303,22 @@ fn annotations_ui(ui: &mut egui::Ui, metadata: &mut crate::mkmacro::MkStepMetada
                 ui.selectable_value(&mut metadata.accent, accent, text);
             }
         });
+}
+
+fn apply_and_open_call_target(d: &mut MkMacroDialog, target: u64) -> bool {
+    if !d.action_editor.draft.as_ref().is_some_and(
+        |step| matches!(&step.action, MkAction::CallMacro(call) if call.macro_id == target),
+    ) {
+        return false;
+    }
+    let mut editor = d.take_action_editor();
+    let applied = editor.apply(d).is_some();
+    if applied {
+        d.set_selected_macro(Some(target));
+    } else if editor.draft.is_some() {
+        d.action_editor = editor;
+    }
+    applied
 }
 
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
@@ -4194,6 +4519,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         None;
     let mut preview_request = None;
     let mut point_pick_request = None;
+    let mut open_call_target_request = None;
     // Execute after egui releases the mutable draft borrow held by `step`.
     let mut region_preview_request = None;
     let mut identify_monitors_request = false;
@@ -4219,9 +4545,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         })
         .1
         .clone();
+    let catalog_owner = d.action_editor.owner_macro_id.or(d.selected_macro_id);
     let catalog_key = (
         d.draft_revision(),
-        d.selected_macro_id,
+        catalog_owner,
         d.action_editor.draft_generation,
     );
     if d.action_editor.variable_catalog_key != Some(catalog_key) {
@@ -4229,11 +4556,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             .draft
             .macros
             .iter()
-            .find(|m| Some(m.id) == d.selected_macro_id)
+            .find(|m| Some(m.id) == catalog_owner)
             .map(|m| m.steps.as_slice())
             .unwrap_or_default();
         d.action_editor
-            .refresh_variable_catalog(steps, d.selected_macro_id.map(|id| (&d.draft, id)));
+            .refresh_variable_catalog(steps, catalog_owner.map(|id| (&d.draft, id)));
         d.action_editor.variable_catalog_key = Some(catalog_key);
     }
     egui::Window::new("Action Editor")
@@ -4255,7 +4582,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 store: &d.store,
                 assets: &image_refs,
             };
-            let (position, mut window, launcher, image, condition_image, preview, pick_point)=action_ui(
+            let caller_id = state.owner_macro_id.or(d.selected_macro_id).unwrap_or(0);
+            let (position, mut window, launcher, image, condition_image, preview, pick_point, open_target)=action_ui(
                 ui,
                 step,
                 &mut state.capture_keys,
@@ -4265,6 +4593,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 point_pick_active,
                 workflow_active || importing || crop_open,
                 test_busy,
+                &d.draft,
+                caller_id,
+                &mut state.call_target_search,
+                &mut state.pending_call_target,
             );
             if step.action != action_before { state.draft_changed = true; }
             pick_request = position;
@@ -4272,6 +4604,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             condition_image_request = condition_image;
             preview_request = preview;
             point_pick_request = pick_point;
+            open_call_target_request = open_target;
             if matches!(
                 step.action,
                 MkAction::FindPixel(_)
@@ -4449,6 +4782,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if let Some(destination) = point_pick_request {
         d.action_editor
             .request_point_pick(d.selected_macro_id.unwrap_or(0), destination);
+    }
+    if let Some(target) = open_call_target_request {
+        apply_and_open_call_target(d, target);
     }
     if let Some(region) = region_preview_request {
         d.action_editor.preview_region(region);

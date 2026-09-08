@@ -93,6 +93,8 @@ pub enum EditorKind {
     PromptInput,
     Notify,
     PlaySound,
+    CallMacro,
+    Return,
     General,
     DirectInsert,
 }
@@ -257,23 +259,19 @@ fn runtime_availability(action: &MkAction) -> RuntimeAvailability {
 pub fn descriptors() -> Vec<ActionDescriptor> {
     let entries = vec![
         d!(
-            hidden,
             Logic,
             "Call Macro",
             "Call a reusable macro",
             &["call"],
-            General,
-            "Reusable macro editing is not yet available",
+            CallMacro,
             MkAction::CallMacro(MkCallMacroPayload::default())
         ),
         d!(
-            hidden,
             Logic,
             "Return",
             "Return from the current macro",
             &["return"],
-            General,
-            "Reusable macro editing is not yet available",
+            Return,
             MkAction::Return(MkReturnPayload::default())
         ),
         d!(
@@ -860,7 +858,8 @@ pub fn descriptors() -> Vec<ActionDescriptor> {
 /// compile-time maintenance point for action/editor coverage.
 pub fn editor_for_action(action: &MkAction) -> EditorKind {
     match action {
-        MkAction::CallMacro(_) | MkAction::Return(_) => EditorKind::General,
+        MkAction::CallMacro(_) => EditorKind::CallMacro,
+        MkAction::Return(_) => EditorKind::Return,
         MkAction::KeyDown(_) | MkAction::KeyUp(_) | MkAction::KeyPress(_) | MkAction::Hotkey(_) => {
             EditorKind::Keyboard
         }
@@ -963,6 +962,8 @@ pub fn editor_completeness(editor: EditorKind) -> Option<EditorCompleteness> {
         | EditorKind::PromptInput
         | EditorKind::Notify
         | EditorKind::PlaySound
+        | EditorKind::CallMacro
+        | EditorKind::Return
         | EditorKind::VirtualDesktop => Some(EditorCompleteness {
             has_primary_control: true,
             intentionally_disabled: false,
@@ -1076,6 +1077,8 @@ pub fn editor_contract(editor: EditorKind) -> Option<EditorContract> {
         EditorKind::PromptInput => Some(EditorContract::Configurable { field_count: 5 }),
         EditorKind::Notify => Some(EditorContract::Configurable { field_count: 5 }),
         EditorKind::PlaySound => Some(EditorContract::Configurable { field_count: 1 }),
+        EditorKind::CallMacro => Some(EditorContract::Configurable { field_count: 3 }),
+        EditorKind::Return => Some(EditorContract::Configurable { field_count: 1 }),
         EditorKind::MouseMove | EditorKind::MouseClick | EditorKind::Image | EditorKind::Pixel => {
             Some(EditorContract::Configurable { field_count: 2 })
         }
@@ -2380,6 +2383,7 @@ pub fn select_descriptor(d: &mut MkMacroDialog, descriptor: &ActionDescriptor) -
                 MkAction::If(_) | MkAction::RepeatStart { .. } | MkAction::WhileStart { .. }
             );
             d.action_editor.begin_new_with_editor(action, kind);
+            d.action_editor.bind_owner(d.selected_macro_id);
             d.action_editor.insertion = Some(if structural && !ids.is_empty() {
                 super::action_editor::InsertionIntent::Wrap { step_ids: ids }
             } else {
