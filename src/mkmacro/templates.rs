@@ -299,15 +299,33 @@ mod tests {
                 .all(|macro_| macro_.hotkey.is_none())
         );
         let first_snapshot = first.apply(&store, &baseline, 0).unwrap();
+        let mut edited_instance = (*first_snapshot).clone();
+        edited_instance.macros[0].name = "Edited instance".into();
+        edited_instance.macros[1].steps.push(MkStep {
+            id: 99,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            metadata: Default::default(),
+            action: MkAction::Delay(Default::default()),
+        });
+        let edited_instance = store.save(edited_instance).unwrap();
+        assert_eq!(
+            catalog,
+            store.load_template_catalog().unwrap(),
+            "editing an instance must not mutate its source template"
+        );
         let second = plan_template_instantiation(
             &store,
             &catalog.templates[0],
-            &first_snapshot,
+            &edited_instance,
             1,
-            &first_snapshot,
+            &edited_instance,
         )
         .unwrap();
-        let second_snapshot = second.apply(&store, &first_snapshot, 1).unwrap();
+        let second_snapshot = second.apply(&store, &edited_instance, 1).unwrap();
         assert_eq!(second_snapshot.macros.len(), 4);
         let ids = second_snapshot
             .macros
@@ -321,6 +339,13 @@ mod tests {
                 .iter()
                 .all(|macro_| macro_.hotkey.is_none())
         );
+        let second_root = second_snapshot
+            .macros
+            .iter()
+            .find(|macro_| second.imported_root_ids.contains(&macro_.id))
+            .unwrap();
+        assert_eq!(second_root.name, "Root");
+        assert_ne!(second_root.name, "Edited instance");
         assert_eq!(catalog, store.load_template_catalog().unwrap());
     }
 

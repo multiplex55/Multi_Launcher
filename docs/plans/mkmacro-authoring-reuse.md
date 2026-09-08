@@ -34,8 +34,8 @@ Every commit: inspect `git status --short`, actual diff, `git diff --check`, and
 | M09 | Shared direct invocation preparation and parameter prompts | M07, M08 | complete | cf388f13; construction gates and 11 selected library tests passed; broader coverage M14 |
 | M10 | Signature, Call and Return authoring | M05, M09 | complete | 7c9366ea; construction gates and focused 20/20 plus 6/6 rerun passed; broader coverage M13/M14 |
 | M11 | Versioned package export and transactional import | M02, M05, M10 | complete | 6128a96c; construction gates and focused package/store/field tests passed (final 54/54); broader coverage M13 |
-| M12 | Library/template workflows and user help | M11 | complete | construction gates and focused template/UI/catalog tests passed 8/8; broader coverage M13 |
-| M13 | Model/editor/analysis/package regression coverage | M12 | pending | |
+| M12 | Library/template workflows and user help | M11 | complete | 44618b22; construction gates and focused template/UI/catalog tests passed 8/8; broader coverage M13 |
+| M13 | Model/editor/analysis/package regression coverage | M12 | complete | focused library groups 129/129 and 484/484; integrations 27/27 |
 | M14 | Runtime/debug/invocation regression coverage and focused verification | M13 | pending | |
 | M15 | Independent review, remediation and authoritative full verification | M14 | pending | |
 
@@ -499,3 +499,10 @@ Construction/targeted/full verification and review findings are appended by the 
 - Package modal lifecycle joins keyboard gating and child cleanup. Persistence catalog/recovery now registers templates as sensitive, critical and backup/restore/reset eligible. README and in-dialog help cover structured shortcuts, folding/annotations/navigation, typed parameters/outputs, isolated calls/returns, recursion prohibition and copied package/library/template semantics.
 - Parent review found template catalog decode could discard unknown fields before validating the reserialized embedded package. Catalog decode/probe now compare the original JSON value with typed reserialization, reject unknown nested model/action fields and leave malformed files untouched. The added disk-level test covers this path.
 - Final `cargo check` passed (7.91 seconds), `cargo check --tests` passed (16.73 seconds), `cargo fmt --all -- --check` and `git diff --check` passed. Focused template/package-UI/catalog/reset Nextest passed 8/8. Parent inspected domain/UI/catalog/help changes and found no unresolved substantive M12 defect. Native rfd interaction remains for final smoke if the environment supports it; domain and compile paths are covered.
+- Commit: `44618b22 feat(mkmacro): add macro library and template workflows`. Working tree clean immediately after commit; M13 started after commit success.
+
+### M13 focused verification
+
+- Audited the deferred authoring matrix against existing module/integration coverage, then added five focused tests for the complete structured-copy selection matrix, strict package identity/canonical/count limits and missing-asset read-only failure, compiled transitive closure/per-macro step identity, and public schema-11 migration plus current metadata/signature/Call/Return persistence. Strengthened export source immutability and bidirectional template independence.
+- Migrated five stale test assumptions without weakening behavior: authoring display now asserts through the production type label, and four folder lifecycle tests perform a real draft mutation before expecting revision-gated dirty/Keep Editing state. No production defect or behavior change was required and no integration binary was added.
+- Final `cargo check` passed (7.88 seconds), `cargo check --tests` passed (16.60 seconds), `cargo fmt --all -- --check` and `git diff --check` passed. Required model/editor/validation/compiler library group passed 129/129 (2706 skipped); GUI/store/package/template library group passed 484/484 (2351 skipped); existing `mkmacro_authoring`, `mkmacro_compiler` and `mkmacro_store` integrations passed 27/27 with none skipped. Parent inspected the test-only diff and found no unresolved M13 coverage gap; runtime/debug scopes remain M14.

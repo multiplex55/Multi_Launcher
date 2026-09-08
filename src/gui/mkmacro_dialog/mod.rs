@@ -562,6 +562,7 @@ mod tests {
         ] {
             let (_dir, mut d) = folder_dialog();
             d.draft.folders[0].name = stored.into();
+            d.mark_dirty();
             assert_eq!(d.rename_folder(42, proposed), Ok(true));
             assert_eq!(d.draft.folders[0].name, expected);
             assert!(d.dirty);
@@ -694,6 +695,7 @@ mod tests {
         d.draft.macros = five_macros().macros;
         d.save().unwrap();
         d.draft.macros[2].folder_id = Some(999);
+        d.mark_dirty();
         let mut expected = d.draft.clone();
         expected.macros[2].folder_id = None;
         assert!(d.move_macro_to_folder(3, None));
@@ -1078,6 +1080,7 @@ mod tests {
             assert!(d.folder_delete_confirmation.is_open());
             assert_eq!(d.folder_error.as_deref(), Some("Existing validation error"));
         }
+        d.draft.folders[0].name = "Dirty Utilities".into();
         d.mark_dirty();
         d.toggle_folder_collapsed(42);
         assert!(
@@ -1147,6 +1150,7 @@ mod tests {
         let (_dir, mut d) = folder_dialog();
         d.begin_folder_rename(42);
         d.request_delete_folder(42);
+        d.draft.folders[0].name = "Dirty Utilities".into();
         d.mark_dirty();
         assert!(!d.reload_with_decision(DirtyDecision::KeepEditing));
         assert!(!d.close_with_decision(DirtyDecision::KeepEditing));

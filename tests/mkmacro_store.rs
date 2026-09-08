@@ -769,6 +769,127 @@ fn schema_newer_than_current_is_rejected() {
 }
 
 #[test]
+fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let legacy = serde_json::json!({
+        "schema_version": 11,
+        "folders": [{"id": 5, "name": "Reusable"}],
+        "settings": serde_json::to_value(MkMacroSettings::default()).unwrap(),
+        "macros": [{
+            "id": 11,
+            "name": "Legacy",
+            "description": "preserved",
+            "enabled": false,
+            "hotkey": null,
+            "hotkey_scope": {"type": "any_window"},
+            "folder_id": 5,
+            "playback": {"speed_percent": 140, "random_delay_ms": 3, "random_offset_px": 2},
+            "steps": [{
+                "id": 77,
+                "enabled": false,
+                "breakpoint": true,
+                "repeat": 4,
+                "delay_after_ms": 12,
+                "on_error": "continue",
+                "action": {"type": "text", "data": {"text": "keep me", "mode": "paste"}}
+            }]
+        }]
+    });
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    let migrated = store.snapshot();
+    let owner = &migrated.macros[0];
+    assert_eq!(migrated.schema_version, 12);
+    assert_eq!(owner.signature, MkMacroSignature::default());
+    assert_eq!(owner.description, "preserved");
+    assert!(!owner.enabled);
+    assert_eq!(owner.folder_id, Some(5));
+    assert_eq!(owner.playback.speed_percent, 140);
+    assert_eq!(owner.steps[0].metadata, MkStepMetadata::default());
+    assert!(owner.steps[0].breakpoint);
+    assert_eq!(owner.steps[0].repeat, 4);
+    assert_eq!(owner.steps[0].on_error, MkErrorPolicy::Continue);
+
+    let parameter_id = MkSignatureId(101);
+    let output_id = MkSignatureId(102);
+    let mut current = (*migrated).clone();
+    current.macros[0].signature = MkMacroSignature {
+        parameters: vec![MkMacroParameter {
+            id: parameter_id,
+            name: "message".into(),
+            value_type: MkValueType::String,
+            description: "typed input".into(),
+            default_value: Some(MkValue::String("default".into())),
+        }],
+        outputs: vec![MkMacroOutput {
+            id: output_id,
+            name: "result".into(),
+            value_type: MkValueType::Boolean,
+            description: "typed output".into(),
+        }],
+    };
+    current.macros[0].steps[0].metadata = MkStepMetadata {
+        label: "Reusable call".into(),
+        comment: "round trip metadata".into(),
+        accent: MkStepAccent::Purple,
+        bookmarked: true,
+    };
+    current.macros[0].steps[0].action = MkAction::CallMacro(MkCallMacroPayload {
+        macro_id: 22,
+        arguments: vec![MkCallArgumentBinding {
+            parameter_id,
+            source: MkValueSource::Literal(MkValue::String("bound".into())),
+        }],
+        outputs: vec![MkCallOutputBinding {
+            output_id,
+            caller_variable: "answer".into(),
+        }],
+    });
+    let mut callee = current.macros[0].clone();
+    callee.id = 22;
+    callee.name = "Callee".into();
+    callee.signature = current.macros[0].signature.clone();
+    callee.steps = vec![MkStep {
+        id: 88,
+        metadata: MkStepMetadata {
+            label: "Return".into(),
+            ..Default::default()
+        },
+        enabled: true,
+        breakpoint: false,
+        repeat: 1,
+        delay_after_ms: 0,
+        on_error: MkErrorPolicy::Stop,
+        action: MkAction::Return(MkReturnPayload {
+            outputs: vec![MkReturnValueBinding {
+                output_id,
+                source: MkValueSource::Literal(MkValue::Boolean(true)),
+            }],
+        }),
+    }];
+    current.macros.push(callee);
+    store.save(current.clone()).unwrap();
+    drop(migrated);
+    drop(store);
+
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(reopened.snapshot().as_ref(), &current);
+    let persisted: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(persisted["schema_version"], 12);
+    assert_eq!(
+        persisted["macros"][0]["steps"][0]["action"]["type"],
+        "call_macro"
+    );
+    assert_eq!(
+        persisted["macros"][1]["steps"][0]["action"]["type"],
+        "return"
+    );
+}
+
+#[test]
 fn persisted_mkmacros_json_excludes_runtime_debug_state() {
     let dir = tempdir().unwrap();
     let (store, _) = MkMacroStore::open(dir.path()).unwrap();

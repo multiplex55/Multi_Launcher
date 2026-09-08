@@ -81,3 +81,64 @@ fn hotkey_scope_does_not_change_compiler_admission_or_plan() {
         assert_eq!(actual.depth, expected.depth);
     }
 }
+
+#[test]
+fn compiled_program_keeps_exact_transitive_closure_and_per_macro_identity() {
+    let mut root = mac(vec![step(
+        7,
+        MkAction::CallMacro(MkCallMacroPayload {
+            macro_id: 20,
+            ..Default::default()
+        }),
+    )]);
+    root.id = 10;
+    root.name = "Root".into();
+    root.playback.speed_percent = 125;
+    root.steps[0].breakpoint = true;
+
+    let mut child = mac(vec![
+        step(
+            7,
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 30,
+                ..Default::default()
+            }),
+        ),
+        step(8, MkAction::Return(Default::default())),
+    ]);
+    child.id = 20;
+    child.name = "Child".into();
+    child.playback.random_delay_ms = 9;
+    child.steps[0].breakpoint = true;
+
+    let mut leaf = mac(vec![step(7, MkAction::Return(Default::default()))]);
+    leaf.id = 30;
+    leaf.name = "Leaf".into();
+    let mut unrelated = mac(vec![step(1, MkAction::Else)]);
+    unrelated.id = 40;
+
+    let document = MkMacroDocument {
+        macros: vec![unrelated, leaf, root, child],
+        ..Default::default()
+    };
+    let program = compile_program(&document, 10).unwrap();
+
+    assert_eq!(program.root_macro_id, 10);
+    assert_eq!(program.macro_ids(), [10, 20, 30]);
+    assert!(
+        program.plan(40).is_none(),
+        "unrelated invalid macros are excluded"
+    );
+    assert_eq!(program.name(20), Some("Child"));
+    assert_eq!(program.plan(10).unwrap().playback.speed_percent, 125);
+    assert_eq!(program.plan(20).unwrap().playback.random_delay_ms, 9);
+    assert!(matches!(
+        program.plan(10).unwrap().instructions[0].step.action,
+        MkAction::CallMacro(MkCallMacroPayload { macro_id: 20, .. })
+    ));
+    assert!(program.plan(10).unwrap().instructions[0].step.breakpoint);
+    assert!(program.plan(20).unwrap().instructions[0].step.breakpoint);
+    assert_eq!(program.plan(10).unwrap().step_to_instruction[&7], 0);
+    assert_eq!(program.plan(20).unwrap().step_to_instruction[&7], 0);
+    assert_eq!(program.plan(30).unwrap().step_to_instruction[&7], 0);
+}

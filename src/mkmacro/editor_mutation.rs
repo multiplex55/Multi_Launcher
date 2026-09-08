@@ -564,4 +564,69 @@ mod tests {
         );
         assert!(analyze_structure(&steps).diagnostics.is_empty());
     }
+
+    #[test]
+    fn copy_matrix_covers_every_marker_family_nested_and_noncontiguous_units() {
+        let steps = vec![
+            delay(1),
+            step(2, MkAction::If(MkCondition::All { conditions: vec![] })),
+            step(3, MkAction::RepeatStart { count: 2 }),
+            delay(4),
+            step(5, MkAction::RepeatEnd),
+            step(6, MkAction::Else),
+            step(
+                7,
+                MkAction::WhileStart {
+                    condition: MkCondition::All { conditions: vec![] },
+                },
+            ),
+            delay(8),
+            step(9, MkAction::WhileEnd),
+            step(10, MkAction::EndIf),
+            delay(11),
+        ];
+        for marker in [2, 6, 10] {
+            assert_eq!(
+                copy_fragment(&steps, &BTreeSet::from([marker]))
+                    .unwrap()
+                    .iter()
+                    .map(|step| step.id)
+                    .collect::<Vec<_>>(),
+                (2..=10).collect::<Vec<_>>()
+            );
+        }
+        for (marker, expected) in [(3, 3..=5), (5, 3..=5), (7, 7..=9), (9, 7..=9)] {
+            assert_eq!(
+                copy_fragment(&steps, &BTreeSet::from([marker]))
+                    .unwrap()
+                    .iter()
+                    .map(|step| step.id)
+                    .collect::<Vec<_>>(),
+                expected.collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            copy_fragment(&steps, &BTreeSet::from([1, 4, 6, 8, 11]))
+                .unwrap()
+                .iter()
+                .map(|step| step.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
+        let fragment = copy_fragment(&steps, &BTreeSet::from([3])).unwrap();
+        let mut destination = vec![delay(20), delay(21)];
+        let middle =
+            insert_fragment(&mut destination, &fragment, InsertionAnchor::After(20)).unwrap();
+        let end = insert_fragment(&mut destination, &fragment, InsertionAnchor::End).unwrap();
+        assert_eq!(destination.len(), 8);
+        assert_eq!(middle.inserted_ids.len(), 3);
+        assert_eq!(end.inserted_ids.len(), 3);
+        assert!(
+            middle
+                .inserted_ids
+                .iter()
+                .all(|id| !end.inserted_ids.contains(id))
+        );
+        assert!(analyze_structure(&destination).diagnostics.is_empty());
+    }
 }

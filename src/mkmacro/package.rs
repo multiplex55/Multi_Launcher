@@ -955,6 +955,104 @@ mod tests {
     }
 
     #[test]
+    fn parser_rejects_ambiguous_identities_noncanonical_manifests_and_count_limits() {
+        let valid_macro = macro_with(1, "Root", None, vec![]);
+        let package = |roots: Vec<u64>, macros: Vec<MkMacro>| MkMacroPackage {
+            manifest: MkMacroPackageManifest {
+                format_version: PACKAGE_FORMAT_VERSION,
+                schema_version: SCHEMA_VERSION,
+                roots,
+                macros,
+                folders: vec![],
+                dependencies: vec![],
+                asset_filenames: vec![],
+            },
+            assets: vec![],
+        };
+        let parse_error = |package: MkMacroPackage| {
+            parse_package(&serde_json::to_vec(&package).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+
+        let duplicate = package(vec![1], vec![valid_macro.clone(), valid_macro.clone()]);
+        assert!(parse_error(duplicate).contains("non-zero and unique"));
+        let duplicate_roots = package(vec![1, 1], vec![valid_macro.clone()]);
+        assert!(parse_error(duplicate_roots).contains("duplicates"));
+        let missing_root = package(vec![2], vec![valid_macro.clone()]);
+        assert!(parse_error(missing_root).contains("missing root"));
+        let unsorted_roots = package(
+            vec![2, 1],
+            vec![valid_macro.clone(), macro_with(2, "Second", None, vec![])],
+        );
+        assert!(parse_error(unsorted_roots).contains("canonical order"));
+
+        let too_many_roots = package(
+            (1..=MAX_PACKAGE_ROOTS as u64 + 1).collect(),
+            vec![valid_macro.clone()],
+        );
+        assert!(parse_error(too_many_roots).contains("root count"));
+
+        let mut too_many_macros =
+            package(vec![1], vec![valid_macro.clone(); MAX_PACKAGE_MACROS + 1]);
+        assert!(
+            validate_package(&too_many_macros)
+                .unwrap_err()
+                .to_string()
+                .contains("macro count")
+        );
+        too_many_macros.manifest.macros = vec![macro_with(
+            1,
+            "Too many steps",
+            None,
+            vec![step(1, MkAction::Delay(Default::default())); MAX_PACKAGE_STEPS + 1],
+        )];
+        assert!(
+            validate_package(&too_many_macros)
+                .unwrap_err()
+                .to_string()
+                .contains("too many package steps")
+        );
+        too_many_macros.manifest.macros = vec![valid_macro];
+        too_many_macros.assets = vec![
+            MkMacroPackageAsset {
+                filename: MkImageRef::new("asset.png").unwrap(),
+                png_base64: String::new(),
+            };
+            MAX_PACKAGE_ASSETS + 1
+        ];
+        assert!(
+            validate_package(&too_many_macros)
+                .unwrap_err()
+                .to_string()
+                .contains("too many package assets")
+        );
+    }
+
+    #[test]
+    fn export_missing_typed_asset_is_read_only_and_reports_the_filename() {
+        let directory = tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let document = MkMacroDocument {
+            schema_version: SCHEMA_VERSION,
+            macros: vec![macro_with(
+                1,
+                "Missing image",
+                None,
+                vec![image_step(1, "missing.png")],
+            )],
+            folders: vec![],
+            settings: Default::default(),
+        };
+        let before = document.clone();
+        let error = export_package(&store, &document, &[1]).unwrap_err();
+        assert!(error.to_string().contains("missing.png"));
+        assert_eq!(document, before);
+        assert!(store.image_refs().unwrap().is_empty());
+        assert_eq!(store.snapshot().as_ref(), &MkMacroDocument::default());
+    }
+
+    #[test]
     fn export_is_exact_for_multi_root_transitive_closure_folders_and_images() {
         let directory = tempdir().unwrap();
         let (store, _) = MkMacroStore::open(directory.path()).unwrap();
@@ -998,7 +1096,12 @@ mod tests {
             ],
             settings: Default::default(),
         };
+        let before = document.clone();
         let package = parse_package(&export_package(&store, &document, &[10]).unwrap()).unwrap();
+        assert_eq!(
+            document, before,
+            "export must not mutate the authored source"
+        );
         assert_eq!(
             package
                 .manifest

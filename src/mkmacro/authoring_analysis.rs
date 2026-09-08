@@ -1247,8 +1247,9 @@ mod tests {
         );
         assert_eq!(
             format!(
-                "{} · {:?} · conditional",
-                descriptor.name, descriptor.value_type
+                "{} · {} · conditional",
+                descriptor.name,
+                variable_type_label(descriptor.value_type)
             ),
             "maybe_point · Point · conditional"
         );
