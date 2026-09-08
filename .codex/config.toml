@@ -1,8 +1,8 @@
-# model = "gpt-5.6-sol"
+model = "gpt-5.6-sol"
 # Astra high alternative:
-model = "gpt-6-astra"
-# model_reasoning_effort = "medium"
-model_reasoning_effort = "xhigh"
+# model = "gpt-6-astra"
+model_reasoning_effort = "medium"
+# model_reasoning_effort = "xhigh"
 
 # When explicitly operating in plan mode, spend more reasoning.
 plan_mode_reasoning_effort = "high"
