@@ -194,7 +194,16 @@ fn catalog_window_desktop_prompt_and_image_inventory_is_intentional() {
             "Restore Window",
         ]
     );
-    for expected in ["Prompt for Input", "Find Image", "Click Image"] {
+    for expected in [
+        "Prompt for Input",
+        "Find Image",
+        "Click Image",
+        "Find Text",
+        "Click Text",
+        "Read Text Into Variable",
+        "Wait for Text",
+        "Wait for Text to Disappear",
+    ] {
         assert_eq!(
             visible.iter().filter(|d| d.name == expected).count(),
             1,

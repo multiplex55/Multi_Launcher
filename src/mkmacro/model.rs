@@ -1552,7 +1552,7 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_12_with_query_payload() {
+    fn current_document_round_trips_as_schema_13_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 signature: Default::default(),
@@ -2305,7 +2305,7 @@ mod ocr_payload_tests {
             found: false,
         };
         let json = serde_json::to_string(&condition).unwrap();
-        assert!(json.contains(r#"\"type\":\"ocr_text_search\""#));
+        assert!(json.contains(r#""type":"ocr_text_search""#));
         assert_eq!(
             serde_json::from_str::<MkCondition>(&json).unwrap(),
             condition

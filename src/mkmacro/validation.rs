@@ -1901,10 +1901,6 @@ mod ocr_validation_tests {
 
     #[test]
     fn only_ocr_bearing_wait_until_requires_the_minimum_poll_interval() {
-        let wait = MkWaitOptions {
-            timeout_ms: 500,
-            poll_interval_ms: 50,
-        };
         let ocr = MkCondition::Not {
             condition: Box::new(MkCondition::Any {
                 conditions: vec![MkCondition::OcrTextSearch {
@@ -1915,14 +1911,21 @@ mod ocr_validation_tests {
                 }],
             }),
         };
-        assert!(
-            diagnostics(MkAction::WaitUntil {
-                condition: ocr,
-                wait: wait.clone(),
-            })
-            .iter()
-            .any(|diagnostic| diagnostic.code == "ocr_poll_interval_too_short")
-        );
+        for (poll_interval_ms, invalid) in [(99, true), (100, false), (250, false)] {
+            assert_eq!(
+                diagnostics(MkAction::WaitUntil {
+                    condition: ocr.clone(),
+                    wait: MkWaitOptions {
+                        timeout_ms: 500,
+                        poll_interval_ms,
+                    },
+                })
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ocr_poll_interval_too_short"),
+                invalid,
+                "poll interval {poll_interval_ms}"
+            );
+        }
         assert!(
             !diagnostics(MkAction::WaitUntil {
                 condition: MkCondition::Variable {
@@ -1930,7 +1933,10 @@ mod ocr_validation_tests {
                     op: MkCompareOp::Eq,
                     value: MkValue::Number(1.0),
                 },
-                wait,
+                wait: MkWaitOptions {
+                    timeout_ms: 500,
+                    poll_interval_ms: 50,
+                },
             })
             .iter()
             .any(|diagnostic| diagnostic.code == "ocr_poll_interval_too_short")

@@ -5383,7 +5383,7 @@ mod ocr_execution_tests {
     use super::{fake::FakeBackend, *};
     use crate::mkmacro::{
         MkOcrClickPayload, MkOcrFindPayload, MkOcrLanguage, MkOcrMatchMode, MkOcrOccurrence,
-        MkOcrOutputs, MkOcrReadPayload, MkOcrSearchSpec, OcrLine, OcrWord,
+        MkOcrOutputs, MkOcrReadPayload, MkOcrSearchCondition, MkOcrSearchSpec, OcrLine, OcrWord,
     };
 
     struct OcrCapture;
@@ -5402,6 +5402,28 @@ mod ocr_execution_tests {
             _: &dyn Fn() -> bool,
         ) -> ExecResult<image::RgbaImage> {
             Ok(image::RgbaImage::new(rect.width, rect.height))
+        }
+    }
+
+    struct FailingOcrCapture;
+    impl ScreenCaptureBackend for FailingOcrCapture {
+        fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(0, 0, 500, 500))
+        }
+
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(10, 20, 100, 40))
+        }
+
+        fn capture_rect(
+            &self,
+            _: ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<image::RgbaImage> {
+            Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Backend,
+                "capture failed",
+            ))
         }
     }
 
@@ -5539,6 +5561,452 @@ mod ocr_execution_tests {
             variables.get("read"),
             Some(&MkValue::String("line text".into()))
         );
+    }
+
+    #[test]
+    fn find_polls_to_success_and_writes_every_builtin_and_typed_output() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(document("waiting")));
+        fake.script_ocr(Ok(document("target")));
+        let waiter = Arc::new(RecordingWaiter::default());
+        let executor = executor(&fake, waiter.clone());
+        let outputs = MkOcrOutputs {
+            found: Some("found".into()),
+            matched_text: Some("text".into()),
+            point: Some("point".into()),
+            x: Some("x".into()),
+            y: Some("y".into()),
+            match_count: Some("count".into()),
+        };
+        let mut variables = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        executor
+            .action(
+                1,
+                &MkAction::OcrFindText(MkOcrFindPayload {
+                    search: search("target"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 100,
+                        poll_interval_ms: 25,
+                    },
+                    outputs,
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        let point = MkPoint { x: 22, y: 28 };
+        assert_eq!(waiter.sleeps(), [Duration::from_millis(25)]);
+        assert_eq!(
+            variables.get("last_ocr_found"),
+            Some(&MkValue::Boolean(true))
+        );
+        assert_eq!(
+            variables.get("last_ocr_text"),
+            Some(&MkValue::String("target".into()))
+        );
+        assert_eq!(variables.get("last_ocr_x"), Some(&MkValue::Number(22.0)));
+        assert_eq!(variables.get("last_ocr_y"), Some(&MkValue::Number(28.0)));
+        assert_eq!(variables.get("found"), Some(&MkValue::Boolean(true)));
+        assert_eq!(
+            variables.get("text"),
+            Some(&MkValue::String("target".into()))
+        );
+        assert_eq!(variables.get("point"), Some(&MkValue::Point(point)));
+        assert_eq!(variables.get("x"), Some(&MkValue::Number(22.0)));
+        assert_eq!(variables.get("y"), Some(&MkValue::Number(28.0)));
+        assert_eq!(variables.get("count"), Some(&MkValue::Number(1.0)));
+    }
+
+    #[test]
+    fn finite_failure_and_timeout_zero_cancellation_have_distinct_diagnostics() {
+        let fake = Arc::new(FakeBackend::default());
+        let finite_waiter = Arc::new(RecordingWaiter::default());
+        let finite = executor(&fake, finite_waiter.clone());
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        let error = finite
+            .action(
+                1,
+                &MkAction::OcrFindText(MkOcrFindPayload {
+                    search: search("missing"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 50,
+                        poll_interval_ms: 25,
+                    },
+                    not_found_policy: MkImageNotFoundPolicy::Fail,
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Timeout);
+        assert_eq!(error.context.get("polls").map(String::as_str), Some("3"));
+        assert_eq!(finite_waiter.sleeps().len(), 2);
+
+        let cancel_waiter = Arc::new(RecordingWaiter::stop_after(2));
+        let indefinite = executor(&fake, cancel_waiter.clone());
+        let error = indefinite
+            .action(
+                1,
+                &MkAction::OcrFindText(MkOcrFindPayload {
+                    search: search("missing"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 0,
+                        poll_interval_ms: 20,
+                    },
+                    not_found_policy: MkImageNotFoundPolicy::Fail,
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut InputCleanupGuard::new(fake.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(cancel_waiter.sleeps().len(), 2);
+    }
+
+    #[test]
+    fn find_capture_and_backend_failures_keep_structured_context_and_clear_stale_state() {
+        let fake = Arc::new(FakeBackend::default());
+        let mut backends = fake.clone().backends();
+        backends.screenshot_capture = Arc::new(FailingOcrCapture);
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let executor =
+            Executor::with_waiter(backends, control, Arc::new(RecordingWaiter::default()));
+        let mut variables = RuntimeVariables::from([
+            ("last_ocr_text".into(), MkValue::String("stale".into())),
+            ("out".into(), MkValue::String("stale".into())),
+        ]);
+        let action = MkAction::OcrFindText(MkOcrFindPayload {
+            search: search("target"),
+            outputs: MkOcrOutputs {
+                matched_text: Some("out".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let error = executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut InputCleanupGuard::new(fake),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            error
+                .context
+                .get("ocr_pipeline_operation")
+                .map(String::as_str),
+            Some("capture region")
+        );
+        assert_eq!(
+            error.context.get("action").map(String::as_str),
+            Some("OCR Find Text")
+        );
+        assert!(!variables.contains_key("last_ocr_text"));
+        assert!(!variables.contains_key("out"));
+    }
+
+    #[test]
+    fn interpolated_regex_nth_is_resolved_once_for_an_action() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(document("one TARGET two target")));
+        let executor = executor(&fake, Arc::new(RecordingWaiter::default()));
+        let mut variables =
+            RuntimeVariables::from([("needle".into(), MkValue::String("target".into()))]);
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        executor
+            .action(
+                1,
+                &MkAction::OcrFindText(MkOcrFindPayload {
+                    search: MkOcrSearchSpec {
+                        text: "${needle}".into(),
+                        match_mode: MkOcrMatchMode::Regex,
+                        case_sensitive: false,
+                        occurrence: MkOcrOccurrence::Nth(2),
+                        ..Default::default()
+                    },
+                    wait: MkWaitOptions {
+                        timeout_ms: 1,
+                        poll_interval_ms: 1,
+                    },
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(
+            variables.get("last_ocr_text"),
+            Some(&MkValue::String("target".into()))
+        );
+        assert_eq!(variables.get("last_ocr_x"), Some(&MkValue::Number(97.0)));
+    }
+
+    #[test]
+    fn click_honors_count_and_finalization_while_misses_never_emit_input() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(document("target")));
+        fake.script_ocr(Ok(document("absent")));
+        let executor = executor(&fake, Arc::new(RecordingWaiter::default()));
+        let mut variables = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        executor
+            .action(
+                1,
+                &MkAction::OcrClickText(MkOcrClickPayload {
+                    search: search("target"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 1,
+                        poll_interval_ms: 1,
+                    },
+                    button: MkMouseButton::Middle,
+                    clicks: 2,
+                    x_offset: -30,
+                    y_offset: -40,
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(
+            *fake.finalized_points.lock().unwrap(),
+            [MkPoint { x: -8, y: -12 }]
+        );
+        assert_eq!(
+            fake.events(),
+            [
+                "move:-8,-12",
+                "button_down:Middle",
+                "button_up:Middle",
+                "button_down:Middle",
+                "button_up:Middle"
+            ]
+        );
+        assert_eq!(variables.get("mouse.x"), Some(&MkValue::Number(-8.0)));
+        assert_eq!(variables.get("mouse.y"), Some(&MkValue::Number(-12.0)));
+        assert_eq!(variables.get("last_point.x"), Some(&MkValue::Number(-8.0)));
+        assert_eq!(variables.get("last_point.y"), Some(&MkValue::Number(-12.0)));
+        let before = fake.events();
+        executor
+            .action(
+                1,
+                &MkAction::OcrClickText(MkOcrClickPayload {
+                    search: search("target"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 1,
+                        poll_interval_ms: 1,
+                    },
+                    not_found_policy: MkImageNotFoundPolicy::Continue,
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(fake.events(), before);
+    }
+
+    #[test]
+    fn click_wait_cancellation_emits_no_mouse_input() {
+        let fake = Arc::new(FakeBackend::default());
+        let waiter = Arc::new(RecordingWaiter::stop_after(1));
+        let executor = executor(&fake, waiter);
+        let error = executor
+            .action(
+                1,
+                &MkAction::OcrClickText(MkOcrClickPayload {
+                    search: search("missing"),
+                    wait: MkWaitOptions {
+                        timeout_ms: 0,
+                        poll_interval_ms: 100,
+                    },
+                    ..Default::default()
+                }),
+                &MkPlayback::default(),
+                &mut RuntimeVariables::new(),
+                &mut InputCleanupGuard::new(fake.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert!(fake.events().is_empty());
+        assert!(fake.finalized_points.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_preserves_unicode_lines_and_clears_output_before_backend_error() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(OcrDocument {
+            lines: vec![
+                OcrLine {
+                    text: "Καλημέρα".into(),
+                    words: vec![],
+                },
+                OcrLine {
+                    text: "世界".into(),
+                    words: vec![],
+                },
+            ],
+            ..Default::default()
+        }));
+        fake.script_ocr(Err(ExecutionDiagnostic::new(
+            DiagnosticKind::Backend,
+            "ocr failed",
+        )));
+        fake.script_ocr(Ok(OcrDocument::default()));
+        let executor = executor(&fake, Arc::new(RecordingWaiter::default()));
+        let action = MkAction::OcrReadText(MkOcrReadPayload {
+            output_variable: "read".into(),
+            ..Default::default()
+        });
+        let mut variables = RuntimeVariables::new();
+        let mut guard = InputCleanupGuard::new(fake.clone());
+        executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(
+            variables.get("read"),
+            Some(&MkValue::String("Καλημέρα\n世界".into()))
+        );
+        let error = executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert!(!variables.contains_key("read"));
+        executor
+            .action(
+                1,
+                &action,
+                &MkPlayback::default(),
+                &mut variables,
+                &mut guard,
+            )
+            .unwrap();
+        assert_eq!(variables.get("read"), Some(&MkValue::String(String::new())));
+    }
+
+    #[test]
+    fn recursive_ocr_conditions_short_circuit_and_each_leaf_captures_once() {
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(document("yes")));
+        fake.script_ocr(Ok(document("no")));
+        fake.script_ocr(Ok(document("yes")));
+        let executor = executor(&fake, Arc::new(RecordingWaiter::default()));
+        let leaf = |text: &str, found| MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: search(text),
+            },
+            found,
+        };
+        let condition = MkCondition::All {
+            conditions: vec![
+                leaf("yes", true),
+                MkCondition::Any {
+                    conditions: vec![
+                        leaf("yes", true),
+                        MkCondition::Not {
+                            condition: Box::new(leaf("missing", true)),
+                        },
+                    ],
+                },
+            ],
+        };
+        assert!(
+            executor
+                .condition(1, &condition, &mut RuntimeVariables::new())
+                .unwrap()
+        );
+        assert!(fake.ocr_results.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ocr_conditions_drive_if_while_and_wait_until_without_extra_evaluations() {
+        let fake = Arc::new(FakeBackend::default());
+        for text in ["if-hit", "while-miss", "wait-miss", "wait-hit"] {
+            fake.script_ocr(Ok(document(text)));
+        }
+        let waiter = Arc::new(RecordingWaiter::default());
+        let executor = executor(&fake, waiter.clone());
+        let leaf = |text: &str| MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: search(text),
+            },
+            found: true,
+        };
+        let step = |id, action| crate::mkmacro::MkStep {
+            metadata: Default::default(),
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: crate::mkmacro::MkErrorPolicy::Stop,
+            action,
+        };
+        let plan = crate::mkmacro::compile(&crate::mkmacro::MkMacro {
+            id: 7,
+            name: "OCR control flow".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            signature: Default::default(),
+            playback: Default::default(),
+            steps: vec![
+                step(1, MkAction::If(leaf("if-hit"))),
+                step(2, MkAction::EndIf),
+                step(
+                    3,
+                    MkAction::WhileStart {
+                        condition: leaf("while-hit"),
+                    },
+                ),
+                step(4, MkAction::WhileEnd),
+                step(
+                    5,
+                    MkAction::WaitUntil {
+                        condition: leaf("wait-hit"),
+                        wait: MkWaitOptions {
+                            timeout_ms: 250,
+                            poll_interval_ms: 100,
+                        },
+                    },
+                ),
+            ],
+        })
+        .unwrap();
+
+        executor
+            .execute(&plan, ExecutionOptions::normal(), &|_| {})
+            .unwrap();
+        assert!(fake.ocr_results.lock().unwrap().is_empty());
+        assert_eq!(waiter.sleeps(), [Duration::from_millis(100)]);
     }
 }
 

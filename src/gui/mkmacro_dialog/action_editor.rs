@@ -6513,6 +6513,28 @@ mod tests {
             unreachable!()
         };
         assert_eq!(payload.path_output.as_deref(), Some("saved_path"));
+
+        let mut ocr = MkAction::OcrFindText(MkOcrFindPayload {
+            outputs: MkOcrOutputs {
+                found: Some(" found ".into()),
+                matched_text: Some("  ".into()),
+                point: Some(" point ".into()),
+                x: Some(" x ".into()),
+                y: Some(" y ".into()),
+                match_count: Some(" count ".into()),
+            },
+            ..Default::default()
+        });
+        normalize_optional_outputs(&mut ocr);
+        let MkAction::OcrFindText(payload) = ocr else {
+            unreachable!()
+        };
+        assert_eq!(payload.outputs.found.as_deref(), Some("found"));
+        assert_eq!(payload.outputs.matched_text, None);
+        assert_eq!(payload.outputs.point.as_deref(), Some("point"));
+        assert_eq!(payload.outputs.x.as_deref(), Some("x"));
+        assert_eq!(payload.outputs.y.as_deref(), Some("y"));
+        assert_eq!(payload.outputs.match_count.as_deref(), Some("count"));
     }
 
     fn screenshot_action(region: SearchRegion) -> MkAction {

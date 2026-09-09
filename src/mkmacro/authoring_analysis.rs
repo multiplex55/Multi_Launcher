@@ -1747,4 +1747,85 @@ mod tests {
                 .contains(&VariableUncertaintyReason::MayBeUnset)
         );
     }
+
+    #[test]
+    fn ocr_outputs_have_exact_types_and_missing_match_availability() {
+        let steps = vec![
+            step(
+                1,
+                MkAction::OcrFindText(crate::mkmacro::MkOcrFindPayload {
+                    outputs: crate::mkmacro::MkOcrOutputs {
+                        found: Some("found".into()),
+                        matched_text: Some("text".into()),
+                        point: Some("point".into()),
+                        x: Some("x".into()),
+                        y: Some("y".into()),
+                        match_count: Some("count".into()),
+                    },
+                    not_found_policy: MkImageNotFoundPolicy::Continue,
+                    ..Default::default()
+                }),
+            ),
+            step(
+                2,
+                MkAction::OcrReadText(crate::mkmacro::MkOcrReadPayload {
+                    output_variable: "read".into(),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+        let get = |name: &str| {
+            catalog
+                .effective_variables()
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap()
+        };
+        for (name, value_type, availability) in [
+            (
+                "found",
+                MkValueType::Boolean,
+                VariableAvailability::DefinitelyAvailable,
+            ),
+            (
+                "text",
+                MkValueType::String,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "point",
+                MkValueType::Point,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "x",
+                MkValueType::Number,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "y",
+                MkValueType::Number,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "count",
+                MkValueType::Number,
+                VariableAvailability::DefinitelyAvailable,
+            ),
+            (
+                "read",
+                MkValueType::String,
+                VariableAvailability::DefinitelyAvailable,
+            ),
+        ] {
+            let descriptor = get(name);
+            assert_eq!(
+                descriptor.value_type,
+                VariableValueType::Known(value_type),
+                "{name}"
+            );
+            assert_eq!(descriptor.availability, availability, "{name}");
+        }
+    }
 }

@@ -25,13 +25,13 @@
 
 | ID | Milestone | Depends on | Status | Commit / verification |
 | --- | --- | --- | --- | --- |
-| M01 | Persisted OCR model, schema 13, built-ins, and pure matching types | baseline | implemented_unverified | Formatting and diff checks pass; downstream exhaustive enum integration intentionally deferred before any commit |
-| M02 | OCR backend, Windows adapter, tiling, capture service, and pure tests | M01 | implemented_unverified | Windows 0.58 adapter type-checks; formatting/diff checks pass; tests await downstream exhaustive integration |
-| M03 | Executor actions, conditions, outputs, polling, cancellation, and capabilities | M02 | implemented_unverified | Runtime-owned code compiles; 12 remaining exhaustive errors belong to M04/M05; formatting/diff checks pass |
-| M04 | Validation, typed fields, static analysis, compiler/runtime metadata, and package compatibility | M03 | implemented_unverified | Domain/static owners compile; schema-12 packages normalize canonically; only six M05 GUI exhaustiveness errors remain |
-| M05 | Catalog, transactional OCR editors, shared region routing, language jobs, and Test OCR preview | M04 | implemented_unverified | All targets compile; focused catalog/job/lifecycle/routing tests pass; preview texture is completion-cached |
-| M06 | Bounded batched OCR debug overlay and authoring integration | M05 | implemented_unverified | All targets compile; capped batched overlay and authoring-only scheduling tests pass |
-| M07 | Comprehensive test expansion, compile stabilization, and existing-test migration | M06 | pending | |
+| M01 | Persisted OCR model, schema 13, built-ins, and pure matching types | baseline | implemented_unverified | 9340dd36; construction checks pass, behavioral verification M07/M08 |
+| M02 | OCR backend, Windows adapter, tiling, capture service, and pure tests | M01 | implemented_unverified | 9340dd36; Windows 0.58 adapter type-checks, behavioral verification M07/M08 |
+| M03 | Executor actions, conditions, outputs, polling, cancellation, and capabilities | M02 | implemented_unverified | 9340dd36; runtime-owned code compiles, behavioral verification M07/M08 |
+| M04 | Validation, typed fields, static analysis, compiler/runtime metadata, and package compatibility | M03 | implemented_unverified | 9340dd36; schema-12 packages normalize canonically, behavioral verification M07/M08 |
+| M05 | Catalog, transactional OCR editors, shared region routing, language jobs, and Test OCR preview | M04 | implemented_unverified | 9340dd36; focused construction tests pass, broader verification M07/M08 |
+| M06 | Bounded batched OCR debug overlay and authoring integration | M05 | implemented_unverified | 9340dd36; focused construction tests pass, broader verification M07/M08 |
+| M07 | Comprehensive test expansion, compile stabilization, and existing-test migration | M06 | implemented_unverified | Focused Cargo tests pass (45 OCR lib plus existing integrations); authoritative Nextest is M08 |
 | M08 | Targeted verification, formatting/checks, and full authoritative Nextest | M07 | pending | |
 | M09 | Independent review, remediation, final verification, and ledger completion | M08 | pending | |
 

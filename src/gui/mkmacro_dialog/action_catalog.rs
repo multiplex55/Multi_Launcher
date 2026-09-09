@@ -1746,6 +1746,75 @@ mod grouping_tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn ocr_catalog_has_five_supported_searchable_presets_with_exact_defaults() {
+        let ocr = descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                matches!(
+                    descriptor.name,
+                    "Find Text"
+                        | "Click Text"
+                        | "Read Text Into Variable"
+                        | "Wait for Text"
+                        | "Wait for Text to Disappear"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ocr.len(), 5);
+        assert!(ocr.iter().all(|descriptor| {
+            descriptor.category == ActionCategory::Visual
+                && descriptor.runtime == RuntimeAvailability::Supported
+                && descriptor.keywords.contains(&"ocr")
+                && descriptor.keywords.contains(&"text")
+                && matches(descriptor, "recognize")
+        }));
+
+        for descriptor in &ocr {
+            match (descriptor.make_default)() {
+                MkAction::OcrFindText(payload) => {
+                    assert_eq!(payload.search.text, "Text");
+                    assert_eq!(payload.search.region, SearchRegion::Desktop);
+                    assert_eq!(payload.search.language, MkOcrLanguage::Auto);
+                    assert_eq!(payload.wait.timeout_ms, 5_000);
+                    assert_eq!(payload.wait.poll_interval_ms, 250);
+                    assert_eq!(payload.not_found_policy, MkImageNotFoundPolicy::Continue);
+                }
+                MkAction::OcrClickText(payload) => {
+                    assert_eq!(payload.search.text, "Text");
+                    assert_eq!(payload.search.region, SearchRegion::Desktop);
+                    assert_eq!(payload.search.language, MkOcrLanguage::Auto);
+                    assert_eq!(payload.wait.timeout_ms, 5_000);
+                    assert_eq!(payload.wait.poll_interval_ms, 250);
+                    assert_eq!(payload.not_found_policy, MkImageNotFoundPolicy::Fail);
+                    assert_eq!(payload.button, MkMouseButton::Left);
+                    assert_eq!(payload.clicks, 1);
+                }
+                MkAction::OcrReadText(payload) => {
+                    assert_eq!(payload.region, SearchRegion::Desktop);
+                    assert_eq!(payload.language, MkOcrLanguage::Auto);
+                    assert_eq!(payload.output_variable, "text");
+                }
+                MkAction::WaitUntil {
+                    condition: MkCondition::OcrTextSearch { search, found },
+                    wait,
+                } => {
+                    assert_eq!(search.search.text, "Text");
+                    assert_eq!(search.search.region, SearchRegion::Desktop);
+                    assert_eq!(search.search.language, MkOcrLanguage::Auto);
+                    assert_eq!(wait.timeout_ms, 5_000);
+                    assert_eq!(wait.poll_interval_ms, 250);
+                    assert_eq!(
+                        found,
+                        descriptor.name == "Wait for Text",
+                        "appearance polarity must follow the preset name"
+                    );
+                }
+                action => panic!("unexpected OCR catalog action: {action:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn source_visual_descriptors_are_not_contiguous() {
         let categories: Vec<_> = descriptors()
             .into_iter()

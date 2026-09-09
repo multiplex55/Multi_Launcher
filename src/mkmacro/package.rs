@@ -967,6 +967,24 @@ mod tests {
         let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
         assert_eq!(parsed.manifest.schema_version, SCHEMA_VERSION);
 
+        package.manifest.schema_version = SCHEMA_VERSION;
+        package.manifest.macros[0].steps[0].action = MkAction::OcrFindText(MkOcrFindPayload {
+            search: MkOcrSearchSpec {
+                text: "Ready".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
+        assert!(matches!(
+            parsed.manifest.macros[0].steps[0].action,
+            MkAction::OcrFindText(_)
+        ));
+        assert!(
+            parsed.assets.is_empty(),
+            "OCR packages must not synthesize assets"
+        );
+
         package.manifest.schema_version = SCHEMA_VERSION + 1;
         assert!(
             parse_package(&serde_json::to_vec(&package).unwrap())

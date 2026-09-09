@@ -1543,4 +1543,152 @@ mod tests {
             .unwrap_err();
         assert_eq!(cancelled.kind, DiagnosticKind::Cancelled);
     }
+
+    #[test]
+    fn fake_backend_exposes_languages_maximum_calls_and_preflight_cancellation() {
+        let backend = FakeOcr {
+            maximum: 321,
+            documents: Mutex::new(VecDeque::from([OcrDocument::default()])),
+            calls: Mutex::new(vec![]),
+            cancel_after_recognition: None,
+        };
+        assert_eq!(
+            backend.available_languages().unwrap(),
+            vec![OcrLanguageInfo {
+                tag: "en-US".into(),
+                display_name: "English (United States)".into(),
+            }]
+        );
+        assert_eq!(backend.max_image_dimension().unwrap(), 321);
+        backend
+            .recognize(
+                &RgbaImage::new(7, 9),
+                &MkOcrLanguage::LanguageTag("el-GR".into()),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![((7, 9), MkOcrLanguage::LanguageTag("el-GR".into()))]
+        );
+
+        let capture = FakeCapture {
+            image: RgbaImage::new(10, 10),
+            origin: (-10, -20),
+            captures: AtomicUsize::new(0),
+        };
+        let error = recognize_region(
+            &capture,
+            &backend,
+            &SearchRegion::Desktop,
+            &MkOcrLanguage::Auto,
+            &|| true,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(capture.captures.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn matching_reports_exact_unicode_ranges_multiline_geometry_and_all_occurrences() {
+        let document = document();
+        let greek = search_document(
+            &document,
+            "καλημέρα CAT",
+            MkOcrMatchMode::Contains,
+            false,
+            MkOcrOccurrence::First,
+        )
+        .unwrap();
+        let selected = greek.selected.unwrap();
+        assert_eq!(selected.text, "Καλημέρα cat");
+        assert_eq!(selected.normalized_range, 33..53);
+        assert_eq!(selected.bounds, ScreenRect::new(95, 24, 78, 10));
+
+        let multiline = search_document(
+            &document,
+            r"completed\s+successfully",
+            MkOcrMatchMode::Regex,
+            true,
+            MkOcrOccurrence::First,
+        )
+        .unwrap();
+        assert_eq!(multiline.match_count, 1);
+        assert_eq!(
+            multiline.selected.unwrap().bounds,
+            ScreenRect::new(10, 4, 100, 30)
+        );
+
+        for (occurrence, expected_text) in [
+            (MkOcrOccurrence::First, "cat"),
+            (MkOcrOccurrence::Nth(2), "cat"),
+            (MkOcrOccurrence::Nth(3), "CAT"),
+        ] {
+            let result = search_document(
+                &document,
+                "cat",
+                MkOcrMatchMode::Contains,
+                false,
+                occurrence,
+            )
+            .unwrap();
+            assert_eq!(result.match_count, 3);
+            assert_eq!(result.selected.unwrap().text, expected_text);
+        }
+    }
+
+    #[test]
+    fn tile_plans_have_required_overlap_and_partial_edges_on_each_axis() {
+        for (width, height, expected) in [(175, 30, 2), (30, 175, 2), (175, 175, 4)] {
+            let tiles = plan_ocr_tiles(width, height, 100).unwrap();
+            assert_eq!(tiles.len(), expected);
+            assert_eq!(tiles[0].rect.x, 0);
+            assert_eq!(tiles[0].rect.y, 0);
+            assert!(
+                tiles
+                    .iter()
+                    .any(|tile| tile.rect.right() == i64::from(width))
+            );
+            assert!(
+                tiles
+                    .iter()
+                    .any(|tile| tile.rect.bottom() == i64::from(height))
+            );
+            for pair in tiles.windows(2) {
+                if pair[0].rect.y == pair[1].rect.y {
+                    assert!(pair[0].rect.right() > i64::from(pair[1].rect.x));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reconstructed_cross_tile_words_support_phrase_matching_in_reading_order() {
+        let lines = reconstruct_ocr_lines(vec![
+            word("second", -20, -30, 30),
+            word("first", -70, -30, 35),
+            word("below", -70, -5, 35),
+        ]);
+        let document = OcrDocument {
+            image_width: 200,
+            image_height: 100,
+            lines,
+            ..Default::default()
+        };
+        assert_eq!(document.recognized_text(), "first second\nbelow");
+        let result = search_document(
+            &document,
+            "first second below",
+            MkOcrMatchMode::WholeWordPhrase,
+            true,
+            MkOcrOccurrence::First,
+        )
+        .unwrap();
+        assert_eq!(result.match_count, 1);
+        assert_eq!(
+            result.selected.unwrap().bounds,
+            ScreenRect::new(-70, -30, 80, 35)
+        );
+    }
 }
