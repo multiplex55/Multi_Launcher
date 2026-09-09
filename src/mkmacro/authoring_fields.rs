@@ -1031,6 +1031,116 @@ mod tests {
     }
 
     #[test]
+    fn ocr_action_traverses_template_language_window_region_and_output_names() {
+        let action = MkAction::OcrFindText(MkOcrFindPayload {
+            search: MkOcrSearchSpec {
+                text: "Ready ${user}".into(),
+                language: MkOcrLanguage::LanguageTag("fr-FR".into()),
+                region: SearchRegion::Window { matcher: window() },
+                ..Default::default()
+            },
+            outputs: MkOcrOutputs {
+                found: Some("ocr_found".into()),
+                matched_text: Some("ocr_text".into()),
+                point: Some("ocr_point".into()),
+                x: Some("ocr_x".into()),
+                y: Some("ocr_y".into()),
+                match_count: Some("ocr_count".into()),
+            },
+            ..Default::default()
+        });
+
+        let fields = step_fields(&step(42, action));
+        let actual = fields
+            .iter()
+            .filter(|field| !field.value.is_empty())
+            .map(|field| (field.path.to_string(), field.kind, field.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                ("Text".into(), FieldKind::Template, "Ready ${user}"),
+                ("Language".into(), FieldKind::Text, "fr-FR"),
+                ("Region / Title".into(), FieldKind::Text, "old"),
+                ("Region / Title regex".into(), FieldKind::Text, "old.*"),
+                ("Region / Process".into(), FieldKind::Text, "old.exe"),
+                ("Region / Class".into(), FieldKind::Text, "old_class"),
+                (
+                    "Outputs / Found".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_found"
+                ),
+                (
+                    "Outputs / Matched text".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_text"
+                ),
+                (
+                    "Outputs / Point".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_point"
+                ),
+                ("Outputs / X".into(), FieldKind::VariableWrite, "ocr_x"),
+                ("Outputs / Y".into(), FieldKind::VariableWrite, "ocr_y"),
+                (
+                    "Outputs / Match count".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_count"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ocr_condition_reuses_template_language_and_client_window_traversal() {
+        let action = MkAction::If(MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: MkOcrSearchSpec {
+                    text: "Signed in as ${user}".into(),
+                    language: MkOcrLanguage::LanguageTag("en-US".into()),
+                    region: SearchRegion::ClientArea { matcher: window() },
+                    ..Default::default()
+                },
+            },
+            found: true,
+        });
+
+        let fields = step_fields(&step(42, action));
+        let actual = fields
+            .iter()
+            .filter(|field| !field.value.is_empty())
+            .map(|field| (field.path.to_string(), field.kind, field.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                (
+                    "Condition / Text".into(),
+                    FieldKind::Template,
+                    "Signed in as ${user}"
+                ),
+                ("Condition / Language".into(), FieldKind::Text, "en-US"),
+                ("Condition / Region / Title".into(), FieldKind::Text, "old"),
+                (
+                    "Condition / Region / Title regex".into(),
+                    FieldKind::Text,
+                    "old.*"
+                ),
+                (
+                    "Condition / Region / Process".into(),
+                    FieldKind::Text,
+                    "old.exe"
+                ),
+                (
+                    "Condition / Region / Class".into(),
+                    FieldKind::Text,
+                    "old_class"
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn sources_distinguish_reads_templates_and_literal_data() {
         let doc = document(vec![
             MkAction::SetVariable {

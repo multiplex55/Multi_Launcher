@@ -3236,6 +3236,15 @@ fn ocr_optional_output(ui: &mut egui::Ui, label: &str, value: &mut Option<String
     });
 }
 
+fn ocr_not_found_policy_ui(ui: &mut egui::Ui, policy: &mut MkImageNotFoundPolicy) {
+    egui::ComboBox::from_label("If not found")
+        .selected_text(format!("{policy:?}"))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(policy, MkImageNotFoundPolicy::Continue, "Continue");
+            ui.selectable_value(policy, MkImageNotFoundPolicy::Fail, "Fail");
+        });
+}
+
 fn action_ui(
     ui: &mut egui::Ui,
     step: &mut MkStep,
@@ -3924,20 +3933,7 @@ fn action_ui(
         MkAction::OcrFindText(p) => {
             super::ocr_controls::search_match_ui(ui, &mut p.search);
             ocr_wait_ui(ui, &mut p.wait);
-            egui::ComboBox::from_label("If not found")
-                .selected_text(format!("{:?}", p.not_found_policy))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut p.not_found_policy,
-                        MkImageNotFoundPolicy::Continue,
-                        "Continue",
-                    );
-                    ui.selectable_value(
-                        &mut p.not_found_policy,
-                        MkImageNotFoundPolicy::Fail,
-                        "Fail",
-                    );
-                });
+            ocr_not_found_policy_ui(ui, &mut p.not_found_policy);
             ui.collapsing("Output variables", |ui| {
                 ocr_optional_output(ui, "Found", &mut p.outputs.found);
                 ocr_optional_output(ui, "Matched text", &mut p.outputs.matched_text);
@@ -3950,6 +3946,7 @@ fn action_ui(
         MkAction::OcrClickText(p) => {
             super::ocr_controls::search_match_ui(ui, &mut p.search);
             ocr_wait_ui(ui, &mut p.wait);
+            ocr_not_found_policy_ui(ui, &mut p.not_found_policy);
             egui::ComboBox::from_label("Button")
                 .selected_text(format!("{:?}", p.button))
                 .show_ui(ui, |ui| {
@@ -6690,6 +6687,39 @@ mod tests {
             MkAction::WindowActivate(MkWindowPayload { matcher: actual, .. }) if actual == &matcher
         ));
         assert!(matches!(steps[1].action, MkAction::OcrFindText(_)));
+    }
+
+    #[test]
+    fn ocr_click_not_found_policy_is_preserved_and_authorable_in_the_editor() {
+        let (_dir, mut dialog, _fixture) = shared_dialog();
+        dialog
+            .action_editor
+            .begin_new(MkAction::OcrClickText(MkOcrClickPayload {
+                search: MkOcrSearchSpec {
+                    text: "Ready".into(),
+                    ..Default::default()
+                },
+                not_found_policy: MkImageNotFoundPolicy::Continue,
+                ..Default::default()
+            }));
+
+        let MkAction::OcrClickText(payload) =
+            &mut dialog.action_editor.draft.as_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        assert_eq!(payload.not_found_policy, MkImageNotFoundPolicy::Continue);
+        payload.not_found_policy = MkImageNotFoundPolicy::Fail;
+
+        let mut state = dialog.take_action_editor();
+        state.apply(&mut dialog).unwrap();
+        dialog.action_editor = state;
+
+        let MkAction::OcrClickText(payload) = &dialog.selected_macro().unwrap().steps[0].action
+        else {
+            unreachable!()
+        };
+        assert_eq!(payload.not_found_policy, MkImageNotFoundPolicy::Fail);
     }
 
     #[test]

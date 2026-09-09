@@ -12,8 +12,8 @@ Status vocabulary: `pending`, `implemented_unverified`, `verified`, `blocked`. A
 | R02 | OCR compliance audit | implemented_unverified | Current source was audited independently; matrix below records evidence. Recheck evidence and status after remediation. |
 | R03 | OCR condition ownership cleanup | implemented_unverified | Canonical recursive `MkCondition::contains_ocr()` now serves validation, executor outcomes, and editor lifecycle routing; focused tests pass. Full-suite verification remains pending. |
 | R04 | OCR runtime capability reporting | implemented_unverified | `WaitUntil`, `If`, and `WhileStart` now derive support from their condition trees through an injected OCR-capability seam; deterministic nested tests pass. Full-suite verification remains pending. |
-| R05 | Other discovered OCR gaps | pending | Expose Click Text failure policy in the editor and add direct OCR authoring-field traversal coverage. |
-| R06 | Test expansion/migration | implemented_unverified | Numpad routing, top-row, focus/modifier/idle-probe/repeat, and history coverage is implemented; OCR remediation coverage remains pending. |
+| R05 | Other discovered OCR gaps | implemented_unverified | Click Text now exposes its persisted failure policy through the shared OCR editor control; direct OCR action/condition field-traversal coverage is added. Targeted tests pass; full-suite verification remains pending. |
+| R06 | Test expansion/migration | implemented_unverified | Numpad routing, top-row, focus/modifier/idle-probe/repeat/history, OCR ownership/capability, Click Text policy, and OCR field-traversal coverage is implemented. Full-suite verification remains pending. |
 | R07 | Targeted verification | pending | `cargo fmt --all`, `cargo check --all-targets`, `git diff --check`, source searches, and focused Nextest groups pass. |
 | R08 | Full verification | pending | `cargo fmt --all --check`, `cargo check --all-targets`, `git diff --check`, and `cargo nextest run --no-fail-fast` pass. |
 | R09 | Independent review/remediation | pending | A non-implementing reviewer inspects numpad and OCR risks; findings are fixed and affected/full verification is repeated as required. |
@@ -45,7 +45,7 @@ Invariants: schema 13 remains current; schema-12 documents/packages remain compa
 | Tiling | `mkmacro/ocr.rs` | Max-dimension tiles, overlap, translation, deduplication, reading order | Tiling/dedup/cross-tile tests | satisfied | Preserve. |
 | Negative coordinates | `mkmacro/screen.rs`, `ocr.rs` | Signed desktop coordinate translation | Screen/OCR negative-coordinate tests | satisfied | Preserve. |
 | Find Text | `model.rs`, `executor.rs`, `action_editor.rs` | `OcrFindText` runtime/editor path | Executor/editor tests | satisfied | Preserve. |
-| Click Text | `model.rs`, `executor.rs`, `action_editor.rs` | Runtime supports button/count/offset and not-found policy | Executor tests; editor policy coverage absent | partial | Add failure-policy editor control/test. |
+| Click Text | `model.rs`, `executor.rs`, `action_editor.rs` | Runtime and editor support button/count/offset and shared not-found policy | Executor and editor policy tests | satisfied | Remediated: shared failure-policy editor control/test. |
 | Read Text | `model.rs`, `executor.rs` | One pass, Unicode/lines, empty success; leaves search built-ins alone | Read-text tests | satisfied | Preserve. |
 | Wait for Text | `action_catalog.rs`, `executor.rs` | `WaitUntil(OcrTextSearch found=true)` preset uses shared waiter | Wait/runtime tests | satisfied | Preserve. |
 | Wait for Text to Disappear | `action_catalog.rs`, `executor.rs` | `WaitUntil(OcrTextSearch found=false)` preset | Wait/runtime tests | satisfied | Preserve. |
@@ -57,12 +57,12 @@ Invariants: schema 13 remains current; schema-12 documents/packages remain compa
 | `timeout_ms = 0` | `executor.rs` | Existing waiter interprets zero as indefinite | Timeout-zero/cancellation tests | satisfied | Preserve. |
 | Polling minimum | `validation.rs`, `action_catalog.rs` | OCR default 250 ms; nested OCR minimum 100 ms | Validation/catalog tests | satisfied | Migrate to canonical `contains_ocr`. |
 | Cancellation | `executor.rs` | Wait loop checks run control | Wait cancellation tests | satisfied | Preserve. |
-| Editor controls | `action_editor.rs`, `condition_editor.rs`, `ocr_controls.rs` | Search/language/region/wait/output/click controls present | Editor tests | partial | Add Click Text failure policy. |
+| Editor controls | `action_editor.rs`, `condition_editor.rs`, `ocr_controls.rs` | Search/language/region/wait/output/click/failure-policy controls present | Editor tests including Click Text policy round trip | satisfied | Remediated. |
 | Test OCR async lifecycle | `ocr_test_job.rs`, `action_editor.rs` | Worker job, stable identity, stale-result rejection, image/text/geometry/match preview | Job/editor tests | satisfied | Preserve. |
 | Preview geometry | `ocr_test_job.rs`, `image_preview.rs` | Captured image and word/line/selected-match geometry | Preview/job tests | satisfied | Preserve. |
 | Desktop debug overlay | `visual_overlay.rs`, `visual_overlay_windows.rs` | Authoring-only, bounded 256 rects, non-activating transparent surfaces | Overlay-planning tests | satisfied | Preserve. |
 | Validation | `validation.rs` | OCR search/language/region/output/wait validation | Validation tests | satisfied | Use canonical domain helper. |
-| Authoring field traversal | `authoring_fields.rs` | OCR template/language/region/output traversal implemented | Direct OCR traversal coverage absent | partial | Add direct nested/action regression tests. |
+| Authoring field traversal | `authoring_fields.rs` | OCR template/language/shared-region/output traversal implemented | Direct OCR action and condition traversal tests | satisfied | Remediated with focused coverage. |
 | Authoring analysis | `authoring_analysis.rs` | OCR output types and condition paths included | OCR analysis tests | satisfied | Preserve. |
 | Runtime capability reporting | `executor.rs` `has_runtime_support` | Direct actions gated; condition-bearing actions ignore OCR tree | No deterministic nested capability tests | incorrect | Add condition capability evaluator and migrate If/While/WaitUntil. |
 | Schema 12 -> 13 migration | `store.rs` | Additive migration to schema 13 | Store migration tests | satisfied | No schema bump. |
