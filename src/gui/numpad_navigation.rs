@@ -27,36 +27,48 @@ pub(crate) enum PhysicalNumpadKey {
     Num8,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PhysicalDigitKeyState {
+    pub(crate) numpad_down: bool,
+    pub(crate) top_row_down: bool,
+}
+
 pub(crate) trait NumpadKeyStateProbe {
-    fn is_down(&self, key: PhysicalNumpadKey) -> bool;
+    fn state(&self, key: PhysicalNumpadKey) -> PhysicalDigitKeyState;
 }
 
 pub(crate) struct NativeNumpadKeyStateProbe;
 
 impl NumpadKeyStateProbe for NativeNumpadKeyStateProbe {
-    fn is_down(&self, key: PhysicalNumpadKey) -> bool {
-        native_numpad_key_is_down(key)
+    fn state(&self, key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
+        native_digit_key_state(key)
     }
 }
 
 #[cfg(windows)]
-fn native_numpad_key_is_down(key: PhysicalNumpadKey) -> bool {
+fn native_digit_key_state(key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_NUMPAD2, VK_NUMPAD4, VK_NUMPAD6, VK_NUMPAD8,
+        GetAsyncKeyState, VIRTUAL_KEY, VK_NUMPAD2, VK_NUMPAD4, VK_NUMPAD6, VK_NUMPAD8,
     };
 
-    let virtual_key = match key {
-        PhysicalNumpadKey::Num2 => VK_NUMPAD2,
-        PhysicalNumpadKey::Num4 => VK_NUMPAD4,
-        PhysicalNumpadKey::Num6 => VK_NUMPAD6,
-        PhysicalNumpadKey::Num8 => VK_NUMPAD8,
+    let (numpad_key, top_row_key) = match key {
+        PhysicalNumpadKey::Num2 => (VK_NUMPAD2, VIRTUAL_KEY(b'2' as u16)),
+        PhysicalNumpadKey::Num4 => (VK_NUMPAD4, VIRTUAL_KEY(b'4' as u16)),
+        PhysicalNumpadKey::Num6 => (VK_NUMPAD6, VIRTUAL_KEY(b'6' as u16)),
+        PhysicalNumpadKey::Num8 => (VK_NUMPAD8, VIRTUAL_KEY(b'8' as u16)),
     };
-    unsafe { (GetAsyncKeyState(virtual_key.0 as i32) as u16 & 0x8000) != 0 }
+    let is_down = |virtual_key: VIRTUAL_KEY| unsafe {
+        (GetAsyncKeyState(virtual_key.0 as i32) as u16 & 0x8000) != 0
+    };
+    PhysicalDigitKeyState {
+        numpad_down: is_down(numpad_key),
+        top_row_down: is_down(top_row_key),
+    }
 }
 
 #[cfg(not(windows))]
-fn native_numpad_key_is_down(_key: PhysicalNumpadKey) -> bool {
-    false
+fn native_digit_key_state(_key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
+    PhysicalDigitKeyState::default()
 }
 
 fn candidate_for_key(
@@ -105,7 +117,11 @@ pub(crate) fn consume_physical_numpad_navigation(
             event_index += 1;
             continue;
         };
-        if !probe.is_down(physical_key) {
+        let state = probe.state(physical_key);
+        // egui exposes both locations as the same logical key. If Windows says
+        // both physical keys are held, ownership is ambiguous, so preserve the
+        // events for text input rather than deleting a top-row key pair.
+        if !state.numpad_down || state.top_row_down {
             event_index += 1;
             continue;
         }
@@ -130,14 +146,14 @@ mod tests {
     use std::cell::Cell;
 
     struct FakeProbe {
-        down: Option<PhysicalNumpadKey>,
+        state: PhysicalDigitKeyState,
         calls: Cell<usize>,
     }
 
     impl NumpadKeyStateProbe for FakeProbe {
-        fn is_down(&self, key: PhysicalNumpadKey) -> bool {
+        fn state(&self, _key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
             self.calls.set(self.calls.get() + 1);
-            self.down == Some(key)
+            self.state
         }
     }
 
@@ -162,7 +178,10 @@ mod tests {
             ..Default::default()
         });
         let probe = FakeProbe {
-            down,
+            state: PhysicalDigitKeyState {
+                numpad_down: down.is_some(),
+                top_row_down: false,
+            },
             calls: Cell::new(0),
         };
         let navigation =
@@ -255,6 +274,32 @@ mod tests {
         assert!(navigation.is_empty());
         assert_eq!(remaining, events);
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn simultaneous_top_row_and_numpad_state_preserves_ambiguous_pairs() {
+        let ctx = egui::Context::default();
+        let events = vec![
+            key_press(egui::Key::Num8, egui::Modifiers::NONE),
+            egui::Event::Text("8".into()),
+        ];
+        ctx.begin_frame(egui::RawInput {
+            events: events.clone(),
+            ..Default::default()
+        });
+        let probe = FakeProbe {
+            state: PhysicalDigitKeyState {
+                numpad_down: true,
+                top_row_down: true,
+            },
+            calls: Cell::new(0),
+        };
+        let navigation =
+            ctx.input_mut(|input| consume_physical_numpad_navigation(true, input, &probe));
+        assert!(navigation.is_empty());
+        assert_eq!(ctx.input(|input| input.events.clone()), events);
+        assert_eq!(probe.calls.get(), 1);
+        let _ = ctx.end_frame();
     }
 
     #[test]

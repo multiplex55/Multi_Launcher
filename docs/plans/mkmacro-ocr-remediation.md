@@ -14,9 +14,9 @@ Status vocabulary: `pending`, `implemented_unverified`, `verified`, `blocked`. A
 | R04 | OCR runtime capability reporting | implemented_unverified | `WaitUntil`, `If`, and `WhileStart` now derive support from their condition trees through an injected OCR-capability seam; deterministic nested tests pass. Full-suite verification remains pending. |
 | R05 | Other discovered OCR gaps | implemented_unverified | Click Text now exposes its persisted failure policy through the shared OCR editor control; direct OCR action/condition field-traversal coverage is added. Targeted tests pass; full-suite verification remains pending. |
 | R06 | Test expansion/migration | implemented_unverified | Numpad routing, top-row, focus/modifier/idle-probe/repeat/history, OCR ownership/capability, Click Text policy, and OCR field-traversal coverage is implemented. Full-suite verification remains pending. |
-| R07 | Targeted verification | pending | `cargo fmt --all`, `cargo check --all-targets`, `git diff --check`, source searches, and focused Nextest groups pass. |
-| R08 | Full verification | pending | `cargo fmt --all --check`, `cargo check --all-targets`, `git diff --check`, and `cargo nextest run --no-fail-fast` pass. |
-| R09 | Independent review/remediation | pending | A non-implementing reviewer inspects numpad and OCR risks; findings are fixed and affected/full verification is repeated as required. |
+| R07 | Targeted verification | verified | All-target check and focused Nextest groups passed: numpad 9, query history 14, runtime support 2, OCR 59, visual/store 17, package 16. Review-remediation focused tests also pass. |
+| R08 | Full verification | implemented_unverified | Pre-review full Nextest passed 3,479 tests with 7 skipped; production/shared review remediations require the final full rerun. |
+| R09 | Independent review/remediation | implemented_unverified | Independent review completed. OCR outcome emission, mixed keypad/top-row preservation, and rendered Click Text policy coverage are remediated; final automated verification remains. |
 
 ## Ordered implementation plan
 
@@ -52,6 +52,7 @@ Invariants: schema 13 remains current; schema-12 documents/packages remain compa
 | OCR conditions | `model.rs`, `executor.rs` | Immediate OCR leaf works in If/While/WaitUntil/All/Any/Not | Nested/short-circuit/capture-count tests | satisfied | Centralize metadata ownership only. |
 | Interpolation | `interpolation.rs`, `executor.rs` | OCR search fields pass through existing interpolation | Executor/interpolation tests | satisfied | Preserve. |
 | Output variables | `model.rs`, `executor.rs`, `authoring_analysis.rs` | Found/text/point/x/y/count typed outputs | Output and authoring-analysis tests | satisfied | Preserve. |
+| Runtime step outcomes | `executor.rs`, `executor/frame.rs`, `runtime.rs` | OCR match/miss `StepOutcome` metadata is emitted and retained by runtime snapshots | Runtime observer integration test | satisfied | Remediated after review. |
 | `last_ocr_*` built-ins | `variables.rs`, `executor.rs` | Typed found/text/x/y writes | Built-in tests | satisfied | Preserve. |
 | Stale clearing | `executor.rs` | Failed later searches clear configured and built-in stale values | Stale-output tests | satisfied | Preserve. |
 | `timeout_ms = 0` | `executor.rs` | Existing waiter interprets zero as indefinite | Timeout-zero/cancellation tests | satisfied | Preserve. |
@@ -78,3 +79,11 @@ Invariants: schema 13 remains current; schema-12 documents/packages remain compa
 - OCR authoring-field traversal exists but lacks direct regression coverage. Add tests without changing traversal semantics.
 
 No other substantive OCR implementation gap was found in the source audit. Correct backend, capture, matching, tiling, runtime, persistence, overlay, privacy, and performance behavior should remain architecturally intact.
+
+## Independent review findings
+
+- **OCR outcomes:** `RootSession` previously emitted `StepOutcome` only for image metadata, suppressing calculated OCR match/miss outcomes. Emission now occurs when either image or OCR metadata exists, with match and continued-miss runtime-observer coverage.
+- **Mixed keypad/top-row state:** egui 0.27 collapses both physical locations to the same logical key. The native seam now samples both matching virtual-key states only after a focused candidate; if both are down, the event remains text rather than risking theft of top-row input. Ordinary keypad repeats remain fully consumed and navigate once per direction.
+- **Click Text editor evidence:** the earlier policy round-trip test did not render the control. A rendered egui control test now verifies the shared policy selector and selected Click Text policy in addition to round-trip coverage.
+
+No high-severity finding was reported. Final full verification is required because the first two findings changed shared production behavior after the pre-review full run.

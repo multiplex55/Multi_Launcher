@@ -1891,8 +1891,8 @@ mod tests {
     use super::*;
     use crate::{
         gui::numpad_navigation::{
-            LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalNumpadKey,
-            consume_physical_numpad_navigation,
+            LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalDigitKeyState,
+            PhysicalNumpadKey, consume_physical_numpad_navigation,
         },
         mkmacro::{LauncherCommandBroker, LauncherCommandResponse, RunControl},
         plugin::{Plugin, PluginManager},
@@ -1953,13 +1953,17 @@ mod tests {
 
     struct FakeNumpadProbe {
         down: Option<PhysicalNumpadKey>,
+        top_row_down: bool,
         calls: Cell<usize>,
     }
 
     impl NumpadKeyStateProbe for FakeNumpadProbe {
-        fn is_down(&self, key: PhysicalNumpadKey) -> bool {
+        fn state(&self, key: PhysicalNumpadKey) -> PhysicalDigitKeyState {
             self.calls.set(self.calls.get() + 1);
-            self.down == Some(key)
+            PhysicalDigitKeyState {
+                numpad_down: self.down == Some(key),
+                top_row_down: self.top_row_down,
+            }
         }
     }
 
@@ -1998,6 +2002,7 @@ mod tests {
         key: egui::Key,
         digit: &str,
         down: Option<PhysicalNumpadKey>,
+        top_row_down: bool,
         selected: usize,
     ) -> (LauncherApp, Vec<LauncherNumpadNavigation>, usize) {
         let ctx = egui::Context::default();
@@ -2016,6 +2021,7 @@ mod tests {
         app.selected = Some(selected);
         let probe = FakeNumpadProbe {
             down,
+            top_row_down,
             calls: Cell::new(0),
         };
 
@@ -2086,7 +2092,7 @@ mod tests {
             ),
         ] {
             let (app, routed, calls) =
-                run_two_frame_query_routing(key, digit, Some(physical), selected);
+                run_two_frame_query_routing(key, digit, Some(physical), false, selected);
             assert_eq!(routed, vec![expected_direction]);
             assert_eq!(calls, 1);
             assert_eq!(app.query, "note");
@@ -2102,12 +2108,27 @@ mod tests {
             (egui::Key::Num4, "4"),
             (egui::Key::Num6, "6"),
         ] {
-            let (app, routed, calls) = run_two_frame_query_routing(key, digit, None, 4);
+            let (app, routed, calls) = run_two_frame_query_routing(key, digit, None, false, 4);
             assert_eq!(app.query, format!("note{digit}"));
             assert_eq!(app.selected, Some(4));
             assert!(routed.is_empty());
             assert_eq!(calls, 1);
         }
+    }
+
+    #[test]
+    fn focused_query_preserves_ambiguous_digit_when_top_row_and_keypad_are_both_down() {
+        let (app, routed, calls) = run_two_frame_query_routing(
+            egui::Key::Num8,
+            "8",
+            Some(PhysicalNumpadKey::Num8),
+            true,
+            4,
+        );
+        assert_eq!(app.query, "note8");
+        assert_eq!(app.selected, Some(4));
+        assert!(routed.is_empty());
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -2119,6 +2140,7 @@ mod tests {
         });
         let probe = FakeNumpadProbe {
             down: Some(PhysicalNumpadKey::Num8),
+            top_row_down: false,
             calls: Cell::new(0),
         };
 

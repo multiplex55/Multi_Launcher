@@ -6723,6 +6723,45 @@ mod tests {
     }
 
     #[test]
+    fn ocr_not_found_policy_control_renders_the_current_click_text_policy() {
+        use eframe::egui::epaint::Shape;
+
+        fn collect_text(shape: &Shape, text: &mut String) {
+            match shape {
+                Shape::Text(shape) => {
+                    text.push_str(&shape.galley.job.text);
+                    text.push('\n');
+                }
+                Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (policy, expected) in [
+            (MkImageNotFoundPolicy::Continue, "Continue"),
+            (MkImageNotFoundPolicy::Fail, "Fail"),
+        ] {
+            let ctx = egui::Context::default();
+            let mut policy = policy;
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ocr_not_found_policy_ui(ui, &mut policy);
+                });
+            });
+            let mut text = String::new();
+            for clipped in &output.shapes {
+                collect_text(&clipped.shape, &mut text);
+            }
+            assert!(text.contains("If not found"), "rendered text: {text}");
+            assert!(text.contains(expected), "rendered text: {text}");
+        }
+    }
+
+    #[test]
     fn cancelling_after_queueing_never_inserts_a_related_action() {
         use super::super::image_search_editor::ImageEditorRequest;
 
