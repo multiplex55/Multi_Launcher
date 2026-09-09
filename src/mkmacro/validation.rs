@@ -195,7 +195,13 @@ fn ocr_language(language: &MkOcrLanguage, m: u64, s: Option<u64>, out: &mut Vec<
     }
 }
 
-fn ocr_region(region: &SearchRegion, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+fn ocr_region(
+    region: &SearchRegion,
+    monitors: MonitorValidation<'_>,
+    m: u64,
+    s: Option<u64>,
+    out: &mut Vec<MkDiagnostic>,
+) {
     match region {
         SearchRegion::Rectangle { rect } if rect.validate_capture().is_err() => push(
             out,
@@ -207,11 +213,37 @@ fn ocr_region(region: &SearchRegion, m: u64, s: Option<u64>, out: &mut Vec<MkDia
         SearchRegion::Window { matcher: window } | SearchRegion::ClientArea { matcher: window } => {
             matcher(window, m, s, out)
         }
+        SearchRegion::Monitor { index } if matches!(monitors, MonitorValidation::Available(available) if !available.iter().any(|monitor| monitor.index == *index)) => {
+            push(
+                out,
+                m,
+                s,
+                "unavailable_ocr_monitor",
+                format!("Selected OCR monitor {index} is no longer available"),
+            )
+        }
+        SearchRegion::Monitor { .. }
+            if matches!(monitors, MonitorValidation::EnumerationFailed) =>
+        {
+            push(
+                out,
+                m,
+                s,
+                "ocr_monitor_enumeration_failed",
+                "Monitor enumeration is unavailable for the OCR region",
+            )
+        }
         _ => {}
     }
 }
 
-fn ocr_search(search: &MkOcrSearchSpec, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
+fn ocr_search(
+    search: &MkOcrSearchSpec,
+    monitors: MonitorValidation<'_>,
+    m: u64,
+    s: Option<u64>,
+    out: &mut Vec<MkDiagnostic>,
+) {
     if search.text.trim().is_empty() {
         push(
             out,
@@ -260,7 +292,7 @@ fn ocr_search(search: &MkOcrSearchSpec, m: u64, s: Option<u64>, out: &mut Vec<Mk
         );
     }
     ocr_language(&search.language, m, s, out);
-    ocr_region(&search.region, m, s, out);
+    ocr_region(&search.region, monitors, m, s, out);
 }
 
 fn ocr_outputs(outputs: &MkOcrOutputs, m: u64, s: Option<u64>, out: &mut Vec<MkDiagnostic>) {
@@ -489,7 +521,7 @@ fn analyze_document_with_context(
                     }
                 }
                 MkAction::If(c) => {
-                    condition(c, m.id, sid, asset_root, &mut out);
+                    condition(c, context.monitors, m.id, sid, asset_root, &mut out);
                     stack.push(("if", false))
                 }
                 MkAction::Else => match stack.last_mut() {
@@ -533,7 +565,7 @@ fn analyze_document_with_context(
                     }
                 }
                 MkAction::WhileStart { condition: c } => {
-                    condition(c, m.id, sid, asset_root, &mut out);
+                    condition(c, context.monitors, m.id, sid, asset_root, &mut out);
                     stack.push(("while", false))
                 }
                 MkAction::WhileEnd => {
@@ -595,7 +627,7 @@ fn analyze_document_with_context(
                     condition: c,
                     wait: w,
                 } => {
-                    condition(c, m.id, sid, asset_root, &mut out);
+                    condition(c, context.monitors, m.id, sid, asset_root, &mut out);
                     wait(w, m.id, sid, &mut out);
                     if condition_contains_ocr(c) && w.poll_interval_ms < 100 {
                         push(
@@ -714,12 +746,12 @@ fn analyze_document_with_context(
                     }
                 }
                 MkAction::OcrFindText(p) => {
-                    ocr_search(&p.search, m.id, sid, &mut out);
+                    ocr_search(&p.search, context.monitors, m.id, sid, &mut out);
                     ocr_wait(&p.wait, m.id, sid, &mut out);
                     ocr_outputs(&p.outputs, m.id, sid, &mut out);
                 }
                 MkAction::OcrClickText(p) => {
-                    ocr_search(&p.search, m.id, sid, &mut out);
+                    ocr_search(&p.search, context.monitors, m.id, sid, &mut out);
                     ocr_wait(&p.wait, m.id, sid, &mut out);
                     if p.clicks == 0 {
                         push(
@@ -733,7 +765,7 @@ fn analyze_document_with_context(
                 }
                 MkAction::OcrReadText(p) => {
                     ocr_language(&p.language, m.id, sid, &mut out);
-                    ocr_region(&p.region, m.id, sid, &mut out);
+                    ocr_region(&p.region, context.monitors, m.id, sid, &mut out);
                     if p.output_variable.trim().is_empty() {
                         push(
                             &mut out,
@@ -1811,34 +1843,35 @@ fn wait(w: &MkWaitOptions, m: u64, s: Option<u64>, o: &mut Vec<MkDiagnostic>) {
 mod ocr_validation_tests {
     use super::*;
 
-    fn diagnostics(action: MkAction) -> Vec<MkDiagnostic> {
-        validate_document(
-            &MkMacroDocument {
-                macros: vec![MkMacro {
-                    signature: Default::default(),
+    fn document(action: MkAction) -> MkMacroDocument {
+        MkMacroDocument {
+            macros: vec![MkMacro {
+                signature: Default::default(),
+                id: 1,
+                name: "OCR validation".into(),
+                description: String::new(),
+                enabled: true,
+                hotkey: None,
+                hotkey_scope: Default::default(),
+                folder_id: None,
+                playback: Default::default(),
+                steps: vec![MkStep {
+                    metadata: Default::default(),
                     id: 1,
-                    name: "OCR validation".into(),
-                    description: String::new(),
                     enabled: true,
-                    hotkey: None,
-                    hotkey_scope: Default::default(),
-                    folder_id: None,
-                    playback: Default::default(),
-                    steps: vec![MkStep {
-                        metadata: Default::default(),
-                        id: 1,
-                        enabled: true,
-                        breakpoint: false,
-                        repeat: 1,
-                        delay_after_ms: 0,
-                        on_error: Default::default(),
-                        action,
-                    }],
+                    breakpoint: false,
+                    repeat: 1,
+                    delay_after_ms: 0,
+                    on_error: Default::default(),
+                    action,
                 }],
-                ..MkMacroDocument::default()
-            },
-            None,
-        )
+            }],
+            ..MkMacroDocument::default()
+        }
+    }
+
+    fn diagnostics(action: MkAction) -> Vec<MkDiagnostic> {
+        validate_document(&document(action), None)
     }
 
     fn search(text: &str) -> MkOcrSearchSpec {
@@ -1941,6 +1974,76 @@ mod ocr_validation_tests {
             .iter()
             .any(|diagnostic| diagnostic.code == "ocr_poll_interval_too_short")
         );
+    }
+
+    #[test]
+    fn ocr_action_and_condition_monitor_regions_use_environment_availability() {
+        let available = [MonitorDescriptor {
+            index: 2,
+            bounds: crate::mkmacro::ScreenRect::new(-100, 0, 100, 100),
+            primary: true,
+        }];
+        let actions = |index| {
+            let search = MkOcrSearchSpec {
+                text: "ready".into(),
+                region: SearchRegion::Monitor { index },
+                ..Default::default()
+            };
+            [
+                MkAction::OcrFindText(MkOcrFindPayload {
+                    search: search.clone(),
+                    ..Default::default()
+                }),
+                MkAction::WaitUntil {
+                    condition: MkCondition::Not {
+                        condition: Box::new(MkCondition::OcrTextSearch {
+                            search: MkOcrSearchCondition { search },
+                            found: false,
+                        }),
+                    },
+                    wait: MkWaitOptions {
+                        timeout_ms: 500,
+                        poll_interval_ms: 100,
+                    },
+                },
+            ]
+        };
+        let monitor_diagnostics = |action, monitors| {
+            validate_document_with_context(
+                &document(action),
+                ValidationContext {
+                    asset_root: None,
+                    monitors,
+                },
+            )
+            .into_iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    "unavailable_ocr_monitor" | "ocr_monitor_enumeration_failed"
+                )
+            })
+            .collect::<Vec<_>>()
+        };
+
+        for action in actions(2) {
+            assert!(
+                monitor_diagnostics(action, MonitorValidation::Available(&available)).is_empty(),
+                "an available OCR monitor must not produce a monitor diagnostic"
+            );
+        }
+        for action in actions(9) {
+            let diagnostics = monitor_diagnostics(action, MonitorValidation::Available(&available));
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].code, "unavailable_ocr_monitor");
+            assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Fatal);
+        }
+        for action in actions(2) {
+            let diagnostics = monitor_diagnostics(action, MonitorValidation::EnumerationFailed);
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].code, "ocr_monitor_enumeration_failed");
+            assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Fatal);
+        }
     }
 }
 
@@ -2260,6 +2363,7 @@ fn validate_pixel_reference(
 }
 fn condition(
     c: &MkCondition,
+    monitors: MonitorValidation<'_>,
     m: u64,
     s: Option<u64>,
     root: Option<&Path>,
@@ -2319,7 +2423,7 @@ fn condition(
             }
         }
         MkCondition::OcrTextSearch { search, .. } => {
-            ocr_search(&search.search, m, s, o);
+            ocr_search(&search.search, monitors, m, s, o);
         }
         MkCondition::PreviousImageResult {
             image: Some(image), ..
@@ -2341,10 +2445,10 @@ fn condition(
         }
         MkCondition::All { conditions } | MkCondition::Any { conditions } => {
             for x in conditions {
-                condition(x, m, s, root, o)
+                condition(x, monitors, m, s, root, o)
             }
         }
-        MkCondition::Not { condition: x } => condition(x, m, s, root, o),
+        MkCondition::Not { condition: x } => condition(x, monitors, m, s, root, o),
     }
 }
 

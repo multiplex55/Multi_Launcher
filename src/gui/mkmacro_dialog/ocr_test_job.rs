@@ -28,8 +28,26 @@ pub struct OcrTestRequest {
     pub search: Option<MkOcrSearchSpec>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrTestConfiguration {
+    pub region: SearchRegion,
+    pub language: MkOcrLanguage,
+    pub search: Option<MkOcrSearchSpec>,
+}
+
+impl OcrTestRequest {
+    pub fn configuration(&self) -> OcrTestConfiguration {
+        OcrTestConfiguration {
+            region: self.region.clone(),
+            language: self.language.clone(),
+            search: self.search.clone(),
+        }
+    }
+}
+
 pub struct OcrTestCompletion {
     pub identity: OcrDraftIdentity,
+    pub configuration: OcrTestConfiguration,
     pub result: ExecResult<OcrAuthoringPreview>,
 }
 
@@ -47,6 +65,7 @@ impl OcrTestJob {
         request: OcrTestRequest,
     ) {
         self.cancel();
+        let configuration = request.configuration();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
         let (sender, receiver) = mpsc::channel();
@@ -82,6 +101,7 @@ impl OcrTestJob {
             });
             let _ = sender.send(OcrTestCompletion {
                 identity: request.identity,
+                configuration,
                 result,
             });
         });

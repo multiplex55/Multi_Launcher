@@ -49,9 +49,25 @@ const OCR_SELECTED_COLOR: COLORREF = COLORREF(0x0000ff00); // green
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowRole {
     VisibleOverlay,
+    TransparentOverlay,
     Passive,
     Tooltip,
     InputShield,
+}
+
+fn role_is_hit_test_transparent(role: WindowRole) -> bool {
+    matches!(
+        role,
+        WindowRole::TransparentOverlay | WindowRole::Passive | WindowRole::Tooltip
+    )
+}
+
+fn full_surface_role(visual: &OverlayVisual) -> WindowRole {
+    if overlay_is_mouse_transparent(visual) {
+        WindowRole::TransparentOverlay
+    } else {
+        WindowRole::VisibleOverlay
+    }
 }
 
 struct WindowPaintState {
@@ -142,10 +158,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_ERASEBKGND => LRESULT(1), // WM_PAINT owns clearing the complete surface.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST
-            if !state.is_null()
-                && unsafe {
-                    matches!((*state).role, WindowRole::Passive | WindowRole::Tooltip)
-                } =>
+            if !state.is_null() && unsafe { role_is_hit_test_transparent((*state).role) } =>
         {
             LRESULT(HTTRANSPARENT as isize)
         }
@@ -718,6 +731,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             }
         }
 
+        let transparent = overlay_is_mouse_transparent(visual);
         let frame = overlay_frame(visual);
         for bounds in monitor_bounds {
             let (width, height) = match win32_dimensions(bounds, "interactive overlay") {
@@ -731,11 +745,11 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 solid: None,
                 operation_id,
                 description: "interactive",
-                role: WindowRole::VisibleOverlay,
+                role: full_surface_role(visual),
                 paint_count: AtomicUsize::new(0),
             });
             let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-            if overlay_is_mouse_transparent(visual) {
+            if transparent {
                 ex |= WS_EX_TRANSPARENT;
             }
             let created = unsafe {
@@ -1066,7 +1080,20 @@ impl Drop for NativeOverlayRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::key_pressed;
+    use super::*;
+
+    #[test]
+    fn ocr_full_surface_role_is_nonactivating_and_hit_test_transparent() {
+        let visual = OverlayVisual::OcrDebug(OcrDebugOverlayPlan {
+            region: ScreenRect::new(-100, -50, 200, 100),
+            rects: vec![],
+            truncated_rects: 0,
+        });
+        let role = full_surface_role(&visual);
+        assert_eq!(role, WindowRole::TransparentOverlay);
+        assert!(role_is_hit_test_transparent(role));
+        assert!(!role_is_hit_test_transparent(WindowRole::VisibleOverlay));
+    }
 
     #[test]
     fn return_key_held_down_emits_only_one_pressed_transition() {

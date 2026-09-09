@@ -1520,7 +1520,7 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{AlphaPolicy, MkPoint, ReturnPoint, SearchRegion};
+    use crate::mkmacro::{AlphaPolicy, MkPoint, MkValue, ReturnPoint, ScreenRect, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
 
     #[test]
@@ -1611,7 +1611,7 @@ mod tests {
     fn schema_twelve_document_loads_with_existing_model_semantics_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MKMACROS_FILE);
-        let expected = document();
+        let expected = representative_schema_twelve_document();
         let mut schema_twelve = serde_json::to_value(&expected).unwrap();
         schema_twelve["schema_version"] = serde_json::json!(12);
         fs::write(&path, serde_json::to_vec_pretty(&schema_twelve).unwrap()).unwrap();
@@ -1619,6 +1619,11 @@ mod tests {
         let (loaded, changed) = read_document(&path).unwrap().unwrap();
         assert!(changed);
         assert_eq!(loaded, expected);
+
+        persist(&path, &loaded).unwrap();
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(canonical["schema_version"], SCHEMA_VERSION);
     }
 
     fn png_bytes(color: [u8; 4]) -> Vec<u8> {
@@ -1689,6 +1694,124 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    fn representative_schema_twelve_document() -> MkMacroDocument {
+        let mut document = document();
+        document.folders.push(MkMacroFolder {
+            id: 3,
+            name: "Legacy tools".into(),
+        });
+        document.macros[0].folder_id = Some(3);
+        document.macros[0].signature = serde_json::from_value(serde_json::json!({
+            "parameters": [{
+                "id": 1, "name": "needle", "value_type": "string",
+                "description": "legacy parameter", "default_value": {"type":"string","value":"OK"}
+            }],
+            "outputs": [{
+                "id": 2, "name": "found", "value_type": "boolean",
+                "description": "legacy output"
+            }]
+        }))
+        .unwrap();
+        let image = MkImagePayload {
+            image: MkImageRef::from_filename("legacy.png"),
+            wait: MkWaitOptions {
+                timeout_ms: 2_000,
+                poll_interval_ms: 125,
+            },
+            region: SearchRegion::Rectangle {
+                rect: ScreenRect::new(-40, 20, 300, 180),
+            },
+            tolerance: 12,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs {
+                found: Some("image_found".into()),
+                ..Default::default()
+            },
+        };
+        let actions = vec![
+            MkAction::ImageFind(image.clone()),
+            MkAction::ImageClick(image.clone()),
+            MkAction::WaitUntil {
+                condition: MkCondition::ImageSearch {
+                    search: MkImageSearchCondition {
+                        image: image.image.clone(),
+                        region: image.region.clone(),
+                        tolerance: image.tolerance,
+                        alpha: image.alpha,
+                        return_point: image.return_point,
+                    },
+                    found: true,
+                },
+                wait: MkWaitOptions {
+                    timeout_ms: 4_000,
+                    poll_interval_ms: 250,
+                },
+            },
+            MkAction::FindPixel(MkPixelSearchPayload {
+                search_id: 44,
+                color: "#123456".into(),
+                tolerance: 5,
+                region: SearchRegion::Monitor { index: 2 },
+                wait: MkWaitOptions::default(),
+                not_found_policy: MkImageNotFoundPolicy::Fail,
+                outputs: MkImageOutputs::default(),
+            }),
+            MkAction::CaptureScreenshot(MkScreenshotPayload {
+                region: SearchRegion::Desktop,
+                destination: MkScreenshotDestination::File,
+                path: Some("legacy-shot.png".into()),
+                format: MkScreenshotFormat::Png,
+                collision: MkFileCollisionPolicy::Unique,
+                path_output: Some("screenshot_path".into()),
+            }),
+            MkAction::WaitForVisualChange(WaitForVisualChange {
+                region: SearchRegion::Desktop,
+                ..Default::default()
+            }),
+            MkAction::WaitUntil {
+                condition: MkCondition::Variable {
+                    name: "ready".into(),
+                    op: MkCompareOp::Eq,
+                    value: MkValue::Boolean(true),
+                },
+                wait: MkWaitOptions::default(),
+            },
+            MkAction::SetVariable {
+                name: "ready".into(),
+                value: MkValue::Boolean(true),
+            },
+            MkAction::CallMacro(MkCallMacroPayload {
+                macro_id: 99,
+                ..Default::default()
+            }),
+        ];
+        let template = document.macros[0].steps[0].clone();
+        document.macros[0].steps = actions
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| MkStep {
+                id: index as u64 + 1,
+                action,
+                ..template.clone()
+            })
+            .collect();
+        document.macros.push(MkMacro {
+            id: 99,
+            name: "Legacy callee".into(),
+            description: "call target".into(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: Some(3),
+            playback: Default::default(),
+            signature: Default::default(),
+            steps: Vec::new(),
+        });
+        document
     }
     #[test]
     fn v7_launcher_commands_are_classified_conservatively() {

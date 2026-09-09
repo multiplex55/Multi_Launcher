@@ -31,6 +31,7 @@ windows = { version = "0.58", features = [
     "Globalization",
     "Graphics_Imaging",
     "Media_Ocr",
+    "System_UserProfile",
     "Foundation_Collections",
     "Storage_Streams",
     "Security_Cryptography",

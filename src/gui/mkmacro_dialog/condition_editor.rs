@@ -32,9 +32,11 @@ pub struct ConditionImageRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConditionOcrOperation {
     TestOcr,
+    RefreshLanguages,
     PickRectangle,
     PickWindow,
     PreviewRegion,
+    IdentifyMonitors,
     AddActivateWindowBefore,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,7 +343,7 @@ pub(super) fn condition_ui_with_assets(
                     });
             }
             MkCondition::OcrTextSearch { search, found } => {
-                super::ocr_controls::search_ui(ui, &mut search.search);
+                super::ocr_controls::search_match_ui(ui, &mut search.search);
                 ui.horizontal(|ui| {
                     if ui.button("Test OCR").clicked() {
                         requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
@@ -466,6 +468,11 @@ pub fn condition_ui_with_context(
     context: ImageAssetUiContext<'_>,
     authoring_busy: bool,
     test_busy: bool,
+    ocr_languages: super::ocr_controls::OcrLanguageCapability<'_>,
+    ocr_regions: &mut std::collections::HashMap<
+        ConditionPath,
+        super::image_search_controls::SearchRegionEditorState,
+    >,
 ) -> Option<ConditionEditorRequest> {
     let target_context = TargetEditorContext {
         store: context.store,
@@ -479,6 +486,8 @@ pub fn condition_ui_with_context(
         &ConditionPath::root(),
         authoring_busy,
         test_busy,
+        ocr_languages,
+        ocr_regions,
     )
 }
 
@@ -490,7 +499,100 @@ fn condition_ui_context_at(
     path: &ConditionPath,
     authoring_busy: bool,
     test_busy: bool,
+    ocr_languages: super::ocr_controls::OcrLanguageCapability<'_>,
+    ocr_regions: &mut std::collections::HashMap<
+        ConditionPath,
+        super::image_search_controls::SearchRegionEditorState,
+    >,
 ) -> Option<ConditionEditorRequest> {
+    if let MkCondition::OcrTextSearch { search, found } = condition {
+        let mut requested = None;
+        ui.group(|ui| {
+            super::ocr_controls::search_match_ui(ui, &mut search.search);
+            super::ocr_controls::installed_language_ui(
+                ui,
+                &mut search.search.language,
+                ocr_languages,
+            );
+            let region_state = ocr_regions.entry(path.clone()).or_insert_with(|| {
+                super::image_search_controls::SearchRegionEditorState::from_region(
+                    &search.search.region,
+                )
+            });
+            if region_state.selected_region() != search.search.region {
+                *region_state = super::image_search_controls::SearchRegionEditorState::from_region(
+                    &search.search.region,
+                );
+            }
+            if let Some(operation) =
+                super::image_search_controls::show_search_region_fields(ui, region_state)
+            {
+                use super::image_search_controls::SearchRegionRequest as R;
+                match operation {
+                    R::SelectRectangle => {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: path.clone(),
+                            operation: ConditionOcrOperation::PickRectangle,
+                        }))
+                    }
+                    R::PickWindow => {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: path.clone(),
+                            operation: ConditionOcrOperation::PickWindow,
+                        }))
+                    }
+                    R::PreviewRegion => {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: path.clone(),
+                            operation: ConditionOcrOperation::PreviewRegion,
+                        }))
+                    }
+                    R::RefreshMonitors => region_state.refresh_monitors(),
+                    R::IdentifyMonitors => {
+                        requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                            path: path.clone(),
+                            operation: ConditionOcrOperation::IdentifyMonitors,
+                        }))
+                    }
+                }
+            }
+            search.search.region = region_state.selected_region();
+            ui.horizontal(|ui| {
+                if ui.button("Refresh OCR languages").clicked() {
+                    requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                        path: path.clone(),
+                        operation: ConditionOcrOperation::RefreshLanguages,
+                    }));
+                }
+                if ui
+                    .add_enabled(!test_busy, egui::Button::new("Test OCR"))
+                    .clicked()
+                {
+                    requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                        path: path.clone(),
+                        operation: ConditionOcrOperation::TestOcr,
+                    }));
+                }
+                if matches!(
+                    search.search.region,
+                    SearchRegion::Window { .. } | SearchRegion::ClientArea { .. }
+                ) && ui.button("Add Activate Window Before").clicked()
+                {
+                    requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
+                        path: path.clone(),
+                        operation: ConditionOcrOperation::AddActivateWindowBefore,
+                    }));
+                }
+            });
+            egui::ComboBox::from_label("Expected")
+                .selected_text(if *found { "Found" } else { "Not found" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(found, true, "Found");
+                    ui.selectable_value(found, false, "Not found");
+                });
+        });
+        return requested;
+    }
     // The established editor handles all non-browser controls and request
     // routing. Temporarily rendering ImageSearch ourselves avoids maintaining
     // a second asset selector while leaving its capture controls untouched.
@@ -567,6 +669,8 @@ fn condition_ui_context_at(
                         &child_path,
                         authoring_busy,
                         test_busy,
+                        ocr_languages,
+                        ocr_regions,
                     ) {
                         request = Some(r);
                     }
@@ -591,6 +695,8 @@ fn condition_ui_context_at(
                         &child_path,
                         authoring_busy,
                         test_busy,
+                        ocr_languages,
+                        ocr_regions,
                     ) {
                         request = Some(r);
                     }
@@ -613,6 +719,8 @@ fn condition_ui_context_at(
                     &child_path,
                     authoring_busy,
                     test_busy,
+                    ocr_languages,
+                    ocr_regions,
                 )
             })
             .inner
@@ -848,9 +956,11 @@ mod tests {
         }
         for operation in [
             ConditionOcrOperation::TestOcr,
+            ConditionOcrOperation::RefreshLanguages,
             ConditionOcrOperation::PickRectangle,
             ConditionOcrOperation::PickWindow,
             ConditionOcrOperation::PreviewRegion,
+            ConditionOcrOperation::IdentifyMonitors,
             ConditionOcrOperation::AddActivateWindowBefore,
         ] {
             let mut request = ConditionEditorRequest::Ocr(ConditionOcrRequest {

@@ -13,7 +13,7 @@ use super::{
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 type NotificationPreview = Arc<dyn Fn(&ResolvedNotification) -> Result<(), String> + Send + Sync>;
 type SoundPreview = Arc<dyn Fn(&str) + Send + Sync>;
@@ -240,7 +240,15 @@ pub struct ActionEditorState {
     pub(crate) ocr_test: super::ocr_test_job::OcrTestJob,
     pub(crate) ocr_languages: super::ocr_test_job::OcrLanguageJob,
     pub(crate) ocr_language_cache: Option<ExecResult<Vec<OcrLanguageInfo>>>,
+    ocr_condition_regions: HashMap<
+        super::condition_editor::ConditionPath,
+        super::image_search_controls::SearchRegionEditorState,
+    >,
     pub(crate) ocr_preview: Option<super::ocr_test_job::OcrAuthoringPreview>,
+    ocr_preview_owner: Option<(
+        super::ocr_test_job::OcrDraftIdentity,
+        super::ocr_test_job::OcrTestConfiguration,
+    )>,
     ocr_preview_texture: Option<egui::TextureHandle>,
     pub(crate) ocr_message: Option<String>,
     ocr_capture_backend: Arc<dyn ScreenCaptureBackend>,
@@ -564,7 +572,9 @@ impl ActionEditorState {
             ocr_test: Default::default(),
             ocr_languages: Default::default(),
             ocr_language_cache: None,
+            ocr_condition_regions: HashMap::new(),
             ocr_preview: None,
+            ocr_preview_owner: None,
             ocr_preview_texture: None,
             ocr_message: None,
             ocr_capture_backend,
@@ -603,7 +613,9 @@ impl ActionEditorState {
         self.ocr_test.cancel();
         self.ocr_languages = Default::default();
         self.ocr_language_cache = None;
+        self.ocr_condition_regions.clear();
         self.ocr_preview = None;
+        self.ocr_preview_owner = None;
         self.ocr_preview_texture = None;
         self.ocr_message = None;
     }
@@ -626,39 +638,75 @@ impl ActionEditorState {
         }
     }
 
+    fn current_ocr_configuration(
+        &self,
+        identity: &super::ocr_test_job::OcrDraftIdentity,
+    ) -> Option<super::ocr_test_job::OcrTestConfiguration> {
+        match identity.condition_path.as_ref() {
+            None => self.draft.as_ref().and_then(|step| {
+                direct_ocr_test_parts(&step.action).map(|(mut region, language, search)| {
+                    if let Some(editor) = &self.image_search {
+                        region = editor.selected_region();
+                    }
+                    super::ocr_test_job::OcrTestConfiguration {
+                        region,
+                        language,
+                        search,
+                    }
+                })
+            }),
+            Some(path) => self
+                .ocr_condition_test_request(identity.macro_id, path)
+                .map(|request| request.configuration()),
+        }
+    }
+
+    fn discard_stale_ocr_preview(&mut self) {
+        let stale = self
+            .ocr_preview_owner
+            .as_ref()
+            .is_some_and(|(identity, configuration)| {
+                identity.macro_id != self.owner_macro_id.unwrap_or(0)
+                    || identity.step_id != self.editing_id
+                    || self.current_ocr_configuration(identity).as_ref() != Some(configuration)
+            });
+        if stale {
+            self.ocr_preview = None;
+            self.ocr_preview_owner = None;
+            self.ocr_preview_texture = None;
+            if self.ocr_message.as_deref() != Some("Testing OCR…") {
+                self.ocr_message = None;
+            }
+        }
+    }
+
     fn poll_ocr_authoring(&mut self) {
         if let Some(result) = self.ocr_languages.take() {
             self.ocr_language_cache = Some(result);
         }
         if let Some(completion) = self.ocr_test.take() {
             let identity = &completion.identity;
+            let current_configuration = self.current_ocr_configuration(identity);
             let target_is_current = identity.macro_id == self.owner_macro_id.unwrap_or(0)
                 && identity.step_id == self.editing_id
                 && identity.draft_generation == self.draft_generation
-                && match identity.condition_path.as_ref() {
-                    None => self.draft.as_ref().is_some_and(|step| {
-                        matches!(
-                            step.action,
-                            MkAction::OcrFindText(_)
-                                | MkAction::OcrClickText(_)
-                                | MkAction::OcrReadText(_)
-                        )
-                    }),
-                    Some(path) => self
-                        .ocr_condition_test_request(identity.macro_id, path)
-                        .is_some(),
-                };
+                && current_configuration.as_ref() == Some(&completion.configuration);
             if !target_is_current {
+                if self.ocr_message.as_deref() == Some("Testing OCR…") {
+                    self.ocr_message = None;
+                }
                 return;
             }
             match completion.result {
                 Ok(preview) => {
                     self.ocr_preview = Some(preview);
+                    self.ocr_preview_owner = Some((completion.identity, completion.configuration));
                     self.ocr_preview_texture = None;
                     self.ocr_message = None;
                 }
                 Err(error) => {
                     self.ocr_preview = None;
+                    self.ocr_preview_owner = Some((completion.identity, completion.configuration));
                     self.ocr_preview_texture = None;
                     self.ocr_message = Some(error.to_string());
                 }
@@ -666,8 +714,12 @@ impl ActionEditorState {
         }
     }
 
-    fn start_ocr_test(&mut self, request: super::ocr_test_job::OcrTestRequest) {
+    fn start_ocr_test(&mut self, request: super::ocr_test_job::OcrTestRequest) -> bool {
+        if self.ocr_test.active() {
+            return false;
+        }
         self.ocr_preview = None;
+        self.ocr_preview_owner = None;
         self.ocr_preview_texture = None;
         self.ocr_message = Some("Testing OCR…".into());
         self.ocr_test.start(
@@ -675,6 +727,7 @@ impl ActionEditorState {
             self.ocr_backend.clone(),
             request,
         );
+        true
     }
 
     fn preview_ocr_debug_overlay(&mut self) {
@@ -1241,6 +1294,13 @@ impl ActionEditorState {
                 }
             } else {
                 return false;
+            }
+            let region = image.selected_region();
+            match &mut step.action {
+                MkAction::OcrFindText(payload) => payload.search.region = region,
+                MkAction::OcrClickText(payload) => payload.search.region = region,
+                MkAction::OcrReadText(payload) => payload.region = region,
+                _ => {}
             }
             return true;
         }
@@ -1890,9 +1950,20 @@ impl ActionEditorState {
             return;
         };
         region.refresh_monitors();
-        match &region.monitors {
+        let monitors = region.monitors.clone();
+        self.show_monitor_identification(monitors);
+    }
+    fn identify_condition_monitors(&mut self, path: &super::condition_editor::ConditionPath) {
+        let Some(region) = self.ocr_condition_regions.get_mut(path) else {
+            return;
+        };
+        let monitors = region.monitors.clone();
+        self.show_monitor_identification(monitors);
+    }
+    fn show_monitor_identification(&mut self, monitors: Result<Vec<MonitorDescriptor>, String>) {
+        match monitors {
             Ok(monitors) if !monitors.is_empty() => {
-                let id = self.visual_overlay.identify_monitors(monitors.clone());
+                let id = self.visual_overlay.identify_monitors(monitors);
                 self.overlay_diagnostic = Some((id, "Unable to identify monitors".into()));
                 if self.visual_overlay.operation_id() == Some(id) {
                     self.capture_message = None;
@@ -1995,6 +2066,10 @@ impl ActionEditorState {
                 "The insertion anchor changed outside the editor. Cancel and reopen it before applying."
                     .into(),
             );
+            return None;
+        }
+        if let Some(message) = ocr_draft_validation_error(self.draft.as_ref().unwrap()) {
+            self.capture_message = Some(message);
             return None;
         }
         if matches!(
@@ -3175,6 +3250,11 @@ fn action_ui(
     caller_id: u64,
     call_target_search: &mut String,
     pending_call_target: &mut Option<u64>,
+    ocr_languages: super::ocr_controls::OcrLanguageCapability<'_>,
+    ocr_condition_regions: &mut HashMap<
+        super::condition_editor::ConditionPath,
+        super::image_search_controls::SearchRegionEditorState,
+    >,
 ) -> (
     Option<PositionCaptureSlot>,
     Option<super::window_picker::MatcherPath>,
@@ -3767,6 +3847,8 @@ fn action_ui(
                 image_context,
                 authoring_busy,
                 test_busy,
+                ocr_languages,
+                ocr_condition_regions,
             ) {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
@@ -3789,6 +3871,8 @@ fn action_ui(
                 image_context,
                 authoring_busy,
                 test_busy,
+                ocr_languages,
+                ocr_condition_regions,
             ) {
                 match request {
                     super::condition_editor::ConditionEditorRequest::WindowMatcher { path } => {
@@ -4452,6 +4536,110 @@ fn image_output_names_valid(action: &MkAction) -> bool {
     super::image_search_controls::image_outputs_valid(outputs)
 }
 
+fn action_contains_ocr(action: &MkAction) -> bool {
+    match action {
+        MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => true,
+        MkAction::If(condition)
+        | MkAction::WhileStart { condition }
+        | MkAction::WaitUntil { condition, .. } => {
+            crate::mkmacro::validation::condition_contains_ocr(condition)
+        }
+        _ => false,
+    }
+}
+
+fn invalidate_ocr_authoring_after_action_change(
+    before: &MkAction,
+    after: &MkAction,
+    draft_generation: &mut u64,
+    preview: &mut Option<super::ocr_test_job::OcrAuthoringPreview>,
+    preview_texture: &mut Option<egui::TextureHandle>,
+    message: &mut Option<String>,
+) {
+    if !action_contains_ocr(before) && !action_contains_ocr(after) {
+        return;
+    }
+    *draft_generation = draft_generation.wrapping_add(1);
+    *preview = None;
+    *preview_texture = None;
+    if message.as_deref() == Some("Testing OCR…") {
+        *message = None;
+    }
+}
+
+fn direct_ocr_test_parts(
+    action: &MkAction,
+) -> Option<(SearchRegion, MkOcrLanguage, Option<MkOcrSearchSpec>)> {
+    match action {
+        MkAction::OcrFindText(payload) => Some((
+            payload.search.region.clone(),
+            payload.search.language.clone(),
+            Some(payload.search.clone()),
+        )),
+        MkAction::OcrClickText(payload) => Some((
+            payload.search.region.clone(),
+            payload.search.language.clone(),
+            Some(payload.search.clone()),
+        )),
+        MkAction::OcrReadText(payload) => {
+            Some((payload.region.clone(), payload.language.clone(), None))
+        }
+        _ => None,
+    }
+}
+
+fn direct_ocr_region(action: &MkAction) -> Option<&SearchRegion> {
+    match action {
+        MkAction::OcrFindText(payload) => Some(&payload.search.region),
+        MkAction::OcrClickText(payload) => Some(&payload.search.region),
+        MkAction::OcrReadText(payload) => Some(&payload.region),
+        _ => None,
+    }
+}
+
+fn ocr_draft_validation_error(step: &MkStep) -> Option<String> {
+    if !action_contains_ocr(&step.action) {
+        return None;
+    }
+    let mut opener = step.clone();
+    normalize_optional_outputs(&mut opener.action);
+    opener.id = 1;
+    let close = match &opener.action {
+        MkAction::If(_) => Some(MkAction::EndIf),
+        MkAction::WhileStart { .. } => Some(MkAction::WhileEnd),
+        _ => None,
+    };
+    let mut steps = vec![opener];
+    if let Some(action) = close {
+        let mut closer = steps[0].clone();
+        closer.id = 2;
+        closer.action = action;
+        steps.push(closer);
+    }
+    let document = MkMacroDocument {
+        macros: vec![MkMacro {
+            id: 1,
+            name: "OCR draft validation".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            signature: Default::default(),
+            steps,
+        }],
+        ..Default::default()
+    };
+    crate::mkmacro::validate_document(&document, None)
+        .into_iter()
+        .find(|diagnostic| {
+            diagnostic.severity == crate::mkmacro::DiagnosticSeverity::Fatal
+                && diagnostic.step_id == Some(1)
+        })
+        .map(|diagnostic| diagnostic.message)
+}
+
 fn draft_apply_valid(
     step: &MkStep,
     image_search: Option<&super::image_search_editor::ImageSearchEditorState>,
@@ -4473,6 +4661,7 @@ fn draft_apply_valid(
         && image_search
             .and_then(|image| image.validation_error())
             .is_none()
+        && ocr_draft_validation_error(step).is_none()
 }
 
 /// Validate the exact prospective Call/Return document through the central
@@ -4915,16 +5104,14 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .action_editor
         .draft
         .as_ref()
-        .is_some_and(|step| match &step.action {
-            MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => true,
-            MkAction::If(condition)
-            | MkAction::WhileStart { condition }
-            | MkAction::WaitUntil { condition, .. } => {
-                crate::mkmacro::validation::condition_contains_ocr(condition)
-            }
-            _ => false,
-        });
+        .is_some_and(|step| action_contains_ocr(&step.action));
+    let direct_ocr_editor_open = d
+        .action_editor
+        .draft
+        .as_ref()
+        .is_some_and(|step| direct_ocr_test_parts(&step.action).is_some());
     d.action_editor.poll_ocr_authoring();
+    d.action_editor.discard_stale_ocr_preview();
     if ocr_editor_open
         && d.action_editor.ocr_language_cache.is_none()
         && !d.action_editor.ocr_languages.active()
@@ -5012,8 +5199,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .show(ctx, |ui| {
           egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let state = &mut d.action_editor;
-            let draft_generation = state.draft_generation;
-            let ocr_identity = state.ocr_identity(None);
+            let mut draft_generation = state.draft_generation;
             let point_pick_active = state.active_point_pick.is_some()
                 || state.visual_overlay.operation_id().is_some();
             let step = state.draft.as_mut().unwrap();
@@ -5025,6 +5211,19 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 assets: &image_refs,
             };
             let caller_id = state.owner_macro_id.or(d.selected_macro_id).unwrap_or(0);
+            let installed_languages = if state.ocr_languages.active() {
+                super::ocr_controls::OcrLanguageCapability::Loading
+            } else {
+                match state.ocr_language_cache.as_ref() {
+                    None => super::ocr_controls::OcrLanguageCapability::NotRequested,
+                    Some(Ok(languages)) => {
+                        super::ocr_controls::OcrLanguageCapability::Available(languages)
+                    }
+                    Some(Err(error)) => {
+                        super::ocr_controls::OcrLanguageCapability::Failed(error)
+                    }
+                }
+            };
             let (position, mut window, launcher, image, condition_image, condition_ocr, preview, pick_point, open_target)=action_ui(
                 ui,
                 step,
@@ -5034,13 +5233,32 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 &state.variable_catalog,
                 point_pick_active,
                 workflow_active || importing || crop_open,
-                test_busy,
+                test_busy || state.ocr_test.active(),
                 &d.draft,
                 caller_id,
                 &mut state.call_target_search,
                 &mut state.pending_call_target,
+                installed_languages,
+                &mut state.ocr_condition_regions,
             );
-            if step.action != action_before { state.draft_changed = true; }
+            if step.action != action_before {
+                state.draft_changed = true;
+                invalidate_ocr_authoring_after_action_change(
+                    &action_before,
+                    &step.action,
+                    &mut state.draft_generation,
+                    &mut state.ocr_preview,
+                    &mut state.ocr_preview_texture,
+                    &mut state.ocr_message,
+                );
+                draft_generation = state.draft_generation;
+            }
+            let ocr_identity = super::ocr_test_job::OcrDraftIdentity {
+                macro_id: state.owner_macro_id.unwrap_or(0),
+                step_id: state.editing_id,
+                draft_generation,
+                condition_path: None,
+            };
             pick_request = position;
             image_request = image;
             condition_image_request = condition_image;
@@ -5048,86 +5266,58 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             preview_request = preview;
             point_pick_request = pick_point;
             open_call_target_request = open_target;
-            let installed_languages = state
-                .ocr_language_cache
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .cloned()
-                .unwrap_or_default();
             match &mut step.action {
                 MkAction::OcrFindText(payload) => {
                     super::ocr_controls::installed_language_ui(
                         ui,
                         &mut payload.search.language,
-                        &installed_languages,
+                        installed_languages,
                     );
                 }
                 MkAction::OcrClickText(payload) => {
                     super::ocr_controls::installed_language_ui(
                         ui,
                         &mut payload.search.language,
-                        &installed_languages,
+                        installed_languages,
                     );
                 }
                 MkAction::OcrReadText(payload) => {
                     super::ocr_controls::installed_language_ui(
                         ui,
                         &mut payload.language,
-                        &installed_languages,
+                        installed_languages,
                     );
                 }
                 _ => {}
             }
-            if ocr_editor_open {
+            if direct_ocr_editor_open {
                 ui.horizontal(|ui| {
                     if ui.button("Refresh OCR languages").clicked() {
                         refresh_ocr_languages = true;
                     }
-                    if ui.button("Test OCR").clicked() {
-                        let (region, language, search) = match &step.action {
-                            MkAction::OcrFindText(payload) => (
-                                payload.search.region.clone(),
-                                payload.search.language.clone(),
-                                Some(payload.search.clone()),
-                            ),
-                            MkAction::OcrClickText(payload) => (
-                                payload.search.region.clone(),
-                                payload.search.language.clone(),
-                                Some(payload.search.clone()),
-                            ),
-                            MkAction::OcrReadText(payload) => (
-                                payload.region.clone(),
-                                payload.language.clone(),
-                                None,
-                            ),
-                            _ => unreachable!(),
-                        };
-                        ocr_test_request = Some(super::ocr_test_job::OcrTestRequest {
-                            identity: ocr_identity.clone(),
-                            region,
-                            language,
-                            search,
-                        });
+                    if ui
+                        .add_enabled(!state.ocr_test.active(), egui::Button::new("Test OCR"))
+                        .clicked()
+                    {
+                        ocr_test_request = direct_ocr_test_parts(&step.action).map(
+                            |(region, language, search)| super::ocr_test_job::OcrTestRequest {
+                                identity: ocr_identity.clone(),
+                                region,
+                                language,
+                                search,
+                            },
+                        );
                     }
                 });
-                let ocr_region = match &step.action {
-                    MkAction::OcrFindText(payload) => {
-                        &payload.search.region
+                if let Some(ocr_region) = direct_ocr_region(&step.action) {
+                    if activation_matcher(ocr_region).is_some()
+                        && ui.button("Add Activate Window Before").clicked()
+                    {
+                        state.add_activate_before = true;
                     }
-                    MkAction::OcrClickText(payload) => {
-                        &payload.search.region
-                    }
-                    MkAction::OcrReadText(payload) => &payload.region,
-                    _ => unreachable!(),
-                };
-                if activation_matcher(ocr_region).is_some()
-                    && ui.button("Add Activate Window Before").clicked()
-                {
-                    state.add_activate_before = true;
                 }
-                if let Some(Err(error)) = &state.ocr_language_cache {
-                    ui.colored_label(ui.visuals().error_fg_color, error.to_string());
-                }
+            }
+            if ocr_editor_open {
                 if let Some(message) = &state.ocr_message {
                     ui.label(message);
                 }
@@ -5339,8 +5529,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         ctx.request_repaint();
     }
     if let Some(request) = ocr_test_request {
-        d.action_editor.start_ocr_test(request);
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        if d.action_editor.start_ocr_test(request) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
     if show_ocr_debug_overlay {
         d.action_editor.preview_ocr_debug_overlay();
@@ -5355,13 +5546,19 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         use super::condition_editor::ConditionOcrOperation;
         let macro_id = d.selected_macro_id.unwrap_or(0);
         match request.operation {
+            ConditionOcrOperation::RefreshLanguages => {
+                d.action_editor.ocr_language_cache = None;
+                d.action_editor.request_ocr_languages();
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
             ConditionOcrOperation::TestOcr => {
                 if let Some(test) = d
                     .action_editor
                     .ocr_condition_test_request(macro_id, &request.path)
                 {
-                    d.action_editor.start_ocr_test(test);
-                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    if d.action_editor.start_ocr_test(test) {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    }
                 }
             }
             ConditionOcrOperation::PreviewRegion => {
@@ -5371,6 +5568,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 {
                     d.action_editor.preview_region(test.region);
                 }
+            }
+            ConditionOcrOperation::IdentifyMonitors => {
+                d.action_editor.identify_condition_monitors(&request.path);
             }
             ConditionOcrOperation::PickRectangle => {
                 let destination = d.action_editor.condition_destination(
@@ -5720,7 +5920,10 @@ mod tests {
     use super::*;
     use image::RgbaImage;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        time::{Duration, Instant},
+    };
 
     fn variable_step(id: u64, name: &str, value: MkValue) -> MkStep {
         MkStep {
@@ -6035,6 +6238,44 @@ mod tests {
         }
         fn capture_rect(&self, rect: ScreenRect, _: &dyn Fn() -> bool) -> ExecResult<RgbaImage> {
             Ok(RgbaImage::new(rect.width, rect.height))
+        }
+    }
+
+    struct GatedOcr {
+        started: mpsc::Sender<std::thread::ThreadId>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl OcrBackend for GatedOcr {
+        fn available_languages(&self) -> ExecResult<Vec<OcrLanguageInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn max_image_dimension(&self) -> ExecResult<u32> {
+            Ok(2_048)
+        }
+
+        fn recognize(
+            &self,
+            image: &RgbaImage,
+            _: &MkOcrLanguage,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<OcrDocument> {
+            let _ = self.started.send(std::thread::current().id());
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| {
+                    ExecutionDiagnostic::new(
+                        DiagnosticKind::Backend,
+                        format!("test OCR gate was not released: {error}"),
+                    )
+                })?;
+            Ok(OcrDocument {
+                image_width: image.width(),
+                image_height: image.height(),
+                ..Default::default()
+            })
         }
     }
     struct TestAssets;
@@ -7442,8 +7683,6 @@ mod tests {
         }
     }
     use image::{GenericImageView, Rgba};
-    use std::sync::mpsc;
-
     #[derive(Default)]
     struct HeldExecutor(std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>);
     impl super::super::image_authoring_job::ImageAuthoringExecutor for HeldExecutor {
@@ -8521,6 +8760,322 @@ mod tests {
         assert_eq!(request.identity.macro_id, 42);
         assert_eq!(request.identity.condition_path, Some(path));
         assert_eq!(request.search.unwrap().text, "ready");
+    }
+
+    #[test]
+    fn ocr_edit_invalidates_running_condition_job_and_rejects_overlap() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let backend = Arc::new(GatedOcr {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        });
+        let mut editor = test_editor();
+        editor.begin_new(MkAction::If(MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: MkOcrSearchSpec {
+                    text: "ready".into(),
+                    ..Default::default()
+                },
+            },
+            found: true,
+        }));
+        editor.bind_owner(Some(42));
+        editor.set_ocr_authoring_backends(Arc::new(TestDesktop), backend);
+        let path = super::super::condition_editor::ConditionPath::root();
+        let request = editor.ocr_condition_test_request(42, &path).unwrap();
+        let caller_thread = std::thread::current().id();
+        assert!(editor.start_ocr_test(request));
+        let worker_thread = started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("OCR worker did not reach the deterministic gate");
+        assert_ne!(worker_thread, caller_thread);
+
+        let overlapping = editor.ocr_condition_test_request(42, &path).unwrap();
+        assert!(!editor.start_ocr_test(overlapping));
+        assert!(editor.ocr_test.active());
+
+        let old_generation = editor.draft_generation;
+        if let MkAction::If(MkCondition::OcrTextSearch { search, .. }) =
+            &mut editor.draft.as_mut().unwrap().action
+        {
+            search.search.text = "changed".into();
+        } else {
+            panic!("expected OCR If draft");
+        }
+        assert_eq!(editor.draft_generation, old_generation);
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.ocr_test.active() && Instant::now() < deadline {
+            editor.poll_ocr_authoring();
+            std::thread::yield_now();
+        }
+        assert!(
+            !editor.ocr_test.active(),
+            "stale completion was not consumed"
+        );
+        assert!(editor.ocr_preview.is_none());
+        assert_ne!(editor.ocr_message.as_deref(), Some("Testing OCR…"));
+    }
+
+    #[test]
+    fn direct_ocr_configuration_and_window_picker_update_are_lossless() {
+        let mut payload = MkOcrFindPayload::default();
+        payload.search.text = "ready".into();
+        payload.search.region = SearchRegion::Window {
+            matcher: MkWindowMatcher::default(),
+        };
+        let mut editor = test_editor();
+        editor.begin_edit(&step(MkAction::OcrFindText(payload)));
+        editor.bind_owner(Some(7));
+        let before = direct_ocr_test_parts(&editor.draft.as_ref().unwrap().action).unwrap();
+        let identity = editor.ocr_identity(None);
+        editor.ocr_preview_owner = Some((
+            identity,
+            super::super::ocr_test_job::OcrTestConfiguration {
+                region: before.0.clone(),
+                language: before.1.clone(),
+                search: before.2.clone(),
+            },
+        ));
+        editor.ocr_preview = Some(super::super::ocr_test_job::OcrAuthoringPreview {
+            recognized: OcrRegionDocument {
+                capture: CapturedRegion {
+                    image: RgbaImage::new(1, 1),
+                    origin: (0, 0),
+                },
+                document: OcrDocument::default(),
+            },
+            search: None,
+        });
+        let replacement = MkWindowMatcher {
+            title: Some("Picked OCR window".into()),
+            ..Default::default()
+        };
+        let request = super::super::window_picker::MatcherEditRequest {
+            destination: super::super::window_picker::MatcherDestination::Action {
+                macro_id: 7,
+                draft_generation: editor.draft_generation,
+                step_id: editor.editing_id,
+                path: super::super::window_picker::MatcherPath::VisualRegion,
+            },
+            original: MkWindowMatcher::default(),
+        };
+        assert!(editor.apply_window_matcher(&request, replacement.clone(), Some(7)));
+        editor.discard_stale_ocr_preview();
+        assert!(
+            editor.ocr_preview.is_none(),
+            "picker mutation invalidates completed preview"
+        );
+        let MkAction::OcrFindText(payload) = &mut editor.draft.as_mut().unwrap().action else {
+            panic!()
+        };
+        assert!(
+            matches!(&payload.search.region, SearchRegion::Window { matcher } if matcher == &replacement)
+        );
+        payload.search.language = MkOcrLanguage::LanguageTag("fr-FR".into());
+        payload.search.region = SearchRegion::Rectangle {
+            rect: ScreenRect::new(-5, 6, 70, 80),
+        };
+        let after = direct_ocr_test_parts(&editor.draft.as_ref().unwrap().action).unwrap();
+        assert_ne!(
+            before, after,
+            "language and region belong to the job snapshot"
+        );
+        editor.ocr_preview_owner = Some((
+            editor.ocr_identity(None),
+            super::super::ocr_test_job::OcrTestConfiguration {
+                region: SearchRegion::Window {
+                    matcher: replacement,
+                },
+                language: MkOcrLanguage::Auto,
+                search: Some(MkOcrSearchSpec {
+                    text: "ready".into(),
+                    region: SearchRegion::Window {
+                        matcher: MkWindowMatcher::default(),
+                    },
+                    ..Default::default()
+                }),
+            },
+        ));
+        editor.ocr_preview = Some(super::super::ocr_test_job::OcrAuthoringPreview {
+            recognized: OcrRegionDocument {
+                capture: CapturedRegion {
+                    image: RgbaImage::new(1, 1),
+                    origin: (0, 0),
+                },
+                document: OcrDocument::default(),
+            },
+            search: None,
+        });
+        editor.discard_stale_ocr_preview();
+        assert!(
+            editor.ocr_preview.is_none(),
+            "widget-equivalent language/region mutation invalidates completed preview"
+        );
+    }
+
+    #[test]
+    fn completed_ocr_error_is_cleared_when_configuration_changes() {
+        let mut payload = MkOcrFindPayload::default();
+        payload.search.text = "ready".into();
+        let mut editor = test_editor();
+        editor.begin_edit(&step(MkAction::OcrFindText(payload)));
+        editor.bind_owner(Some(7));
+        let identity = editor.ocr_identity(None);
+        let configuration = editor.current_ocr_configuration(&identity).unwrap();
+        editor.ocr_preview_owner = Some((identity, configuration));
+        editor.ocr_message = Some("Windows OCR recognize image failed".into());
+
+        let MkAction::OcrFindText(payload) = &mut editor.draft.as_mut().unwrap().action else {
+            panic!()
+        };
+        payload.search.language = MkOcrLanguage::LanguageTag("fr-FR".into());
+        editor.discard_stale_ocr_preview();
+
+        assert!(editor.ocr_preview_owner.is_none());
+        assert!(editor.ocr_message.is_none());
+    }
+
+    #[test]
+    fn nested_condition_monitor_identification_uses_only_exact_path_state() {
+        let fixture =
+            super::super::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+        let mut editor = ActionEditorState::new(fixture.controller.clone());
+        let direct_monitor = monitor(3, ScreenRect::new(0, 0, 300, 200));
+        let nested_monitor = monitor(8, ScreenRect::new(-900, 40, 640, 480));
+        let mut direct = super::super::image_search_controls::SearchRegionEditorState::from_region(
+            &SearchRegion::Monitor { index: 3 },
+        );
+        direct.monitors = Ok(vec![direct_monitor]);
+        editor.image_search = Some(direct);
+        let direct_before = editor.image_search.clone();
+
+        let path = super::super::condition_editor::ConditionPath::from_indexes(&[1, 0]);
+        let mut nested = super::super::image_search_controls::SearchRegionEditorState::from_region(
+            &SearchRegion::Monitor { index: 8 },
+        );
+        nested.monitors = Ok(vec![nested_monitor.clone()]);
+        editor.ocr_condition_regions.insert(path.clone(), nested);
+
+        editor.identify_condition_monitors(&path);
+        fixture.observer.wait_for_commands(1);
+        assert!(matches!(
+            &fixture.observer.commands.lock().unwrap()[0],
+            VisualOverlayCommand::IdentifyMonitors { monitors, .. }
+                if monitors == &vec![nested_monitor]
+        ));
+        assert_eq!(editor.image_search, direct_before);
+    }
+
+    #[test]
+    fn ocr_condition_hosts_never_enter_direct_action_preview_routing() {
+        let condition = MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: MkOcrSearchSpec {
+                    text: "ready".into(),
+                    ..Default::default()
+                },
+            },
+            found: true,
+        };
+        for action in [
+            MkAction::If(condition.clone()),
+            MkAction::WhileStart {
+                condition: condition.clone(),
+            },
+            MkAction::WaitUntil {
+                condition: condition.clone(),
+                wait: MkWaitOptions {
+                    timeout_ms: 5_000,
+                    poll_interval_ms: 250,
+                },
+            },
+        ] {
+            assert!(action_contains_ocr(&action));
+            assert!(direct_ocr_test_parts(&action).is_none());
+            assert!(direct_ocr_region(&action).is_none());
+
+            let mut editor = test_editor();
+            editor.begin_new(action);
+            editor.bind_owner(Some(42));
+            let request = editor
+                .ocr_condition_test_request(
+                    42,
+                    &super::super::condition_editor::ConditionPath::root(),
+                )
+                .expect("condition-owned OCR uses its dedicated request route");
+            assert_eq!(
+                request.identity.condition_path,
+                Some(super::super::condition_editor::ConditionPath::root())
+            );
+            assert_eq!(request.search.unwrap().text, "ready");
+        }
+    }
+
+    #[test]
+    fn central_ocr_validation_gates_apply_and_keeps_invalid_drafts_transactional() {
+        let mut invalid_regex = MkOcrFindPayload::default();
+        invalid_regex.search.text = "(".into();
+        invalid_regex.search.match_mode = MkOcrMatchMode::Regex;
+        let mut invalid_nth = MkOcrFindPayload::default();
+        invalid_nth.search.text = "ready".into();
+        invalid_nth.search.occurrence = MkOcrOccurrence::Nth(0);
+        let mut invalid_language = MkOcrFindPayload::default();
+        invalid_language.search.text = "ready".into();
+        invalid_language.search.language = MkOcrLanguage::LanguageTag("not a tag".into());
+        let mut invalid_wait = MkOcrFindPayload::default();
+        invalid_wait.search.text = "ready".into();
+        invalid_wait.wait.poll_interval_ms = 0;
+        let mut invalid_output = MkOcrFindPayload::default();
+        invalid_output.search.text = "ready".into();
+        invalid_output.outputs.found = Some("not valid".into());
+
+        for action in [
+            MkAction::OcrFindText(MkOcrFindPayload::default()),
+            MkAction::OcrFindText(invalid_regex),
+            MkAction::OcrFindText(invalid_nth),
+            MkAction::OcrFindText(invalid_language),
+            MkAction::OcrFindText(invalid_wait),
+            MkAction::OcrFindText(invalid_output),
+            MkAction::OcrReadText(MkOcrReadPayload::default()),
+            MkAction::WaitUntil {
+                condition: MkCondition::OcrTextSearch {
+                    search: MkOcrSearchCondition {
+                        search: MkOcrSearchSpec {
+                            text: "ready".into(),
+                            ..Default::default()
+                        },
+                    },
+                    found: true,
+                },
+                wait: MkWaitOptions {
+                    timeout_ms: 5_000,
+                    poll_interval_ms: 99,
+                },
+            },
+        ] {
+            let draft = step(action);
+            assert!(ocr_draft_validation_error(&draft).is_some());
+            assert!(!draft_apply_valid(&draft, None));
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = MkMacroDialog::new(Arc::new(store));
+        dialog.create_macro();
+        let owner = dialog.selected_macro_id.unwrap();
+        let mut editor = dialog.take_action_editor();
+        editor.begin_new_with_editor(
+            MkAction::OcrFindText(MkOcrFindPayload::default()),
+            super::super::action_catalog::EditorKind::OcrSearch,
+        );
+        editor.bind_owner(Some(owner));
+        assert!(editor.apply(&mut dialog).is_none());
+        assert!(editor.draft.is_some());
+        assert!(editor.capture_message.is_some());
+        assert!(dialog.selected_macro().unwrap().steps.is_empty());
     }
 
     #[test]

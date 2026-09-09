@@ -771,6 +771,26 @@ pub fn rgba_to_bgra_bytes(image: &RgbaImage) -> Vec<u8> {
     converted
 }
 
+fn normalized_ocr_engine_cache_key(language_tag: &str) -> Option<String> {
+    let language_tag = language_tag.trim();
+    (!language_tag.is_empty()).then(|| format!("tag:{}", language_tag.to_ascii_lowercase()))
+}
+
+fn ocr_profile_language_signature(tags: &[String]) -> String {
+    tags.iter()
+        .map(|tag| format!("{}:{}", tag.len(), tag.to_ascii_lowercase()))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn record_auto_profile_resolution(
+    state: &mut Option<(String, String)>,
+    signature: String,
+    resolved_key: String,
+) {
+    *state = Some((signature, resolved_key));
+}
+
 #[cfg(windows)]
 mod windows_backend {
     use super::*;
@@ -780,6 +800,7 @@ mod windows_backend {
         Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap},
         Media::Ocr::{OcrEngine, OcrResult},
         Security::Cryptography::CryptographicBuffer,
+        System::UserProfile::GlobalizationPreferences,
         Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
         core::HSTRING,
     };
@@ -791,6 +812,7 @@ mod windows_backend {
     /// engines across executor and authoring worker threads.
     pub struct WindowsOcrBackend {
         engines: Mutex<VecDeque<(String, OcrEngine)>>,
+        auto_profile: Mutex<Option<(String, String)>>,
     }
 
     impl Default for WindowsOcrBackend {
@@ -803,47 +825,51 @@ mod windows_backend {
         pub fn new() -> Self {
             Self {
                 engines: Mutex::new(VecDeque::new()),
+                auto_profile: Mutex::new(None),
             }
         }
 
-        fn engine(&self, language: &MkOcrLanguage) -> ExecResult<OcrEngine> {
-            let key = match language {
-                MkOcrLanguage::Auto => "auto".to_owned(),
-                MkOcrLanguage::LanguageTag(tag) => {
-                    format!("tag:{}", tag.to_ascii_lowercase())
-                }
-            };
-            {
-                let mut engines = self.engines.lock().map_err(|_| {
-                    diagnostic(
-                        "lock engine cache",
-                        language,
-                        "OCR engine cache was poisoned",
-                    )
-                })?;
-                if let Some(index) = engines.iter().position(|(cached, _)| cached == &key) {
-                    let entry = engines.remove(index).ok_or_else(|| {
-                        diagnostic("read engine cache", language, "OCR engine cache changed")
-                    })?;
-                    let engine = entry.1.clone();
-                    engines.push_back(entry);
-                    return Ok(engine);
-                }
-            }
-
-            let engine = create_engine(language)?;
+        fn cached_engine(
+            &self,
+            key: &str,
+            requested: &MkOcrLanguage,
+        ) -> ExecResult<Option<OcrEngine>> {
             let mut engines = self.engines.lock().map_err(|_| {
                 diagnostic(
                     "lock engine cache",
-                    language,
+                    requested,
                     "OCR engine cache was poisoned",
                 )
             })?;
-            // A racing thread may have populated the same key. Keep its engine
-            // and avoid growing the bounded cache with duplicates.
+            if let Some(index) = engines.iter().position(|(cached, _)| cached == key) {
+                let entry = engines.remove(index).ok_or_else(|| {
+                    diagnostic("read engine cache", requested, "OCR engine cache changed")
+                })?;
+                let cached = entry.1.clone();
+                engines.push_back(entry);
+                return Ok(Some(cached));
+            }
+            Ok(None)
+        }
+
+        fn cache_engine(
+            &self,
+            key: String,
+            engine: OcrEngine,
+            requested: &MkOcrLanguage,
+        ) -> ExecResult<OcrEngine> {
+            let mut engines = self.engines.lock().map_err(|_| {
+                diagnostic(
+                    "lock engine cache",
+                    requested,
+                    "OCR engine cache was poisoned",
+                )
+            })?;
+            // A racing thread may have populated the same resolved language.
+            // Prefer that entry and keep the LRU free of duplicates.
             if let Some(index) = engines.iter().position(|(cached, _)| cached == &key) {
                 let entry = engines.remove(index).ok_or_else(|| {
-                    diagnostic("read engine cache", language, "OCR engine cache changed")
+                    diagnostic("read engine cache", requested, "OCR engine cache changed")
                 })?;
                 let cached = entry.1.clone();
                 engines.push_back(entry);
@@ -855,6 +881,115 @@ mod windows_backend {
             engines.push_back((key, engine.clone()));
             Ok(engine)
         }
+
+        fn engine(&self, language: &MkOcrLanguage) -> ExecResult<OcrEngine> {
+            match language {
+                MkOcrLanguage::Auto => {
+                    // A cheap ordered profile-language signature invalidates
+                    // Auto without constructing a recognizer for every tile or
+                    // poll. Engines remain keyed by the resolved canonical tag.
+                    let signature = user_profile_language_signature(language)?;
+                    let cached_key = self
+                        .auto_profile
+                        .lock()
+                        .map_err(|_| {
+                            diagnostic(
+                                "lock profile cache",
+                                language,
+                                "OCR profile cache was poisoned",
+                            )
+                        })?
+                        .as_ref()
+                        .and_then(|(cached_signature, key)| {
+                            (cached_signature == &signature).then(|| key.clone())
+                        });
+                    if let Some(key) = cached_key
+                        && let Some(cached) = self.cached_engine(&key, language)?
+                    {
+                        return Ok(cached);
+                    }
+                    let engine =
+                        OcrEngine::TryCreateFromUserProfileLanguages().map_err(|error| {
+                            diagnostic("resolve user-profile language", language, error)
+                        })?;
+                    let resolved_tag = engine
+                        .RecognizerLanguage()
+                        .and_then(|resolved| resolved.LanguageTag())
+                        .map_err(|error| diagnostic("read resolved language", language, error))?
+                        .to_string();
+                    let key = normalized_ocr_engine_cache_key(&resolved_tag).ok_or_else(|| {
+                        diagnostic(
+                            "read resolved language",
+                            language,
+                            "OCR recognizer returned an empty language tag",
+                        )
+                    })?;
+                    let engine = match self.cached_engine(&key, language)? {
+                        Some(cached) => cached,
+                        None => self.cache_engine(key.clone(), engine, language)?,
+                    };
+                    let mut profile = self.auto_profile.lock().map_err(|_| {
+                        diagnostic(
+                            "lock profile cache",
+                            language,
+                            "OCR profile cache was poisoned",
+                        )
+                    })?;
+                    record_auto_profile_resolution(&mut profile, signature, key);
+                    Ok(engine)
+                }
+                MkOcrLanguage::LanguageTag(tag) => {
+                    let language_value = Language::CreateLanguage(&HSTRING::from(tag))
+                        .map_err(|error| diagnostic("parse language tag", language, error))?;
+                    let supported = OcrEngine::IsLanguageSupported(&language_value)
+                        .map_err(|error| diagnostic("check language support", language, error))?;
+                    if !supported {
+                        return Err(ExecutionDiagnostic::new(
+                            DiagnosticKind::TargetNotFound,
+                            format!("OCR language '{tag}' is not installed or supported"),
+                        )
+                        .context("backend", "windows.media.ocr")
+                        .context("operation", "resolve language")
+                        .context("language", tag));
+                    }
+                    let canonical_tag = language_value
+                        .LanguageTag()
+                        .map_err(|error| diagnostic("read language tag", language, error))?
+                        .to_string();
+                    let key = normalized_ocr_engine_cache_key(&canonical_tag).ok_or_else(|| {
+                        diagnostic(
+                            "read language tag",
+                            language,
+                            "OCR language resolved to an empty tag",
+                        )
+                    })?;
+                    if let Some(cached) = self.cached_engine(&key, language)? {
+                        return Ok(cached);
+                    }
+                    let engine = OcrEngine::TryCreateFromLanguage(&language_value)
+                        .map_err(|error| diagnostic("create language engine", language, error))?;
+                    self.cache_engine(key, engine, language)
+                }
+            }
+        }
+    }
+
+    fn user_profile_language_signature(language: &MkOcrLanguage) -> ExecResult<String> {
+        let languages = GlobalizationPreferences::Languages()
+            .map_err(|error| diagnostic("read profile languages", language, error))?;
+        let count = languages
+            .Size()
+            .map_err(|error| diagnostic("count profile languages", language, error))?;
+        let mut tags = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            tags.push(
+                languages
+                    .GetAt(index)
+                    .map_err(|error| diagnostic("read profile language", language, error))?
+                    .to_string(),
+            );
+        }
+        Ok(ocr_profile_language_signature(&tags))
     }
 
     impl OcrBackend for WindowsOcrBackend {
@@ -967,30 +1102,6 @@ mod windows_backend {
                 image.dimensions(),
                 language,
             )
-        }
-    }
-
-    fn create_engine(language: &MkOcrLanguage) -> ExecResult<OcrEngine> {
-        match language {
-            MkOcrLanguage::Auto => OcrEngine::TryCreateFromUserProfileLanguages()
-                .map_err(|error| diagnostic("resolve user-profile language", language, error)),
-            MkOcrLanguage::LanguageTag(tag) => {
-                let language_value = Language::CreateLanguage(&HSTRING::from(tag))
-                    .map_err(|error| diagnostic("parse language tag", language, error))?;
-                let supported = OcrEngine::IsLanguageSupported(&language_value)
-                    .map_err(|error| diagnostic("check language support", language, error))?;
-                if !supported {
-                    return Err(ExecutionDiagnostic::new(
-                        DiagnosticKind::TargetNotFound,
-                        format!("OCR language '{tag}' is not installed or supported"),
-                    )
-                    .context("backend", "windows.media.ocr")
-                    .context("operation", "resolve language")
-                    .context("language", tag));
-                }
-                OcrEngine::TryCreateFromLanguage(&language_value)
-                    .map_err(|error| diagnostic("create language engine", language, error))
-            }
         }
     }
 
@@ -1347,6 +1458,30 @@ mod tests {
         let image = RgbaImage::from_vec(2, 1, vec![1, 2, 3, 4, 10, 20, 30, 40]).unwrap();
         assert_eq!(rgba_to_bgra_bytes(&image), vec![3, 2, 1, 4, 30, 20, 10, 40]);
         assert_eq!(image.as_raw(), &[1, 2, 3, 4, 10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn engine_cache_keys_use_validated_resolved_language_tags() {
+        assert_eq!(
+            normalized_ocr_engine_cache_key(" en-US "),
+            Some("tag:en-us".into())
+        );
+        assert_eq!(
+            normalized_ocr_engine_cache_key("EN-us"),
+            normalized_ocr_engine_cache_key("en-US")
+        );
+        assert_eq!(normalized_ocr_engine_cache_key("  "), None);
+        assert_eq!(
+            ocr_profile_language_signature(&["en-US".into(), "fr-FR".into()]),
+            "5:en-us|5:fr-fr"
+        );
+        assert_ne!(
+            ocr_profile_language_signature(&["en-US".into(), "fr-FR".into()]),
+            ocr_profile_language_signature(&["fr-FR".into(), "en-US".into()])
+        );
+        let mut profile = Some(("old-profile".into(), "tag:fr-fr".into()));
+        record_auto_profile_resolution(&mut profile, "new-profile".into(), "tag:en-us".into());
+        assert_eq!(profile, Some(("new-profile".into(), "tag:en-us".into())));
     }
 
     #[test]

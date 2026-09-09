@@ -4,10 +4,12 @@
 use crate::mkmacro::*;
 use eframe::egui;
 
-pub fn search_ui(ui: &mut egui::Ui, search: &mut MkOcrSearchSpec) {
-    search_match_ui(ui, search);
-    language_ui(ui, &mut search.language);
-    region_ui(ui, &mut search.region);
+#[derive(Clone, Copy)]
+pub enum OcrLanguageCapability<'a> {
+    NotRequested,
+    Loading,
+    Available(&'a [OcrLanguageInfo]),
+    Failed(&'a ExecutionDiagnostic),
 }
 
 /// Search fields whose capability-backed language and region controls are
@@ -46,12 +48,6 @@ pub fn search_match_ui(ui: &mut egui::Ui, search: &mut MkOcrSearchSpec) {
     };
 }
 
-pub fn read_ui(ui: &mut egui::Ui, read: &mut MkOcrReadPayload) {
-    language_ui(ui, &mut read.language);
-    region_ui(ui, &mut read.region);
-    read_output_ui(ui, read);
-}
-
 pub fn read_output_ui(ui: &mut egui::Ui, read: &mut MkOcrReadPayload) {
     ui.horizontal(|ui| {
         ui.label("Output variable");
@@ -62,8 +58,12 @@ pub fn read_output_ui(ui: &mut egui::Ui, read: &mut MkOcrReadPayload) {
 pub fn installed_language_ui(
     ui: &mut egui::Ui,
     language: &mut MkOcrLanguage,
-    languages: &[OcrLanguageInfo],
+    capability: OcrLanguageCapability<'_>,
 ) {
+    let languages = match capability {
+        OcrLanguageCapability::Available(languages) => languages,
+        _ => &[],
+    };
     let selected = match language {
         MkOcrLanguage::Auto => "Auto (Windows profile)".to_owned(),
         MkOcrLanguage::LanguageTag(tag) => languages
@@ -84,6 +84,61 @@ pub fn installed_language_ui(
                 );
             }
         });
+    match capability {
+        OcrLanguageCapability::Loading => {
+            ui.label("Loading installed OCR languages…");
+        }
+        OcrLanguageCapability::Failed(error) => {
+            ui.colored_label(ui.visuals().error_fg_color, error.to_string());
+        }
+        OcrLanguageCapability::Available(languages)
+            if !selected_language_is_available(language, languages) =>
+        {
+            let tag = match language {
+                MkOcrLanguage::LanguageTag(tag) => tag.as_str(),
+                MkOcrLanguage::Auto => unreachable!(),
+            };
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("OCR language '{tag}' is not currently installed"),
+            );
+        }
+        OcrLanguageCapability::NotRequested | OcrLanguageCapability::Available(_) => {}
+    }
+}
+
+pub fn selected_language_is_available(
+    language: &MkOcrLanguage,
+    languages: &[OcrLanguageInfo],
+) -> bool {
+    match language {
+        MkOcrLanguage::Auto => true,
+        MkOcrLanguage::LanguageTag(tag) => languages
+            .iter()
+            .any(|candidate| candidate.tag.eq_ignore_ascii_case(tag)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_language_availability_is_case_insensitive_and_auto_is_always_valid() {
+        let languages = [OcrLanguageInfo {
+            tag: "en-US".into(),
+            display_name: "English".into(),
+        }];
+        assert!(selected_language_is_available(&MkOcrLanguage::Auto, &[]));
+        assert!(selected_language_is_available(
+            &MkOcrLanguage::LanguageTag("EN-us".into()),
+            &languages
+        ));
+        assert!(!selected_language_is_available(
+            &MkOcrLanguage::LanguageTag("fr-FR".into()),
+            &languages
+        ));
+    }
 }
 
 pub fn preview_ui(
@@ -175,121 +230,4 @@ pub fn preview_ui(
             .desired_rows(6)
             .desired_width(f32::INFINITY),
     );
-}
-
-fn language_ui(ui: &mut egui::Ui, language: &mut MkOcrLanguage) {
-    let mut explicit = matches!(language, MkOcrLanguage::LanguageTag(_));
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut explicit, "Explicit language");
-        if explicit {
-            let tag = match language {
-                MkOcrLanguage::LanguageTag(tag) => tag,
-                MkOcrLanguage::Auto => {
-                    *language = MkOcrLanguage::LanguageTag("en-US".into());
-                    let MkOcrLanguage::LanguageTag(tag) = language else {
-                        unreachable!()
-                    };
-                    tag
-                }
-            };
-            ui.text_edit_singleline(tag);
-        } else {
-            *language = MkOcrLanguage::Auto;
-            ui.label("Auto (Windows profile)");
-        }
-    });
-}
-
-pub fn region_ui(ui: &mut egui::Ui, region: &mut SearchRegion) {
-    let mut kind = match region {
-        SearchRegion::Desktop => 0,
-        SearchRegion::Monitor { .. } => 1,
-        SearchRegion::Rectangle { .. } => 2,
-        SearchRegion::Window { .. } => 3,
-        SearchRegion::ClientArea { .. } => 4,
-    };
-    egui::ComboBox::from_label("Region")
-        .selected_text(["Desktop", "Monitor", "Rectangle", "Window", "Client area"][kind])
-        .show_ui(ui, |ui| {
-            for (index, label) in ["Desktop", "Monitor", "Rectangle", "Window", "Client area"]
-                .into_iter()
-                .enumerate()
-            {
-                ui.selectable_value(&mut kind, index, label);
-            }
-        });
-    let old = match region {
-        SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
-            Some(matcher.clone())
-        }
-        _ => None,
-    };
-    if kind
-        != match region {
-            SearchRegion::Desktop => 0,
-            SearchRegion::Monitor { .. } => 1,
-            SearchRegion::Rectangle { .. } => 2,
-            SearchRegion::Window { .. } => 3,
-            SearchRegion::ClientArea { .. } => 4,
-        }
-    {
-        *region = match kind {
-            0 => SearchRegion::Desktop,
-            1 => SearchRegion::Monitor { index: 0 },
-            2 => SearchRegion::Rectangle {
-                rect: ScreenRect::new(0, 0, 640, 480),
-            },
-            3 => SearchRegion::Window {
-                matcher: old.unwrap_or_else(default_matcher),
-            },
-            _ => SearchRegion::ClientArea {
-                matcher: old.unwrap_or_else(default_matcher),
-            },
-        };
-    }
-    match region {
-        SearchRegion::Monitor { index } => {
-            ui.horizontal(|ui| {
-                ui.label("Monitor index");
-                ui.add(egui::DragValue::new(index));
-            });
-        }
-        SearchRegion::Rectangle { rect } => {
-            ui.horizontal(|ui| {
-                ui.label("X");
-                ui.add(egui::DragValue::new(&mut rect.x));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut rect.y));
-                ui.label("W");
-                ui.add(egui::DragValue::new(&mut rect.width).clamp_range(1..=u32::MAX));
-                ui.label("H");
-                ui.add(egui::DragValue::new(&mut rect.height).clamp_range(1..=u32::MAX));
-            });
-        }
-        SearchRegion::Window { matcher } | SearchRegion::ClientArea { matcher } => {
-            ui.label("Window matcher");
-            option(ui, "Process", &mut matcher.process);
-            option(ui, "Title", &mut matcher.title);
-            option(ui, "Title regex", &mut matcher.title_regex);
-            option(ui, "Class", &mut matcher.class);
-        }
-        SearchRegion::Desktop => {}
-    }
-}
-
-fn default_matcher() -> MkWindowMatcher {
-    MkWindowMatcher {
-        title: Some("Window".into()),
-        ..Default::default()
-    }
-}
-fn option(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
-    let value = value.get_or_insert_with(String::new);
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.text_edit_singleline(value);
-    });
-    if value.trim().is_empty() {
-        *value = String::new();
-    }
 }
