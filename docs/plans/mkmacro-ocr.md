@@ -32,8 +32,8 @@
 | M05 | Catalog, transactional OCR editors, shared region routing, language jobs, and Test OCR preview | M04 | complete | 9340dd36; focused and full-suite verification passed |
 | M06 | Bounded batched OCR debug overlay and authoring integration | M05 | complete | 9340dd36; focused and full-suite verification passed |
 | M07 | Comprehensive test expansion, compile stabilization, and existing-test migration | M06 | complete | d40e9a7a; 45/45 OCR Nextest and 51/51 MkMacro integration tests passed |
-| M08 | Targeted verification, formatting/checks, and full authoritative Nextest | M07 | complete | `cargo fmt --all -- --check`, `cargo check --all-targets`, and `git diff --check` passed; final rerun: 3,453/3,453 passed, 7 skipped |
-| M09 | Independent review, remediation, final verification, and ledger completion | M08 | in_progress | Independent review pending |
+| M08 | Targeted verification, formatting/checks, and full authoritative Nextest | M07 | complete | `cargo fmt --all -- --check`, `cargo check --all-targets`, and `git diff --check` passed; final committed-tree rerun: 3,464/3,464 passed, 7 skipped |
+| M09 | Independent review, remediation, final verification, and ledger completion | M08 | complete | ed512943; independent reviewer approved the remediated diff; 54/54 OCR, 5/5 schema-12, nested monitor routing, and full 3,464-test Nextest passed |
 
 ## M01 — Persisted model and pure matching foundation
 
@@ -122,3 +122,5 @@ Run focused actual targets discovered in the tree, then `cargo fmt --all --check
 ## M09 — Independent review and completion
 
 Assign a reviewer that did not implement the primary slice. Review the full specification, ledger, cumulative diff, surrounding source, and tests for architecture leakage, runtime semantics, coordinates, tiling, UI lifecycle, privacy, performance, and compatibility. Resolve every substantive finding, rerun focused checks and any full suite affected by remediation, inspect final Git state, update every milestone and commit hash, and provide the exact required final-report headings.
+
+The independent review found and the remediation commit resolved: OCR-condition editor panics; bypassable Apply validation; stale/unowned Test OCR previews and errors; overlapping test-job admission; lossy direct window-picker synchronization; missing condition feedback and path-specific monitor identification; state-blind language diagnostics; stale/ineffective Auto-engine caching; missing monitor availability validation; unreliable native overlay hit-test transparency; and insufficient schema-12 compatibility fixtures. A final focused re-review approved the resulting diff. Native interactive smoke testing was unavailable because this host exposed no native application-control surface; deterministic Windows compilation and adapter/helper tests remain authoritative here.
