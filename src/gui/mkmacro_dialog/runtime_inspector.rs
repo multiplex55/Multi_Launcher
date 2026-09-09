@@ -1056,6 +1056,7 @@ mod tests {
             macro_name: Arc::from("Demo"),
             outcome: CompletedStepOutcome::Success(Some(StepOutcome {
                 last_image_found: Some(true),
+                ..StepOutcome::default()
             })),
         }));
         assert_eq!(

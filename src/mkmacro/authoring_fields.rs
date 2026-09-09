@@ -38,6 +38,8 @@ pub enum FieldPart {
     Path,
     PathOutput,
     Found,
+    MatchedText,
+    MatchCount,
     Point,
     X,
     Y,
@@ -52,6 +54,7 @@ pub enum FieldPart {
     From,
     To,
     Region,
+    Language,
     Condition,
     Not,
     Outputs,
@@ -114,6 +117,8 @@ impl std::fmt::Display for FieldPath {
                         FieldPart::Path => "Path",
                         FieldPart::PathOutput => "Path output",
                         FieldPart::Found => "Found",
+                        FieldPart::MatchedText => "Matched text",
+                        FieldPart::MatchCount => "Match count",
                         FieldPart::Point => "Point",
                         FieldPart::X => "X",
                         FieldPart::Y => "Y",
@@ -128,6 +133,7 @@ impl std::fmt::Display for FieldPath {
                         FieldPart::From => "From",
                         FieldPart::To => "To",
                         FieldPart::Region => "Region",
+                        FieldPart::Language => "Language",
                         FieldPart::Condition => "Condition",
                         FieldPart::Not => "Not",
                         FieldPart::Outputs => "Outputs",
@@ -308,6 +314,9 @@ fn condition(path: &FieldPath, value: &mut MkCondition, visit: &mut Visitor<'_>)
             image(path, &mut search.image, visit);
             region(&path.child(Region), &mut search.region, visit);
         }
+        MkCondition::OcrTextSearch { search, .. } => {
+            ocr_search(path, &mut search.search, visit);
+        }
         MkCondition::PreviousImageResult { image: value, .. } => {
             if let Some(value) = value {
                 image(path, value, visit);
@@ -325,6 +334,19 @@ fn condition(path: &FieldPath, value: &mut MkCondition, visit: &mut Visitor<'_>)
         MkCondition::Not { condition: value } => condition(&path.child(Not), value, visit),
     }
 }
+fn ocr_search(path: &FieldPath, value: &mut MkOcrSearchSpec, visit: &mut Visitor<'_>) {
+    string(
+        path,
+        FieldPart::Text,
+        &mut value.text,
+        FieldKind::Template,
+        visit,
+    );
+    if let MkOcrLanguage::LanguageTag(tag) = &mut value.language {
+        string(path, FieldPart::Language, tag, FieldKind::Text, visit);
+    }
+    region(&path.child(FieldPart::Region), &mut value.region, visit);
+}
 fn outputs(path: &FieldPath, value: &mut MkImageOutputs, visit: &mut Visitor<'_>) {
     use FieldPart::*;
     for (part, value) in [
@@ -332,6 +354,19 @@ fn outputs(path: &FieldPath, value: &mut MkImageOutputs, visit: &mut Visitor<'_>
         (Point, &mut value.point),
         (X, &mut value.x),
         (Y, &mut value.y),
+    ] {
+        optional(path, part, value, FieldKind::VariableWrite, visit);
+    }
+}
+fn ocr_outputs(path: &FieldPath, value: &mut MkOcrOutputs, visit: &mut Visitor<'_>) {
+    use FieldPart::*;
+    for (part, value) in [
+        (Found, &mut value.found),
+        (MatchedText, &mut value.matched_text),
+        (Point, &mut value.point),
+        (X, &mut value.x),
+        (Y, &mut value.y),
+        (MatchCount, &mut value.match_count),
     ] {
         optional(path, part, value, FieldKind::VariableWrite, visit);
     }
@@ -512,6 +547,24 @@ pub fn visit_step_fields(step: &mut MkStep, visit: &mut Visitor<'_>) {
             image(&path, &mut value.image, visit);
             region(&path.child(Region), &mut value.region, visit);
             outputs(&path.child(Outputs), &mut value.outputs, visit);
+        }
+        MkAction::OcrFindText(value) => {
+            ocr_search(&path, &mut value.search, visit);
+            ocr_outputs(&path.child(Outputs), &mut value.outputs, visit);
+        }
+        MkAction::OcrClickText(value) => ocr_search(&path, &mut value.search, visit),
+        MkAction::OcrReadText(value) => {
+            if let MkOcrLanguage::LanguageTag(tag) = &mut value.language {
+                string(&path, Language, tag, FieldKind::Text, visit);
+            }
+            region(&path.child(Region), &mut value.region, visit);
+            string(
+                &path,
+                Variable,
+                &mut value.output_variable,
+                FieldKind::VariableWrite,
+                visit,
+            );
         }
         MkAction::FindPixel(value) => {
             string(&path, Color, &mut value.color, FieldKind::Color, visit);
@@ -975,6 +1028,116 @@ mod tests {
             assert_eq!(edited.delay_after_ms, original.delay_after_ms);
             assert_eq!(edited.breakpoint, original.breakpoint);
         }
+    }
+
+    #[test]
+    fn ocr_action_traverses_template_language_window_region_and_output_names() {
+        let action = MkAction::OcrFindText(MkOcrFindPayload {
+            search: MkOcrSearchSpec {
+                text: "Ready ${user}".into(),
+                language: MkOcrLanguage::LanguageTag("fr-FR".into()),
+                region: SearchRegion::Window { matcher: window() },
+                ..Default::default()
+            },
+            outputs: MkOcrOutputs {
+                found: Some("ocr_found".into()),
+                matched_text: Some("ocr_text".into()),
+                point: Some("ocr_point".into()),
+                x: Some("ocr_x".into()),
+                y: Some("ocr_y".into()),
+                match_count: Some("ocr_count".into()),
+            },
+            ..Default::default()
+        });
+
+        let fields = step_fields(&step(42, action));
+        let actual = fields
+            .iter()
+            .filter(|field| !field.value.is_empty())
+            .map(|field| (field.path.to_string(), field.kind, field.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                ("Text".into(), FieldKind::Template, "Ready ${user}"),
+                ("Language".into(), FieldKind::Text, "fr-FR"),
+                ("Region / Title".into(), FieldKind::Text, "old"),
+                ("Region / Title regex".into(), FieldKind::Text, "old.*"),
+                ("Region / Process".into(), FieldKind::Text, "old.exe"),
+                ("Region / Class".into(), FieldKind::Text, "old_class"),
+                (
+                    "Outputs / Found".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_found"
+                ),
+                (
+                    "Outputs / Matched text".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_text"
+                ),
+                (
+                    "Outputs / Point".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_point"
+                ),
+                ("Outputs / X".into(), FieldKind::VariableWrite, "ocr_x"),
+                ("Outputs / Y".into(), FieldKind::VariableWrite, "ocr_y"),
+                (
+                    "Outputs / Match count".into(),
+                    FieldKind::VariableWrite,
+                    "ocr_count"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ocr_condition_reuses_template_language_and_client_window_traversal() {
+        let action = MkAction::If(MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition {
+                search: MkOcrSearchSpec {
+                    text: "Signed in as ${user}".into(),
+                    language: MkOcrLanguage::LanguageTag("en-US".into()),
+                    region: SearchRegion::ClientArea { matcher: window() },
+                    ..Default::default()
+                },
+            },
+            found: true,
+        });
+
+        let fields = step_fields(&step(42, action));
+        let actual = fields
+            .iter()
+            .filter(|field| !field.value.is_empty())
+            .map(|field| (field.path.to_string(), field.kind, field.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                (
+                    "Condition / Text".into(),
+                    FieldKind::Template,
+                    "Signed in as ${user}"
+                ),
+                ("Condition / Language".into(), FieldKind::Text, "en-US"),
+                ("Condition / Region / Title".into(), FieldKind::Text, "old"),
+                (
+                    "Condition / Region / Title regex".into(),
+                    FieldKind::Text,
+                    "old.*"
+                ),
+                (
+                    "Condition / Region / Process".into(),
+                    FieldKind::Text,
+                    "old.exe"
+                ),
+                (
+                    "Condition / Region / Class".into(),
+                    FieldKind::Text,
+                    "old_class"
+                ),
+            ]
+        );
     }
 
     #[test]

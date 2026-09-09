@@ -42,13 +42,32 @@ const TRANSPARENT_KEY: COLORREF = COLORREF(0x00ff00ff);
 const OUTLINE_COLOR: COLORREF = COLORREF(0x0000ffff); // bright yellow
 const BADGE_COLOR: COLORREF = COLORREF(0x00400000); // dark blue
 const LABEL_COLOR: COLORREF = COLORREF(0x00ffffff);
+const OCR_LINE_COLOR: COLORREF = COLORREF(0x0000a5ff); // orange
+const OCR_WORD_COLOR: COLORREF = COLORREF(0x00ffbf50); // light blue
+const OCR_SELECTED_COLOR: COLORREF = COLORREF(0x0000ff00); // green
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowRole {
     VisibleOverlay,
+    TransparentOverlay,
     Passive,
     Tooltip,
     InputShield,
+}
+
+fn role_is_hit_test_transparent(role: WindowRole) -> bool {
+    matches!(
+        role,
+        WindowRole::TransparentOverlay | WindowRole::Passive | WindowRole::Tooltip
+    )
+}
+
+fn full_surface_role(visual: &OverlayVisual) -> WindowRole {
+    if overlay_is_mouse_transparent(visual) {
+        WindowRole::TransparentOverlay
+    } else {
+        WindowRole::VisibleOverlay
+    }
 }
 
 struct WindowPaintState {
@@ -139,10 +158,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_ERASEBKGND => LRESULT(1), // WM_PAINT owns clearing the complete surface.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST
-            if !state.is_null()
-                && unsafe {
-                    matches!((*state).role, WindowRole::Passive | WindowRole::Tooltip)
-                } =>
+            if !state.is_null() && unsafe { role_is_hit_test_transparent((*state).role) } =>
         {
             LRESULT(HTTRANSPARENT as isize)
         }
@@ -266,6 +282,22 @@ unsafe fn paint_frame(dc: HDC, state: &WindowPaintState) {
             OverlayFramePrimitive::MonitorLabel { bounds, index } => unsafe {
                 draw_label(dc, state.bounds, *bounds, *index)
             },
+            OverlayFramePrimitive::OcrOutline { bounds, style } => {
+                let (color, width) = match style {
+                    OcrDebugStyle::SearchRegion => (OUTLINE_COLOR, 3),
+                    OcrDebugStyle::Line => (OCR_LINE_COLOR, 2),
+                    OcrDebugStyle::Word => (OCR_WORD_COLOR, 1),
+                    OcrDebugStyle::SelectedMatch => (OCR_SELECTED_COLOR, 4),
+                };
+                let styled_pen = unsafe { CreatePen(PS_SOLID, width, color) };
+                let previous = unsafe { SelectObject(dc, HGDIOBJ(styled_pen.0)) };
+                let (left, top, right, bottom) = desktop_to_overlay(*bounds, state.bounds);
+                unsafe {
+                    let _ = Rectangle(dc, left as i32, top as i32, right as i32, bottom as i32);
+                    SelectObject(dc, previous);
+                    let _ = DeleteObject(HGDIOBJ(styled_pen.0));
+                }
+            }
         }
     }
     unsafe { SelectObject(dc, old_brush) };
@@ -351,6 +383,7 @@ impl NativeOverlayRenderer {
             OverlayVisual::Monitor(d) => Some(d.bounds),
             OverlayVisual::Monitors(ds) => monitor_union(ds),
             OverlayVisual::Desktop(_) => None,
+            OverlayVisual::OcrDebug(plan) => Some(plan.region),
         }
     }
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T, VisualOverlayError> {
@@ -643,7 +676,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 GetLastError().0
             }));
         }
-        if visual.passive() {
+        if visual.passive() && !matches!(visual, OverlayVisual::OcrDebug(_)) {
             self.operation_id = Some(operation_id);
             self.visual = Some(visual.clone());
             self.show_passive(module, class, operation_id, visual)?;
@@ -661,6 +694,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             // Preserve the descriptor topology: never create a virtual-desktop union window
             // spanning gaps between physical displays.
             OverlayVisual::Desktop(descriptors) => descriptors.iter().map(|d| d.bounds).collect(),
+            OverlayVisual::OcrDebug(plan) => ocr_debug_surface_plan(plan, &physical),
             _ => {
                 let Some(target) = Self::target(visual) else {
                     return self
@@ -697,6 +731,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             }
         }
 
+        let transparent = overlay_is_mouse_transparent(visual);
         let frame = overlay_frame(visual);
         for bounds in monitor_bounds {
             let (width, height) = match win32_dimensions(bounds, "interactive overlay") {
@@ -710,11 +745,11 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 solid: None,
                 operation_id,
                 description: "interactive",
-                role: WindowRole::VisibleOverlay,
+                role: full_surface_role(visual),
                 paint_count: AtomicUsize::new(0),
             });
             let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-            if overlay_is_mouse_transparent(visual) {
+            if transparent {
                 ex |= WS_EX_TRANSPARENT;
             }
             let created = unsafe {
@@ -1045,7 +1080,20 @@ impl Drop for NativeOverlayRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::key_pressed;
+    use super::*;
+
+    #[test]
+    fn ocr_full_surface_role_is_nonactivating_and_hit_test_transparent() {
+        let visual = OverlayVisual::OcrDebug(OcrDebugOverlayPlan {
+            region: ScreenRect::new(-100, -50, 200, 100),
+            rects: vec![],
+            truncated_rects: 0,
+        });
+        let role = full_surface_role(&visual);
+        assert_eq!(role, WindowRole::TransparentOverlay);
+        assert!(role_is_hit_test_transparent(role));
+        assert!(!role_is_hit_test_transparent(WindowRole::VisibleOverlay));
+    }
 
     #[test]
     fn return_key_held_down_emits_only_one_pressed_transition() {

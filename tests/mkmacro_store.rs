@@ -358,7 +358,7 @@ fn schema_seven_notification_sequence_preserves_order_and_payloads() {
 }
 
 #[test]
-fn schema_eight_migrates_through_store_and_persists_canonical_schema_twelve() {
+fn schema_eight_migrates_through_store_and_persists_canonical_current_schema() {
     let dir = tempdir().unwrap();
     let path = dir.path().join(MKMACROS_FILE);
     let fixture = include_str!("fixtures/mkmacros_v8.json");
@@ -368,7 +368,7 @@ fn schema_eight_migrates_through_store_and_persists_canonical_schema_twelve() {
     assert!(matches!(disposition, LoadDisposition::Loaded));
     let first = (*store.snapshot()).clone();
     assert_eq!(first.schema_version, SCHEMA_VERSION);
-    assert_eq!(first.schema_version, 12);
+    assert_eq!(first.schema_version, 13);
     assert!(first.folders.is_empty());
     for mac in &first.macros {
         assert_eq!(mac.hotkey_scope, MkHotkeyScope::AnyWindow);
@@ -801,7 +801,7 @@ fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round
     assert!(matches!(disposition, LoadDisposition::Loaded));
     let migrated = store.snapshot();
     let owner = &migrated.macros[0];
-    assert_eq!(migrated.schema_version, 12);
+    assert_eq!(migrated.schema_version, 13);
     assert_eq!(owner.signature, MkMacroSignature::default());
     assert_eq!(owner.description, "preserved");
     assert!(!owner.enabled);
@@ -878,7 +878,7 @@ fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round
     assert!(matches!(disposition, LoadDisposition::Loaded));
     assert_eq!(reopened.snapshot().as_ref(), &current);
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(persisted["schema_version"], 12);
+    assert_eq!(persisted["schema_version"], 13);
     assert_eq!(
         persisted["macros"][0]["steps"][0]["action"]["type"],
         "call_macro"

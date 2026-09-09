@@ -379,6 +379,8 @@ fn descriptors_for_action_with_signature(
         MkAction::PromptInput(_) => "Prompt for Input",
         MkAction::ImageFind(_) => "Find Image",
         MkAction::ImageClick(_) => "Click Image",
+        MkAction::OcrFindText(_) => "OCR Find Text",
+        MkAction::OcrReadText(_) => "OCR Read Text",
         MkAction::FindPixel(_) => "Find Pixel",
         MkAction::CaptureScreenshot(_) => "Capture Screenshot",
         MkAction::UiReadValue { .. } => "UI Read Value",
@@ -446,6 +448,17 @@ fn descriptors_for_action_with_signature(
             VariableAvailability::DefinitelyAvailable,
             None,
         ),
+        MkAction::OcrReadText(payload) => add(
+            &payload.output_variable,
+            VariableValueType::Known(MkValueType::String),
+            VariableAvailability::DefinitelyAvailable,
+            None,
+        ),
+        MkAction::OcrFindText(payload) => add_ocr_outputs(
+            &payload.outputs,
+            &mut add,
+            payload.not_found_policy == MkImageNotFoundPolicy::Continue,
+        ),
         MkAction::ImageFind(payload) | MkAction::ImageClick(payload) => add_visual_outputs(
             &payload.outputs,
             &mut add,
@@ -471,6 +484,49 @@ fn descriptors_for_action_with_signature(
         _ => {}
     }
     result
+}
+
+fn add_ocr_outputs(
+    outputs: &super::MkOcrOutputs,
+    add: &mut impl FnMut(&str, VariableValueType, VariableAvailability, Option<&'static str>),
+    can_continue_missing: bool,
+) {
+    let selected_availability = if can_continue_missing {
+        VariableAvailability::PossiblyUnavailable
+    } else {
+        VariableAvailability::DefinitelyAvailable
+    };
+    if let Some(name) = &outputs.found {
+        add(
+            name,
+            VariableValueType::Known(MkValueType::Boolean),
+            VariableAvailability::DefinitelyAvailable,
+            None,
+        );
+    }
+    for (name, value_type) in [
+        (&outputs.matched_text, MkValueType::String),
+        (&outputs.point, MkValueType::Point),
+        (&outputs.x, MkValueType::Number),
+        (&outputs.y, MkValueType::Number),
+    ] {
+        if let Some(name) = name {
+            add(
+                name,
+                VariableValueType::Known(value_type),
+                selected_availability,
+                can_continue_missing.then_some("May be Null if OCR text is not found"),
+            );
+        }
+    }
+    if let Some(name) = &outputs.match_count {
+        add(
+            name,
+            VariableValueType::Known(MkValueType::Number),
+            VariableAvailability::DefinitelyAvailable,
+            None,
+        );
+    }
 }
 
 fn add_visual_outputs(
@@ -1690,5 +1746,86 @@ mod tests {
                 .uncertainty_reasons
                 .contains(&VariableUncertaintyReason::MayBeUnset)
         );
+    }
+
+    #[test]
+    fn ocr_outputs_have_exact_types_and_missing_match_availability() {
+        let steps = vec![
+            step(
+                1,
+                MkAction::OcrFindText(crate::mkmacro::MkOcrFindPayload {
+                    outputs: crate::mkmacro::MkOcrOutputs {
+                        found: Some("found".into()),
+                        matched_text: Some("text".into()),
+                        point: Some("point".into()),
+                        x: Some("x".into()),
+                        y: Some("y".into()),
+                        match_count: Some("count".into()),
+                    },
+                    not_found_policy: MkImageNotFoundPolicy::Continue,
+                    ..Default::default()
+                }),
+            ),
+            step(
+                2,
+                MkAction::OcrReadText(crate::mkmacro::MkOcrReadPayload {
+                    output_variable: "read".into(),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let catalog = VariableCatalog::before_step(&steps, usize::MAX);
+        let get = |name: &str| {
+            catalog
+                .effective_variables()
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+                .unwrap()
+        };
+        for (name, value_type, availability) in [
+            (
+                "found",
+                MkValueType::Boolean,
+                VariableAvailability::DefinitelyAvailable,
+            ),
+            (
+                "text",
+                MkValueType::String,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "point",
+                MkValueType::Point,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "x",
+                MkValueType::Number,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "y",
+                MkValueType::Number,
+                VariableAvailability::PossiblyUnavailable,
+            ),
+            (
+                "count",
+                MkValueType::Number,
+                VariableAvailability::DefinitelyAvailable,
+            ),
+            (
+                "read",
+                MkValueType::String,
+                VariableAvailability::DefinitelyAvailable,
+            ),
+        ] {
+            let descriptor = get(name);
+            assert_eq!(
+                descriptor.value_type,
+                VariableValueType::Known(value_type),
+                "{name}"
+            );
+            assert_eq!(descriptor.availability, availability, "{name}");
+        }
     }
 }

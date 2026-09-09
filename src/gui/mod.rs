@@ -32,6 +32,7 @@ mod note_graph_dialog;
 pub(crate) mod note_mutation;
 mod note_panel;
 mod notes_dialog;
+mod numpad_navigation;
 mod query_history;
 mod render;
 mod screenshot_editor;
@@ -141,6 +142,9 @@ use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use numpad_navigation::{
+    LauncherNumpadNavigation, NativeNumpadKeyStateProbe, consume_physical_numpad_navigation,
+};
 use once_cell::sync::Lazy;
 use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]

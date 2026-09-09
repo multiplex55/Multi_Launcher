@@ -333,6 +333,19 @@ impl SharedVisualOverlayController {
             },
         )
     }
+    pub fn preview_ocr_debug(
+        &self,
+        plan: super::visual_overlay::OcrDebugOverlayPlan,
+    ) -> OperationId {
+        let id = self.allocate();
+        self.send_with_recovery(
+            id,
+            VisualOverlayCommand::PreviewOcrDebug {
+                operation_id: id,
+                plan,
+            },
+        )
+    }
     pub fn operation_id(&self) -> Option<OperationId> {
         match self.0.active_id.load(Ordering::Acquire) {
             0 => None,

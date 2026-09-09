@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-// Schema 12 adds grouped authoring metadata and reusable macro signatures/actions,
-// retaining schema 11's shared flat-library image filename references.
-pub const SCHEMA_VERSION: u32 = 12;
+// Schema 13 adds persisted OCR actions and conditions. Existing schema-12
+// documents require no content changes beyond advancing the version.
+pub const SCHEMA_VERSION: u32 = 13;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -610,6 +610,10 @@ pub enum MkCondition {
         search: MkImageSearchCondition,
         found: bool,
     },
+    OcrTextSearch {
+        search: MkOcrSearchCondition,
+        found: bool,
+    },
     PreviousImageResult {
         image: Option<MkImageRef>,
         found: bool,
@@ -629,6 +633,21 @@ pub enum MkCondition {
         condition: Box<MkCondition>,
     },
 }
+
+impl MkCondition {
+    /// Returns whether this condition tree performs OCR when evaluated.
+    pub(crate) fn contains_ocr(&self) -> bool {
+        match self {
+            Self::OcrTextSearch { .. } => true,
+            Self::All { conditions } | Self::Any { conditions } => {
+                conditions.iter().any(Self::contains_ocr)
+            }
+            Self::Not { condition } => condition.contains_ocr(),
+            _ => false,
+        }
+    }
+}
+
 /// A single, immediate image search used by a condition.  Action polling and
 /// output policy deliberately live in [`MkImagePayload`], not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -643,6 +662,174 @@ pub struct MkImageSearchCondition {
     pub alpha: AlphaPolicy,
     #[serde(default)]
     pub return_point: ReturnPoint,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum MkOcrLanguage {
+    #[default]
+    Auto,
+    LanguageTag(String),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MkOcrMatchMode {
+    #[default]
+    Contains,
+    WholeWordPhrase,
+    Regex,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum MkOcrOccurrence {
+    #[default]
+    First,
+    Nth(u32),
+}
+
+impl MkOcrOccurrence {
+    /// Zero-based selected index. An invalid persisted `Nth(0)` deliberately
+    /// selects nothing until document validation asks the author to repair it.
+    pub fn selected_index(self) -> Option<usize> {
+        match self {
+            Self::First => Some(0),
+            Self::Nth(n) => usize::try_from(n.checked_sub(1)?).ok(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MkOcrSearchSpec {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub region: SearchRegion,
+    #[serde(default)]
+    pub language: MkOcrLanguage,
+    #[serde(default)]
+    pub match_mode: MkOcrMatchMode,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub occurrence: MkOcrOccurrence,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MkOcrSearchCondition {
+    #[serde(flatten)]
+    pub search: MkOcrSearchSpec,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MkOcrOutputs {
+    #[serde(default)]
+    pub found: Option<String>,
+    #[serde(default)]
+    pub matched_text: Option<String>,
+    #[serde(default)]
+    pub point: Option<String>,
+    #[serde(default)]
+    pub x: Option<String>,
+    #[serde(default)]
+    pub y: Option<String>,
+    #[serde(default)]
+    pub match_count: Option<String>,
+}
+
+impl MkOcrOutputs {
+    pub fn normalize(&mut self) {
+        for value in [
+            &mut self.found,
+            &mut self.matched_text,
+            &mut self.point,
+            &mut self.x,
+            &mut self.y,
+            &mut self.match_count,
+        ] {
+            *value = value.take().and_then(|name| {
+                let name = name.trim();
+                (!name.is_empty()).then(|| name.to_owned())
+            });
+        }
+    }
+}
+
+fn default_ocr_wait() -> MkWaitOptions {
+    MkWaitOptions {
+        timeout_ms: 5_000,
+        poll_interval_ms: 250,
+    }
+}
+
+fn default_ocr_button() -> MkMouseButton {
+    MkMouseButton::Left
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkOcrFindPayload {
+    #[serde(default)]
+    pub search: MkOcrSearchSpec,
+    #[serde(default = "default_ocr_wait")]
+    pub wait: MkWaitOptions,
+    #[serde(default)]
+    pub not_found_policy: MkImageNotFoundPolicy,
+    #[serde(default)]
+    pub outputs: MkOcrOutputs,
+}
+
+impl Default for MkOcrFindPayload {
+    fn default() -> Self {
+        Self {
+            search: MkOcrSearchSpec::default(),
+            wait: default_ocr_wait(),
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkOcrOutputs::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkOcrClickPayload {
+    #[serde(default)]
+    pub search: MkOcrSearchSpec,
+    #[serde(default = "default_ocr_wait")]
+    pub wait: MkWaitOptions,
+    #[serde(default = "legacy_image_not_found_policy")]
+    pub not_found_policy: MkImageNotFoundPolicy,
+    #[serde(default = "default_ocr_button")]
+    pub button: MkMouseButton,
+    #[serde(default = "one")]
+    pub clicks: u32,
+    #[serde(default)]
+    pub x_offset: i32,
+    #[serde(default)]
+    pub y_offset: i32,
+}
+
+impl Default for MkOcrClickPayload {
+    fn default() -> Self {
+        Self {
+            search: MkOcrSearchSpec::default(),
+            wait: default_ocr_wait(),
+            not_found_policy: MkImageNotFoundPolicy::Fail,
+            button: MkMouseButton::Left,
+            clicks: 1,
+            x_offset: 0,
+            y_offset: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MkOcrReadPayload {
+    #[serde(default)]
+    pub region: SearchRegion,
+    #[serde(default)]
+    pub language: MkOcrLanguage,
+    #[serde(default)]
+    pub output_variable: String,
 }
 
 impl MkImageSearchCondition {
@@ -1128,6 +1315,9 @@ pub enum MkAction {
     Continue,
     ImageFind(MkImagePayload),
     ImageClick(MkImagePayload),
+    OcrFindText(MkOcrFindPayload),
+    OcrClickText(MkOcrClickPayload),
+    OcrReadText(MkOcrReadPayload),
     FindPixel(MkPixelSearchPayload),
     CaptureScreenshot(MkScreenshotPayload),
     WaitForVisualChange(WaitForVisualChange),
@@ -1243,7 +1433,7 @@ mod reusable_model_tests {
     fn metadata_signature_and_reusable_actions_round_trip() {
         let original = document();
         let json = serde_json::to_value(&original).unwrap();
-        assert_eq!(json["schema_version"], 12);
+        assert_eq!(json["schema_version"], SCHEMA_VERSION);
         assert_eq!(json["macros"][0]["signature"]["parameters"][0]["id"], 1);
         assert_eq!(
             json["macros"][0]["steps"][0]["metadata"]["accent"],
@@ -1377,7 +1567,7 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_12_with_query_payload() {
+    fn current_document_round_trips_as_schema_13_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 signature: Default::default(),
@@ -1407,7 +1597,7 @@ mod launcher_command_payload_tests {
         };
 
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"schema_version\":12"));
+        assert!(json.contains("\"schema_version\":13"));
         assert!(json.contains(r#""data":{"query":"note list"}"#));
         assert_eq!(
             serde_json::from_str::<MkMacroDocument>(&json).unwrap(),
@@ -1907,7 +2097,7 @@ mod schema_v10_serialization_tests {
     use super::*;
 
     #[test]
-    fn document_defaults_to_schema_twelve_and_no_folders() {
+    fn document_defaults_to_current_schema_and_no_folders() {
         let document: MkMacroDocument = serde_json::from_str("{}").unwrap();
         assert_eq!(document.schema_version, SCHEMA_VERSION);
         assert!(document.folders.is_empty());
@@ -2005,5 +2195,191 @@ mod schema_v10_serialization_tests {
             r#"{"type":"virtual_desktop","data":{"go_to":{"desktop":3}}}"#
         );
         assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+    }
+}
+
+#[cfg(test)]
+mod ocr_payload_tests {
+    use super::*;
+
+    #[test]
+    fn ocr_payload_defaults_match_authoring_contract() {
+        let find = MkOcrFindPayload::default();
+        assert_eq!(find.search, MkOcrSearchSpec::default());
+        assert_eq!(find.wait.timeout_ms, 5_000);
+        assert_eq!(find.wait.poll_interval_ms, 250);
+        assert_eq!(find.not_found_policy, MkImageNotFoundPolicy::Continue);
+
+        let click = MkOcrClickPayload::default();
+        assert_eq!(click.wait, find.wait);
+        assert_eq!(click.not_found_policy, MkImageNotFoundPolicy::Fail);
+        assert_eq!(click.button, MkMouseButton::Left);
+        assert_eq!(click.clicks, 1);
+        assert_eq!((click.x_offset, click.y_offset), (0, 0));
+
+        assert_eq!(MkOcrOccurrence::First.selected_index(), Some(0));
+        assert_eq!(MkOcrOccurrence::Nth(1).selected_index(), Some(0));
+        assert_eq!(MkOcrOccurrence::Nth(3).selected_index(), Some(2));
+        assert_eq!(MkOcrOccurrence::Nth(0).selected_index(), None);
+    }
+
+    fn variable_condition() -> MkCondition {
+        MkCondition::Variable {
+            name: "ready".into(),
+            op: MkCompareOp::Eq,
+            value: MkValue::Boolean(true),
+        }
+    }
+
+    fn ocr_condition() -> MkCondition {
+        MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition::default(),
+            found: true,
+        }
+    }
+
+    #[test]
+    fn contains_ocr_recurses_through_logical_conditions() {
+        assert!(ocr_condition().contains_ocr());
+        assert!(
+            MkCondition::All {
+                conditions: vec![variable_condition(), ocr_condition()],
+            }
+            .contains_ocr()
+        );
+        assert!(
+            MkCondition::Any {
+                conditions: vec![variable_condition(), ocr_condition()],
+            }
+            .contains_ocr()
+        );
+        assert!(
+            MkCondition::Not {
+                condition: Box::new(ocr_condition()),
+            }
+            .contains_ocr()
+        );
+
+        assert!(
+            !MkCondition::All {
+                conditions: vec![
+                    variable_condition(),
+                    MkCondition::WindowExists {
+                        matcher: MkWindowMatcher::default(),
+                    },
+                ],
+            }
+            .contains_ocr()
+        );
+        assert!(
+            !MkCondition::Not {
+                condition: Box::new(variable_condition()),
+            }
+            .contains_ocr()
+        );
+    }
+
+    #[test]
+    fn ocr_outputs_trim_names_and_remove_empty_values() {
+        let mut outputs = MkOcrOutputs {
+            found: Some(" found ".into()),
+            matched_text: Some("\tmatched\n".into()),
+            point: Some(" ".into()),
+            x: None,
+            y: Some(" y".into()),
+            match_count: Some(String::new()),
+        };
+        outputs.normalize();
+        assert_eq!(outputs.found.as_deref(), Some("found"));
+        assert_eq!(outputs.matched_text.as_deref(), Some("matched"));
+        assert_eq!(outputs.point, None);
+        assert_eq!(outputs.x, None);
+        assert_eq!(outputs.y.as_deref(), Some("y"));
+        assert_eq!(outputs.match_count, None);
+    }
+
+    #[test]
+    fn every_ocr_action_condition_mode_and_occurrence_round_trips() {
+        for language in [
+            MkOcrLanguage::Auto,
+            MkOcrLanguage::LanguageTag("en-GB".into()),
+        ] {
+            let json = serde_json::to_string(&language).unwrap();
+            assert_eq!(
+                serde_json::from_str::<MkOcrLanguage>(&json).unwrap(),
+                language
+            );
+        }
+        for mode in [
+            MkOcrMatchMode::Contains,
+            MkOcrMatchMode::WholeWordPhrase,
+            MkOcrMatchMode::Regex,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serde_json::from_str::<MkOcrMatchMode>(&json).unwrap(), mode);
+        }
+        for occurrence in [MkOcrOccurrence::First, MkOcrOccurrence::Nth(4)] {
+            let json = serde_json::to_string(&occurrence).unwrap();
+            assert_eq!(
+                serde_json::from_str::<MkOcrOccurrence>(&json).unwrap(),
+                occurrence
+            );
+        }
+
+        let search = MkOcrSearchSpec {
+            text: "${needle}".into(),
+            region: SearchRegion::Rectangle {
+                rect: ScreenRect::new(-1200, 40, 900, 500),
+            },
+            language: MkOcrLanguage::LanguageTag("ja-JP".into()),
+            match_mode: MkOcrMatchMode::WholeWordPhrase,
+            case_sensitive: true,
+            occurrence: MkOcrOccurrence::Nth(2),
+        };
+        let actions = [
+            MkAction::OcrFindText(MkOcrFindPayload {
+                search: search.clone(),
+                outputs: MkOcrOutputs {
+                    found: Some("found".into()),
+                    matched_text: Some("matched".into()),
+                    point: Some("point".into()),
+                    x: Some("x".into()),
+                    y: Some("y".into()),
+                    match_count: Some("count".into()),
+                },
+                ..Default::default()
+            }),
+            MkAction::OcrClickText(MkOcrClickPayload {
+                search: MkOcrSearchSpec {
+                    match_mode: MkOcrMatchMode::Regex,
+                    ..search.clone()
+                },
+                button: MkMouseButton::Right,
+                clicks: 2,
+                x_offset: -4,
+                y_offset: 7,
+                ..Default::default()
+            }),
+            MkAction::OcrReadText(MkOcrReadPayload {
+                region: SearchRegion::Desktop,
+                language: MkOcrLanguage::Auto,
+                output_variable: "page_text".into(),
+            }),
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<MkAction>(&json).unwrap(), action);
+        }
+
+        let condition = MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition { search },
+            found: false,
+        };
+        let json = serde_json::to_string(&condition).unwrap();
+        assert!(json.contains(r#""type":"ocr_text_search""#));
+        assert_eq!(
+            serde_json::from_str::<MkCondition>(&json).unwrap(),
+            condition
+        );
     }
 }

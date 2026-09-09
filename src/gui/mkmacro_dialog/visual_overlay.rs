@@ -3,7 +3,7 @@
 //! The controller deliberately deals only in signed desktop coordinates.  A
 //! native implementation is responsible for converting window-client input to
 //! desktop coordinates before returning an [`OverlayInput`].
-use crate::mkmacro::{MkPoint, MonitorDescriptor, ScreenRect};
+use crate::mkmacro::{MkPoint, MonitorDescriptor, OcrDocument, OcrMatch, ScreenRect};
 #[cfg(test)]
 use std::sync::{
     Arc, Condvar, Mutex,
@@ -24,6 +24,71 @@ pub const RECTANGLE_OUTLINE_WIDTH: i32 = 3;
 pub const RECTANGLE_TOOLTIP_OFFSET: (i32, i32) = (16, 16);
 pub const RECTANGLE_INSTRUCTION: &str = "Draw a rectangle around the region — Esc to cancel";
 pub const POINT_INSTRUCTION: &str = "Click a screen position — Esc to cancel";
+/// Includes the search-region and selected-match outlines. The cap bounds GDI
+/// work independently of recognizer output size.
+pub const MAX_OCR_DEBUG_RECTS: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OcrDebugStyle {
+    SearchRegion,
+    Line,
+    Word,
+    SelectedMatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcrDebugRect {
+    pub bounds: ScreenRect,
+    pub(crate) style: OcrDebugStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcrDebugOverlayPlan {
+    pub region: ScreenRect,
+    pub rects: Vec<OcrDebugRect>,
+    pub truncated_rects: usize,
+}
+
+pub fn plan_ocr_debug_overlay(
+    region: ScreenRect,
+    document: &OcrDocument,
+    selected: Option<&OcrMatch>,
+) -> OcrDebugOverlayPlan {
+    let mut candidates = Vec::new();
+    for line in &document.lines {
+        if let Some(bounds) = line.bounds() {
+            candidates.push(OcrDebugRect {
+                bounds,
+                style: OcrDebugStyle::Line,
+            });
+        }
+        candidates.extend(line.words.iter().map(|word| OcrDebugRect {
+            bounds: word.bounds,
+            style: OcrDebugStyle::Word,
+        }));
+    }
+    let reserved = 1 + usize::from(selected.is_some());
+    let keep = MAX_OCR_DEBUG_RECTS.saturating_sub(reserved);
+    let truncated_rects = candidates.len().saturating_sub(keep);
+    candidates.truncate(keep);
+    let mut rects = Vec::with_capacity(reserved + candidates.len());
+    rects.push(OcrDebugRect {
+        bounds: region,
+        style: OcrDebugStyle::SearchRegion,
+    });
+    rects.extend(candidates);
+    if let Some(selected) = selected {
+        rects.push(OcrDebugRect {
+            bounds: selected.bounds,
+            style: OcrDebugStyle::SelectedMatch,
+        });
+    }
+    OcrDebugOverlayPlan {
+        region,
+        rects,
+        truncated_rects,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RectangleTooltip {
@@ -164,6 +229,10 @@ pub enum VisualOverlayState {
         area_kind: WindowAreaKind,
         expires_at: Duration,
     },
+    PreviewingOcrDebug {
+        plan: OcrDebugOverlayPlan,
+        expires_at: Duration,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +324,10 @@ pub(crate) enum VisualOverlayCommand {
         operation_id: OperationId,
         rect: ScreenRect,
         area_kind: WindowAreaKind,
+    },
+    PreviewOcrDebug {
+        operation_id: OperationId,
+        plan: OcrDebugOverlayPlan,
     },
     Cancel {
         expected_operation_id: Option<OperationId>,
@@ -603,6 +676,9 @@ fn apply_command(controller: &mut VisualOverlayController, command: VisualOverla
         } => {
             controller.highlight_window_with_id(operation_id, rect, area_kind);
         }
+        VisualOverlayCommand::PreviewOcrDebug { operation_id, plan } => {
+            controller.preview_ocr_debug_with_id(operation_id, plan);
+        }
         VisualOverlayCommand::Cancel {
             expected_operation_id,
         } => {
@@ -649,6 +725,7 @@ pub enum OverlayVisual {
         rect: ScreenRect,
         area_kind: WindowAreaKind,
     },
+    OcrDebug(OcrDebugOverlayPlan),
 }
 impl OverlayVisual {
     pub(crate) fn passive(&self) -> bool {
@@ -759,6 +836,7 @@ pub(crate) fn passive_overlay_plan(
         }
         OverlayVisual::Monitor(d) => (vec![d.bounds], vec![]),
         OverlayVisual::Desktop(ds) => (ds.iter().map(|d| d.bounds).collect(), vec![]),
+        OverlayVisual::OcrDebug(_) => return Some(vec![]),
         OverlayVisual::Monitors(ds) => (
             ds.iter().map(|d| d.bounds).collect(),
             ds.iter().map(|d| (d.bounds, d.index)).collect(),
@@ -815,7 +893,14 @@ pub fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError> {
 pub(crate) enum OverlayFramePrimitive {
     Clear,
     Outline(ScreenRect),
-    MonitorLabel { bounds: ScreenRect, index: usize },
+    MonitorLabel {
+        bounds: ScreenRect,
+        index: usize,
+    },
+    OcrOutline {
+        bounds: ScreenRect,
+        style: OcrDebugStyle,
+    },
 }
 
 pub(crate) fn overlay_frame(visual: &OverlayVisual) -> Vec<OverlayFramePrimitive> {
@@ -851,6 +936,16 @@ pub(crate) fn overlay_frame(visual: &OverlayVisual) -> Vec<OverlayFramePrimitive
                 frame.push(OverlayFramePrimitive::Outline(monitor.bounds));
             }
         }
+        OverlayVisual::OcrDebug(plan) => {
+            frame.extend(
+                plan.rects
+                    .iter()
+                    .map(|rect| OverlayFramePrimitive::OcrOutline {
+                        bounds: rect.bounds,
+                        style: rect.style,
+                    }),
+            )
+        }
     }
     frame
 }
@@ -869,6 +964,15 @@ pub(crate) fn intersecting_monitor_bounds(
                 && i64::from(target.y) < m.bottom()
         })
         .collect()
+}
+
+/// Full-surface batched window plan for OCR. The number of native windows is
+/// bounded by intersected monitors, never by recognized rectangle count.
+pub(crate) fn ocr_debug_surface_plan(
+    plan: &OcrDebugOverlayPlan,
+    monitors: &[ScreenRect],
+) -> Vec<ScreenRect> {
+    intersecting_monitor_bounds(monitors, plan.region)
 }
 
 pub(crate) fn desktop_to_overlay(rect: ScreenRect, origin: ScreenRect) -> (i64, i64, i64, i64) {
@@ -1278,6 +1382,16 @@ impl VisualOverlayController {
             OverlayVisual::Window { rect, area_kind },
         );
     }
+    pub(crate) fn preview_ocr_debug_with_id(&mut self, id: OperationId, plan: OcrDebugOverlayPlan) {
+        self.start_passive_with_id(
+            id,
+            VisualOverlayState::PreviewingOcrDebug {
+                plan: plan.clone(),
+                expires_at: self.deadline(),
+            },
+            OverlayVisual::OcrDebug(plan),
+        );
+    }
     pub fn highlight_monitor(&mut self, descriptor: MonitorDescriptor) -> OperationId {
         let state = VisualOverlayState::HighlightingMonitor {
             descriptor: descriptor.clone(),
@@ -1300,6 +1414,15 @@ impl VisualOverlayController {
                 expires_at: self.deadline(),
             },
             OverlayVisual::Window { rect, area_kind },
+        )
+    }
+    pub fn preview_ocr_debug(&mut self, plan: OcrDebugOverlayPlan) -> OperationId {
+        self.start_passive(
+            VisualOverlayState::PreviewingOcrDebug {
+                plan: plan.clone(),
+                expires_at: self.deadline(),
+            },
+            OverlayVisual::OcrDebug(plan),
         )
     }
     fn deadline(&self) -> Duration {
@@ -1381,7 +1504,8 @@ impl VisualOverlayController {
             | VisualOverlayState::HighlightingMonitor { expires_at, .. }
             | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
             | VisualOverlayState::PreviewingDesktop { expires_at, .. }
-            | VisualOverlayState::HighlightingWindow { expires_at, .. } => {
+            | VisualOverlayState::HighlightingWindow { expires_at, .. }
+            | VisualOverlayState::PreviewingOcrDebug { expires_at, .. } => {
                 self.clock.now() >= *expires_at
             }
             _ => false,
@@ -1617,7 +1741,8 @@ fn passive_expiry(state: &VisualOverlayState) -> Option<Duration> {
         | VisualOverlayState::HighlightingMonitor { expires_at, .. }
         | VisualOverlayState::IdentifyingMonitors { expires_at, .. }
         | VisualOverlayState::PreviewingDesktop { expires_at, .. }
-        | VisualOverlayState::HighlightingWindow { expires_at, .. } => Some(*expires_at),
+        | VisualOverlayState::HighlightingWindow { expires_at, .. }
+        | VisualOverlayState::PreviewingOcrDebug { expires_at, .. } => Some(*expires_at),
         _ => None,
     }
 }
@@ -1641,6 +1766,7 @@ fn geometry_of(visual: &OverlayVisual) -> Option<ScreenRect> {
     match visual {
         OverlayVisual::RectanglePreview(r) | OverlayVisual::Window { rect: r, .. } => Some(*r),
         OverlayVisual::Monitor(d) => Some(d.bounds),
+        OverlayVisual::OcrDebug(plan) => Some(plan.region),
         _ => None,
     }
 }
@@ -1921,7 +2047,6 @@ mod tests {
             }]
         );
     }
-
     #[test]
     fn point_picker_enter_requires_arming_and_confirms_exactly_once() {
         let (mut c, data, _) = controller();
@@ -3256,6 +3381,14 @@ mod tests {
                 rect: ScreenRect::new(5, 6, 70, 80),
                 area_kind: WindowAreaKind::ClientArea,
             },
+            VisualOverlayCommand::PreviewOcrDebug {
+                operation_id: 805,
+                plan: plan_ocr_debug_overlay(
+                    ScreenRect::new(-50, 5, 40, 30),
+                    &OcrDocument::default(),
+                    None,
+                ),
+            },
         ];
         for (index, command) in commands.into_iter().enumerate() {
             let id = 801 + index as u64;
@@ -3285,5 +3418,74 @@ mod tests {
             assert_eq!(close_count(&data), index + 1);
         }
         service.shutdown_and_join();
+    }
+
+    #[test]
+    fn ocr_debug_plan_caps_rectangles_and_always_preserves_region_and_selected() {
+        let region = ScreenRect::new(-500, -200, 1_000, 800);
+        let words = (0..MAX_OCR_DEBUG_RECTS + 40)
+            .map(|index| crate::mkmacro::OcrWord {
+                text: format!("w{index}"),
+                bounds: ScreenRect::new(-490 + index as i32, -190, 1, 8),
+            })
+            .collect();
+        let document = OcrDocument {
+            image_width: 1_000,
+            image_height: 800,
+            lines: vec![crate::mkmacro::OcrLine {
+                text: String::new(),
+                words,
+            }],
+            ..Default::default()
+        };
+        let selected = OcrMatch {
+            text: "selected".into(),
+            bounds: ScreenRect::new(-42, 17, 80, 20),
+            center: MkPoint { x: -2, y: 27 },
+            occurrence: 1,
+            normalized_range: 0..8,
+        };
+        let plan = plan_ocr_debug_overlay(region, &document, Some(&selected));
+        assert_eq!(plan.rects.len(), MAX_OCR_DEBUG_RECTS);
+        assert!(plan.truncated_rects > 0);
+        assert_eq!(plan.rects.first().unwrap().bounds, region);
+        assert_eq!(
+            plan.rects.first().unwrap().style,
+            OcrDebugStyle::SearchRegion
+        );
+        assert_eq!(plan.rects.last().unwrap().bounds, selected.bounds);
+        assert_eq!(
+            plan.rects.last().unwrap().style,
+            OcrDebugStyle::SelectedMatch
+        );
+    }
+
+    #[test]
+    fn ocr_debug_uses_one_transparent_surface_per_intersected_monitor() {
+        let plan = plan_ocr_debug_overlay(
+            ScreenRect::new(-50, 10, 200, 80),
+            &OcrDocument::default(),
+            None,
+        );
+        let monitors = [
+            ScreenRect::new(-100, 0, 100, 100),
+            ScreenRect::new(0, 0, 100, 100),
+            ScreenRect::new(500, 0, 100, 100),
+        ];
+        assert_eq!(ocr_debug_surface_plan(&plan, &monitors), monitors[..2]);
+        let visual = OverlayVisual::OcrDebug(plan.clone());
+        assert!(overlay_is_mouse_transparent(&visual));
+        assert!(!overlay_requires_input_shields(&visual));
+        assert_eq!(passive_overlay_plan(&visual, &monitors), Some(vec![]));
+        let frame = overlay_frame(&visual);
+        assert_eq!(frame.len(), plan.rects.len() + 1);
+        assert!(matches!(frame[0], OverlayFramePrimitive::Clear));
+        assert!(matches!(
+            frame[1],
+            OverlayFramePrimitive::OcrOutline {
+                bounds,
+                style: OcrDebugStyle::SearchRegion
+            } if bounds == plan.region
+        ));
     }
 }

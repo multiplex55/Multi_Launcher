@@ -251,14 +251,27 @@ pub fn parse_package(bytes: &[u8]) -> Result<MkMacroPackage> {
     );
     let source: serde_json::Value =
         serde_json::from_slice(bytes).context("malformed .mkmacro JSON")?;
-    let package: MkMacroPackage =
+    let source_schema = source
+        .pointer("/manifest/schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .context("package manifest has no valid schema version")?;
+    ensure!(
+        matches!(source_schema, 12 | SCHEMA_VERSION),
+        "unsupported macro schema version {source_schema}"
+    );
+    let mut package: MkMacroPackage =
         serde_json::from_value(source.clone()).context("malformed .mkmacro JSON")?;
+    // Canonicality belongs to the package's declared schema. Schema 12 added
+    // no fields that require a content rewrite, so deserialize/serialize it
+    // with its original version before normalizing the in-memory manifest.
     let canonical = serde_json::to_value(&package)?;
     ensure!(
         source == canonical,
         "package contains unknown fields or a non-canonical nested model shape"
     );
     validate_package(&package)?;
+    package.manifest.schema_version = SCHEMA_VERSION;
     Ok(package)
 }
 
@@ -493,7 +506,7 @@ fn validate_package(package: &MkMacroPackage) -> Result<()> {
         manifest.format_version
     );
     ensure!(
-        manifest.schema_version == SCHEMA_VERSION,
+        matches!(manifest.schema_version, 12 | SCHEMA_VERSION),
         "unsupported macro schema version {}",
         manifest.schema_version
     );
@@ -930,6 +943,175 @@ mod tests {
                 .to_string()
                 .contains("too large")
         );
+    }
+
+    #[test]
+    fn parser_normalizes_canonical_schema_twelve_packages_and_rejects_future_schema() {
+        let mut package = MkMacroPackage {
+            manifest: MkMacroPackageManifest {
+                format_version: PACKAGE_FORMAT_VERSION,
+                schema_version: 12,
+                roots: vec![1],
+                macros: vec![macro_with(
+                    1,
+                    "legacy",
+                    None,
+                    vec![step(1, MkAction::Delay(Default::default()))],
+                )],
+                folders: vec![],
+                dependencies: vec![],
+                asset_filenames: vec![],
+            },
+            assets: vec![],
+        };
+        let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
+        assert_eq!(parsed.manifest.schema_version, SCHEMA_VERSION);
+
+        package.manifest.schema_version = SCHEMA_VERSION;
+        package.manifest.macros[0].steps[0].action = MkAction::OcrFindText(MkOcrFindPayload {
+            search: MkOcrSearchSpec {
+                text: "Ready".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let parsed = parse_package(&serde_json::to_vec(&package).unwrap()).unwrap();
+        assert!(matches!(
+            parsed.manifest.macros[0].steps[0].action,
+            MkAction::OcrFindText(_)
+        ));
+        assert!(
+            parsed.assets.is_empty(),
+            "OCR packages must not synthesize assets"
+        );
+
+        package.manifest.schema_version = SCHEMA_VERSION + 1;
+        assert!(
+            parse_package(&serde_json::to_vec(&package).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported macro schema")
+        );
+    }
+
+    #[test]
+    fn schema_twelve_package_preserves_representative_legacy_content_on_reexport() {
+        let directory = tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        write_image(&store, "legacy.png", [1, 2, 3, 255]);
+        let image = MkImagePayload {
+            image: MkImageRef::new("legacy.png").unwrap(),
+            wait: MkWaitOptions::default(),
+            region: SearchRegion::Rectangle {
+                rect: ScreenRect::new(-20, 10, 320, 180),
+            },
+            tolerance: 9,
+            alpha: AlphaPolicy::Compare,
+            return_point: ReturnPoint::Center,
+            not_found_policy: MkImageNotFoundPolicy::Continue,
+            outputs: MkImageOutputs::default(),
+        };
+        let mut root = macro_with(
+            1,
+            "Legacy root",
+            Some(7),
+            vec![
+                step(1, MkAction::ImageFind(image.clone())),
+                step(2, MkAction::ImageClick(image.clone())),
+                step(
+                    3,
+                    MkAction::WaitUntil {
+                        condition: MkCondition::ImageSearch {
+                            search: MkImageSearchCondition {
+                                image: image.image.clone(),
+                                region: image.region.clone(),
+                                tolerance: image.tolerance,
+                                alpha: image.alpha,
+                                return_point: image.return_point,
+                            },
+                            found: true,
+                        },
+                        wait: MkWaitOptions::default(),
+                    },
+                ),
+                step(
+                    4,
+                    MkAction::FindPixel(MkPixelSearchPayload {
+                        search_id: 41,
+                        color: "#123456".into(),
+                        tolerance: 4,
+                        region: SearchRegion::Monitor { index: 1 },
+                        wait: MkWaitOptions::default(),
+                        not_found_policy: MkImageNotFoundPolicy::Fail,
+                        outputs: MkImageOutputs::default(),
+                    }),
+                ),
+                step(
+                    5,
+                    MkAction::CaptureScreenshot(MkScreenshotPayload {
+                        region: SearchRegion::Desktop,
+                        destination: MkScreenshotDestination::File,
+                        path: Some("shot.png".into()),
+                        format: MkScreenshotFormat::Png,
+                        collision: MkFileCollisionPolicy::Unique,
+                        path_output: Some("shot_path".into()),
+                    }),
+                ),
+                step(
+                    6,
+                    MkAction::WaitForVisualChange(WaitForVisualChange::default()),
+                ),
+                step(
+                    7,
+                    MkAction::SetVariable {
+                        name: "ready".into(),
+                        value: MkValue::Boolean(true),
+                    },
+                ),
+                step(
+                    8,
+                    MkAction::WaitUntil {
+                        condition: MkCondition::Variable {
+                            name: "ready".into(),
+                            op: MkCompareOp::Eq,
+                            value: MkValue::Boolean(true),
+                        },
+                        wait: MkWaitOptions::default(),
+                    },
+                ),
+                step(
+                    9,
+                    MkAction::CallMacro(MkCallMacroPayload {
+                        macro_id: 2,
+                        ..Default::default()
+                    }),
+                ),
+            ],
+        );
+        root.signature = serde_json::from_value(serde_json::json!({
+            "parameters": [{"id":1,"name":"needle","value_type":"string"}],
+            "outputs": [{"id":2,"name":"found","value_type":"boolean"}]
+        }))
+        .unwrap();
+        let document = MkMacroDocument {
+            macros: vec![root, macro_with(2, "Legacy callee", Some(7), vec![])],
+            folders: vec![MkMacroFolder {
+                id: 7,
+                name: "Legacy folder".into(),
+            }],
+            ..Default::default()
+        };
+        let schema_thirteen = parse_package(&export_package(&store, &document, &[1]).unwrap())
+            .expect("exported package must parse");
+        let mut legacy_value = serde_json::to_value(&schema_thirteen).unwrap();
+        legacy_value["manifest"]["schema_version"] = serde_json::json!(12);
+        let migrated = parse_package(&serde_json::to_vec(&legacy_value).unwrap()).unwrap();
+        assert_eq!(migrated, schema_thirteen);
+        assert_eq!(migrated.manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(migrated.assets.len(), 1);
+
+        let canonical_reexport = serde_json::to_vec(&migrated).unwrap();
+        assert_eq!(parse_package(&canonical_reexport).unwrap(), migrated);
     }
 
     #[test]

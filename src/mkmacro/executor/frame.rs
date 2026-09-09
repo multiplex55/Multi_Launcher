@@ -565,7 +565,7 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
             }
         } else {
             let outcome = StepOutcome::for_action(&step.action, &frame.variables);
-            if outcome.last_image_found.is_some() {
+            if outcome.last_image_found.is_some() || outcome.last_ocr_found.is_some() {
                 (self.observe)(frame.context, ExecutionEvent::StepOutcome(step_id, outcome));
             }
             (self.observe)(frame.context, ExecutionEvent::StepFinished(step_id));

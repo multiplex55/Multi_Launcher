@@ -3730,9 +3730,11 @@ mod step_outcome_tests {
     fn image_match_and_continued_miss_are_distinct_success_details() {
         let matched = StepOutcome {
             last_image_found: Some(true),
+            ..StepOutcome::default()
         };
         let missed = StepOutcome {
             last_image_found: Some(false),
+            ..StepOutcome::default()
         };
         assert_ne!(matched.detail(), missed.detail());
         assert_eq!(matched.last_image_found, Some(true));
@@ -3749,7 +3751,25 @@ mod step_outcome_tests {
     fn unrelated_step_has_no_inherited_image_status() {
         let unrelated = StepOutcome::default();
         assert_eq!(unrelated.last_image_found, None);
+        assert_eq!(unrelated.last_ocr_found, None);
         assert_eq!(unrelated.detail(), None);
+    }
+
+    #[test]
+    fn ocr_match_and_continued_miss_are_distinct_success_details() {
+        let matched = StepOutcome {
+            last_ocr_found: Some(true),
+            ..StepOutcome::default()
+        };
+        let missed = StepOutcome {
+            last_ocr_found: Some(false),
+            ..StepOutcome::default()
+        };
+        assert_eq!(matched.detail(), Some("Success — OCR text found."));
+        assert_eq!(
+            missed.detail(),
+            Some("Success — OCR text not found; continued.")
+        );
     }
 }
 
@@ -3758,8 +3778,10 @@ mod runtime_snapshot_tests {
     use super::*;
     use crate::mkmacro::{
         MkAction, MkCoordinateTarget, MkDelayPayload, MkImageNotFoundPolicy, MkImageOutputs,
-        MkImagePayload, MkImageRef, MkMacro, MkMacroDocument, MkMouseMovePayload, MkPoint, MkStep,
-        MkTextMode, MkTextPayload, MkValue, MkWaitOptions, executor::fake::FakeBackend,
+        MkImagePayload, MkImageRef, MkMacro, MkMacroDocument, MkMouseMovePayload, MkOcrFindPayload,
+        MkOcrSearchSpec, MkPoint, MkStep, MkTextMode, MkTextPayload, MkValue, MkWaitOptions,
+        OcrDocument, OcrLine, OcrWord, ScreenCaptureBackend, ScreenRect, SearchRegion,
+        executor::fake::FakeBackend,
     };
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -3839,6 +3861,94 @@ mod runtime_snapshot_tests {
         let fake = Arc::new(FakeBackend::default());
         let runtime = MacroRuntime::new(Arc::new(store), fake.clone().backends());
         (directory, runtime, fake)
+    }
+
+    struct OcrCapture;
+
+    impl ScreenCaptureBackend for OcrCapture {
+        fn virtual_desktop(&self) -> crate::mkmacro::ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(0, 0, 200, 100))
+        }
+
+        fn region_bounds(&self, _: &SearchRegion) -> crate::mkmacro::ExecResult<ScreenRect> {
+            Ok(ScreenRect::new(10, 20, 100, 40))
+        }
+
+        fn capture_rect(
+            &self,
+            rect: ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> crate::mkmacro::ExecResult<image::RgbaImage> {
+            Ok(image::RgbaImage::new(rect.width, rect.height))
+        }
+    }
+
+    fn ocr_document(text: &str) -> OcrDocument {
+        OcrDocument {
+            image_width: 100,
+            image_height: 40,
+            lines: vec![OcrLine {
+                text: text.into(),
+                words: vec![OcrWord {
+                    text: text.into(),
+                    bounds: ScreenRect::new(2, 3, 30, 10),
+                }],
+            }],
+            ..OcrDocument::default()
+        }
+    }
+
+    fn runtime_with_ocr(
+        target: MkMacro,
+        recognized: &str,
+    ) -> (tempfile::TempDir, MacroRuntime, Arc<FakeBackend>) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        store.save(document_for(target)).unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        fake.script_ocr(Ok(ocr_document(recognized)));
+        let mut backends = fake.clone().backends();
+        backends.screenshot_capture = Arc::new(OcrCapture);
+        let runtime = MacroRuntime::new(Arc::new(store), backends);
+        (directory, runtime, fake)
+    }
+
+    #[test]
+    fn runtime_observes_ocr_match_and_continued_miss_step_outcomes() {
+        for (recognized, expected_found) in [("target", true), ("other", false)] {
+            let action = MkAction::OcrFindText(MkOcrFindPayload {
+                search: MkOcrSearchSpec {
+                    text: "target".into(),
+                    ..Default::default()
+                },
+                wait: MkWaitOptions {
+                    timeout_ms: 100,
+                    poll_interval_ms: 100,
+                },
+                not_found_policy: MkImageNotFoundPolicy::Continue,
+                ..Default::default()
+            });
+            let (_directory, runtime, _fake) =
+                runtime_with_ocr(test_macro(vec![step(1, action)]), recognized);
+            assert_eq!(
+                runtime.command(RuntimeCommand::Run(1)),
+                CommandResult::Accepted
+            );
+            let completed = wait_for_terminal(&runtime);
+            assert_eq!(completed.state, RuntimeState::Completed, "{completed:?}");
+            let expected = StepOutcome {
+                last_ocr_found: Some(expected_found),
+                ..StepOutcome::default()
+            };
+            assert_eq!(completed.step_outcomes.get(&1), Some(&expected));
+            assert_eq!(
+                completed.last_completed.as_ref().map(|step| &step.outcome),
+                Some(&CompletedStepOutcome::Success(Some(expected.clone())))
+            );
+            assert!(runtime.take_test_events().iter().any(|event| {
+                matches!(event, ExecutionEvent::StepOutcome(1, outcome) if outcome == &expected)
+            }));
+        }
     }
 
     fn wait_for_terminal(runtime: &MacroRuntime) -> Arc<RuntimeSnapshot> {
