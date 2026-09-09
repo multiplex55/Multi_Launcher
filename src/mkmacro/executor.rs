@@ -997,7 +997,7 @@ impl StepOutcome {
             _ => None,
         };
         let reports_ocr = matches!(action, MkAction::OcrFindText(_) | MkAction::OcrClickText(_))
-            || matches!(action, MkAction::WaitUntil { condition, .. } if condition_contains_ocr(condition));
+            || matches!(action, MkAction::WaitUntil { condition, .. } if condition.contains_ocr());
         Self {
             last_image_found: image_key.and_then(|key| match variables.get(key) {
                 Some(MkValue::Boolean(found)) => Some(*found),
@@ -1020,17 +1020,6 @@ impl StepOutcome {
             (Some(false), None) => Some("Success — image not found; continued."),
             (None, None) => None,
         }
-    }
-}
-
-fn condition_contains_ocr(condition: &MkCondition) -> bool {
-    match condition {
-        MkCondition::OcrTextSearch { .. } => true,
-        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-            conditions.iter().any(condition_contains_ocr)
-        }
-        MkCondition::Not { condition } => condition_contains_ocr(condition),
-        _ => false,
     }
 }
 
@@ -6325,8 +6314,18 @@ mod notification_sound_tests {
         assert_eq!(fake.events(), vec!["text:following step"]);
     }
 }
+/// Reports whether every condition in the tree has an available runtime
+/// implementation for the supplied platform OCR capability.
+pub(crate) fn condition_runtime_support(condition: &MkCondition, ocr_supported: bool) -> bool {
+    ocr_supported || !condition.contains_ocr()
+}
+
 /// Testable declaration that every action has deliberate executor handling.
 pub fn has_runtime_support(action: &MkAction) -> bool {
+    has_runtime_support_with_ocr(action, cfg!(windows))
+}
+
+fn has_runtime_support_with_ocr(action: &MkAction, ocr_supported: bool) -> bool {
     // This is production capability metadata, not merely a mirror of the
     // executor match. Mouse support includes the wired WindowsScreenBackend
     // coordinate resolver and SendInput paths (including drag).
@@ -6340,6 +6339,10 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::UiFocus(_)
         | MkAction::UiWait(_) => false,
         MkAction::Notify(_) => cfg!(windows),
+        MkAction::WaitUntil { condition, .. } | MkAction::WhileStart { condition } => {
+            condition_runtime_support(condition, ocr_supported)
+        }
+        MkAction::If(condition) => condition_runtime_support(condition, ocr_supported),
         MkAction::KeyDown(_)
         | MkAction::KeyUp(_)
         | MkAction::KeyPress(_)
@@ -6360,17 +6363,14 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::WindowWait(_)
         | MkAction::WindowMoveResize(_)
         | MkAction::WindowState { .. }
-        | MkAction::WaitUntil { .. }
         | MkAction::SetVariable { .. }
         | MkAction::UnsetVariable { .. }
         | MkAction::PromptInput(_)
         | MkAction::PlaySound(_)
-        | MkAction::If(_)
         | MkAction::Else
         | MkAction::EndIf
         | MkAction::RepeatStart { .. }
         | MkAction::RepeatEnd
-        | MkAction::WhileStart { .. }
         | MkAction::WhileEnd
         | MkAction::Break
         | MkAction::Continue
@@ -6378,7 +6378,7 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         | MkAction::FindPixel(_) => true,
         MkAction::CaptureScreenshot(_) | MkAction::WaitForVisualChange(_) => true,
         MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => {
-            cfg!(windows)
+            ocr_supported
         }
         MkAction::VirtualDesktop(_) => cfg!(windows),
         // Production installs `ProductionVisualSearch`, backed by the same
@@ -6386,6 +6386,88 @@ pub fn has_runtime_support(action: &MkAction) -> bool {
         MkAction::ImageFind(_) | MkAction::ImageClick(_) => true,
     }
 }
+
+#[cfg(test)]
+mod runtime_support_tests {
+    use super::*;
+    use crate::mkmacro::MkOcrSearchCondition;
+
+    fn variable_condition() -> MkCondition {
+        MkCondition::Variable {
+            name: "ready".into(),
+            op: MkCompareOp::Eq,
+            value: MkValue::Boolean(true),
+        }
+    }
+
+    fn ocr_condition() -> MkCondition {
+        MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition::default(),
+            found: true,
+        }
+    }
+
+    #[test]
+    fn condition_runtime_support_recurses_with_injected_ocr_capability() {
+        let conditions = [
+            MkCondition::All {
+                conditions: vec![variable_condition(), ocr_condition()],
+            },
+            MkCondition::Any {
+                conditions: vec![variable_condition(), ocr_condition()],
+            },
+            MkCondition::Not {
+                condition: Box::new(ocr_condition()),
+            },
+        ];
+        for condition in &conditions {
+            assert!(condition_runtime_support(condition, true));
+            assert!(!condition_runtime_support(condition, false));
+        }
+
+        let non_ocr = MkCondition::All {
+            conditions: vec![
+                variable_condition(),
+                MkCondition::WindowExists {
+                    matcher: MkWindowMatcher::default(),
+                },
+            ],
+        };
+        assert!(condition_runtime_support(&non_ocr, true));
+        assert!(condition_runtime_support(&non_ocr, false));
+    }
+
+    #[test]
+    fn conditional_actions_derive_runtime_support_from_nested_conditions() {
+        let actions = [
+            MkAction::WaitUntil {
+                condition: MkCondition::All {
+                    conditions: vec![variable_condition(), ocr_condition()],
+                },
+                wait: MkWaitOptions::default(),
+            },
+            MkAction::If(MkCondition::Not {
+                condition: Box::new(ocr_condition()),
+            }),
+            MkAction::WhileStart {
+                condition: MkCondition::Any {
+                    conditions: vec![variable_condition(), ocr_condition()],
+                },
+            },
+        ];
+        for action in &actions {
+            assert!(has_runtime_support_with_ocr(action, true));
+            assert!(!has_runtime_support_with_ocr(action, false));
+            assert_eq!(has_runtime_support(action), cfg!(windows));
+        }
+
+        assert!(has_runtime_support_with_ocr(
+            &MkAction::If(variable_condition()),
+            false
+        ));
+    }
+}
+
 fn action_name(a: &MkAction) -> &'static str {
     match a {
         MkAction::CallMacro(_) | MkAction::Return(_) => "macro executor",

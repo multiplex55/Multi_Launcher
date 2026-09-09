@@ -10,8 +10,8 @@ Status vocabulary: `pending`, `implemented_unverified`, `verified`, `blocked`. A
 | --- | --- | --- | --- |
 | R01 | Numpad input-routing regression | implemented_unverified | Pre-`TextEdit` physical routing and focused frame coverage are implemented; targeted numpad, top-row, and query-history tests pass. Full-suite verification remains pending. |
 | R02 | OCR compliance audit | implemented_unverified | Current source was audited independently; matrix below records evidence. Recheck evidence and status after remediation. |
-| R03 | OCR condition ownership cleanup | pending | One canonical recursive `MkCondition::contains_ocr()` remains and all validation, executor, and editor consumers use it. |
-| R04 | OCR runtime capability reporting | pending | `WaitUntil`, `If`, and `WhileStart` derive support from their condition trees; nested traversal is deterministically tested with OCR enabled and disabled. |
+| R03 | OCR condition ownership cleanup | implemented_unverified | Canonical recursive `MkCondition::contains_ocr()` now serves validation, executor outcomes, and editor lifecycle routing; focused tests pass. Full-suite verification remains pending. |
+| R04 | OCR runtime capability reporting | implemented_unverified | `WaitUntil`, `If`, and `WhileStart` now derive support from their condition trees through an injected OCR-capability seam; deterministic nested tests pass. Full-suite verification remains pending. |
 | R05 | Other discovered OCR gaps | pending | Expose Click Text failure policy in the editor and add direct OCR authoring-field traversal coverage. |
 | R06 | Test expansion/migration | implemented_unverified | Numpad routing, top-row, focus/modifier/idle-probe/repeat, and history coverage is implemented; OCR remediation coverage remains pending. |
 | R07 | Targeted verification | pending | `cargo fmt --all`, `cargo check --all-targets`, `git diff --check`, source searches, and focused Nextest groups pass. |

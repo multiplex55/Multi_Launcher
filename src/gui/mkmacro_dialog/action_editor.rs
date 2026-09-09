@@ -4541,9 +4541,7 @@ fn action_contains_ocr(action: &MkAction) -> bool {
         MkAction::OcrFindText(_) | MkAction::OcrClickText(_) | MkAction::OcrReadText(_) => true,
         MkAction::If(condition)
         | MkAction::WhileStart { condition }
-        | MkAction::WaitUntil { condition, .. } => {
-            crate::mkmacro::validation::condition_contains_ocr(condition)
-        }
+        | MkAction::WaitUntil { condition, .. } => condition.contains_ocr(),
         _ => false,
     }
 }

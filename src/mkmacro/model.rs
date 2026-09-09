@@ -633,6 +633,21 @@ pub enum MkCondition {
         condition: Box<MkCondition>,
     },
 }
+
+impl MkCondition {
+    /// Returns whether this condition tree performs OCR when evaluated.
+    pub(crate) fn contains_ocr(&self) -> bool {
+        match self {
+            Self::OcrTextSearch { .. } => true,
+            Self::All { conditions } | Self::Any { conditions } => {
+                conditions.iter().any(Self::contains_ocr)
+            }
+            Self::Not { condition } => condition.contains_ocr(),
+            _ => false,
+        }
+    }
+}
+
 /// A single, immediate image search used by a condition.  Action polling and
 /// output policy deliberately live in [`MkImagePayload`], not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2206,6 +2221,62 @@ mod ocr_payload_tests {
         assert_eq!(MkOcrOccurrence::Nth(1).selected_index(), Some(0));
         assert_eq!(MkOcrOccurrence::Nth(3).selected_index(), Some(2));
         assert_eq!(MkOcrOccurrence::Nth(0).selected_index(), None);
+    }
+
+    fn variable_condition() -> MkCondition {
+        MkCondition::Variable {
+            name: "ready".into(),
+            op: MkCompareOp::Eq,
+            value: MkValue::Boolean(true),
+        }
+    }
+
+    fn ocr_condition() -> MkCondition {
+        MkCondition::OcrTextSearch {
+            search: MkOcrSearchCondition::default(),
+            found: true,
+        }
+    }
+
+    #[test]
+    fn contains_ocr_recurses_through_logical_conditions() {
+        assert!(ocr_condition().contains_ocr());
+        assert!(
+            MkCondition::All {
+                conditions: vec![variable_condition(), ocr_condition()],
+            }
+            .contains_ocr()
+        );
+        assert!(
+            MkCondition::Any {
+                conditions: vec![variable_condition(), ocr_condition()],
+            }
+            .contains_ocr()
+        );
+        assert!(
+            MkCondition::Not {
+                condition: Box::new(ocr_condition()),
+            }
+            .contains_ocr()
+        );
+
+        assert!(
+            !MkCondition::All {
+                conditions: vec![
+                    variable_condition(),
+                    MkCondition::WindowExists {
+                        matcher: MkWindowMatcher::default(),
+                    },
+                ],
+            }
+            .contains_ocr()
+        );
+        assert!(
+            !MkCondition::Not {
+                condition: Box::new(variable_condition()),
+            }
+            .contains_ocr()
+        );
     }
 
     #[test]

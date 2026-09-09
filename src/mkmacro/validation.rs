@@ -327,16 +327,6 @@ fn ocr_outputs(outputs: &MkOcrOutputs, m: u64, s: Option<u64>, out: &mut Vec<MkD
     }
 }
 
-pub fn condition_contains_ocr(condition: &MkCondition) -> bool {
-    match condition {
-        MkCondition::OcrTextSearch { .. } => true,
-        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
-            conditions.iter().any(condition_contains_ocr)
-        }
-        MkCondition::Not { condition } => condition_contains_ocr(condition),
-        _ => false,
-    }
-}
 pub fn can_run(ds: &[MkDiagnostic]) -> bool {
     !ds.iter().any(|d| d.severity == DiagnosticSeverity::Fatal)
 }
@@ -629,7 +619,7 @@ fn analyze_document_with_context(
                 } => {
                     condition(c, context.monitors, m.id, sid, asset_root, &mut out);
                     wait(w, m.id, sid, &mut out);
-                    if condition_contains_ocr(c) && w.poll_interval_ms < 100 {
+                    if c.contains_ocr() && w.poll_interval_ms < 100 {
                         push(
                             &mut out,
                             m.id,
