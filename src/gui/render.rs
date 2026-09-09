@@ -1226,6 +1226,15 @@ impl eframe::App for LauncherApp {
             scale_ui(ui, self.query_scale, |ui| {
                 let input_id = egui::Id::new("query_input");
 
+                let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
+                let numpad_navigation = ui.ctx().input_mut(|input| {
+                    consume_physical_numpad_navigation(
+                        query_owned_focus,
+                        input,
+                        &NativeNumpadKeyStateProbe,
+                    )
+                });
+
                 if self.move_cursor_end {
                     if ui.ctx().memory(|m| m.has_focus(input_id)) {
                         let len = self.query.chars().count();
@@ -1249,7 +1258,7 @@ impl eframe::App for LauncherApp {
 
                 let query_response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .id_source(input_id)
+                        .id(input_id)
                         .desired_width(f32::INFINITY),
                 );
                 if Self::launcher_query_focus_should_be_requested(
@@ -1272,6 +1281,10 @@ impl eframe::App for LauncherApp {
                 });
                 if let Some(direction) = history_direction {
                     self.navigate_query_history(direction);
+                }
+
+                for direction in numpad_navigation {
+                    self.handle_key(direction.navigation_key());
                 }
 
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
@@ -1310,10 +1323,6 @@ impl eframe::App for LauncherApp {
                         egui::Key::PageUp,
                         egui::Key::ArrowLeft,
                         egui::Key::ArrowRight,
-                        egui::Key::Num8,
-                        egui::Key::Num2,
-                        egui::Key::Num4,
-                        egui::Key::Num6,
                     ] {
                         if ctx.input(|i| i.key_pressed(key)) {
                             self.handle_key(key);
@@ -1881,12 +1890,17 @@ impl LauncherApp {
 mod tests {
     use super::*;
     use crate::{
+        gui::numpad_navigation::{
+            LauncherNumpadNavigation, NumpadKeyStateProbe, PhysicalNumpadKey,
+            consume_physical_numpad_navigation,
+        },
         mkmacro::{LauncherCommandBroker, LauncherCommandResponse, RunControl},
         plugin::{Plugin, PluginManager},
         settings::Settings,
     };
     use eframe::egui;
     use std::{
+        cell::Cell,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1935,6 +1949,189 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    struct FakeNumpadProbe {
+        down: Option<PhysicalNumpadKey>,
+        calls: Cell<usize>,
+    }
+
+    impl NumpadKeyStateProbe for FakeNumpadProbe {
+        fn is_down(&self, key: PhysicalNumpadKey) -> bool {
+            self.calls.set(self.calls.get() + 1);
+            self.down == Some(key)
+        }
+    }
+
+    fn render_query_text_edit_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        request_focus: bool,
+        probe: &impl NumpadKeyStateProbe,
+    ) -> (bool, Vec<LauncherNumpadNavigation>) {
+        let mut focused = false;
+        let mut routed = Vec::new();
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let input_id = egui::Id::new("numpad_routing_query_input");
+            let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
+            routed = ui.ctx().input_mut(|input| {
+                consume_physical_numpad_navigation(query_owned_focus, input, probe)
+            });
+
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.query)
+                    .id(input_id)
+                    .desired_width(f32::INFINITY),
+            );
+            if request_focus {
+                response.request_focus();
+            }
+            focused = response.has_focus();
+            for direction in routed.iter().copied() {
+                app.handle_key(direction.navigation_key());
+            }
+        });
+        (focused, routed)
+    }
+
+    fn run_two_frame_query_routing(
+        key: egui::Key,
+        digit: &str,
+        down: Option<PhysicalNumpadKey>,
+        selected: usize,
+    ) -> (LauncherApp, Vec<LauncherNumpadNavigation>, usize) {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "note".into();
+        app.results = (0..8)
+            .map(|index| Action {
+                label: format!("Result {index}"),
+                desc: "Test".into(),
+                action: format!("test:{index}"),
+                args: None,
+            })
+            .collect();
+        app.resolved_grid_layout = true;
+        app.query_results_layout.cols = 3;
+        app.selected = Some(selected);
+        let probe = FakeNumpadProbe {
+            down,
+            calls: Cell::new(0),
+        };
+
+        ctx.begin_frame(egui::RawInput::default());
+        let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, true, &probe);
+        assert!(focused);
+        assert!(routed.is_empty());
+        let _ = ctx.end_frame();
+
+        let input_id = egui::Id::new("numpad_routing_query_input");
+        ctx.data_mut(|data| {
+            let state = data
+                .get_persisted_mut_or_default::<egui::widgets::text_edit::TextEditState>(input_id);
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(app.query.chars().count()),
+                )));
+        });
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![
+                key_press(key, egui::Modifiers::NONE),
+                egui::Event::Text(digit.into()),
+            ],
+            ..Default::default()
+        });
+        let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, false, &probe);
+        assert!(focused);
+        let _ = ctx.end_frame();
+        (app, routed, probe.calls.get())
+    }
+
+    #[test]
+    fn focused_query_text_edit_routes_all_physical_numpad_directions_without_typing() {
+        for (key, digit, physical, selected, expected_selected, expected_direction) in [
+            (
+                egui::Key::Num8,
+                "8",
+                PhysicalNumpadKey::Num8,
+                4,
+                1,
+                LauncherNumpadNavigation::Up,
+            ),
+            (
+                egui::Key::Num2,
+                "2",
+                PhysicalNumpadKey::Num2,
+                1,
+                4,
+                LauncherNumpadNavigation::Down,
+            ),
+            (
+                egui::Key::Num4,
+                "4",
+                PhysicalNumpadKey::Num4,
+                4,
+                3,
+                LauncherNumpadNavigation::Left,
+            ),
+            (
+                egui::Key::Num6,
+                "6",
+                PhysicalNumpadKey::Num6,
+                4,
+                5,
+                LauncherNumpadNavigation::Right,
+            ),
+        ] {
+            let (app, routed, calls) =
+                run_two_frame_query_routing(key, digit, Some(physical), selected);
+            assert_eq!(routed, vec![expected_direction]);
+            assert_eq!(calls, 1);
+            assert_eq!(app.query, "note");
+            assert_eq!(app.selected, Some(expected_selected));
+        }
+    }
+
+    #[test]
+    fn focused_query_text_edit_preserves_all_top_row_navigation_digits_as_text() {
+        for (key, digit) in [
+            (egui::Key::Num8, "8"),
+            (egui::Key::Num2, "2"),
+            (egui::Key::Num4, "4"),
+            (egui::Key::Num6, "6"),
+        ] {
+            let (app, routed, calls) = run_two_frame_query_routing(key, digit, None, 4);
+            assert_eq!(app.query, format!("note{digit}"));
+            assert_eq!(app.selected, Some(4));
+            assert!(routed.is_empty());
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn numpad_routing_leaves_query_history_shortcuts_available() {
+        let ctx = egui::Context::default();
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
+            ..Default::default()
+        });
+        let probe = FakeNumpadProbe {
+            down: Some(PhysicalNumpadKey::Num8),
+            calls: Cell::new(0),
+        };
+
+        assert_eq!(
+            ctx.input_mut(|input| consume_physical_numpad_navigation(true, input, &probe)),
+            Vec::new()
+        );
+        assert_eq!(probe.calls.get(), 0);
+        assert_eq!(
+            ctx.input_mut(|input| LauncherApp::consume_query_history_shortcut(true, input)),
+            Some(QueryHistoryDirection::Older)
+        );
+        let _ = ctx.end_frame();
     }
 
     #[test]
