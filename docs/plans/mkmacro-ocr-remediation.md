@@ -8,15 +8,15 @@ Status vocabulary: `pending`, `implemented_unverified`, `verified`, `blocked`. A
 
 | ID | Milestone | Status | Acceptance and verification |
 | --- | --- | --- | --- |
-| R01 | Numpad input-routing regression | implemented_unverified | Pre-`TextEdit` physical routing and focused frame coverage are implemented; targeted numpad, top-row, and query-history tests pass. Full-suite verification remains pending. |
-| R02 | OCR compliance audit | implemented_unverified | Current source was audited independently; matrix below records evidence. Recheck evidence and status after remediation. |
-| R03 | OCR condition ownership cleanup | implemented_unverified | Canonical recursive `MkCondition::contains_ocr()` now serves validation, executor outcomes, and editor lifecycle routing; focused tests pass. Full-suite verification remains pending. |
-| R04 | OCR runtime capability reporting | implemented_unverified | `WaitUntil`, `If`, and `WhileStart` now derive support from their condition trees through an injected OCR-capability seam; deterministic nested tests pass. Full-suite verification remains pending. |
-| R05 | Other discovered OCR gaps | implemented_unverified | Click Text now exposes its persisted failure policy through the shared OCR editor control; direct OCR action/condition field-traversal coverage is added. Targeted tests pass; full-suite verification remains pending. |
-| R06 | Test expansion/migration | implemented_unverified | Numpad routing, top-row, focus/modifier/idle-probe/repeat/history, OCR ownership/capability, Click Text policy, and OCR field-traversal coverage is implemented. Full-suite verification remains pending. |
-| R07 | Targeted verification | verified | All-target check and focused Nextest groups passed: numpad 9, query history 14, runtime support 2, OCR 59, visual/store 17, package 16. Review-remediation focused tests also pass. |
-| R08 | Full verification | implemented_unverified | Pre-review full Nextest passed 3,479 tests with 7 skipped; production/shared review remediations require the final full rerun. |
-| R09 | Independent review/remediation | implemented_unverified | Independent review completed. OCR outcome emission, mixed keypad/top-row preservation, and rendered Click Text policy coverage are remediated; final automated verification remains. |
+| R01 | Numpad input-routing regression | verified | Pre-`TextEdit` physical routing and focused frame coverage pass targeted and full-suite verification. |
+| R02 | OCR compliance audit | verified | Current source and tests were audited independently; the matrix below records the final evidence and remediations. |
+| R03 | OCR condition ownership cleanup | verified | Canonical recursive `MkCondition::contains_ocr()` serves validation, executor outcomes, and editor lifecycle routing; focused and full-suite tests pass. |
+| R04 | OCR runtime capability reporting | verified | `WaitUntil`, `If`, and `WhileStart` derive support from their condition trees through an injected OCR-capability seam; deterministic nested and full-suite tests pass. |
+| R05 | Other discovered OCR gaps | verified | Click Text exposes its persisted failure policy through the shared OCR editor control; direct OCR action/condition field-traversal coverage passes. |
+| R06 | Test expansion/migration | verified | Numpad routing, top-row, focus/modifier/idle-probe/repeat/history, OCR ownership/capability/outcomes, Click Text policy, and OCR field-traversal coverage passes. |
+| R07 | Targeted verification | verified | All-target check and focused Nextest groups passed: numpad 10 after review remediation, query history 14, runtime support 2, OCR 59, visual/store 17, package 16. Review-remediation focused tests also pass. |
+| R08 | Full verification | verified | Post-review `cargo nextest run --no-fail-fast` passed all 3,483 tests with 7 skipped. |
+| R09 | Independent review/remediation | verified | Independent review completed. OCR outcome emission, mixed keypad/top-row preservation, and rendered Click Text policy coverage were remediated and passed final verification. |
 
 ## Ordered implementation plan
 
@@ -65,11 +65,11 @@ Invariants: schema 13 remains current; schema-12 documents/packages remain compa
 | Validation | `validation.rs` | OCR search/language/region/output/wait validation | Validation tests | satisfied | Use canonical domain helper. |
 | Authoring field traversal | `authoring_fields.rs` | OCR template/language/shared-region/output traversal implemented | Direct OCR action and condition traversal tests | satisfied | Remediated with focused coverage. |
 | Authoring analysis | `authoring_analysis.rs` | OCR output types and condition paths included | OCR analysis tests | satisfied | Preserve. |
-| Runtime capability reporting | `executor.rs` `has_runtime_support` | Direct actions gated; condition-bearing actions ignore OCR tree | No deterministic nested capability tests | incorrect | Add condition capability evaluator and migrate If/While/WaitUntil. |
+| Runtime capability reporting | `executor.rs` `has_runtime_support` | Direct actions and condition-bearing actions are gated through OCR-aware condition traversal | Deterministic direct/nested capability tests | satisfied | Remediated with condition capability evaluator for If/While/WaitUntil. |
 | Schema 12 -> 13 migration | `store.rs` | Additive migration to schema 13 | Store migration tests | satisfied | No schema bump. |
 | Package compatibility | `package.rs` | Schema-12 import, schema-13 round trip, future rejection, no OCR assets | Package tests | satisfied | Preserve. |
-| Privacy | OCR/editor/runtime modules | No capture persistence, cloud request, or normal-level recognized-text logging found | Source audit; deterministic persistence tests where applicable | satisfied | Recheck diff/review. |
-| Idle-performance contract | OCR/editor/runtime modules | OCR runs only for actions/conditions/Test; language enumeration explicit | Capture/job/runtime tests plus source audit | satisfied | Recheck diff/review. |
+| Privacy | OCR/editor/runtime modules | No capture persistence, cloud request, or normal-level recognized-text logging found | Source audit; deterministic persistence tests where applicable | satisfied | Confirmed in final diff review. |
+| Idle-performance contract | OCR/editor/runtime modules | OCR runs only for actions/conditions/Test; language enumeration explicit | Capture/job/runtime tests plus source audit | satisfied | Confirmed in final diff review. |
 
 ## Audit findings requiring changes
 
@@ -86,4 +86,4 @@ No other substantive OCR implementation gap was found in the source audit. Corre
 - **Mixed keypad/top-row state:** egui 0.27 collapses both physical locations to the same logical key. The native seam now samples both matching virtual-key states only after a focused candidate; if both are down, the event remains text rather than risking theft of top-row input. Ordinary keypad repeats remain fully consumed and navigate once per direction.
 - **Click Text editor evidence:** the earlier policy round-trip test did not render the control. A rendered egui control test now verifies the shared policy selector and selected Click Text policy in addition to round-trip coverage.
 
-No high-severity finding was reported. Final full verification is required because the first two findings changed shared production behavior after the pre-review full run.
+No high-severity finding was reported. All findings were remediated, targeted checks passed, and the post-review full suite passed 3,483 tests with 7 skipped.
