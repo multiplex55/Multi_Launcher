@@ -2686,6 +2686,10 @@ mod tests {
                         condition: MkCondition::ImageSearch { found, .. },
                         ..
                     } => Some(format!("wait_image:{found}")),
+                    MkAction::WaitUntil {
+                        condition: MkCondition::OcrTextSearch { found, .. },
+                        ..
+                    } => Some(format!("wait_ocr_text:{found}")),
                     _ => None,
                 },
             );

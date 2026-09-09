@@ -25,15 +25,15 @@
 
 | ID | Milestone | Depends on | Status | Commit / verification |
 | --- | --- | --- | --- | --- |
-| M01 | Persisted OCR model, schema 13, built-ins, and pure matching types | baseline | implemented_unverified | 9340dd36; construction checks pass, behavioral verification M07/M08 |
-| M02 | OCR backend, Windows adapter, tiling, capture service, and pure tests | M01 | implemented_unverified | 9340dd36; Windows 0.58 adapter type-checks, behavioral verification M07/M08 |
-| M03 | Executor actions, conditions, outputs, polling, cancellation, and capabilities | M02 | implemented_unverified | 9340dd36; runtime-owned code compiles, behavioral verification M07/M08 |
-| M04 | Validation, typed fields, static analysis, compiler/runtime metadata, and package compatibility | M03 | implemented_unverified | 9340dd36; schema-12 packages normalize canonically, behavioral verification M07/M08 |
-| M05 | Catalog, transactional OCR editors, shared region routing, language jobs, and Test OCR preview | M04 | implemented_unverified | 9340dd36; focused construction tests pass, broader verification M07/M08 |
-| M06 | Bounded batched OCR debug overlay and authoring integration | M05 | implemented_unverified | 9340dd36; focused construction tests pass, broader verification M07/M08 |
-| M07 | Comprehensive test expansion, compile stabilization, and existing-test migration | M06 | implemented_unverified | Focused Cargo tests pass (45 OCR lib plus existing integrations); authoritative Nextest is M08 |
-| M08 | Targeted verification, formatting/checks, and full authoritative Nextest | M07 | pending | |
-| M09 | Independent review, remediation, final verification, and ledger completion | M08 | pending | |
+| M01 | Persisted OCR model, schema 13, built-ins, and pure matching types | baseline | complete | 9340dd36; focused and full-suite verification passed |
+| M02 | OCR backend, Windows adapter, tiling, capture service, and pure tests | M01 | complete | 9340dd36; Windows 0.58 adapter type-checks; focused and full-suite verification passed |
+| M03 | Executor actions, conditions, outputs, polling, cancellation, and capabilities | M02 | complete | 9340dd36; focused and full-suite verification passed |
+| M04 | Validation, typed fields, static analysis, compiler/runtime metadata, and package compatibility | M03 | complete | 9340dd36; focused and full-suite verification passed |
+| M05 | Catalog, transactional OCR editors, shared region routing, language jobs, and Test OCR preview | M04 | complete | 9340dd36; focused and full-suite verification passed |
+| M06 | Bounded batched OCR debug overlay and authoring integration | M05 | complete | 9340dd36; focused and full-suite verification passed |
+| M07 | Comprehensive test expansion, compile stabilization, and existing-test migration | M06 | complete | d40e9a7a; 45/45 OCR Nextest and 51/51 MkMacro integration tests passed |
+| M08 | Targeted verification, formatting/checks, and full authoritative Nextest | M07 | complete | `cargo fmt --all -- --check`, `cargo check --all-targets`, and `git diff --check` passed; final rerun: 3,453/3,453 passed, 7 skipped |
+| M09 | Independent review, remediation, final verification, and ledger completion | M08 | in_progress | Independent review pending |
 
 ## M01 — Persisted model and pure matching foundation
 

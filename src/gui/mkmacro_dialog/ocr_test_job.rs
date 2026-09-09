@@ -256,16 +256,18 @@ mod tests {
         );
         let mut stale = identity.clone();
         stale.draft_generation += 1;
-        let mut consumed = false;
-        for _ in 0..100 {
-            assert!(job.take_if_current(&stale).is_none());
-            if !job.active() {
-                consumed = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert!(consumed, "stale completion was not consumed");
+        let completion = job
+            .receiver
+            .as_ref()
+            .expect("started OCR job has a completion receiver")
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("background OCR job did not complete within the harness timeout");
+        let (sender, receiver) = mpsc::channel();
+        sender.send(completion).unwrap();
+        job.receiver = Some(receiver);
+
+        assert!(job.take_if_current(&stale).is_none());
+        assert!(!job.active(), "stale completion was not consumed");
         assert_ne!(*backend.recognize_thread.lock().unwrap(), Some(caller));
     }
 }
