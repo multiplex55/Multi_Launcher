@@ -180,8 +180,13 @@ affected library cases, 7 recorder integration cases, and all 9 authoring integr
 batch removed the obsolete literal-plan compatibility path and fixed long-held modifier shortcut
 classification, precise Freeze Paste targeting, balanced cross-Pause mouse ownership, per-primary
 window targeting across held modifiers, bounded UIA inspection/finalization, and annotation/marker
-control ownership. `cargo check --tests`, formatting, and diff checks pass. Remaining Review,
-anchor, and preview coverage stays pending in a later ordered M7 batch.
+control ownership. Recording Review and insertion-anchor coverage is also green (more than 16 focused cases),
+including confidence defaults, immutable raw/cleaned baselines and cached statistics, local
+multi-select/edit/trim/delete undo-redo, Reconfigure restoration, draft/store-neutral cancellation,
+fresh insertion IDs, cross-macro captured-target ownership, real Freeze Paste terminal privacy,
+deleted-anchor/macro recovery, and stale document undo/redo blocking. `cargo check --tests`,
+formatting, and diff checks pass. Remaining preview
+coverage stays pending in a later ordered M7 batch.
 
 Depends on: M1-M6 production integration.
 

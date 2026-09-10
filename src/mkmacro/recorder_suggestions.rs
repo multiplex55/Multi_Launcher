@@ -60,6 +60,10 @@ impl SuggestionReplacement {
         }
         steps
     }
+
+    pub(crate) fn clear_sensitive(&mut self) {
+        self.frozen_clipboard_text = None;
+    }
 }
 impl fmt::Debug for SuggestionReplacement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1325,6 +1329,12 @@ mod tests {
         assert!(!format!("{:?}", found[0]).contains("top secret"));
         assert!(!format!("{:?}", found[0].replacement).contains("top secret"));
         assert!(matches!(plan.steps[0].action, MkAction::Hotkey(_)));
+        let mut cleared = found[0].replacement.clone();
+        cleared.clear_sensitive();
+        assert!(matches!(
+            cleared.materialize()[0].action,
+            MkAction::Hotkey(_)
+        ));
     }
 
     #[test]

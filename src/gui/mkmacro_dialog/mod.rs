@@ -4033,6 +4033,32 @@ mod tests {
         }
     }
 
+    fn freeze_review_result(
+        target: crate::mkmacro::RecordingTarget,
+        secret: &str,
+    ) -> crate::mkmacro::RecordingResult {
+        let mut result = review_result(
+            target,
+            vec![MkAction::Hotkey(vec![
+                MkKey::LeftControl,
+                MkKey::Character("V".into()),
+            ])],
+        );
+        result.clipboard_observations = vec![crate::mkmacro::ClipboardObservation {
+            timestamp_us: 10,
+            text: crate::mkmacro::SensitiveClipboardText::new(secret.into()),
+        }];
+        result.suggestions = crate::mkmacro::discover_suggestions(
+            &result.plan,
+            &crate::mkmacro::MkRecorderSettings::default(),
+            &crate::mkmacro::ObservationBaseline::default(),
+            &[],
+            &result.clipboard_observations,
+            &[(0, 10)],
+        );
+        result
+    }
+
     fn delay_step(id: u64, fixed_ms: u64) -> MkStep {
         MkStep {
             id,
@@ -4066,6 +4092,9 @@ mod tests {
                 .get(&(macro_id, anchor.id))
                 .copied(),
         };
+        dialog.create_macro();
+        let other_macro_id = dialog.selected_macro_id.unwrap();
+        dialog.set_selected_macro(Some(macro_id));
         dialog
             .open_recording_review(review_result(
                 target,
@@ -4082,10 +4111,16 @@ mod tests {
             ))
             .unwrap();
         dialog.selection.replace([3]);
+        dialog.set_selected_macro(Some(other_macro_id));
         let ids = dialog.apply_recording_review().unwrap();
         assert_eq!(ids.len(), 2);
+        assert_eq!(dialog.selected_macro_id, Some(other_macro_id));
+        assert!(dialog.selected_macro().unwrap().steps.is_empty());
         let values: Vec<_> = dialog
-            .selected_macro()
+            .draft
+            .macros
+            .iter()
+            .find(|item| item.id == macro_id)
             .unwrap()
             .steps
             .iter()
@@ -4096,9 +4131,311 @@ mod tests {
             .collect();
         assert_eq!(values, vec![1, 2, 10, 20, 3]);
         dialog.undo_last_recording_insert().unwrap();
-        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 3);
+        assert_eq!(
+            dialog
+                .draft
+                .macros
+                .iter()
+                .find(|item| item.id == macro_id)
+                .unwrap()
+                .steps
+                .len(),
+            3
+        );
         dialog.redo_last_recording_insert().unwrap();
-        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 5);
+        assert_eq!(
+            dialog
+                .draft
+                .macros
+                .iter()
+                .find(|item| item.id == macro_id)
+                .unwrap()
+                .steps
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn completed_recording_and_cancel_are_a_total_draft_and_store_no_op() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1)];
+        dialog.mark_dirty();
+        dialog.save().unwrap();
+        let draft_before = dialog.draft.clone();
+        let stored_before = dialog.store.snapshot();
+        let revision_before = dialog.draft_revision();
+
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 99,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(dialog.store.snapshot(), stored_before);
+        assert!(!dialog.dirty);
+        assert_eq!(dialog.draft_revision(), revision_before);
+        dialog.cancel_recording_review();
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(dialog.store.snapshot(), stored_before);
+        assert!(!dialog.dirty);
+        assert_eq!(dialog.draft_revision(), revision_before);
+    }
+
+    #[test]
+    fn disabled_freeze_paste_never_materializes_or_persists_clipboard_text() {
+        const SECRET: &str = "recording-only clipboard sentinel";
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.save().unwrap();
+        let stored_before = dialog.store.snapshot();
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+
+        dialog
+            .open_recording_review(freeze_review_result(target, SECRET))
+            .unwrap();
+        assert!(
+            dialog
+                .recording_review
+                .as_ref()
+                .unwrap()
+                .enabled_suggestions
+                .is_empty()
+        );
+        dialog.cancel_recording_review();
+        assert!(
+            !serde_json::to_string(&dialog.draft)
+                .unwrap()
+                .contains(SECRET)
+        );
+        assert_eq!(dialog.store.snapshot(), stored_before);
+
+        dialog
+            .open_recording_review(freeze_review_result(target, SECRET))
+            .unwrap();
+        dialog.discard_all_recording_reviews();
+        assert!(dialog.recording_review.is_none());
+        assert!(
+            !serde_json::to_string(&dialog.draft)
+                .unwrap()
+                .contains(SECRET)
+        );
+        assert_eq!(dialog.store.snapshot(), stored_before);
+
+        dialog
+            .open_recording_review(freeze_review_result(target, SECRET))
+            .unwrap();
+        let inserted = dialog.apply_recording_review().unwrap();
+        assert_eq!(inserted.len(), 1);
+        assert!(matches!(
+            &dialog.selected_macro().unwrap().steps[0].action,
+            MkAction::Hotkey(keys)
+                if keys == &vec![MkKey::LeftControl, MkKey::Character("V".into())]
+        ));
+        assert!(
+            !serde_json::to_string(&dialog.draft)
+                .unwrap()
+                .contains(SECRET)
+        );
+        assert_eq!(dialog.store.snapshot(), stored_before);
+    }
+
+    #[test]
+    fn no_anchor_appends_with_fresh_ids() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1), delay_step(2, 2)];
+        dialog.mark_dirty();
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 10,
+                        ..Default::default()
+                    }),
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 20,
+                        ..Default::default()
+                    }),
+                ],
+            ))
+            .unwrap();
+
+        let inserted = dialog.apply_recording_review().unwrap();
+        assert_eq!(inserted.len(), 2);
+        assert!(inserted.iter().all(|id| ![1, 2].contains(id)));
+        let all_ids: HashSet<_> = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .map(|step| step.id)
+            .collect();
+        assert_eq!(all_ids.len(), 4);
+        let values: Vec<_> = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::Delay(payload) => Some(payload.fixed_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, vec![1, 2, 10, 20]);
+    }
+
+    #[test]
+    fn deleted_anchor_blocks_apply_until_explicit_append_recovery() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1), delay_step(2, 2)];
+        dialog.mark_dirty();
+        let generation = dialog
+            .step_instance_generations
+            .get(&(macro_id, 1))
+            .copied();
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: Some(1),
+                    insertion_anchor_generation: generation,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 9,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+
+        dialog.selected_macro_mut().unwrap().steps.remove(0);
+        dialog.mark_dirty();
+        assert!(dialog.apply_recording_review().is_err());
+        assert!(dialog.recording_review.is_some());
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .recover_append_to_original_macro();
+        dialog.apply_recording_review().unwrap();
+        let values: Vec<_> = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::Delay(payload) => Some(payload.fixed_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, vec![2, 9]);
+    }
+
+    #[test]
+    fn deleted_target_macro_preserves_review_until_explicit_retarget() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let target_id = dialog.selected_macro_id.unwrap();
+        dialog.create_macro();
+        let recovery_id = dialog.selected_macro_id.unwrap();
+        dialog.set_selected_macro(Some(target_id));
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id: target_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 9,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+
+        dialog.delete_selected_macro();
+        assert!(dialog.apply_recording_review().is_err());
+        assert!(dialog.recording_review.is_some());
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .retarget_append(recovery_id);
+        dialog.apply_recording_review().unwrap();
+        let recovery = dialog
+            .draft
+            .macros
+            .iter()
+            .find(|item| item.id == recovery_id)
+            .unwrap();
+        assert_eq!(recovery.steps.len(), 1);
+    }
+
+    #[test]
+    fn recording_insert_history_blocks_stale_undo_and_redo() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1)];
+        dialog.mark_dirty();
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 2,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+        dialog.apply_recording_review().unwrap();
+        let inserted_state = dialog.selected_macro().unwrap().steps.clone();
+
+        dialog.selected_macro_mut().unwrap().steps[0]
+            .metadata
+            .comment = "changed".into();
+        dialog.mark_dirty();
+        assert!(!dialog.can_undo_recording_insert());
+        assert!(dialog.undo_last_recording_insert().is_err());
+        dialog.selected_macro_mut().unwrap().steps = inserted_state;
+        dialog.mark_dirty();
+        dialog.undo_last_recording_insert().unwrap();
+        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 1);
+
+        dialog.selected_macro_mut().unwrap().steps[0]
+            .metadata
+            .comment = "changed again".into();
+        dialog.mark_dirty();
+        assert!(!dialog.can_redo_recording_insert());
+        assert!(dialog.redo_last_recording_insert().is_err());
+        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 1);
     }
 
     #[test]

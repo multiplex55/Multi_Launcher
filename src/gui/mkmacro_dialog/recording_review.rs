@@ -436,6 +436,14 @@ impl RecordingReviewSession {
         self.click_inspections.clear();
         self.window_observations.clear();
         self.notes.clear();
+        for suggestion in &mut self.suggestions {
+            suggestion.replacement.clear_sensitive();
+        }
+        // This method is a terminal Review cleanup boundary (Apply/Cancel/close).
+        // Drop all materialized proposal actions too: an enabled Freeze Paste
+        // suggestion may already have copied clipboard text into either plan.
+        self.generated_plan.steps.clear();
+        self.editable_steps = None;
     }
 
     fn selected_bounds(&self) -> Result<(usize, usize), RecordingReviewError> {
@@ -1068,9 +1076,11 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        ClickInspection, MkAction, MkDelayPayload, MkUiControlType, MkUiSelector, RecordedAction,
-        RecordedStep, RecordingProvenance, RecordingSuggestionKind, SuggestionConfidence,
-        UiElementInfo,
+        ClickInspection, ClipboardObservation, MkAction, MkDelayPayload, MkKey, MkRecorderSettings,
+        MkUiControlType, MkUiSelector, ObservationBaseline, RecordedAction, RecordedStep,
+        RecordingNote, RecordingProvenance, RecordingSuggestionKind, SensitiveClipboardText,
+        SuggestionConfidence, UiElementInfo, WindowContext, WindowObservation,
+        WindowObservationKind,
     };
 
     fn planned(id: u64, source: usize) -> PlannedStep {
@@ -1168,6 +1178,83 @@ mod tests {
         }
     }
 
+    fn suggestion(
+        id: u64,
+        confidence: SuggestionConfidence,
+        enabled_by_default: bool,
+        source: usize,
+    ) -> RecordingSuggestion {
+        RecordingSuggestion {
+            id: RecordingSuggestionId(id),
+            kind: RecordingSuggestionKind::RepeatedClick,
+            confidence,
+            source_span: RecordingSourceSpan {
+                first: source,
+                last: source,
+            },
+            description: format!("suggestion {id}"),
+            rationale: "test".into(),
+            enabled_by_default,
+            replacement: vec![planned(0, source)].into(),
+        }
+    }
+
+    fn freeze_recording(secret: &str) -> RecordingResult {
+        let mut recording = result();
+        recording.plan = RecordingPlan {
+            steps: vec![PlannedStep {
+                action: MkAction::Hotkey(vec![MkKey::LeftControl, MkKey::Character("V".into())]),
+                ..planned(1, 0)
+            }],
+        };
+        recording.clipboard_observations = vec![ClipboardObservation {
+            timestamp_us: 10,
+            text: SensitiveClipboardText::new(secret.into()),
+        }];
+        recording.suggestions = crate::mkmacro::discover_suggestions(
+            &recording.plan,
+            &MkRecorderSettings::default(),
+            &ObservationBaseline::default(),
+            &[],
+            &recording.clipboard_observations,
+            &[(0, 10)],
+        );
+        recording
+    }
+
+    #[test]
+    fn confidence_defaults_are_applied_only_when_producer_marks_them_safe() {
+        let mut recording = result();
+        recording.suggestions = vec![
+            suggestion(1, SuggestionConfidence::High, true, 0),
+            suggestion(2, SuggestionConfidence::Low, false, 2),
+        ];
+        let review = RecordingReviewSession::new(recording);
+
+        assert!(
+            review
+                .enabled_suggestions
+                .contains(&RecordingSuggestionId(1))
+        );
+        assert!(
+            !review
+                .enabled_suggestions
+                .contains(&RecordingSuggestionId(2))
+        );
+        assert_eq!(review.suggestions[0].confidence, SuggestionConfidence::High);
+        assert_eq!(review.suggestions[1].confidence, SuggestionConfidence::Low);
+
+        let frozen = RecordingReviewSession::new(freeze_recording("never default this"));
+        assert_eq!(frozen.suggestions.len(), 1);
+        assert_eq!(frozen.suggestions[0].confidence, SuggestionConfidence::High);
+        assert!(!frozen.suggestions[0].enabled_by_default);
+        assert!(frozen.enabled_suggestions.is_empty());
+        assert!(matches!(
+            frozen.proposed_steps()[0].action,
+            MkAction::Hotkey(_)
+        ));
+    }
+
     #[test]
     fn generated_toggle_rebuilds_and_manual_edit_freezes_until_confirmed() {
         let mut review = RecordingReviewSession::new(result());
@@ -1213,6 +1300,174 @@ mod tests {
         assert_eq!(review.proposed_steps()[0].repeat, 4);
         assert_eq!(review.literal_steps, literal);
         assert_eq!(review.dropped_event_count, 4);
+    }
+
+    #[test]
+    fn multiselect_delete_trim_after_and_local_history_are_reversible() {
+        let mut recording = result();
+        recording.suggestions.clear();
+        recording.plan.steps.extend([planned(4, 3), planned(5, 4)]);
+        let mut review = RecordingReviewSession::new(recording);
+        let original = review.proposed_steps().to_vec();
+        let ids: Vec<_> = original.iter().map(|step| step.review_id).collect();
+
+        review.select(ids[1], false, false);
+        review.select(ids[3], true, false);
+        review.delete_selected().unwrap();
+        assert_eq!(
+            review
+                .proposed_steps()
+                .iter()
+                .map(|step| step.source.first)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        assert!(review.undo());
+        assert_eq!(review.proposed_steps(), original);
+        assert_eq!(review.selection, BTreeSet::from([ids[1], ids[3]]));
+        assert_eq!(review.primary, Some(ids[3]));
+        assert!(review.redo());
+        assert_eq!(
+            review.proposed_steps(),
+            [
+                original[0].clone(),
+                original[2].clone(),
+                original[4].clone()
+            ]
+        );
+
+        assert!(review.undo());
+        review.select(ids[2], false, false);
+        review.trim_after_selection().unwrap();
+        assert_eq!(review.proposed_steps(), &original[..=2]);
+        assert!(review.undo());
+        assert_eq!(review.proposed_steps(), original);
+        assert!(review.redo());
+        assert_eq!(review.proposed_steps(), &original[..=2]);
+
+        assert!(review.undo());
+        review.select(ids[2], false, false);
+        review.trim_before_selection().unwrap();
+        assert_eq!(review.proposed_steps(), &original[2..]);
+        assert!(review.undo());
+        assert_eq!(review.proposed_steps(), original);
+        assert!(review.redo());
+        assert_eq!(review.proposed_steps(), &original[2..]);
+
+        assert!(review.undo());
+        let mut edited = review.step_for_editor(ids[2]).unwrap();
+        edited.delay_after_ms = 777;
+        review.replace_step(ids[2], &edited).unwrap();
+        assert_eq!(review.proposed_steps()[2].delay_after_ms, 777);
+        assert!(!review.can_redo());
+        assert!(review.undo());
+        assert_eq!(review.proposed_steps(), original);
+        assert!(review.redo());
+        assert_eq!(review.proposed_steps()[2].delay_after_ms, 777);
+    }
+
+    #[test]
+    fn reconfigure_restores_generated_plan_and_preserves_cached_baselines() {
+        let mut recording = result();
+        recording.literal_steps = (0..4)
+            .map(|index| RecordedStep {
+                timestamp_us: index * 10,
+                delay_after_ms: 0,
+                action: RecordedAction::Click {
+                    button: crate::mkmacro::MouseButton::Left,
+                    x: index as i32,
+                    y: 0,
+                    count: 1,
+                },
+                context: None,
+            })
+            .collect();
+        let mut review = RecordingReviewSession::new(recording);
+        let literal = review.literal_steps.clone();
+        let cleaned = review.cleaned_plan.clone();
+        let generated = review.proposed_steps().to_vec();
+        let initial_statistics = review.statistics.clone();
+        assert_eq!(initial_statistics.reduction_count, 2);
+        assert_eq!(initial_statistics.reduction_percent, 50.0);
+
+        review
+            .toggle_suggestion(RecordingSuggestionId(1), false)
+            .unwrap();
+        assert_eq!(review.statistics.generated_action_count, 3);
+        assert_eq!(review.statistics.reduction_count, 1);
+        assert_eq!(review.statistics.reduction_percent, 25.0);
+        review
+            .toggle_suggestion(RecordingSuggestionId(1), true)
+            .unwrap();
+        assert_eq!(review.statistics, initial_statistics);
+
+        let id = review.proposed_steps()[0].review_id;
+        review.select(id, false, false);
+        review.delete_selected().unwrap();
+        assert_eq!(review.statistics.raw_event_count, 12);
+        assert_eq!(review.statistics.literal_action_count, 4);
+        assert_eq!(review.statistics.cleaned_action_count, 3);
+        assert_eq!(review.statistics.generated_action_count, 1);
+        assert_eq!(review.statistics.reduction_count, 3);
+        assert_eq!(review.statistics.reduction_percent, 75.0);
+        assert_eq!(review.literal_steps, literal);
+        assert_eq!(review.cleaned_plan, cleaned);
+
+        review.reconfigure(true).unwrap();
+        assert_eq!(review.mode, RecordingReviewMode::Generated);
+        assert_eq!(review.proposed_steps(), generated);
+        assert_eq!(review.statistics, initial_statistics);
+        assert!(!review.can_undo());
+        assert!(!review.can_redo());
+    }
+
+    #[test]
+    fn clearing_sensitive_review_observations_removes_every_transient_payload() {
+        let mut recording = freeze_recording("secret");
+        recording.clipboard_observations = vec![ClipboardObservation {
+            timestamp_us: 1,
+            text: SensitiveClipboardText::new("secret".into()),
+        }];
+        recording.click_inspections = vec![ClickInspection {
+            timestamp_us: 2,
+            info: UiElementInfo {
+                selector: MkUiSelector {
+                    automation_id: None,
+                    name: None,
+                    control_type: None,
+                    class_name: None,
+                    framework_id: None,
+                    ancestor_path: Vec::new(),
+                },
+                user_facing_name: "private control".into(),
+                target_executable: "app.exe".into(),
+                supported_patterns: Default::default(),
+                bounds: None,
+            },
+        }];
+        recording.window_observations = vec![WindowObservation {
+            timestamp_us: 3,
+            source_hint: Some(0),
+            kind: WindowObservationKind::Foreground,
+            window: WindowContext {
+                title: "private title".into(),
+                ..Default::default()
+            },
+            visible_top_level: true,
+        }];
+        recording.notes = vec![RecordingNote::Annotation {
+            timestamp_us: 4,
+            text: "private note".into(),
+        }];
+        let mut review = RecordingReviewSession::new(recording);
+
+        review.clear_sensitive();
+
+        assert!(review.clipboard_observations.is_empty());
+        assert!(review.click_inspections.is_empty());
+        assert!(review.window_observations.is_empty());
+        assert!(review.notes.is_empty());
+        assert!(review.proposed_steps().is_empty());
     }
 
     #[test]
