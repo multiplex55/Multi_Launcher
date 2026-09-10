@@ -391,6 +391,7 @@ fn schema_eight_migrates_through_store_and_persists_canonical_current_schema() {
     let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
     expected["schema_version"] = serde_json::json!(SCHEMA_VERSION);
     expected["folders"] = serde_json::json!([]);
+    expected["settings"]["recorder"] = serde_json::to_value(MkRecorderSettings::default()).unwrap();
     for mac in expected["macros"].as_array_mut().unwrap() {
         mac["signature"] = serde_json::json!({"parameters": [], "outputs": []});
         mac["hotkey_scope"] = serde_json::json!({"type": "any_window"});
@@ -468,6 +469,8 @@ fn schema_nine_load_adds_breakpoints_and_repairs_only_dangling_folder_membership
     // including the deliberately unsorted arrays and the unused folder.
     let mut expected_json: serde_json::Value = serde_json::from_str(fixture).unwrap();
     expected_json["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+    expected_json["settings"]["recorder"] =
+        serde_json::to_value(MkRecorderSettings::default()).unwrap();
     expected_json["macros"][1]["folder_id"] = serde_json::Value::Null;
     for mac in expected_json["macros"].as_array_mut().unwrap() {
         mac["signature"] = serde_json::json!({"parameters": [], "outputs": []});
