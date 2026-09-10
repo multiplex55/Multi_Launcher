@@ -9,10 +9,10 @@ use super::executor::{
     RunControl, StepOutcome, production_backends_with_store,
 };
 use super::{
-    MkInvocation, MkInvocationSubset, MkInvocationValues, MkMacroStore, MkValue,
-    NormalizationConfig, Operation, RecorderRuntime, RecorderSnapshot, RecordingResult,
-    RecordingTarget, RuntimeVariables, SharedOperationGuard, SystemRecorderClock,
-    production_hook_service,
+    EventEnricher, KeyboardTranslator, MkInvocation, MkInvocationSubset, MkInvocationValues,
+    MkMacroStore, MkValue, NormalizationConfig, Operation, RecorderObserverSession,
+    RecorderRuntime, RecorderSnapshot, RecordingResult, RecordingTarget, RuntimeVariables,
+    SharedOperationGuard, SystemRecorderClock, production_hook_service,
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
@@ -1327,6 +1327,7 @@ pub fn set_shared_store_with_backends_and_reserved(
         reserved,
         production_hook_service(8192),
         true,
+        None,
     )
 }
 fn set_shared_store_components(
@@ -1335,6 +1336,11 @@ fn set_shared_store_components(
     reserved: &[(&str, &str)],
     recorder_hooks: super::HookService,
     start_hotkey_services: bool,
+    recorder_components: Option<(
+        Box<dyn KeyboardTranslator>,
+        Arc<dyn Fn() -> RecorderObserverSession + Send + Sync>,
+        Box<dyn EventEnricher>,
+    )>,
 ) {
     // Stop pollers before taking stop coordination; a poller callback may be
     // in the process of enqueuing the current recording's Stop occurrence.
@@ -1363,12 +1369,24 @@ fn set_shared_store_components(
         backends,
         guard.clone(),
     )));
-    *RECORDER.write().unwrap() = Some(Arc::new(RecorderRuntime::with_guard(
-        store.clone(),
-        recorder_hooks,
-        Arc::new(SystemRecorderClock::default()),
-        guard,
-    )));
+    let recorder = match recorder_components {
+        Some((translator, factory, enricher)) => RecorderRuntime::with_guard_and_components(
+            store.clone(),
+            recorder_hooks,
+            Arc::new(SystemRecorderClock::default()),
+            guard,
+            translator,
+            factory,
+            enricher,
+        ),
+        None => RecorderRuntime::with_guard(
+            store.clone(),
+            recorder_hooks,
+            Arc::new(SystemRecorderClock::default()),
+            guard,
+        ),
+    };
+    *RECORDER.write().unwrap() = Some(Arc::new(recorder));
     if start_hotkey_services {
         *HOTKEYS.write().unwrap() = Some(Arc::new(
             super::hotkeys::MkMacroHotkeyService::new_with_reserved(store.clone(), reserved),
@@ -4068,8 +4086,10 @@ mod facade_tests {
 mod recording_controller_tests {
     use super::*;
     use crate::mkmacro::{
-        CallbackSender, HookCommand, HookCommandRequest, HookLoopAdapter, HookService, MkMacro,
-        MkMacroDocument, MkPlayback, SCHEMA_VERSION, executor::fake::FakeBackend,
+        AuxiliaryObservationWorker, CallbackSender, HookCommand, HookCommandRequest, HookEvent,
+        HookLoopAdapter, HookService, KeyTranslation, KeyboardTranslationRequest, MkMacro,
+        MkMacroDocument, MkPlayback, ObservationBaseline, RawWindowObservation,
+        RecorderObserverSession, SCHEMA_VERSION, WindowEventSource, executor::fake::FakeBackend,
     };
 
     struct FakeHookLoop;
@@ -4082,6 +4102,40 @@ mod recording_controller_tests {
                     break;
                 }
             }
+        }
+    }
+    struct SyntheticTranslator;
+    impl KeyboardTranslator for SyntheticTranslator {
+        fn initial_key_state(&mut self) -> [u8; 256] {
+            [0; 256]
+        }
+        fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+            KeyTranslation::None
+        }
+    }
+    struct SyntheticEnricher;
+    impl EventEnricher for SyntheticEnricher {
+        fn enrich(&mut self, _: &HookEvent) -> Option<crate::mkmacro::EventContext> {
+            None
+        }
+    }
+
+    struct BlockingObservationSource {
+        gate: Arc<(Mutex<(bool, bool)>, Condvar)>,
+    }
+    impl WindowEventSource for BlockingObservationSource {
+        fn drain(&mut self) -> Vec<RawWindowObservation> {
+            Vec::new()
+        }
+        fn shutdown_and_drain(&mut self) -> Vec<RawWindowObservation> {
+            let (lock, wake) = &*self.gate;
+            let mut state = lock.lock().unwrap();
+            state.0 = true;
+            wake.notify_all();
+            while !state.1 {
+                state = wake.wait(state).unwrap();
+            }
+            Vec::new()
         }
     }
 
@@ -4114,12 +4168,28 @@ mod recording_controller_tests {
             .unwrap();
         let store = Arc::new(store);
         let fake = Arc::new(FakeBackend::default());
+        let observation_gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let observer_factory = {
+            let gate = observation_gate.clone();
+            Arc::new(move || {
+                RecorderObserverSession::with_sources(
+                    ObservationBaseline::default(),
+                    AuxiliaryObservationWorker::spawn(None, None),
+                    Some(Box::new(BlockingObservationSource { gate: gate.clone() })),
+                )
+            })
+        };
         set_shared_store_components(
-            store,
+            store.clone(),
             fake.backends(),
             &[],
             HookService::with_adapter(FakeHookLoop, 16),
             false,
+            Some((
+                Box::new(SyntheticTranslator),
+                observer_factory,
+                Box::new(SyntheticEnricher),
+            )),
         );
         take_pending_recordings();
 
@@ -4145,7 +4215,34 @@ mod recording_controller_tests {
         assert_eq!(recording_status(), None);
         toggle_recording();
         assert_eq!(recorder_snapshot().unwrap().macro_id, Some(2));
-        toggle_recording();
+        let unchanged = store.snapshot();
+        assert!(request_record_stop_for_review().unwrap());
+        {
+            let (lock, wake) = &*observation_gate;
+            let state = lock.lock().unwrap();
+            let (mut state, timeout) = wake
+                .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| !state.0)
+                .unwrap();
+            assert!(
+                !timeout.timed_out(),
+                "recording finalization did not reach its barrier"
+            );
+            assert!(record_stop_pending());
+            assert_eq!(
+                recorder_snapshot().unwrap().state,
+                super::super::RecorderRuntimeState::Stopping
+            );
+            assert!(!request_record_stop_for_review().unwrap());
+            assert!(
+                run(1)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("recording is active")
+            );
+            assert_eq!(*unchanged, *store.snapshot());
+            state.1 = true;
+            wake.notify_all();
+        }
         let (pending_lock, pending_wake) = &*RECORD_STOP_COORDINATOR;
         let pending = pending_lock
             .lock()
@@ -4166,6 +4263,9 @@ mod recording_controller_tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].target.macro_id, 2);
         assert!(results[0].plan.steps.is_empty());
+        assert_eq!(*unchanged, *store.snapshot());
+        assert!(request_record_stop_for_review().is_err());
+        assert!(take_pending_recordings().is_empty());
     }
 }
 

@@ -243,4 +243,42 @@ mod tests {
                 .any(|diagnostic| diagnostic.code == "duplicate_recorder_control_hotkey")
         );
     }
+
+    #[test]
+    fn refreshed_binding_held_during_configuration_waits_for_a_new_rising_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        let fake = Fake(RwLock::new(vec![]));
+        let snapshot = store.snapshot();
+        let state = Mutex::new(State {
+            bindings: compile_bindings(&snapshot, &fake),
+            snapshot,
+        });
+        let seen = Mutex::new(Vec::new());
+
+        fake.0.write().unwrap().push(MkKey::Function(10));
+        let mut doc = (*store.snapshot()).clone();
+        doc.settings.record_toggle_hotkey = MkHotkey {
+            key: MkKey::Function(10),
+            modifiers: vec![],
+        };
+        store.save(doc).unwrap();
+        tick(&store, &state, &fake, &|action| {
+            seen.lock().unwrap().push(action)
+        });
+        assert!(seen.lock().unwrap().is_empty());
+
+        fake.0.write().unwrap().clear();
+        tick(&store, &state, &fake, &|action| {
+            seen.lock().unwrap().push(action)
+        });
+        fake.0.write().unwrap().push(MkKey::Function(10));
+        tick(&store, &state, &fake, &|action| {
+            seen.lock().unwrap().push(action)
+        });
+        tick(&store, &state, &fake, &|action| {
+            seen.lock().unwrap().push(action)
+        });
+        assert_eq!(*seen.lock().unwrap(), vec![RecorderControlAction::Toggle]);
+    }
 }

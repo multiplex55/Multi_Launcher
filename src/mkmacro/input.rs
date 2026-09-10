@@ -134,7 +134,38 @@ impl<S: InputSink> Win32InputBackend<S> {
                 extra: MKMACRO_EXTRA_INFO,
             });
         }
-        self.emit(&e)
+        let sent = self
+            .sink
+            .send(&e)
+            .map_err(|error| rejected(e.len(), 0, error))?;
+        if sent != e.len() {
+            // UTF-16 events are emitted as down/up pairs. If SendInput accepts
+            // an odd prefix, the last accepted unit is owned by us and must be
+            // released best-effort before returning the primary rejection.
+            if sent < e.len()
+                && sent % 2 == 1
+                && let RawInputEvent::Keyboard {
+                    vk,
+                    scan,
+                    flags,
+                    extra,
+                } = e[sent - 1]
+            {
+                let _ = self.sink.send(&[RawInputEvent::Keyboard {
+                    vk,
+                    scan,
+                    flags: flags | KEYEVENTF_KEYUP_,
+                    extra,
+                }]);
+            }
+            Err(rejected(
+                e.len(),
+                sent,
+                "the operating system rejected Unicode input",
+            ))
+        } else {
+            Ok(())
+        }
     }
     pub fn key_press(&self, key: &MkKey) -> ExecResult {
         self.key_event(key, false)?;
@@ -414,6 +445,17 @@ mod tests {
         fail_call: usize,
         calls: Mutex<usize>,
     }
+    #[derive(Default)]
+    struct PartialUnicodeSink {
+        calls: Mutex<Vec<Vec<RawInputEvent>>>,
+    }
+    impl InputSink for &PartialUnicodeSink {
+        fn send(&self, events: &[RawInputEvent]) -> Result<usize, String> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(events.to_vec());
+            Ok(if calls.len() == 1 { 1 } else { events.len() })
+        }
+    }
     impl InputSink for &FailingSink {
         fn send(&self, events: &[RawInputEvent]) -> Result<usize, String> {
             let mut calls = self.calls.lock().unwrap();
@@ -436,6 +478,35 @@ mod tests {
             RawInputEvent::Keyboard { extra, .. } => *extra == MKMACRO_EXTRA_INFO,
             _ => false,
         }));
+    }
+    #[test]
+    fn odd_unicode_partial_acceptance_releases_the_owned_packet() {
+        let sink = PartialUnicodeSink::default();
+        let error = Win32InputBackend::with_sink(&sink)
+            .unicode_text("A")
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InputRejected);
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].len(), 2);
+        assert!(matches!(
+            calls[0][0],
+            RawInputEvent::Keyboard {
+                vk: 0,
+                scan: 0x41,
+                flags: KEYEVENTF_UNICODE_,
+                extra: MKMACRO_EXTRA_INFO,
+            }
+        ));
+        assert_eq!(
+            calls[1],
+            vec![RawInputEvent::Keyboard {
+                vk: 0,
+                scan: 0x41,
+                flags: KEYEVENTF_UNICODE_ | KEYEVENTF_KEYUP_,
+                extra: MKMACRO_EXTRA_INFO,
+            }]
+        );
     }
     #[test]
     fn x2_data_and_flags() {

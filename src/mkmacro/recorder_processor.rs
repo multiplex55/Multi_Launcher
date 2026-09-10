@@ -85,6 +85,10 @@ enum Command {
     Shutdown {
         reply: mpsc::SyncSender<()>,
     },
+    #[cfg(test)]
+    PanicForTest {
+        _reply: mpsc::SyncSender<()>,
+    },
 }
 
 struct Session {
@@ -95,7 +99,7 @@ struct Session {
     /// Keys whose down transition was already recorded when capture paused.
     /// A matching up after resume belongs to the recording, unlike keys first
     /// pressed by a pause-owned annotation prompt.
-    held_before_pause: HashSet<u32>,
+    held_before_pause: HashMap<u32, DownRun>,
     suppressed_until_up: HashSet<u32>,
     suppressed: HashSet<usize>,
     mouse_pressed: HashMap<super::MouseButton, usize>,
@@ -136,19 +140,43 @@ impl RecorderProcessor {
         translator: Box<dyn KeyboardTranslator>,
         observer_factory: Arc<dyn Fn() -> RecorderObserverSession + Send + Sync>,
     ) -> Self {
+        Self::with_all_components(
+            events,
+            translator,
+            observer_factory,
+            Box::new(WindowsEventEnricher::default()),
+        )
+    }
+    pub(crate) fn with_all_components(
+        events: mpsc::Receiver<SequencedHookEvent>,
+        translator: Box<dyn KeyboardTranslator>,
+        observer_factory: Arc<dyn Fn() -> RecorderObserverSession + Send + Sync>,
+        enricher: Box<dyn EventEnricher>,
+    ) -> Self {
         let (commands, command_rx) = mpsc::channel();
         let snapshot = Arc::new(RwLock::new(Arc::new(ProcessorSnapshot::default())));
         let worker_snapshot = snapshot.clone();
         let worker = thread::Builder::new()
             .name("mkmacro-recorder-processor".into())
             .spawn(move || {
-                worker_loop(
-                    command_rx,
-                    events,
-                    worker_snapshot,
-                    translator,
-                    observer_factory,
-                )
+                let mut translator = translator;
+                let mut enricher = enricher;
+                loop {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        worker_loop(
+                            &command_rx,
+                            &events,
+                            &worker_snapshot,
+                            translator.as_mut(),
+                            &observer_factory,
+                            enricher.as_mut(),
+                        )
+                    }));
+                    if result.is_ok() {
+                        break;
+                    }
+                    publish(&worker_snapshot, None);
+                }
             })
             .expect("spawn recorder processor");
         Self {
@@ -236,6 +264,12 @@ impl RecorderProcessor {
         if let Some(worker) = self.worker.lock().unwrap().take() {
             let _ = worker.join();
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn panic_worker_for_test(&self) {
+        let (reply, response) = mpsc::sync_channel(0);
+        let _ = self.commands.send(Command::PanicForTest { _reply: reply });
+        let _ = response.recv();
     }
 }
 impl Drop for RecorderProcessor {
@@ -342,57 +376,74 @@ fn live_state_from_initial(initial: &[u8; 256]) -> [bool; 256] {
     std::array::from_fn(|index| initial[index] & 0x80 != 0)
 }
 
-fn seed_resumed_modifiers(session: &mut Session, state: &[u8; 256], timestamp_us: u64) {
-    let mut resumed = Vec::new();
-    for family in [[0xA0, 0xA1, 0x10], [0xA2, 0xA3, 0x11], [0xA4, 0xA5, 0x12]] {
-        let sided = family[..2]
-            .iter()
-            .copied()
-            .filter(|vk| state[*vk as usize] & 0x80 != 0)
-            .collect::<Vec<_>>();
-        let keys = if sided.is_empty() && state[family[2] as usize] & 0x80 != 0 {
-            vec![family[2]]
-        } else {
-            sided
-        };
-        resumed.extend(keys);
-    }
-    resumed.extend(
-        [0x5b, 0x5c]
-            .into_iter()
-            .filter(|vk| state[*vk as usize] & 0x80 != 0),
-    );
-    for vk in resumed {
-        let event = HookEvent::Key {
-            timestamp_us,
-            transition: KeyTransition::Down,
-            vk,
-            scan_code: 0,
-            flags: 0,
-            extra_info: 0,
-        };
-        track_key(session, &event);
-        session.raw.push(RecordingBoundary::Event(event, None));
-    }
-}
-
-fn suppress_newly_held_non_modifiers(session: &mut Session, state: &[u8; 256]) {
-    session.suppressed_until_up.extend(
-        state
-            .iter()
-            .enumerate()
-            .filter(|(vk, value)| {
-                **value & 0x80 != 0
-                    && !is_modifier_vk(*vk as u32)
-                    && !session.held_before_pause.contains(&(*vk as u32))
-            })
-            .map(|(vk, _)| vk as u32),
-    );
-    session.held_before_pause.clear();
-}
-
 fn is_modifier_vk(vk: u32) -> bool {
     matches!(vk, 0x10 | 0x11 | 0x12 | 0x5b | 0x5c | 0xa0..=0xa5)
+}
+
+fn reconcile_resume_ownership(
+    session: &mut Session,
+    physical_state: &[u8; 256],
+    control_keys: &[u32],
+    timestamp_us: u64,
+) -> [u8; 256] {
+    let controls = seed_suppression(control_keys.iter().copied());
+    let mut restored_state = [0u8; 256];
+    let mut owned = std::mem::take(&mut session.held_before_pause)
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Release in reverse authored-down order, matching normal chord cleanup,
+    // while keeping synthetic order and downstream IDs deterministic.
+    owned.sort_by_key(|(_, run)| std::cmp::Reverse(run.index));
+    for (vk, run) in owned {
+        let still_down = physical_state[(vk & 0xff) as usize] & 0x80 != 0;
+        if still_down && !controls.contains(&vk) {
+            restored_state[(vk & 0xff) as usize] = 0x80;
+            session.pressed.insert(vk, run);
+        } else {
+            // The physical up occurred while callbacks were paused. Close the
+            // already-recorded down immediately after Resume so normalization
+            // compresses the paused duration while preserving a balanced pair.
+            let (scan_code, flags, extra_info) = match session.raw.get(run.index) {
+                Some(RecordingBoundary::Event(
+                    HookEvent::Key {
+                        scan_code,
+                        flags,
+                        extra_info,
+                        ..
+                    },
+                    _,
+                )) => (*scan_code, *flags, *extra_info),
+                _ => (0, 0, 0),
+            };
+            let suppress_synthetic = session.suppressed.contains(&run.index)
+                || controls.contains(&vk)
+                || (!still_down && take_suppressed_key_up(&mut session.suppressed_until_up, vk));
+            let synthetic_index = session.raw.len();
+            session.raw.push(RecordingBoundary::Event(
+                HookEvent::Key {
+                    timestamp_us,
+                    transition: KeyTransition::Up,
+                    vk,
+                    scan_code,
+                    flags,
+                    extra_info,
+                },
+                None,
+            ));
+            if suppress_synthetic {
+                session.suppressed.insert(synthetic_index);
+            }
+        }
+    }
+    session.suppressed_until_up.extend(
+        physical_state
+            .iter()
+            .enumerate()
+            .filter(|(vk, value)| **value & 0x80 != 0 && restored_state[*vk] & 0x80 == 0)
+            .map(|(vk, _)| vk as u32),
+    );
+    session.suppressed_until_up.extend(controls);
+    restored_state
 }
 fn down_key_for(requested: u32, pressed: &HashMap<u32, DownRun>) -> Option<u32> {
     match requested {
@@ -626,14 +677,14 @@ impl RecordingTimeline {
 }
 
 fn worker_loop(
-    commands: mpsc::Receiver<Command>,
-    events: mpsc::Receiver<SequencedHookEvent>,
-    snapshot: Arc<RwLock<Arc<ProcessorSnapshot>>>,
-    mut translator: Box<dyn KeyboardTranslator>,
-    observer_factory: Arc<dyn Fn() -> RecorderObserverSession + Send + Sync>,
+    commands: &mpsc::Receiver<Command>,
+    events: &mpsc::Receiver<SequencedHookEvent>,
+    snapshot: &RwLock<Arc<ProcessorSnapshot>>,
+    translator: &mut dyn KeyboardTranslator,
+    observer_factory: &Arc<dyn Fn() -> RecorderObserverSession + Send + Sync>,
+    enricher: &mut dyn EventEnricher,
 ) {
     let mut session: Option<Session> = None;
-    let mut enricher = WindowsEventEnricher::default();
     loop {
         let command = if session.is_none() {
             match commands.recv() {
@@ -646,14 +697,14 @@ fn worker_loop(
                 Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => {
                     if let Some(event) = session.as_mut().unwrap().backlog.pop_front() {
-                        accept(session.as_mut().unwrap(), event, &mut enricher);
-                        publish(&snapshot, session.as_ref());
+                        accept(session.as_mut().unwrap(), event, enricher);
+                        publish(snapshot, session.as_ref());
                         continue;
                     }
                     match events.recv_timeout(Duration::from_millis(20)) {
                         Ok(event) => {
-                            accept(session.as_mut().unwrap(), event, &mut enricher);
-                            publish(&snapshot, session.as_ref());
+                            accept(session.as_mut().unwrap(), event, enricher);
+                            publish(snapshot, session.as_ref());
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -674,14 +725,14 @@ fn worker_loop(
                 let result = if session.is_some() {
                     Err(anyhow!("recorder processor is already active"))
                 } else {
-                    let initial_key_state = initial_key_state(translator.as_mut(), &held_keys);
+                    let initial_key_state = initial_key_state(translator, &held_keys);
                     let live_key_state = live_state_from_initial(&initial_key_state);
                     session = Some(Session {
                         target,
                         config,
                         raw: Vec::new(),
                         pressed: HashMap::new(),
-                        held_before_pause: HashSet::new(),
+                        held_before_pause: HashMap::new(),
                         suppressed_until_up: seed_suppression(held_keys),
                         suppressed: HashSet::new(),
                         mouse_pressed: HashMap::new(),
@@ -692,7 +743,7 @@ fn worker_loop(
                         live_key_state,
                         observations: observer_factory(),
                     });
-                    publish(&snapshot, session.as_ref());
+                    publish(snapshot, session.as_ref());
                     Ok(())
                 };
                 let _ = reply.send(result);
@@ -707,13 +758,12 @@ fn worker_loop(
                     .as_mut()
                     .ok_or_else(|| anyhow!("recorder processor is idle"))
                     .map(|s| {
-                        drain_before(&events, s, fence, &mut enricher);
+                        drain_before(events, s, fence, enricher);
                         suppress_occurrence(s, &occurrence);
                         s.raw.push(RecordingBoundary::Pause { timestamp_us });
-                        s.held_before_pause = s.pressed.keys().copied().collect();
-                        s.pressed.clear();
+                        s.held_before_pause = std::mem::take(&mut s.pressed);
                         s.live_key_state = [false; 256];
-                        publish(&snapshot, Some(s));
+                        publish(snapshot, Some(s));
                     });
                 let _ = reply.send(result);
             }
@@ -732,12 +782,13 @@ fn worker_loop(
                             &mut s.suppressed_until_up,
                             &physical_state,
                         );
-                        suppress_newly_held_non_modifiers(s, &physical_state);
-                        s.suppressed_until_up
-                            .extend(seed_suppression(held_keys.iter().copied()));
-                        let resumed_state = cleared_control_state(physical_state, &held_keys);
+                        let resumed_state = reconcile_resume_ownership(
+                            s,
+                            &physical_state,
+                            &held_keys,
+                            timestamp_us,
+                        );
                         s.live_key_state = live_state_from_initial(&resumed_state);
-                        seed_resumed_modifiers(s, &resumed_state, timestamp_us);
                     });
                 let _ = reply.send(result);
             }
@@ -750,7 +801,7 @@ fn worker_loop(
                     .as_mut()
                     .ok_or_else(|| anyhow!("recorder processor is idle"))
                     .map(|s| {
-                        drain_before(&events, s, fence, &mut enricher);
+                        drain_before(events, s, fence, enricher);
                         suppress_occurrence(s, &occurrence);
                     });
                 let _ = reply.send(result);
@@ -790,7 +841,7 @@ fn worker_loop(
                     .take()
                     .ok_or_else(|| anyhow!("recorder processor is idle"))
                     .map(|mut s| {
-                        drain_before(&events, &mut s, fence, &mut enricher);
+                        drain_before(events, &mut s, fence, enricher);
                         suppress_occurrence(&mut s, &occurrence);
                         let mut index = 0;
                         s.raw.retain(|_| {
@@ -820,7 +871,7 @@ fn worker_loop(
                         let literal_steps = normalize(&s.raw, &s.config, None);
                         let enriched = enrich_keyboard_with_state(
                             &literal_steps,
-                            translator.as_mut(),
+                            translator,
                             s.initial_key_state,
                         );
                         let source_times: Vec<_> = literal_steps
@@ -830,7 +881,7 @@ fn worker_loop(
                             .collect();
                         let mut plan =
                             build_recording_plan(&enriched, &s.config.semantic_settings());
-                        s.observations.finish(&mut enricher);
+                        s.observations.finish(enricher);
                         s.observations
                             .retain_active(|timestamp| !timeline.is_paused(timestamp));
                         s.observations
@@ -844,7 +895,7 @@ fn worker_loop(
                             &s.observations.clipboards,
                             &source_times,
                         );
-                        publish(&snapshot, None);
+                        publish(snapshot, None);
                         ProcessorResult {
                             target: s.target,
                             literal_steps,
@@ -867,13 +918,17 @@ fn worker_loop(
                 let _ = reply.send(());
                 break;
             }
+            #[cfg(test)]
+            Command::PanicForTest { .. } => panic!("injected recorder processor panic"),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{KeyTranslation, KeyboardTranslationRequest, RecordedAction};
+    use super::super::{
+        KeyTranslation, KeyboardTranslationRequest, MkAction, MkKey, RecordedAction,
+    };
     use super::*;
     use std::sync::Mutex;
 
@@ -888,6 +943,32 @@ mod tests {
             self.own
         }
     }
+    struct StatefulTranslator(Arc<Mutex<[u8; 256]>>);
+    impl KeyboardTranslator for StatefulTranslator {
+        fn initial_key_state(&mut self) -> [u8; 256] {
+            *self.0.lock().unwrap()
+        }
+        fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+            KeyTranslation::None
+        }
+    }
+
+    fn synthetic_processor(
+        physical: Arc<Mutex<[u8; 256]>>,
+        receiver: mpsc::Receiver<SequencedHookEvent>,
+    ) -> RecorderProcessor {
+        RecorderProcessor::with_all_components(
+            receiver,
+            Box::new(StatefulTranslator(physical)),
+            Arc::new(|| {
+                RecorderObserverSession::with_parts(
+                    ObservationBaseline::default(),
+                    super::super::AuxiliaryObservationWorker::spawn(None, None),
+                )
+            }),
+            Box::new(SurfaceEnricher { own: false }),
+        )
+    }
 
     fn key(vk: u32, transition: KeyTransition, timestamp_us: u64) -> HookEvent {
         HookEvent::Key {
@@ -898,6 +979,41 @@ mod tests {
             flags: 0,
             extra_info: 0,
         }
+    }
+
+    fn raw_key(
+        vk: u32,
+        transition: KeyTransition,
+        timestamp_us: u64,
+        scan_code: u32,
+        flags: u32,
+        extra_info: usize,
+    ) -> HookEvent {
+        HookEvent::Key {
+            timestamp_us,
+            transition,
+            vk,
+            scan_code,
+            flags,
+            extra_info,
+        }
+    }
+
+    fn begin_synthetic(processor: &RecorderProcessor) {
+        let mut config = NormalizationConfig::default();
+        config.record_window_context = false;
+        processor
+            .begin(
+                RecordingTarget {
+                    macro_id: 1,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                config,
+                0,
+                Vec::new(),
+            )
+            .unwrap();
     }
 
     fn mouse(button: super::super::MouseButton, down: bool, timestamp_us: u64) -> HookEvent {
@@ -1026,72 +1142,11 @@ mod tests {
     }
 
     #[test]
-    fn resume_seeds_held_modifier_for_paste_and_semantic_chord() {
-        let mut s = session();
-        s.raw.push(RecordingBoundary::Resume { timestamp_us: 10 });
-        let mut resumed = [0u8; 256];
-        resumed[0xa2] = 0x80;
-        s.live_key_state = live_state_from_initial(&resumed);
-        seed_resumed_modifiers(&mut s, &resumed, 10);
-
-        assert_eq!(paste_modifier_state(&s.live_key_state), (true, false));
-        assert!(s.pressed.contains_key(&0xa2));
-        assert!(matches!(
-            s.raw.last(),
-            Some(RecordingBoundary::Event(
-                HookEvent::Key {
-                    transition: KeyTransition::Down,
-                    vk: 0xa2,
-                    ..
-                },
-                None
-            ))
-        ));
-
-        let mut meta = [0u8; 256];
-        meta[0x5b] = 0x80;
-        seed_resumed_modifiers(&mut s, &meta, 20);
-        assert!(s.pressed.contains_key(&0x5b));
-    }
-
-    #[test]
     fn pause_resume_excludes_prompt_key_and_balances_pre_pause_held_key() {
-        struct StatefulTranslator(Arc<Mutex<[u8; 256]>>);
-        impl KeyboardTranslator for StatefulTranslator {
-            fn initial_key_state(&mut self) -> [u8; 256] {
-                *self.0.lock().unwrap()
-            }
-            fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
-                KeyTranslation::None
-            }
-        }
-
         let physical = Arc::new(Mutex::new([0u8; 256]));
         let (events, receiver) = mpsc::sync_channel(8);
-        let processor = RecorderProcessor::with_components(
-            receiver,
-            Box::new(StatefulTranslator(physical.clone())),
-            Arc::new(|| {
-                RecorderObserverSession::with_parts(
-                    ObservationBaseline::default(),
-                    super::super::AuxiliaryObservationWorker::spawn(None, None),
-                )
-            }),
-        );
-        let mut config = NormalizationConfig::default();
-        config.record_window_context = false;
-        processor
-            .begin(
-                RecordingTarget {
-                    macro_id: 1,
-                    insertion_anchor_step_id: None,
-                    insertion_anchor_generation: None,
-                },
-                config,
-                0,
-                Vec::new(),
-            )
-            .unwrap();
+        let processor = synthetic_processor(physical.clone(), receiver);
+        begin_synthetic(&processor);
 
         events
             .send(SequencedHookEvent {
@@ -1137,6 +1192,196 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn modifier_held_across_pause_is_not_duplicated_and_owns_its_later_up() {
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(8);
+        let processor = synthetic_processor(physical.clone(), receiver);
+        begin_synthetic(&processor);
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: key(0xa2, KeyTransition::Down, 10),
+            })
+            .unwrap();
+        processor.pause(100, 1, Vec::new()).unwrap();
+        physical.lock().unwrap()[0xa2] = 0x80;
+        processor.resume(200, Vec::new()).unwrap();
+        for (sequence, event) in [
+            key(0x43, KeyTransition::Down, 210),
+            key(0x43, KeyTransition::Up, 220),
+            key(0xa2, KeyTransition::Up, 230),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            events
+                .send(SequencedHookEvent {
+                    sequence: sequence as u64 + 1,
+                    event,
+                })
+                .unwrap();
+        }
+        let result = processor.finish(4, Vec::new()).unwrap();
+        let keys = result
+            .literal_steps
+            .iter()
+            .filter_map(|step| match step.action {
+                RecordedAction::Key { down, vk, .. } => Some((down, vk)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![(true, 0xa2), (true, 0x43), (false, 0x43), (false, 0xa2)]
+        );
+    }
+
+    #[test]
+    fn key_released_during_pause_gets_a_deterministic_metadata_preserving_up() {
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(8);
+        let processor = synthetic_processor(physical, receiver);
+        begin_synthetic(&processor);
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: raw_key(0xe8, KeyTransition::Down, 10, 0x45, 1, 77),
+            })
+            .unwrap();
+        processor.pause(100, 1, Vec::new()).unwrap();
+        processor.resume(200, Vec::new()).unwrap();
+        let result = processor.finish(1, Vec::new()).unwrap();
+        let keys = result
+            .literal_steps
+            .iter()
+            .filter_map(|step| match step.action {
+                RecordedAction::Key {
+                    down,
+                    vk,
+                    scan_code,
+                    extended,
+                    flags,
+                    extra_info,
+                } => Some((down, vk, scan_code, extended, flags, extra_info)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                (true, 0xe8, 0x45, true, 1, 77),
+                (false, 0xe8, 0x45, true, 1, 77),
+            ]
+        );
+    }
+
+    #[test]
+    fn chord_released_during_pause_closes_in_reverse_order_and_remains_a_hotkey() {
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(8);
+        let processor = synthetic_processor(physical, receiver);
+        begin_synthetic(&processor);
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: key(0xa2, KeyTransition::Down, 10),
+            })
+            .unwrap();
+        events
+            .send(SequencedHookEvent {
+                sequence: 1,
+                event: key(0x53, KeyTransition::Down, 20),
+            })
+            .unwrap();
+        processor.pause(100, 2, Vec::new()).unwrap();
+        processor.resume(200, Vec::new()).unwrap();
+        let result = processor.finish(2, Vec::new()).unwrap();
+        let keys = result
+            .literal_steps
+            .iter()
+            .filter_map(|step| match step.action {
+                RecordedAction::Key { down, vk, .. } => Some((down, vk)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![(true, 0xa2), (true, 0x53), (false, 0x53), (false, 0xa2)]
+        );
+        assert!(
+            matches!(
+                result.plan.steps.as_slice(),
+                [step]
+                    if matches!(
+                        &step.action,
+                        MkAction::Hotkey(keys)
+                            if keys == &vec![MkKey::LeftControl, MkKey::Character("S".into())]
+                    )
+            ),
+            "unexpected plan: {:?}",
+            result.plan.steps
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_controls_leave_no_strays_and_later_control_is_recorded() {
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(16);
+        let processor = synthetic_processor(physical.clone(), receiver);
+        begin_synthetic(&processor);
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: key(0xa2, KeyTransition::Down, 10),
+            })
+            .unwrap();
+        events
+            .send(SequencedHookEvent {
+                sequence: 1,
+                event: key(0x77, KeyTransition::Down, 20),
+            })
+            .unwrap();
+        processor.pause(100, 2, vec![0x11, 0x77]).unwrap();
+        {
+            let mut state = physical.lock().unwrap();
+            state[0xa2] = 0x80;
+            state[0x77] = 0x80;
+        }
+        processor.resume(200, vec![0x11, 0x77]).unwrap();
+        for (sequence, event) in [
+            key(0x77, KeyTransition::Up, 210),
+            key(0xa2, KeyTransition::Up, 220),
+            key(0xa2, KeyTransition::Down, 300),
+            key(0x43, KeyTransition::Down, 310),
+            key(0x43, KeyTransition::Up, 320),
+            key(0xa2, KeyTransition::Up, 330),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            events
+                .send(SequencedHookEvent {
+                    sequence: sequence as u64 + 2,
+                    event,
+                })
+                .unwrap();
+        }
+        let result = processor.finish(8, Vec::new()).unwrap();
+        let keys = result
+            .literal_steps
+            .iter()
+            .filter_map(|step| match step.action {
+                RecordedAction::Key { down, vk, .. } => Some((down, vk)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![(true, 0xa2), (true, 0x43), (false, 0x43), (false, 0xa2)]
+        );
     }
 
     #[test]
@@ -1190,7 +1435,7 @@ mod tests {
             config: NormalizationConfig::default(),
             raw: Vec::new(),
             pressed: HashMap::new(),
-            held_before_pause: HashSet::new(),
+            held_before_pause: HashMap::new(),
             suppressed_until_up: HashSet::new(),
             suppressed: HashSet::new(),
             mouse_pressed: HashMap::new(),
