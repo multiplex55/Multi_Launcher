@@ -94,6 +94,7 @@ impl<V: RecorderControllerView> RecorderController<V> {
             }
             HookCommand::Pause => self.status.state = RecorderState::Paused,
             HookCommand::Resume => self.status.state = RecorderState::Recording,
+            HookCommand::Fence => {}
             HookCommand::Stop | HookCommand::Shutdown => self.status.state = RecorderState::Stopped,
         }
     }

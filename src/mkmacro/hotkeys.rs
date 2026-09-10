@@ -2,7 +2,7 @@
 use super::validation::{MatcherValidationError, validate_window_matcher};
 use super::{
     ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore,
-    MkWindowMatcher, WindowCandidate, candidate_matches,
+    MkWindowMatcher, WindowCandidate, candidate_matches, display_name, is_modifier, virtual_key,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,7 +51,7 @@ impl KeyStateBackend for SystemKeyStateBackend {
             MkKey::RightAlt => down(0xA5),
             MkKey::LeftMeta => down(0x5B),
             MkKey::RightMeta => down(0x5C),
-            _ => vk_from_primary(key).is_some_and(down),
+            _ => virtual_key(key).is_some_and(|vk| down(i32::from(vk))),
         }
     }
 }
@@ -72,35 +72,6 @@ impl ActiveWindowBackend for SystemActiveWindowBackend {
     }
 }
 
-#[cfg(windows)]
-fn vk_from_primary(key: &MkKey) -> Option<i32> {
-    Some(match key {
-        MkKey::Character(s) if s.len() == 1 && s.is_ascii() => {
-            let c = s.as_bytes()[0].to_ascii_uppercase();
-            if !c.is_ascii_alphanumeric() {
-                return None;
-            }
-            c as i32
-        }
-        MkKey::Enter => 0x0D,
-        MkKey::Tab => 0x09,
-        MkKey::Escape => 0x1B,
-        MkKey::Space => 0x20,
-        MkKey::Backspace => 0x08,
-        MkKey::Delete => 0x2E,
-        MkKey::Up => 0x26,
-        MkKey::Down => 0x28,
-        MkKey::Left => 0x25,
-        MkKey::Right => 0x27,
-        MkKey::Home => 0x24,
-        MkKey::End => 0x23,
-        MkKey::PageUp => 0x21,
-        MkKey::PageDown => 0x22,
-        MkKey::Function(n @ 1..=12) => 0x6F + *n as i32,
-        _ => return None,
-    })
-}
-
 /// Whether a hotkey configuration is invalid or merely risks contextual overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyDiagnosticSeverity {
@@ -116,6 +87,9 @@ pub struct HotkeyDiagnostic {
 }
 
 fn modifier(key: &MkKey) -> Option<MkKey> {
+    if !is_modifier(key) {
+        return None;
+    }
     match key {
         MkKey::Control | MkKey::LeftControl | MkKey::RightControl => Some(MkKey::Control),
         MkKey::Alt | MkKey::LeftAlt | MkKey::RightAlt => Some(MkKey::Alt),
@@ -132,7 +106,7 @@ fn key_name(k: &MkKey) -> String {
         Some(MkKey::Meta) => "META".into(),
         _ => match k {
             MkKey::Character(s) => s.to_ascii_uppercase(),
-            x => format!("{x:?}").to_ascii_uppercase(),
+            x => display_name(x).to_ascii_uppercase(),
         },
     }
 }
@@ -580,27 +554,7 @@ fn candidate_summaries<'a>(
 
 /// Windows virtual-key representation used for recorder-control suppression.
 pub(crate) fn primary_virtual_key(key: &MkKey) -> Option<u32> {
-    Some(match key {
-        MkKey::Character(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_alphanumeric() => {
-            s.as_bytes()[0].to_ascii_uppercase() as u32
-        }
-        MkKey::Enter => 0x0D,
-        MkKey::Tab => 0x09,
-        MkKey::Escape => 0x1B,
-        MkKey::Space => 0x20,
-        MkKey::Backspace => 0x08,
-        MkKey::Delete => 0x2E,
-        MkKey::Up => 0x26,
-        MkKey::Down => 0x28,
-        MkKey::Left => 0x25,
-        MkKey::Right => 0x27,
-        MkKey::Home => 0x24,
-        MkKey::End => 0x23,
-        MkKey::PageUp => 0x21,
-        MkKey::PageDown => 0x22,
-        MkKey::Function(n @ 1..=12) => 0x6F + *n as u32,
-        _ => return None,
-    })
+    virtual_key(key).map(u32::from)
 }
 
 struct PollState {

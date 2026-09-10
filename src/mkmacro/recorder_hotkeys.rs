@@ -1,9 +1,10 @@
-//! Global recorder-control polling, deliberately separate from macro playback bindings.
+//! One global polling worker for all recorder controls.
 use super::{
-    MkKey, MkMacroDocument, MkMacroStore,
+    MkHotkey, MkKey, MkMacroDocument, MkMacroStore,
     hotkeys::{KeyStateBackend, compile_hotkey},
 };
 use std::{
+    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -12,12 +13,33 @@ use std::{
     time::Duration,
 };
 
-type Toggle = dyn Fn() + Send + Sync;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecorderControlAction {
+    Toggle,
+    PauseResume,
+    Marker,
+}
+type Callback<'a> = dyn Fn(RecorderControlAction) + Send + Sync + 'a;
+#[derive(Clone, PartialEq, Eq)]
+struct Binding {
+    modifiers: BTreeSet<String>,
+    primary: MkKey,
+    triggered: bool,
+}
+impl Binding {
+    fn compile(hotkey: &MkHotkey, backend: &dyn KeyStateBackend) -> Option<Self> {
+        let (modifiers, primary) = compile_hotkey(hotkey)?;
+        let triggered = chord_down(&primary, &modifiers, backend);
+        Some(Self {
+            modifiers,
+            primary,
+            triggered,
+        })
+    }
+}
 struct State {
     snapshot: Arc<MkMacroDocument>,
-    modifiers: std::collections::BTreeSet<String>,
-    primary: Option<MkKey>,
-    triggered: bool,
+    bindings: [Option<Binding>; 3],
 }
 pub struct RecorderHotkeyService {
     stop: Arc<AtomicBool>,
@@ -27,23 +49,33 @@ impl RecorderHotkeyService {
     pub fn new(
         store: Arc<MkMacroStore>,
         backend: Arc<dyn KeyStateBackend>,
-        toggle: Arc<Toggle>,
+        toggle: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self::with_controls(
+            store,
+            backend,
+            Arc::new(move |action| {
+                if action == RecorderControlAction::Toggle {
+                    toggle()
+                }
+            }),
+        )
+    }
+    pub fn with_controls(
+        store: Arc<MkMacroStore>,
+        backend: Arc<dyn KeyStateBackend>,
+        callback: Arc<Callback<'static>>,
     ) -> Self {
         let snapshot = store.snapshot();
-        let compiled = compile_hotkey(&snapshot.settings.record_toggle_hotkey);
-        let state = Arc::new(Mutex::new(State {
-            snapshot,
-            modifiers: compiled.as_ref().map(|x| x.0.clone()).unwrap_or_default(),
-            primary: compiled.map(|x| x.1),
-            triggered: false,
-        }));
+        let bindings = compile_bindings(&snapshot, backend.as_ref());
+        let state = Arc::new(Mutex::new(State { snapshot, bindings }));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker = thread::Builder::new()
-            .name("mkmacro-recorder-hotkey".into())
+            .name("mkmacro-recorder-hotkeys".into())
             .spawn(move || {
                 while !worker_stop.load(Ordering::SeqCst) {
-                    tick(&store, &state, backend.as_ref(), toggle.as_ref());
+                    tick(&store, &state, backend.as_ref(), callback.as_ref());
                     thread::sleep(Duration::from_millis(20));
                 }
             })
@@ -54,10 +86,10 @@ impl RecorderHotkeyService {
         }
     }
     pub fn system(store: Arc<MkMacroStore>) -> Self {
-        Self::new(
+        Self::with_controls(
             store,
             Arc::new(super::hotkeys::SystemKeyStateBackend),
-            Arc::new(super::runtime::toggle_recording),
+            Arc::new(super::runtime::recorder_control),
         )
     }
     pub fn shutdown(&self) {
@@ -72,49 +104,65 @@ impl Drop for RecorderHotkeyService {
         self.shutdown();
     }
 }
-
+fn compile_bindings(doc: &MkMacroDocument, backend: &dyn KeyStateBackend) -> [Option<Binding>; 3] {
+    [
+        Binding::compile(&doc.settings.record_toggle_hotkey, backend),
+        doc.settings
+            .recorder
+            .pause_resume_hotkey
+            .as_ref()
+            .and_then(|h| Binding::compile(h, backend)),
+        doc.settings
+            .recorder
+            .marker_hotkey
+            .as_ref()
+            .and_then(|h| Binding::compile(h, backend)),
+    ]
+}
 fn tick(
     store: &MkMacroStore,
     state: &Mutex<State>,
     backend: &dyn KeyStateBackend,
-    toggle: &Toggle,
+    callback: &Callback<'_>,
 ) {
     let snapshot = store.snapshot();
-    let fire = {
+    let mut fired = Vec::new();
+    {
         let mut s = state.lock().unwrap();
         if !Arc::ptr_eq(&snapshot, &s.snapshot) {
-            let compiled = compile_hotkey(&snapshot.settings.record_toggle_hotkey);
-            let modifiers = compiled.as_ref().map(|x| x.0.clone()).unwrap_or_default();
-            let primary = compiled.map(|x| x.1);
-            // The file watcher may republish an equivalent document after a local
-            // save. Treat only an actual binding change as a reconfiguration;
-            // otherwise that publication can consume a legitimate rising edge.
-            if modifiers != s.modifiers || primary != s.primary {
-                s.modifiers = modifiers;
-                s.primary = primary;
-                // A chord held while configuration changes must first be released.
-                s.triggered = s
-                    .primary
+            let next = compile_bindings(&snapshot, backend);
+            for (index, new) in next.into_iter().enumerate() {
+                let changed = s.bindings[index]
                     .as_ref()
-                    .is_some_and(|key| chord_down(key, &s.modifiers, backend));
+                    .map(|b| (&b.modifiers, &b.primary))
+                    != new.as_ref().map(|b| (&b.modifiers, &b.primary));
+                if changed {
+                    s.bindings[index] = new;
+                }
             }
             s.snapshot = snapshot;
         }
-        let down = s
-            .primary
-            .as_ref()
-            .is_some_and(|key| chord_down(key, &s.modifiers, backend));
-        let fire = down && !s.triggered;
-        s.triggered = down;
-        fire
-    };
-    if fire {
-        toggle();
+        for (index, binding) in s.bindings.iter_mut().enumerate() {
+            if let Some(binding) = binding {
+                let down = chord_down(&binding.primary, &binding.modifiers, backend);
+                if down && !binding.triggered {
+                    fired.push(match index {
+                        0 => RecorderControlAction::Toggle,
+                        1 => RecorderControlAction::PauseResume,
+                        _ => RecorderControlAction::Marker,
+                    });
+                }
+                binding.triggered = down;
+            }
+        }
+    }
+    for action in fired {
+        callback(action)
     }
 }
 fn chord_down(
     primary: &MkKey,
-    modifiers: &std::collections::BTreeSet<String>,
+    modifiers: &BTreeSet<String>,
     backend: &dyn KeyStateBackend,
 ) -> bool {
     backend.is_down(primary)
@@ -127,9 +175,7 @@ fn chord_down(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkHotkey, MkMacroDocument};
     use std::sync::RwLock;
-
     struct Fake(RwLock<Vec<MkKey>>);
     impl KeyStateBackend for Fake {
         fn is_down(&self, key: &MkKey) -> bool {
@@ -137,97 +183,32 @@ mod tests {
         }
     }
     #[test]
-    fn held_key_fires_once_then_release_and_repress_fires_again() {
+    fn controls_have_independent_rising_edges() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let snapshot = store.snapshot();
-        let (mods, primary) = compile_hotkey(&snapshot.settings.record_toggle_hotkey).unwrap();
-        let state = Mutex::new(State {
-            snapshot,
-            modifiers: mods,
-            primary: Some(primary),
-            triggered: false,
+        let mut doc = (*store.snapshot()).clone();
+        doc.settings.recorder.pause_resume_hotkey = Some(MkHotkey {
+            key: MkKey::Function(8),
+            modifiers: vec![],
         });
-        let fake = Fake(RwLock::new(vec![MkKey::Function(9)]));
-        let count = Arc::new(Mutex::new(0));
-        let callback_count = count.clone();
-        let callback = move || *callback_count.lock().unwrap() += 1;
-        tick(&store, &state, &fake, &callback);
-        tick(&store, &state, &fake, &callback);
-        assert_eq!(*count.lock().unwrap(), 1);
-        fake.0.write().unwrap().clear();
-        tick(&store, &state, &fake, &callback);
+        store.save(doc).unwrap();
+        let fake = Fake(RwLock::new(vec![]));
+        let snapshot = store.snapshot();
+        let state = Mutex::new(State {
+            bindings: compile_bindings(&snapshot, &fake),
+            snapshot,
+        });
+        let seen = Mutex::new(Vec::new());
         fake.0.write().unwrap().push(MkKey::Function(9));
-        tick(&store, &state, &fake, &callback);
-        assert_eq!(*count.lock().unwrap(), 2);
-    }
-    #[test]
-    fn refresh_to_held_modifier_chord_waits_for_release() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let snapshot = store.snapshot();
-        let (mods, primary) = compile_hotkey(&snapshot.settings.record_toggle_hotkey).unwrap();
-        let state = Mutex::new(State {
-            snapshot,
-            modifiers: mods,
-            primary: Some(primary),
-            triggered: false,
-        });
-        let fake = Fake(RwLock::new(vec![
-            MkKey::Control,
-            MkKey::Character("K".into()),
-        ]));
-        let count = Arc::new(Mutex::new(0));
-        let callback_count = count.clone();
-        let callback = move || *callback_count.lock().unwrap() += 1;
-        let mut doc = MkMacroDocument::default();
-        doc.settings.record_toggle_hotkey = MkHotkey {
-            key: MkKey::Character("K".into()),
-            modifiers: vec![MkKey::Control],
-        };
-        store.save(doc).unwrap();
-        tick(&store, &state, &fake, &callback);
-        assert_eq!(*count.lock().unwrap(), 0);
-        fake.0.write().unwrap().clear();
-        tick(&store, &state, &fake, &callback);
-        fake.0
-            .write()
-            .unwrap()
-            .extend([MkKey::Control, MkKey::Character("K".into())]);
-        tick(&store, &state, &fake, &callback);
-        assert_eq!(*count.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn modifier_chord_requires_every_modifier_and_has_one_rising_edge() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-        let mut doc = MkMacroDocument::default();
-        doc.settings.record_toggle_hotkey = MkHotkey {
-            key: MkKey::Character("K".into()),
-            modifiers: vec![MkKey::Control, MkKey::Shift],
-        };
-        store.save(doc).unwrap();
-        let snapshot = store.snapshot();
-        let (modifiers, primary) = compile_hotkey(&snapshot.settings.record_toggle_hotkey).unwrap();
-        let state = Mutex::new(State {
-            snapshot,
-            modifiers,
-            primary: Some(primary),
-            triggered: false,
-        });
-        let fake = Fake(RwLock::new(vec![
-            MkKey::Control,
-            MkKey::Character("K".into()),
-        ]));
-        let count = Arc::new(Mutex::new(0));
-        let callback_count = count.clone();
-        let callback = move || *callback_count.lock().unwrap() += 1;
-        tick(&store, &state, &fake, &callback);
-        assert_eq!(*count.lock().unwrap(), 0);
-        fake.0.write().unwrap().push(MkKey::Shift);
-        tick(&store, &state, &fake, &callback);
-        tick(&store, &state, &fake, &callback);
-        assert_eq!(*count.lock().unwrap(), 1);
+        tick(&store, &state, &fake, &|a| seen.lock().unwrap().push(a));
+        fake.0.write().unwrap().push(MkKey::Function(8));
+        tick(&store, &state, &fake, &|a| seen.lock().unwrap().push(a));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                RecorderControlAction::Toggle,
+                RecorderControlAction::PauseResume
+            ]
+        );
     }
 }

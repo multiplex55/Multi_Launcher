@@ -136,6 +136,7 @@ fn context(foreground: WindowContext, under: Option<WindowContext>) -> Option<Ev
     Some(EventContext {
         foreground,
         window_under_point: under,
+        keyboard_layout: None,
     })
 }
 fn event(event: HookEvent, context: Option<EventContext>) -> RecordingBoundary {
@@ -378,7 +379,7 @@ fn context_precedence_drag_signed_coordinates_fallback_and_activation_suppressio
 }
 
 #[test]
-fn context_opt_out_preserves_screen_targets_delays_and_control_hotkey_filtering() {
+fn context_opt_out_preserves_screen_targets_delays_and_matching_primary_keys() {
     let c = context(explorer(), Some(notepad()));
     let input = vec![
         contextual_mouse(0, MouseMessage::Move, -10, 20, c.clone()),
@@ -405,7 +406,6 @@ fn context_opt_out_preserves_screen_targets_delays_and_control_hotkey_filtering(
     let mut cfg = NormalizationConfig::default();
     cfg.record_window_context = false;
     cfg.movement_mode = MovementMode::DetailedMovement;
-    cfg.control_hotkeys = vec![0x78];
     let normalized = normalize(&input, &cfg, None);
     let rows = to_macro_steps(&normalized, 0, false);
     assert!(
@@ -427,7 +427,13 @@ fn context_opt_out_preserves_screen_targets_delays_and_control_hotkey_filtering(
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        [MkKey::Character("A".into()), MkKey::Character("B".into())]
+        [
+            MkKey::Character("A".into()),
+            MkKey::Function(9),
+            MkKey::Function(9),
+            MkKey::Function(9),
+            MkKey::Character("B".into())
+        ]
     );
     assert_eq!(
         normalized[1].delay_after_ms, 10,

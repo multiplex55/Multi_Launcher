@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-// Schema 13 adds persisted OCR actions and conditions. Existing schema-12
-// documents require no content changes beyond advancing the version.
-pub const SCHEMA_VERSION: u32 = 13;
+// Schema 14 adds persisted recorder settings and the expanded physical-key model.
+// Existing schema-13 documents retain their macro content and receive defaults.
+pub const SCHEMA_VERSION: u32 = 14;
 fn schema() -> u32 {
     SCHEMA_VERSION
 }
@@ -152,6 +152,8 @@ pub struct MkMacroFolder {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMacroSettings {
     pub record_toggle_hotkey: MkHotkey,
+    #[serde(default)]
+    pub recorder: MkRecorderSettings,
 }
 impl Default for MkMacroSettings {
     fn default() -> Self {
@@ -160,9 +162,102 @@ impl Default for MkMacroSettings {
                 key: MkKey::Function(9),
                 modifiers: vec![],
             },
+            recorder: MkRecorderSettings::default(),
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovementMode {
+    Off,
+    ClicksOnly,
+    SampledMovement,
+    DetailedMovement,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MkRecorderSettings {
+    pub record_keyboard: bool,
+    pub record_mouse_buttons: bool,
+    pub record_mouse_wheel: bool,
+    pub movement_mode: MovementMode,
+    pub movement_distance_px: i32,
+    pub movement_interval_ms: u64,
+    pub click_max_ms: u64,
+    pub click_distance_px: i32,
+    pub multi_click_ms: u64,
+    pub record_injected_input: bool,
+    pub record_window_context: bool,
+    pub minimum_idle_delay_ms: u64,
+    pub delay_rounding_ms: u64,
+    pub key_tap_max_ms: u64,
+    pub text_run_gap_ms: u64,
+    pub smart_keyboard_cleanup: bool,
+    pub smart_mouse_cleanup: bool,
+    pub smart_window_cleanup: bool,
+    pub smart_repeated_click_cleanup: bool,
+    pub detect_application_launches: bool,
+    pub inspect_clicked_controls: bool,
+    pub capture_text_paste_for_freeze_suggestion: bool,
+    pub repeated_click_minimum: u32,
+    pub repeated_click_interval_tolerance_ms: u64,
+    #[serde(default)]
+    pub pause_resume_hotkey: Option<MkHotkey>,
+    #[serde(default)]
+    pub marker_hotkey: Option<MkHotkey>,
+}
+
+impl Default for MkRecorderSettings {
+    fn default() -> Self {
+        Self {
+            record_keyboard: true,
+            record_mouse_buttons: true,
+            record_mouse_wheel: true,
+            movement_mode: MovementMode::SampledMovement,
+            movement_distance_px: 16,
+            movement_interval_ms: 80,
+            click_max_ms: 500,
+            click_distance_px: 4,
+            multi_click_ms: 500,
+            record_injected_input: false,
+            record_window_context: true,
+            minimum_idle_delay_ms: 100,
+            delay_rounding_ms: 10,
+            key_tap_max_ms: 500,
+            text_run_gap_ms: 750,
+            smart_keyboard_cleanup: true,
+            smart_mouse_cleanup: true,
+            smart_window_cleanup: true,
+            smart_repeated_click_cleanup: true,
+            detect_application_launches: true,
+            inspect_clicked_controls: true,
+            capture_text_paste_for_freeze_suggestion: true,
+            repeated_click_minimum: 3,
+            repeated_click_interval_tolerance_ms: 100,
+            pause_resume_hotkey: None,
+            marker_hotkey: None,
+        }
+    }
+}
+
+impl MkRecorderSettings {
+    pub fn clamp(&mut self) {
+        self.movement_distance_px = self.movement_distance_px.clamp(1, 500);
+        self.movement_interval_ms = self.movement_interval_ms.clamp(1, 5_000);
+        self.click_max_ms = self.click_max_ms.clamp(1, 10_000);
+        self.click_distance_px = self.click_distance_px.clamp(0, 100);
+        self.multi_click_ms = self.multi_click_ms.clamp(1, 5_000);
+        self.minimum_idle_delay_ms = self.minimum_idle_delay_ms.min(60_000);
+        self.delay_rounding_ms = self.delay_rounding_ms.clamp(1, 10_000);
+        self.key_tap_max_ms = self.key_tap_max_ms.clamp(1, 10_000);
+        self.text_run_gap_ms = self.text_run_gap_ms.clamp(1, 60_000);
+        self.repeated_click_minimum = self.repeated_click_minimum.clamp(2, 100);
+        self.repeated_click_interval_tolerance_ms =
+            self.repeated_click_interval_tolerance_ms.min(10_000);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MkMacro {
     #[serde(default)]
@@ -413,7 +508,7 @@ pub struct MkRetry {
     pub attempts: u32,
     pub delay_ms: u64,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MkKey {
     Character(String),
@@ -423,6 +518,7 @@ pub enum MkKey {
     Space,
     Backspace,
     Delete,
+    Insert,
     Up,
     Down,
     Left,
@@ -431,6 +527,11 @@ pub enum MkKey {
     End,
     PageUp,
     PageDown,
+    CapsLock,
+    NumLock,
+    ScrollLock,
+    PrintScreen,
+    PauseBreak,
     Control,
     LeftControl,
     RightControl,
@@ -444,6 +545,48 @@ pub enum MkKey {
     LeftMeta,
     RightMeta,
     Function(u8),
+    Numpad(u8),
+    NumpadMultiply,
+    NumpadAdd,
+    NumpadSeparator,
+    NumpadSubtract,
+    NumpadDecimal,
+    NumpadDivide,
+    OemSemicolon,
+    OemEquals,
+    OemComma,
+    OemMinus,
+    OemPeriod,
+    OemSlash,
+    OemBacktick,
+    OemLeftBracket,
+    OemBackslash,
+    OemRightBracket,
+    OemQuote,
+    Oem102,
+    BrowserBack,
+    BrowserForward,
+    BrowserRefresh,
+    BrowserStop,
+    BrowserSearch,
+    BrowserFavorites,
+    BrowserHome,
+    VolumeMute,
+    VolumeDown,
+    VolumeUp,
+    MediaNext,
+    MediaPrevious,
+    MediaStop,
+    MediaPlayPause,
+    LaunchMail,
+    LaunchMediaSelect,
+    LaunchApp1,
+    LaunchApp2,
+    RawVirtualKey {
+        vk: u16,
+        scan_code: u16,
+        extended: bool,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

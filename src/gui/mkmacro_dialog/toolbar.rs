@@ -111,7 +111,9 @@ fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>) {
     }
 }
 pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
-    crate::mkmacro::runtime::set_recording_options(dialog.recorder_options.clone());
+    crate::mkmacro::runtime::set_recording_options(crate::mkmacro::NormalizationConfig::from(
+        &dialog.recorder_options,
+    ));
     let state = state(dialog);
     ui.horizontal(|ui| {
         if ui.button("Refresh checks").on_hover_text("Check external image files and connected monitors").clicked() {
@@ -300,15 +302,19 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             )
             .clicked()
         {
-            if let Some(id) = dialog.selected_macro_id {
+            if let Some(target) = dialog.recording_target() {
                 report(
                     dialog,
-                    crate::mkmacro::runtime::record(id, dialog.recorder_options.clone()),
+                    crate::mkmacro::runtime::record_target(
+                        target,
+                        crate::mkmacro::NormalizationConfig::from(&dialog.recorder_options),
+                    ),
                 );
             }
         }
         ui.menu_button("Record Options", |ui| {
             ui.set_enabled(!recorder_active);
+            let before = dialog.recorder_options.clone();
             ui.checkbox(&mut dialog.recorder_options.record_keyboard, "Keyboard");
             ui.checkbox(
                 &mut dialog.recorder_options.record_mouse_buttons,
@@ -365,6 +371,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 )
                 .text("Sample interval (ms)"),
             );
+            dialog.recorder_options.clamp();
+            if dialog.recorder_options != before {
+                dialog.draft.settings.recorder = dialog.recorder_options.clone();
+                dialog.mark_dirty();
+            }
         });
     });
     if let Some(rec) = crate::mkmacro::runtime::recorder_snapshot()

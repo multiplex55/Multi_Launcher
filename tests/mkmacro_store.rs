@@ -71,6 +71,7 @@ fn delete_all_is_durable_and_never_falls_back_to_legacy_file() {
             key: MkKey::Function(7),
             modifiers: vec![MkKey::Control],
         },
+        recorder: Default::default(),
     };
     let document = MkMacroDocument {
         schema_version: SCHEMA_VERSION,

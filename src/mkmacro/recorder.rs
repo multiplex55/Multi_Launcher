@@ -1,17 +1,11 @@
 //! Worker-side, pure recording normalization. No OS, UI automation, or persistence is used here.
 use super::{
     HookEvent, KeyTransition, MkAction, MkCoordinateTarget, MkErrorPolicy, MkKey, MkMouseButton,
-    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkPoint, MkStep,
-    MkWindowMatcher, MkWindowPayload, MouseButton, MouseMessage, should_record,
+    MkMouseDragPayload, MkMouseMovePayload, MkMousePayload, MkMouseScrollAxis, MkPoint,
+    MkRecorderSettings, MkStep, MkWindowMatcher, MkWindowPayload, MouseButton, MouseMessage,
+    MovementMode, mk_key_from_windows_event, should_record,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MovementMode {
-    Off,
-    ClicksOnly,
-    SampledMovement,
-    DetailedMovement,
-}
 #[derive(Debug, Clone)]
 pub struct NormalizationConfig {
     pub record_keyboard: bool,
@@ -26,24 +20,77 @@ pub struct NormalizationConfig {
     pub record_injected_input: bool,
     /// Capture target-window metadata and author activation/client-relative actions.
     pub record_window_context: bool,
-    pub control_hotkeys: Vec<u32>,
+    pub minimum_idle_delay_ms: u64,
+    pub delay_rounding_ms: u64,
+    pub key_tap_max_ms: u64,
+    pub text_run_gap_ms: u64,
+    pub smart_keyboard_cleanup: bool,
+    pub smart_mouse_cleanup: bool,
+    pub smart_window_cleanup: bool,
+    pub smart_repeated_click_cleanup: bool,
+    pub detect_application_launches: bool,
+    pub inspect_clicked_controls: bool,
+    pub capture_text_paste_for_freeze_suggestion: bool,
+    pub repeated_click_minimum: u32,
+    pub repeated_click_interval_tolerance_ms: u64,
+}
+
+impl From<&MkRecorderSettings> for NormalizationConfig {
+    fn from(settings: &MkRecorderSettings) -> Self {
+        Self {
+            record_keyboard: settings.record_keyboard,
+            record_mouse_buttons: settings.record_mouse_buttons,
+            record_mouse_wheel: settings.record_mouse_wheel,
+            movement_mode: settings.movement_mode,
+            movement_distance_px: settings.movement_distance_px,
+            movement_interval_ms: settings.movement_interval_ms,
+            click_max_ms: settings.click_max_ms,
+            click_distance_px: settings.click_distance_px,
+            multi_click_ms: settings.multi_click_ms,
+            record_injected_input: settings.record_injected_input,
+            record_window_context: settings.record_window_context,
+            minimum_idle_delay_ms: settings.minimum_idle_delay_ms,
+            delay_rounding_ms: settings.delay_rounding_ms,
+            key_tap_max_ms: settings.key_tap_max_ms,
+            text_run_gap_ms: settings.text_run_gap_ms,
+            smart_keyboard_cleanup: settings.smart_keyboard_cleanup,
+            smart_mouse_cleanup: settings.smart_mouse_cleanup,
+            smart_window_cleanup: settings.smart_window_cleanup,
+            smart_repeated_click_cleanup: settings.smart_repeated_click_cleanup,
+            detect_application_launches: settings.detect_application_launches,
+            inspect_clicked_controls: settings.inspect_clicked_controls,
+            capture_text_paste_for_freeze_suggestion: settings
+                .capture_text_paste_for_freeze_suggestion,
+            repeated_click_minimum: settings.repeated_click_minimum,
+            repeated_click_interval_tolerance_ms: settings.repeated_click_interval_tolerance_ms,
+        }
+    }
+}
+
+impl NormalizationConfig {
+    pub fn semantic_settings(&self) -> MkRecorderSettings {
+        let mut settings = MkRecorderSettings::default();
+        settings.record_window_context = self.record_window_context;
+        settings.minimum_idle_delay_ms = self.minimum_idle_delay_ms;
+        settings.delay_rounding_ms = self.delay_rounding_ms;
+        settings.key_tap_max_ms = self.key_tap_max_ms;
+        settings.text_run_gap_ms = self.text_run_gap_ms;
+        settings.smart_keyboard_cleanup = self.smart_keyboard_cleanup;
+        settings.smart_mouse_cleanup = self.smart_mouse_cleanup;
+        settings.smart_window_cleanup = self.smart_window_cleanup;
+        settings.smart_repeated_click_cleanup = self.smart_repeated_click_cleanup;
+        settings.detect_application_launches = self.detect_application_launches;
+        settings.inspect_clicked_controls = self.inspect_clicked_controls;
+        settings.capture_text_paste_for_freeze_suggestion =
+            self.capture_text_paste_for_freeze_suggestion;
+        settings.repeated_click_minimum = self.repeated_click_minimum;
+        settings.repeated_click_interval_tolerance_ms = self.repeated_click_interval_tolerance_ms;
+        settings
+    }
 }
 impl Default for NormalizationConfig {
     fn default() -> Self {
-        Self {
-            record_keyboard: true,
-            record_mouse_buttons: true,
-            record_mouse_wheel: true,
-            movement_mode: MovementMode::SampledMovement,
-            movement_distance_px: DEFAULT_MOVEMENT_DISTANCE_PX,
-            movement_interval_ms: DEFAULT_MOVEMENT_INTERVAL_MS,
-            click_max_ms: 500,
-            click_distance_px: 4,
-            multi_click_ms: 500,
-            record_injected_input: false,
-            record_window_context: true,
-            control_hotkeys: Vec::new(),
-        }
+        Self::from(&MkRecorderSettings::default())
     }
 }
 
@@ -62,6 +109,12 @@ pub struct WindowContext {
     pub client_origin: Option<MkPoint>,
     /// Stable only within the capture session; never persisted.
     pub native_root_id: Option<usize>,
+    /// Transient owning process/thread identity used only for recording correlation.
+    pub process_id: Option<u32>,
+    pub thread_id: Option<u32>,
+    /// OS process start time (seconds since boot/epoch as supplied by the observer).
+    /// Combined with PID this protects launch inference from PID reuse.
+    pub process_started_at: Option<u64>,
 }
 impl WindowContext {
     /// Produces a non-empty, normalized matcher, preferring executable + title.
@@ -87,15 +140,33 @@ impl WindowContext {
 pub struct EventContext {
     pub foreground: WindowContext,
     pub window_under_point: Option<WindowContext>,
+    /// Input layout of the foreground window's owning thread at event time.
+    pub keyboard_layout: Option<isize>,
 }
 pub trait EventEnricher: Send {
     fn enrich(&mut self, event: &HookEvent) -> Option<EventContext>;
+    /// Lightweight keyboard-only path used when window-context authoring is disabled.
+    fn enrich_keyboard_layout(&mut self) -> Option<EventContext> {
+        None
+    }
+    fn context_for_root(&mut self, _root: usize) -> Option<WindowContext> {
+        None
+    }
+    /// Whether a native handle is a visible, non-tool top-level window. Owned
+    /// top-level windows remain eligible because they commonly represent dialogs.
+    /// The default keeps synthetic enrichers platform independent.
+    fn is_recordable_top_level(&self, _root: usize) -> bool {
+        true
+    }
+    fn invalidate_root(&mut self, _root: usize) {}
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordingBoundary {
     Event(HookEvent, Option<EventContext>),
     Pause { timestamp_us: u64 },
     Resume { timestamp_us: u64 },
+    Marker { timestamp_us: u64 },
+    Annotation { timestamp_us: u64, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,9 +369,7 @@ pub fn normalize(
                 }
             }
             RecordingBoundary::Event(e, captured_context)
-                if !paused
-                    && should_record(e, cfg.record_injected_input)
-                    && !matches!(e, HookEvent::Key { vk, .. } if cfg.control_hotkeys.contains(vk)) =>
+                if !paused && should_record(e, cfg.record_injected_input) =>
             {
                 raw.push((
                     *e,
@@ -334,7 +403,7 @@ pub fn normalize(
         if !enabled {
             continue;
         }
-        let context = if cfg.record_window_context {
+        let context = if cfg.record_window_context || matches!(e, HookEvent::Key { .. }) {
             captured_context.or_else(|| enricher.as_deref_mut().and_then(|x| x.enrich(&e)))
         } else {
             None
@@ -543,135 +612,17 @@ pub fn normalize(
     out
 }
 
-fn key(vk: u32) -> MkKey {
-    match vk {
-        0x0D => MkKey::Enter,
-        0x09 => MkKey::Tab,
-        0x1B => MkKey::Escape,
-        0x20 => MkKey::Space,
-        0x25 => MkKey::Left,
-        0x26 => MkKey::Up,
-        0x27 => MkKey::Right,
-        0x28 => MkKey::Down,
-        0x70..=0x87 => MkKey::Function((vk - 0x6f) as u8),
-        _ => MkKey::Character(char::from_u32(vk).unwrap_or('?').to_string()),
-    }
-}
-fn button(b: MouseButton) -> MkMouseButton {
-    match b {
-        MouseButton::Left => MkMouseButton::Left,
-        MouseButton::Right => MkMouseButton::Right,
-        MouseButton::Middle => MkMouseButton::Middle,
-        MouseButton::X1 => MkMouseButton::X1,
-        MouseButton::X2 => MkMouseButton::X2,
-    }
-}
-/// Converts a normalized batch to draft steps. IDs are allocated only at insertion time.
+/// Converts literal normalized output through the explicit compatibility plan.
+/// New recorder results expose their semantic `RecordingPlan` directly.
 pub fn to_macro_steps(
     items: &[RecordedStep],
-    mut next_id: u64,
+    next_id: u64,
     record_window_context: bool,
 ) -> Vec<MkStep> {
-    let mut result = Vec::new();
-    let mut last_target: Option<MkWindowMatcher> = None;
-    for s in items {
-        let window = if record_window_context {
-            match s.action {
-                RecordedAction::Key { .. } => s.context.as_ref().map(|c| &c.foreground),
-                _ => s
-                    .context
-                    .as_ref()
-                    .and_then(|c| c.window_under_point.as_ref().or(Some(&c.foreground))),
-            }
-        } else {
-            None
-        };
-        let matcher = window.and_then(WindowContext::matcher);
-        let target = |x, y| {
-            if let Some((w, matcher)) = window.zip(matcher.clone())
-                && let Some(origin) = w.client_origin
-            {
-                return MkCoordinateTarget::WindowClient {
-                    matcher,
-                    point: MkPoint {
-                        x: x - origin.x,
-                        y: y - origin.y,
-                    },
-                };
-            }
-            MkCoordinateTarget::Screen {
-                point: MkPoint { x, y },
-            }
-        };
-        let relevant = !matches!(s.action, RecordedAction::Move { .. });
-        let mut actions = Vec::new();
-        if relevant && matcher.is_some() && matcher != last_target {
-            actions.push(MkAction::WindowActivate(MkWindowPayload {
-                matcher: matcher.clone().unwrap(),
-                wait: None,
-            }));
-            last_target = matcher.clone();
-        }
-        actions.push(match s.action {
-            RecordedAction::Key { down: true, vk, .. } => MkAction::KeyDown(key(vk)),
-            RecordedAction::Key {
-                down: false, vk, ..
-            } => MkAction::KeyUp(key(vk)),
-            RecordedAction::Move { x, y, duration_ms } => MkAction::MouseMove(MkMouseMovePayload {
-                target: target(x, y),
-                duration_ms,
-            }),
-            RecordedAction::Click {
-                button: b,
-                x,
-                y,
-                count,
-            } => MkAction::MouseClick(MkMousePayload {
-                target: target(x, y),
-                button: button(b),
-                clicks: count,
-            }),
-            RecordedAction::Down { button: b, .. } => MkAction::MouseDown(button(b)),
-            RecordedAction::Up { button: b, .. } => MkAction::MouseUp(button(b)),
-            RecordedAction::Drag {
-                button: b,
-                from,
-                to,
-                down_timestamp_us,
-                up_timestamp_us,
-            } => MkAction::MouseDrag(MkMouseDragPayload {
-                from: target(from.0, from.1),
-                to: target(to.0, to.1),
-                button: button(b),
-                duration_ms: up_timestamp_us.saturating_sub(down_timestamp_us) / 1000,
-            }),
-            RecordedAction::Wheel {
-                delta, horizontal, ..
-            } => MkAction::MouseScroll {
-                axis: if horizontal {
-                    MkMouseScrollAxis::Horizontal
-                } else {
-                    MkMouseScrollAxis::Vertical
-                },
-                i32_delta: delta,
-            },
-        });
-        let count = actions.len();
-        for (i, action) in actions.into_iter().enumerate() {
-            next_id += 1;
-            result.push(MkStep {
-                metadata: Default::default(),
-                id: next_id,
-                enabled: true,
-                breakpoint: false,
-                repeat: 1,
-                delay_after_ms: if i + 1 == count { s.delay_after_ms } else { 0 },
-                on_error: MkErrorPolicy::Stop,
-                action,
-            });
-        }
-    }
-    result
+    super::materialize_plan(
+        &super::build_literal_recording_plan(items, record_window_context),
+        next_id,
+    )
 }
 
 #[cfg(test)]

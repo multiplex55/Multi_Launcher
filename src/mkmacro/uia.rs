@@ -245,6 +245,336 @@ pub fn initialize_com_apartment() -> ExecResult<ComApartment> {
     Ok(ComApartment)
 }
 
+const MAX_INSPECTED_STRING_BYTES: usize = 4096;
+
+fn bounded_inspection_string(mut text: String) -> Option<String> {
+    if text.len() > MAX_INSPECTED_STRING_BYTES {
+        let mut end = MAX_INSPECTED_STRING_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn executable_matcher(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .trim()
+        .to_owned()
+}
+
+/// Persistent recorder click-inspection state. It must be created, used, and
+/// dropped on the recorder's dedicated UIA provider lane.
+#[cfg(windows)]
+pub struct SystemUiaInspector {
+    automation: windows::Win32::UI::Accessibility::IUIAutomation,
+    cache: windows::Win32::UI::Accessibility::IUIAutomationCacheRequest,
+    walker: windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
+    // Fields drop in declaration order; COM interfaces must release first.
+    _apartment: ComApartment,
+}
+
+#[cfg(windows)]
+impl SystemUiaInspector {
+    pub fn new() -> ExecResult<Self> {
+        use windows::{
+            Win32::{
+                System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+                UI::Accessibility::*,
+            },
+            core::Interface,
+        };
+        let apartment = initialize_com_apartment()?;
+        let automation: IUIAutomation =
+            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.map_err(
+                |e| {
+                    diag(
+                        DiagnosticKind::ComFailure,
+                        format!("UI Automation initialization failed: {e}"),
+                    )
+                },
+            )?;
+        if let Ok(v2) = automation.cast::<IUIAutomation2>() {
+            // These native provider timeouts bound cross-process calls. The outer
+            // recorder lane independently circuit-breaks if the budget is exceeded.
+            let _ = unsafe { v2.SetConnectionTimeout(500) };
+            let _ = unsafe { v2.SetTransactionTimeout(500) };
+        }
+        let cache = unsafe { automation.CreateCacheRequest() }.map_err(|e| {
+            diag(
+                DiagnosticKind::ComFailure,
+                format!("could not create UI Automation cache request: {e}"),
+            )
+        })?;
+        unsafe { cache.SetTreeScope(TreeScope_Element) }.map_err(|e| {
+            diag(
+                DiagnosticKind::ComFailure,
+                format!("could not configure UI Automation cache scope: {e}"),
+            )
+        })?;
+        for property in [
+            UIA_ProcessIdPropertyId,
+            UIA_ControlTypePropertyId,
+            UIA_NamePropertyId,
+            UIA_AutomationIdPropertyId,
+            UIA_ClassNamePropertyId,
+            UIA_FrameworkIdPropertyId,
+            UIA_BoundingRectanglePropertyId,
+        ] {
+            unsafe { cache.AddProperty(property) }.map_err(|e| {
+                diag(
+                    DiagnosticKind::ComFailure,
+                    format!("could not configure UI Automation property cache: {e}"),
+                )
+            })?;
+        }
+        for pattern in [
+            UIA_InvokePatternId,
+            UIA_ValuePatternId,
+            UIA_TogglePatternId,
+            UIA_SelectionItemPatternId,
+        ] {
+            unsafe { cache.AddPattern(pattern) }.map_err(|e| {
+                diag(
+                    DiagnosticKind::ComFailure,
+                    format!("could not configure UI Automation pattern cache: {e}"),
+                )
+            })?;
+        }
+        let walker = unsafe { automation.ControlViewWalker() }.map_err(|e| {
+            diag(
+                DiagnosticKind::ComFailure,
+                format!("could not create UI Automation tree walker: {e}"),
+            )
+        })?;
+        Ok(Self {
+            automation,
+            cache,
+            walker,
+            _apartment: apartment,
+        })
+    }
+
+    pub fn inspect_at(&mut self, point: MkPoint) -> ExecResult<UiElementInfo> {
+        use windows::Win32::{Foundation::POINT, UI::Accessibility::*};
+        let element = unsafe {
+            self.automation.ElementFromPointBuildCache(
+                POINT {
+                    x: point.x,
+                    y: point.y,
+                },
+                &self.cache,
+            )
+        }
+        .map_err(|e| {
+            diag(
+                DiagnosticKind::TargetNotFound,
+                format!("UI Automation inspection failed: {e}"),
+            )
+        })?;
+        let bounded = |value: windows::core::BSTR| bounded_inspection_string(value.to_string());
+        let automation_id = unsafe { element.CachedAutomationId() }
+            .ok()
+            .and_then(bounded);
+        let name = unsafe { element.CachedName() }.ok().and_then(bounded);
+        let class_name = unsafe { element.CachedClassName() }.ok().and_then(bounded);
+        let framework_id = unsafe { element.CachedFrameworkId() }
+            .ok()
+            .and_then(bounded);
+        let control_id = unsafe { element.CachedControlType() }.ok();
+        let control_type = control_id.map(|id| {
+            if id == UIA_ButtonControlTypeId {
+                MkUiControlType::Button
+            } else if id == UIA_EditControlTypeId {
+                MkUiControlType::Edit
+            } else if id == UIA_CheckBoxControlTypeId {
+                MkUiControlType::CheckBox
+            } else if id == UIA_RadioButtonControlTypeId {
+                MkUiControlType::RadioButton
+            } else if id == UIA_ComboBoxControlTypeId {
+                MkUiControlType::ComboBox
+            } else if id == UIA_ListItemControlTypeId {
+                MkUiControlType::ListItem
+            } else if id == UIA_TabItemControlTypeId {
+                MkUiControlType::TabItem
+            } else if id == UIA_MenuItemControlTypeId {
+                MkUiControlType::MenuItem
+            } else if id == UIA_TreeItemControlTypeId {
+                MkUiControlType::TreeItem
+            } else if id == UIA_TextControlTypeId {
+                MkUiControlType::Text
+            } else if id == UIA_CustomControlTypeId {
+                MkUiControlType::Custom
+            } else {
+                MkUiControlType::Other(format!("UIA {}", id.0))
+            }
+        });
+        let bounds = unsafe { element.CachedBoundingRectangle() }
+            .ok()
+            .and_then(|rect| {
+                (rect.right > rect.left && rect.bottom > rect.top).then_some((
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                ))
+            });
+        let mut supported_patterns = HashSet::new();
+        for (id, pattern) in [
+            (UIA_InvokePatternId, MkUiPattern::Invoke),
+            (UIA_ValuePatternId, MkUiPattern::Value),
+            (UIA_TogglePatternId, MkUiPattern::Toggle),
+            (UIA_SelectionItemPatternId, MkUiPattern::SelectionItem),
+        ] {
+            if unsafe { element.GetCachedPattern(id) }.is_ok() {
+                supported_patterns.insert(pattern);
+            }
+        }
+        supported_patterns.insert(MkUiPattern::Focus);
+        let pid = unsafe { element.CachedProcessId() }
+            .ok()
+            .filter(|pid| *pid > 0)
+            .map(|pid| pid as u32);
+        let target_executable = pid
+            .and_then(process_path_for_pid)
+            .map(|path| executable_matcher(&path))
+            .unwrap_or_default();
+        let mut ancestor_path = Vec::new();
+        // Ancestors are not a legal CacheRequest tree scope. Fetch each parent
+        // explicitly with the same element-only cache, with a strict depth cap.
+        let mut parent = unsafe {
+            self.walker
+                .GetParentElementBuildCache(&element, &self.cache)
+        }
+        .ok();
+        while let Some(ancestor) = parent.take() {
+            if ancestor_path.len() >= 4 {
+                break;
+            }
+            let part = MkUiSelectorPart {
+                automation_id: unsafe { ancestor.CachedAutomationId() }
+                    .ok()
+                    .and_then(bounded),
+                name: unsafe { ancestor.CachedName() }.ok().and_then(bounded),
+                class_name: unsafe { ancestor.CachedClassName() }.ok().and_then(bounded),
+                control_type: unsafe { ancestor.CachedControlType() }
+                    .ok()
+                    .map(control_type_from_id),
+                framework_id: unsafe { ancestor.CachedFrameworkId() }
+                    .ok()
+                    .and_then(bounded),
+            };
+            if !part_empty(&part) {
+                ancestor_path.push(part);
+            }
+            parent = unsafe {
+                self.walker
+                    .GetParentElementBuildCache(&ancestor, &self.cache)
+            }
+            .ok();
+        }
+        ancestor_path.reverse();
+        Ok(UiElementInfo {
+            selector: MkUiSelector {
+                automation_id,
+                name: name.clone(),
+                class_name,
+                control_type,
+                framework_id,
+                ancestor_path,
+            },
+            user_facing_name: name.unwrap_or_default(),
+            target_executable,
+            supported_patterns,
+            bounds,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn control_type_from_id(
+    id: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID,
+) -> MkUiControlType {
+    use windows::Win32::UI::Accessibility::*;
+    if id == UIA_ButtonControlTypeId {
+        MkUiControlType::Button
+    } else if id == UIA_EditControlTypeId {
+        MkUiControlType::Edit
+    } else if id == UIA_CheckBoxControlTypeId {
+        MkUiControlType::CheckBox
+    } else if id == UIA_RadioButtonControlTypeId {
+        MkUiControlType::RadioButton
+    } else if id == UIA_ComboBoxControlTypeId {
+        MkUiControlType::ComboBox
+    } else if id == UIA_ListItemControlTypeId {
+        MkUiControlType::ListItem
+    } else if id == UIA_TabItemControlTypeId {
+        MkUiControlType::TabItem
+    } else if id == UIA_MenuItemControlTypeId {
+        MkUiControlType::MenuItem
+    } else if id == UIA_TreeItemControlTypeId {
+        MkUiControlType::TreeItem
+    } else if id == UIA_TextControlTypeId {
+        MkUiControlType::Text
+    } else if id == UIA_CustomControlTypeId {
+        MkUiControlType::Custom
+    } else {
+        MkUiControlType::Other(format!("UIA {}", id.0))
+    }
+}
+
+#[cfg(windows)]
+fn process_path_for_pid(pid: u32) -> Option<String> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows::{
+        Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW,
+            },
+        },
+        core::PWSTR,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0u16; 32_768];
+    let mut size = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    result.ok()?;
+    (size > 0).then(|| {
+        OsString::from_wide(&buffer[..size as usize])
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// Compatibility entry point; recorder production keeps `SystemUiaInspector`
+/// alive on its bounded provider lane instead of recreating it per click.
+#[cfg(windows)]
+pub fn inspect_at_system(point: MkPoint) -> ExecResult<UiElementInfo> {
+    SystemUiaInspector::new()?.inspect_at(point)
+}
+
+#[cfg(not(windows))]
+pub fn inspect_at_system(_: MkPoint) -> ExecResult<UiElementInfo> {
+    Err(diag(
+        DiagnosticKind::UnsupportedPlatform,
+        "UI Automation inspection is only available on Windows",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +592,14 @@ mod tests {
             framework_id: Some("Win32".into()),
             ancestor_path: vec![],
         }
+    }
+    #[test]
+    fn inspected_strings_truncate_only_on_utf8_boundaries() {
+        let value = format!("{}érest", "a".repeat(MAX_INSPECTED_STRING_BYTES - 1));
+        let bounded = bounded_inspection_string(value).unwrap();
+        assert_eq!(bounded.len(), MAX_INSPECTED_STRING_BYTES - 1);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert_eq!(executable_matcher(r"C:\Tools\Runner.EXE"), "Runner.EXE");
     }
     fn info(patterns: &[MkUiPattern]) -> UiElementInfo {
         UiElementInfo {
@@ -343,5 +681,14 @@ mod tests {
         );
         drop(w);
         assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn inspected_strings_truncate_on_utf8_boundaries() {
+        let value = format!("{}é-tail", "a".repeat(MAX_INSPECTED_STRING_BYTES - 1));
+        let bounded = bounded_inspection_string(value).unwrap();
+        assert_eq!(bounded.len(), MAX_INSPECTED_STRING_BYTES - 1);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert_eq!(executable_matcher(r"C:\Tools\Editor.EXE"), "Editor.EXE");
     }
 }

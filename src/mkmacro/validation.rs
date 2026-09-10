@@ -1068,13 +1068,30 @@ fn analyze_document_with_context(
                         );
                     }
                 }
+                MkAction::KeyDown(key) | MkAction::KeyUp(key) | MkAction::KeyPress(key) => {
+                    if let Some(error) = super::key_validation_error(key) {
+                        push(&mut out, m.id, sid, "invalid_keyboard_key", error);
+                    }
+                }
+                MkAction::Hotkey(keys) => {
+                    if keys.is_empty() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "empty_keyboard_chord",
+                            "Hotkey chord must contain at least one key",
+                        );
+                    }
+                    for key in keys {
+                        if let Some(error) = super::key_validation_error(key) {
+                            push(&mut out, m.id, sid, "invalid_keyboard_key", error);
+                        }
+                    }
+                }
                 // These actions have no additional payload constraints. Keep
                 // this exhaustive so new actions require a validation decision.
-                MkAction::KeyDown(_)
-                | MkAction::KeyUp(_)
-                | MkAction::KeyPress(_)
-                | MkAction::Hotkey(_)
-                | MkAction::Text(_)
+                MkAction::Text(_)
                 | MkAction::MouseDown(_)
                 | MkAction::MouseUp(_)
                 | MkAction::MouseScroll { .. }

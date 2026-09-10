@@ -173,6 +173,7 @@ impl MkMacroStore {
         let _transaction = self.inner.transaction.lock().unwrap();
         let before = self.snapshot().macros.len();
         doc.schema_version = SCHEMA_VERSION;
+        doc.settings.recorder.clamp();
         repair_ids(doc);
         persist(&self.inner.path, doc)?;
         before_publication();
@@ -667,10 +668,16 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(12) {
         migrate_v12_to_v13(&mut value);
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(13) {
+        migrate_v13_to_v14(&mut value)?;
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
     doc.schema_version = SCHEMA_VERSION;
+    let recorder_before = doc.settings.recorder.clone();
+    doc.settings.recorder.clamp();
+    changed |= doc.settings.recorder != recorder_before;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
 }
@@ -737,6 +744,24 @@ fn migrate_v11_to_v12(value: &mut serde_json::Value) {
 /// OCR persistence is additive, so schema-12 documents retain all content.
 fn migrate_v12_to_v13(value: &mut serde_json::Value) {
     value["schema_version"] = serde_json::json!(13);
+}
+
+/// Recorder persistence is additive. Install the complete default object while
+/// preserving every existing macro, folder, hotkey, and authoring field.
+fn migrate_v13_to_v14(value: &mut serde_json::Value) -> Result<()> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 13 macro document must be an object"))?;
+    let settings = root
+        .entry("settings")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 13 settings must be an object"))?;
+    settings
+        .entry("recorder")
+        .or_insert(serde_json::to_value(super::MkRecorderSettings::default())?);
+    root.insert("schema_version".into(), serde_json::json!(14));
+    Ok(())
 }
 
 /// Filesystem-aware schema-10 migration. The JSON value is rewritten only after

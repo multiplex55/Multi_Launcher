@@ -8,7 +8,18 @@ use std::{
         mpsc::{self, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
+
+static RECORDER_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Shared monotonic timestamp domain for hook events and recorder boundaries.
+pub fn recorder_now_us() -> u64 {
+    RECORDER_EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros() as u64
+}
 
 pub const LLKHF_EXTENDED: u32 = 0x01;
 pub const LLKHF_INJECTED: u32 = 0x10;
@@ -78,17 +89,34 @@ pub enum HookCommand {
     Start,
     Pause,
     Resume,
+    Fence,
     Stop,
     Shutdown,
 }
+pub struct HookCommandRequest {
+    pub command: HookCommand,
+    acknowledgement: mpsc::SyncSender<bool>,
+}
+impl HookCommandRequest {
+    pub fn acknowledge(self, succeeded: bool) {
+        let _ = self.acknowledgement.send(succeeded);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequencedHookEvent {
+    pub sequence: u64,
+    pub event: HookEvent,
+}
 pub trait HookLoopAdapter: Send + 'static {
     /// Runs on the hook thread. Implementations install/uninstall hooks and own their message loop.
-    fn run(self, commands: mpsc::Receiver<HookCommand>, callback: CallbackSender);
+    fn run(self, commands: mpsc::Receiver<HookCommandRequest>, callback: CallbackSender);
 }
 
 #[derive(Clone)]
 pub struct CallbackSender {
-    tx: SyncSender<HookEvent>,
+    tx: SyncSender<SequencedHookEvent>,
+    next_sequence: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     record_injected: Arc<AtomicBool>,
 }
@@ -100,7 +128,9 @@ impl CallbackSender {
         if !should_record(&event, self.record_injected.load(Ordering::Relaxed)) {
             return;
         }
-        if let Err(TrySendError::Full(_)) = self.tx.try_send(event) {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        if let Err(TrySendError::Full(_)) = self.tx.try_send(SequencedHookEvent { sequence, event })
+        {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -108,8 +138,9 @@ impl CallbackSender {
 }
 
 pub struct HookService {
-    commands: mpsc::Sender<HookCommand>,
-    events: Mutex<mpsc::Receiver<HookEvent>>,
+    commands: mpsc::Sender<HookCommandRequest>,
+    events: Mutex<Option<mpsc::Receiver<SequencedHookEvent>>>,
+    next_sequence: Arc<AtomicU64>,
     dropped: Arc<std::sync::atomic::AtomicU64>,
     record_injected: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -119,9 +150,11 @@ impl HookService {
         let (commands, rx) = mpsc::channel();
         let (tx, events) = mpsc::sync_channel(capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
+        let next_sequence = Arc::new(AtomicU64::new(0));
         let record_injected = Arc::new(AtomicBool::new(false));
         let callback = CallbackSender {
             tx,
+            next_sequence: next_sequence.clone(),
             dropped: dropped.clone(),
             record_injected: record_injected.clone(),
         };
@@ -131,14 +164,22 @@ impl HookService {
             .expect("spawn hook loop");
         Self {
             commands,
-            events: Mutex::new(events),
+            events: Mutex::new(Some(events)),
+            next_sequence,
             dropped,
             record_injected,
             thread: Mutex::new(Some(thread)),
         }
     }
     pub fn command(&self, command: HookCommand) -> bool {
-        self.commands.send(command).is_ok()
+        let (acknowledgement, acknowledged) = mpsc::sync_channel(0);
+        self.commands
+            .send(HookCommandRequest {
+                command,
+                acknowledgement,
+            })
+            .is_ok()
+            && acknowledged.recv().unwrap_or(false)
     }
     pub fn start(&self) -> bool {
         self.command(HookCommand::Start)
@@ -156,14 +197,21 @@ impl HookService {
     pub fn stop(&self) -> bool {
         self.command(HookCommand::Stop)
     }
-    pub fn try_event(&self) -> Option<HookEvent> {
-        self.events.lock().unwrap().try_recv().ok()
+    pub fn synchronize(&self) -> Option<u64> {
+        self.command(HookCommand::Fence).then(|| self.fence())
+    }
+    pub fn take_events(&self) -> Option<mpsc::Receiver<SequencedHookEvent>> {
+        self.events.lock().unwrap().take()
+    }
+    /// The first sequence that cannot have been submitted before the acknowledged transition.
+    pub fn fence(&self) -> u64 {
+        self.next_sequence.load(Ordering::Acquire)
     }
     pub fn dropped_events(&self) -> u64 {
         self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn shutdown(&self) {
-        let _ = self.commands.send(HookCommand::Shutdown);
+        let _ = self.command(HookCommand::Shutdown);
         if let Some(t) = self.thread.lock().unwrap().take() {
             let _ = t.join();
         }
@@ -182,9 +230,11 @@ pub fn should_record(event: &HookEvent, record_injected_input: bool) -> bool {
 /// Portable no-op adapter; the Windows implementation is selected by the application on Windows.
 pub struct NoopHookLoop;
 impl HookLoopAdapter for NoopHookLoop {
-    fn run(self, commands: mpsc::Receiver<HookCommand>, _: CallbackSender) {
-        while let Ok(c) = commands.recv() {
-            if c == HookCommand::Shutdown {
+    fn run(self, commands: mpsc::Receiver<HookCommandRequest>, _: CallbackSender) {
+        while let Ok(request) = commands.recv() {
+            let shutdown = request.command == HookCommand::Shutdown;
+            request.acknowledge(true);
+            if shutdown {
                 break;
             }
         }
@@ -206,19 +256,15 @@ pub fn production_hook_service(capacity: usize) -> HookService {
 #[cfg(windows)]
 mod win32 {
     use super::*;
-    use std::{
-        sync::OnceLock,
-        time::{Duration, Instant},
-    };
+    use std::{sync::OnceLock, time::Duration};
     use windows::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::*,
     };
     static CALLBACK: OnceLock<Mutex<Option<CallbackSender>>> = OnceLock::new();
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
     fn now() -> u64 {
-        EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64
+        super::recorder_now_us()
     }
     unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 {
@@ -301,7 +347,7 @@ mod win32 {
     /// shutdown always unhooks both handles before returning and allowing the owner to join.
     pub struct WindowsHookLoop;
     impl HookLoopAdapter for WindowsHookLoop {
-        fn run(self, commands: mpsc::Receiver<HookCommand>, callback: CallbackSender) {
+        fn run(self, commands: mpsc::Receiver<HookCommandRequest>, callback: CallbackSender) {
             unsafe {
                 *CALLBACK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(callback.clone());
                 // HMODULE implements the windows crate's HINSTANCE parameter conversion.
@@ -312,8 +358,9 @@ mod win32 {
                 let mut mouse_hook = None;
                 let mut enabled = false;
                 'outer: loop {
-                    while let Ok(c) = commands.try_recv() {
-                        match c {
+                    while let Ok(request) = commands.try_recv() {
+                        let mut succeeded = true;
+                        match request.command {
                             HookCommand::Start => {
                                 if keyboard_hook.is_none() {
                                     keyboard_hook = SetWindowsHookExW(
@@ -326,11 +373,31 @@ mod win32 {
                                     mouse_hook =
                                         SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
                                 }
-                                enabled = true
+                                succeeded = keyboard_hook.is_some() && mouse_hook.is_some();
+                                enabled = succeeded;
+                                *CALLBACK.get().unwrap().lock().unwrap() =
+                                    succeeded.then(|| callback.clone());
                             }
-                            HookCommand::Pause | HookCommand::Stop => enabled = false,
-                            HookCommand::Resume => enabled = true,
-                            HookCommand::Shutdown => break 'outer,
+                            HookCommand::Pause | HookCommand::Stop => {
+                                enabled = false;
+                                *CALLBACK.get().unwrap().lock().unwrap() = None;
+                            }
+                            HookCommand::Resume => {
+                                succeeded = keyboard_hook.is_some() && mouse_hook.is_some();
+                                enabled = succeeded;
+                                *CALLBACK.get().unwrap().lock().unwrap() =
+                                    succeeded.then(|| callback.clone());
+                            }
+                            HookCommand::Fence => {}
+                            HookCommand::Shutdown => {
+                                enabled = false;
+                                *CALLBACK.get().unwrap().lock().unwrap() = None;
+                            }
+                        }
+                        let shutdown = request.command == HookCommand::Shutdown;
+                        request.acknowledge(succeeded);
+                        if shutdown {
+                            break 'outer;
                         }
                     }
                     if !enabled {
@@ -369,10 +436,11 @@ mod tests {
         event: HookEvent,
     }
     impl HookLoopAdapter for Fake {
-        fn run(self, rx: mpsc::Receiver<HookCommand>, cb: CallbackSender) {
+        fn run(self, rx: mpsc::Receiver<HookCommandRequest>, cb: CallbackSender) {
             let mut active = false;
-            while let Ok(c) = rx.recv() {
-                match c {
+            while let Ok(request) = rx.recv() {
+                let shutdown = request.command == HookCommand::Shutdown;
+                match request.command {
                     HookCommand::Start => {
                         active = true;
                         cb.submit(self.event);
@@ -384,9 +452,13 @@ mod tests {
                             active = false;
                         }
                         self.unhooked.fetch_add(1, Ordering::SeqCst);
-                        break;
                     }
+                    HookCommand::Fence => {}
                     _ => {}
+                }
+                request.acknowledge(true);
+                if shutdown {
+                    break;
                 }
             }
             let _ = active;

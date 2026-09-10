@@ -1,7 +1,7 @@
 //! Production input synthesis. This is intentionally independent of legacy `actions::keys`.
 use super::{
     DiagnosticKind, ExecResult, ExecutionDiagnostic, InputBackend, MkKey, MkMouseButton,
-    MkMouseScrollAxis, MkPoint, MkTextMode, MkTextPayload,
+    MkMouseScrollAxis, MkPoint, MkTextMode, MkTextPayload, windows_key_metadata,
 };
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,13 @@ impl<S: InputSink> Win32InputBackend<S> {
         }
     }
     fn key_event(&self, key: &MkKey, up: bool) -> ExecResult {
-        let (vk, scan, extended) = key_metadata(key)?;
+        let metadata = windows_key_metadata(key).ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "key has no Windows virtual-key representation",
+            )
+        })?;
+        let (vk, scan, extended) = (metadata.virtual_key, metadata.scan_code, metadata.extended);
         let mut flags = if up { KEYEVENTF_KEYUP_ } else { 0 };
         if scan != 0 {
             flags |= KEYEVENTF_SCANCODE_
@@ -167,61 +173,6 @@ impl<S: InputSink> Win32InputBackend<S> {
             extra: MKMACRO_EXTRA_INFO,
         }])
     }
-}
-fn key_metadata(k: &MkKey) -> ExecResult<(u16, u16, bool)> {
-    let v = match k {
-        MkKey::Character(s) if s.len() == 1 => s.as_bytes()[0].to_ascii_uppercase() as u16,
-        MkKey::Enter => 0x0D,
-        MkKey::Tab => 9,
-        MkKey::Escape => 0x1B,
-        MkKey::Space => 0x20,
-        MkKey::Backspace => 8,
-        MkKey::Delete => 0x2E,
-        MkKey::Up => 0x26,
-        MkKey::Down => 0x28,
-        MkKey::Left => 0x25,
-        MkKey::Right => 0x27,
-        MkKey::Home => 0x24,
-        MkKey::End => 0x23,
-        MkKey::PageUp => 0x21,
-        MkKey::PageDown => 0x22,
-        MkKey::Control => 0x11,
-        MkKey::LeftControl => 0xA2,
-        MkKey::RightControl => 0xA3,
-        MkKey::Alt => 0x12,
-        MkKey::LeftAlt => 0xA4,
-        MkKey::RightAlt => 0xA5,
-        MkKey::Shift => 0x10,
-        MkKey::LeftShift => 0xA0,
-        MkKey::RightShift => 0xA1,
-        MkKey::Meta | MkKey::LeftMeta => 0x5B,
-        MkKey::RightMeta => 0x5C,
-        MkKey::Function(n @ 1..=24) => 0x6F + *n as u16,
-        _ => {
-            return Err(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidTarget,
-                "key has no virtual-key representation",
-            ));
-        }
-    };
-    let ext = matches!(
-        k,
-        MkKey::Delete
-            | MkKey::Up
-            | MkKey::Down
-            | MkKey::Left
-            | MkKey::Right
-            | MkKey::Home
-            | MkKey::End
-            | MkKey::PageUp
-            | MkKey::PageDown
-            | MkKey::Meta
-            | MkKey::LeftMeta
-            | MkKey::RightMeta
-            | MkKey::RightControl
-            | MkKey::RightAlt
-    );
-    Ok((v, 0, ext))
 }
 impl<S: InputSink> InputBackend for Win32InputBackend<S> {
     fn escape_pressed(&self) -> bool {

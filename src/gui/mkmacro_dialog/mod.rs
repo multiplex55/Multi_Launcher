@@ -41,7 +41,8 @@ pub mod window_picker;
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
     DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroFolder, MkMacroStore,
-    MkWindowMatcher, NormalizationConfig, RecordedStep, repair_ids, validate_document,
+    MkRecorderSettings, MkWindowMatcher, NormalizationConfig, RecordedStep, repair_ids,
+    validate_document,
 };
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -125,7 +126,7 @@ pub struct MkMacroDialog {
     pub command_error: Option<String>,
     ui_notices: VecDeque<String>,
     /// Editable options are copied into the runtime at Start and never mutate an active session.
-    pub recorder_options: NormalizationConfig,
+    pub recorder_options: MkRecorderSettings,
     /// Kept when the target was deleted so the user can restore it without losing captured data.
     pub pending_recording: Option<(u64, Vec<RecordedStep>)>,
     /// Process-local read-only runtime presentation state. None of these fields
@@ -3894,6 +3895,7 @@ impl MkMacroDialog {
         // The dialog is the sole production ownership boundary for the native
         // visual-overlay worker; every authoring surface receives a clone.
         let visual_overlay = SharedVisualOverlayController::new_dialog_owner();
+        let recorder_options = baseline.settings.recorder.clone();
         Self {
             open: false,
             draft: (*baseline).clone(),
@@ -3935,7 +3937,7 @@ impl MkMacroDialog {
             launcher_action_picker: Default::default(),
             command_error: None,
             ui_notices: VecDeque::new(),
-            recorder_options: Default::default(),
+            recorder_options,
             pending_recording: None,
             runtime_inspector_open: false,
             runtime_inspector_show_internal: false,
@@ -3951,8 +3953,10 @@ impl MkMacroDialog {
         self.sync_external();
         self.refresh_environment();
         self.open = true;
-        crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
-        crate::mkmacro::runtime::set_recording_options(self.recorder_options.clone());
+        self.publish_recording_target();
+        crate::mkmacro::runtime::set_recording_options(NormalizationConfig::from(
+            &self.recorder_options,
+        ));
     }
 
     pub fn take_ui_notice(&mut self) -> Option<String> {
@@ -3977,6 +3981,7 @@ impl MkMacroDialog {
                 self.conflict = true;
             } else {
                 self.draft = (*current).clone();
+                self.recorder_options = self.draft.settings.recorder.clone();
                 self.record_draft_revision();
                 self.baseline = current;
                 self.cancel_folder_operations();
@@ -4364,7 +4369,21 @@ impl MkMacroDialog {
             self.navigation.focus_table = false;
         }
         self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
-        crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
+        self.publish_recording_target();
+    }
+    pub(crate) fn recording_target(&self) -> Option<crate::mkmacro::RecordingTarget> {
+        let macro_id = self.selected_macro_id?;
+        let insertion_anchor_step_id = self.selection.primary.filter(|step_id| {
+            self.selected_macro()
+                .is_some_and(|m| m.steps.iter().any(|step| step.id == *step_id))
+        });
+        Some(crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id,
+        })
+    }
+    fn publish_recording_target(&self) {
+        crate::mkmacro::runtime::set_recording_target_with_anchor(self.recording_target());
     }
     pub fn selected_macro_mut(&mut self) -> Option<&mut MkMacro> {
         let id = self.selected_macro_id?;
@@ -4667,6 +4686,7 @@ impl MkMacroDialog {
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         search::shortcuts(ui.ctx(), self);
+        self.publish_recording_target();
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         for result in crate::mkmacro::runtime::take_pending_recordings() {
             if self
