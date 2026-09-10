@@ -16,6 +16,8 @@ use super::{
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
+#[cfg(test)]
+use std::time::{Duration, Instant};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -340,6 +342,8 @@ struct Shared {
     operations: Arc<SharedOperationGuard>,
     #[cfg(test)]
     test_events: Mutex<Vec<ExecutionEvent>>,
+    #[cfg(test)]
+    test_worker_barrier: Mutex<Option<Arc<TestWorkerBarrierInner>>>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ActiveAdmission {
@@ -362,6 +366,49 @@ pub struct MacroRuntime {
     worker: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
     test_commands: Mutex<Vec<RuntimeCommand>>,
+}
+
+#[cfg(test)]
+struct TestWorkerBarrierInner {
+    state: Mutex<(bool, bool)>,
+    wake: Condvar,
+}
+
+#[cfg(test)]
+pub(crate) struct TestWorkerBarrier(Arc<TestWorkerBarrierInner>);
+
+#[cfg(test)]
+impl TestWorkerBarrier {
+    pub(crate) fn wait_until_blocked(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut state = self.0.state.lock().unwrap();
+        while !state.0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "runtime worker did not reach test barrier"
+            );
+            let (next, timeout) = self.0.wake.wait_timeout(state, remaining).unwrap();
+            state = next;
+            assert!(
+                !timeout.timed_out() || state.0,
+                "runtime worker did not reach test barrier"
+            );
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        state.1 = true;
+        self.0.wake.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestWorkerBarrier {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 impl MacroRuntime {
     fn ensure_available(&self) -> ExecResult {
@@ -502,6 +549,8 @@ impl MacroRuntime {
             operations,
             #[cfg(test)]
             test_events: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            test_worker_barrier: Mutex::new(None),
         });
         let s = shared.clone();
         let worker_store = store.clone();
@@ -713,6 +762,20 @@ impl MacroRuntime {
     #[cfg(test)]
     pub(crate) fn take_test_events(&self) -> Vec<ExecutionEvent> {
         std::mem::take(&mut *self.shared.test_events.lock().unwrap())
+    }
+    #[cfg(test)]
+    pub(crate) fn install_test_worker_barrier(&self) -> TestWorkerBarrier {
+        let barrier = Arc::new(TestWorkerBarrierInner {
+            state: Mutex::new((false, false)),
+            wake: Condvar::new(),
+        });
+        let mut slot = self.shared.test_worker_barrier.lock().unwrap();
+        assert!(
+            slot.is_none(),
+            "runtime test worker barrier is already installed"
+        );
+        *slot = Some(barrier.clone());
+        TestWorkerBarrier(barrier)
     }
     pub fn shutdown(&self) {
         {
@@ -1050,6 +1113,15 @@ fn worker_loop(
             RuntimeCommand::Pause | RuntimeCommand::Resume | RuntimeCommand::Stop => {}
             command => {
                 let request = run_request(&command).expect("run commands are classified");
+                #[cfg(test)]
+                if let Some(barrier) = shared.test_worker_barrier.lock().unwrap().take() {
+                    let mut state = barrier.state.lock().unwrap();
+                    state.0 = true;
+                    barrier.wake.notify_all();
+                    while !state.1 {
+                        state = barrier.wake.wait(state).unwrap();
+                    }
+                }
                 run_one(&store, &backends, &shared, request, program, origin)
             }
         }
@@ -1842,12 +1914,65 @@ mod run_mode_tests {
     use super::*;
     use crate::mkmacro::prompt::{PromptBackend, PromptRequest, PromptResponse};
     use crate::mkmacro::{
-        MkAction, MkCondition, MkCoordinateTarget, MkDelayPayload, MkMacro, MkMacroDocument,
-        MkMouseButton, MkMouseMovePayload, MkMousePayload, MkPoint, MkPromptInputPayload, MkStep,
-        MkTextMode, MkTextPayload, MkValue, executor::fake::FakeBackend,
+        MKMACROS_FILE, MkAction, MkCondition, MkCoordinateTarget, MkDelayPayload, MkKey, MkMacro,
+        MkMacroDocument, MkMouseButton, MkMouseMovePayload, MkMousePayload, MkPoint,
+        MkPromptInputPayload, MkStep, MkTextMode, MkTextPayload, MkValue,
+        executor::fake::FakeBackend,
     };
+    use std::fs;
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
+
+    struct AckHookLoop;
+    impl crate::mkmacro::HookLoopAdapter for AckHookLoop {
+        fn run(
+            self,
+            commands: std::sync::mpsc::Receiver<crate::mkmacro::HookCommandRequest>,
+            _callback: crate::mkmacro::CallbackSender,
+        ) {
+            while let Ok(request) = commands.recv() {
+                let shutdown = request.command == crate::mkmacro::HookCommand::Shutdown;
+                request.acknowledge(true);
+                if shutdown {
+                    break;
+                }
+            }
+        }
+    }
+
+    struct NoTextTranslator;
+    impl crate::mkmacro::KeyboardTranslator for NoTextTranslator {
+        fn translate(
+            &mut self,
+            _request: &crate::mkmacro::KeyboardTranslationRequest,
+        ) -> crate::mkmacro::KeyTranslation {
+            crate::mkmacro::KeyTranslation::None
+        }
+    }
+
+    struct NoContextEnricher;
+    impl crate::mkmacro::EventEnricher for NoContextEnricher {
+        fn enrich(
+            &mut self,
+            _event: &crate::mkmacro::HookEvent,
+        ) -> Option<crate::mkmacro::EventContext> {
+            None
+        }
+    }
+
+    struct FixedRecorderClock;
+    impl crate::mkmacro::RecorderClock for FixedRecorderClock {
+        fn now_us(&self) -> u64 {
+            1
+        }
+    }
+
+    fn empty_recorder_observer() -> crate::mkmacro::RecorderObserverSession {
+        crate::mkmacro::RecorderObserverSession::with_parts(
+            crate::mkmacro::ObservationBaseline::default(),
+            crate::mkmacro::AuxiliaryObservationWorker::spawn(None, None),
+        )
+    }
 
     fn step(id: u64, action: MkAction) -> MkStep {
         MkStep {
@@ -3967,6 +4092,299 @@ mod run_mode_tests {
             RuntimeOrigin::RecordingPreview { ticket: 42 }
         );
         assert_eq!(stopped.state, RuntimeState::Stopped);
+    }
+
+    #[test]
+    fn preview_executes_the_ephemeral_program_without_publishing_it() {
+        let stored = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "stored".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+        let preview = test_macro(
+            1,
+            true,
+            vec![
+                step(
+                    10,
+                    MkAction::Text(MkTextPayload {
+                        text: "preview A".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+                step(
+                    20,
+                    MkAction::Text(MkTextPayload {
+                        text: "preview B".into(),
+                        mode: MkTextMode::Type,
+                    }),
+                ),
+            ],
+        );
+        let document = MkMacroDocument {
+            macros: vec![preview],
+            ..Default::default()
+        };
+        let (dir, runtime, _guard, fake) = runtime_with_effects(vec![stored.clone()]);
+        let persisted_before = runtime.store.snapshot();
+        let macro_file = dir.path().join(MKMACROS_FILE);
+        let bytes_before = fs::read(&macro_file).unwrap();
+
+        runtime.preview(&document, 1, 81).unwrap();
+        let completed = wait_for_terminal(&runtime);
+
+        assert_eq!(completed.state, RuntimeState::Completed);
+        assert_eq!(
+            completed.origin,
+            RuntimeOrigin::RecordingPreview { ticket: 81 }
+        );
+        assert_eq!(fake.events(), ["text:preview A", "text:preview B"]);
+        assert_eq!(runtime.store.snapshot(), persisted_before);
+        assert_eq!(runtime.store.snapshot().macros[0], stored);
+        assert_eq!(fs::read(macro_file).unwrap(), bytes_before);
+    }
+
+    #[test]
+    fn stopping_preview_releases_owned_keyboard_and_mouse_input() {
+        let target = test_macro(
+            1,
+            true,
+            vec![
+                step(1, MkAction::KeyDown(MkKey::Control)),
+                step(2, MkAction::MouseDown(MkMouseButton::Left)),
+                step(
+                    3,
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 60_000,
+                        ..Default::default()
+                    }),
+                ),
+            ],
+        );
+        let document = MkMacroDocument {
+            macros: vec![target.clone()],
+            ..Default::default()
+        };
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+        runtime.preview(&document, 1, 82).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fake.events().len() < 2 {
+            assert!(Instant::now() < deadline, "preview did not acquire input");
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(runtime.stop_recording_preview(82));
+        let stopped = wait_for_terminal(&runtime);
+
+        assert_eq!(stopped.state, RuntimeState::Stopped);
+        assert_eq!(
+            fake.events(),
+            [
+                "key_down:Control",
+                "button_down:Left",
+                "button_up:Left",
+                "key_up:Control"
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_admission_conflicts_with_recording_and_stored_playback_both_ways() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let document = MkMacroDocument {
+            macros: vec![target.clone()],
+            ..Default::default()
+        };
+        let (_dir, runtime, guard) = runtime_with(vec![target]);
+
+        assert!(guard.claim(Operation::Recording));
+        assert!(matches!(
+            runtime.preview(&document, 1, 90),
+            Err(ExecutionDiagnostic {
+                kind: DiagnosticKind::InvalidTarget,
+                ..
+            })
+        ));
+        guard.release(Operation::Recording);
+
+        runtime.preview(&document, 1, 91).unwrap();
+        assert!(matches!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::AlreadyRunning { active_macro_id: 1 }
+        ));
+        assert!(runtime.stop_recording_preview(91));
+        let preview = wait_for_terminal(&runtime);
+        wait_for_admission_release(&runtime);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let running = wait_for_state(&runtime, RuntimeState::Running);
+        assert!(running.run_id > preview.run_id);
+        assert!(matches!(
+            runtime.preview(&document, 1, 92),
+            Err(ExecutionDiagnostic {
+                kind: DiagnosticKind::RuntimeUnavailable,
+                ..
+            })
+        ));
+        assert!(!runtime.stop_recording_preview(91));
+        assert_eq!(runtime.snapshot().state, RuntimeState::Running);
+        assert_eq!(
+            runtime.command(RuntimeCommand::Stop),
+            CommandResult::Accepted
+        );
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Stopped);
+    }
+
+    #[test]
+    fn admitted_preview_blocks_real_recorder_until_exact_ticket_stop_releases_guard() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let document = MkMacroDocument {
+            macros: vec![target.clone()],
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+        store
+            .save(MkMacroDocument {
+                macros: vec![target],
+                ..Default::default()
+            })
+            .unwrap();
+        let store = Arc::new(store);
+        let guard = Arc::new(SharedOperationGuard::default());
+        let runtime = MacroRuntime::with_guard(
+            store.clone(),
+            Arc::new(FakeBackend::default()).backends(),
+            guard.clone(),
+        );
+        let recorder = RecorderRuntime::with_guard_and_components(
+            store,
+            crate::mkmacro::HookService::with_adapter(AckHookLoop, 8),
+            Arc::new(FixedRecorderClock),
+            guard,
+            Box::new(NoTextTranslator),
+            Arc::new(empty_recorder_observer),
+            Box::new(NoContextEnricher),
+        );
+        let barrier = runtime.install_test_worker_barrier();
+
+        runtime.preview(&document, 1, 94).unwrap();
+        barrier.wait_until_blocked();
+        let error = recorder
+            .start_target(
+                RecordingTarget {
+                    macro_id: 1,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                NormalizationConfig::default(),
+                Vec::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("playback is active"));
+
+        assert!(runtime.stop_recording_preview(94));
+        barrier.release();
+        assert_eq!(wait_for_terminal(&runtime).state, RuntimeState::Stopped);
+        wait_for_admission_release(&runtime);
+        recorder
+            .start_target(
+                RecordingTarget {
+                    macro_id: 1,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                NormalizationConfig::default(),
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(recorder.stop().unwrap().target.macro_id, 1);
+    }
+
+    #[test]
+    fn failed_preview_retains_diagnostic_for_its_exact_ticket() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "fail preview".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+        let document = MkMacroDocument {
+            macros: vec![target.clone()],
+            ..Default::default()
+        };
+        let (_dir, runtime, _guard, fake) = runtime_with_effects(vec![target]);
+        let expected = ExecutionDiagnostic::new(DiagnosticKind::Backend, "preview failed")
+            .context("operation", "recording preview")
+            .context("ticket", "93");
+        fake.fail("text:fail preview", expected.clone());
+
+        runtime.preview(&document, 1, 93).unwrap();
+        let failed = wait_for_terminal(&runtime);
+        let (active, retained) = runtime.recording_preview_status(93);
+
+        assert_eq!(failed.state, RuntimeState::Failed);
+        assert_eq!(
+            failed.origin,
+            RuntimeOrigin::RecordingPreview { ticket: 93 }
+        );
+        let failure = failed.latest_failure.as_ref().unwrap();
+        assert_eq!(failure.kind, DiagnosticKind::Backend);
+        assert_eq!(failure.message, "preview failed");
+        for (key, value) in [
+            ("attempt", "1"),
+            ("attempts_exhausted", "true"),
+            ("backend_operation", "SendInput"),
+            ("operation", "recording preview"),
+            ("origin_macro_id", "1"),
+            ("origin_step_id", "1"),
+            ("step", "1"),
+            ("step_id", "1"),
+            ("ticket", "93"),
+        ] {
+            assert_eq!(failure.context.get(key).map(String::as_str), Some(value));
+        }
+        assert!(!active);
+        let retained = retained.unwrap();
+        assert_eq!(retained.run_id, failed.run_id);
+        assert_eq!(retained.latest_failure, failed.latest_failure);
+        let (wrong_active, wrong_snapshot) = runtime.recording_preview_status(92);
+        assert!(!wrong_active);
+        assert!(wrong_snapshot.is_none());
     }
 }
 

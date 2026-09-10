@@ -548,13 +548,13 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     let mut stop_preview = false;
     let review_editor_open = dialog.action_editor.review_editing_id().is_some();
     let apply_blocker = dialog.recording_review_apply_blocker();
-    let runtime = crate::mkmacro::runtime::snapshot();
+    let runtime = dialog.recording_preview_runtime_snapshot();
     let preview_ticket = dialog
         .recording_review
         .as_ref()
         .and_then(|review| review.preview_ticket);
     let (preview_active, preview_snapshot) = preview_ticket.map_or((false, None), |ticket| {
-        crate::mkmacro::runtime::recording_preview_status(ticket)
+        dialog.recording_preview_status(ticket)
     });
     if let (Some(review), Some(snapshot)) = (
         dialog.recording_review.as_mut(),
@@ -1080,8 +1080,9 @@ mod tests {
         MkUiControlType, MkUiSelector, ObservationBaseline, RecordedAction, RecordedStep,
         RecordingNote, RecordingProvenance, RecordingSuggestionKind, SensitiveClipboardText,
         SuggestionConfidence, UiElementInfo, WindowContext, WindowObservation,
-        WindowObservationKind,
+        WindowObservationKind, executor::fake::FakeBackend,
     };
+    use std::{sync::Arc, time::Instant};
 
     fn planned(id: u64, source: usize) -> PlannedStep {
         PlannedStep {
@@ -1115,6 +1116,49 @@ mod tests {
         }
     }
 
+    fn execute_preview_plan(plan: &RecordingPlan, ticket: u64) -> Vec<String> {
+        let target = crate::mkmacro::MkMacro {
+            id: 7,
+            name: "preview".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            signature: Default::default(),
+            steps: crate::mkmacro::materialize_plan(plan, 0),
+        };
+        let document = crate::mkmacro::MkMacroDocument {
+            macros: vec![target],
+            ..Default::default()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(directory.path()).unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        let runtime = crate::mkmacro::MacroRuntime::new(Arc::new(store), fake.clone().backends());
+        runtime.preview(&document, 7, ticket).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = runtime.snapshot();
+            if matches!(
+                snapshot.state,
+                crate::mkmacro::RuntimeState::Completed
+                    | crate::mkmacro::RuntimeState::Failed
+                    | crate::mkmacro::RuntimeState::Stopped
+            ) {
+                assert_eq!(snapshot.state, crate::mkmacro::RuntimeState::Completed);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "recording preview did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        fake.events()
+    }
+
     #[test]
     fn selected_preview_spans_first_through_last_selected_row() {
         let mut recording = result();
@@ -1144,6 +1188,73 @@ mod tests {
             all_sources[1..=3]
         );
         assert_eq!(review.preview_plan(false).unwrap().steps.len(), 5);
+    }
+
+    #[test]
+    fn selected_preview_executes_the_contiguous_min_through_max_range() {
+        let mut recording = result();
+        recording.suggestions.clear();
+        recording.plan.steps = ["zero", "one", "two", "three", "four"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| PlannedStep {
+                action: MkAction::Text(crate::mkmacro::MkTextPayload {
+                    text: text.into(),
+                    mode: crate::mkmacro::MkTextMode::Type,
+                }),
+                ..planned(index as u64 + 1, index)
+            })
+            .collect();
+        let mut review = RecordingReviewSession::new(recording);
+        let ids: Vec<_> = review
+            .proposed_steps()
+            .iter()
+            .map(|step| step.review_id)
+            .collect();
+        review.select(ids[1], false, false);
+        review.select(ids[3], true, false);
+        let preview_plan = review.preview_plan(true).unwrap();
+        assert_eq!(
+            execute_preview_plan(&preview_plan, 501),
+            ["text:one", "text:two", "text:three"]
+        );
+        assert_eq!(
+            execute_preview_plan(&review.preview_plan(false).unwrap(), 502),
+            [
+                "text:zero",
+                "text:one",
+                "text:two",
+                "text:three",
+                "text:four"
+            ]
+        );
+    }
+
+    #[test]
+    fn review_observes_diagnostics_only_for_its_exact_preview_ticket() {
+        let mut review = RecordingReviewSession::new(result());
+        review.preview_ticket = Some(701);
+        let diagnostic = crate::mkmacro::ExecutionDiagnostic::new(
+            crate::mkmacro::DiagnosticKind::Backend,
+            "preview failed",
+        );
+        let snapshot = |ticket| crate::mkmacro::RuntimeSnapshot {
+            state: crate::mkmacro::RuntimeState::Failed,
+            origin: crate::mkmacro::RuntimeOrigin::RecordingPreview { ticket },
+            latest_failure: Some(diagnostic.clone()),
+            ..Default::default()
+        };
+
+        review.observe_preview(&snapshot(700));
+        assert!(review.preview_state.is_none());
+        assert!(review.preview_diagnostic.is_none());
+
+        review.observe_preview(&snapshot(701));
+        assert_eq!(
+            review.preview_state,
+            Some(crate::mkmacro::RuntimeState::Failed)
+        );
+        assert_eq!(review.preview_diagnostic, Some(diagnostic));
     }
 
     fn result() -> RecordingResult {

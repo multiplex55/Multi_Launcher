@@ -185,8 +185,13 @@ including confidence defaults, immutable raw/cleaned baselines and cached statis
 multi-select/edit/trim/delete undo-redo, Reconfigure restoration, draft/store-neutral cancellation,
 fresh insertion IDs, cross-macro captured-target ownership, real Freeze Paste terminal privacy,
 deleted-anchor/macro recovery, and stale document undo/redo blocking. `cargo check --tests`,
-formatting, and diff checks pass. Remaining preview
-coverage stays pending in a later ordered M7 batch.
+formatting, and diff checks pass. Preview coverage is green (12 focused MkMacro cases), including
+fake-backend Play All and selected-range effects, draft/store-neutral ephemeral execution, held
+keyboard/mouse cleanup, real RecorderRuntime and stored-playback admission on the shared guard,
+stale-ticket Stop isolation, byte-exact backing-file stability, exact diagnostic message/context,
+deterministic pre-publication Apply/Cancel/close cleanup through an injected non-global test runtime,
+and fast terminal retention. `cargo check --tests`, formatting, and diff checks pass. M7 coverage
+groups are implemented; broader consolidated verification remains in M8.
 
 Depends on: M1-M6 production integration.
 

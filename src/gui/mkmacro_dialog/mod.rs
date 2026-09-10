@@ -223,6 +223,10 @@ pub struct MkMacroDialog {
     pub annotation_pause_owned: bool,
     /// Process-local capture review. It never participates in draft dirty tracking or persistence.
     pub recording_review: Option<recording_review::RecordingReviewSession>,
+    #[cfg(test)]
+    recording_preview_test_facade: Option<RecordingPreviewTestFacade>,
+    #[cfg(test)]
+    next_recording_preview_test_ticket: u64,
     queued_recording_reviews: VecDeque<recording_review::RecordingReviewSession>,
     recording_insert_undo: Vec<RecordingInsertTransaction>,
     recording_insert_redo: Vec<RecordingInsertTransaction>,
@@ -239,6 +243,12 @@ pub struct MkMacroDialog {
     runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
     runtime_inspector_active_breakpoint: Option<crate::mkmacro::BreakpointOccurrence>,
     package_ui: package_ui::PackageUiState,
+}
+
+#[cfg(test)]
+struct RecordingPreviewTestFacade {
+    runtime: Arc<crate::mkmacro::MacroRuntime>,
+    recorder_state: crate::mkmacro::RecorderRuntimeState,
 }
 
 #[derive(Debug, Clone)]
@@ -4439,6 +4449,109 @@ mod tests {
     }
 
     #[test]
+    fn preview_is_transient_and_review_terminal_actions_stop_the_owned_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let store = Arc::new(store);
+        let mut dialog = MkMacroDialog::new(store.clone());
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1)];
+        dialog.mark_dirty();
+        dialog.save().unwrap();
+        let fake = Arc::new(crate::mkmacro::executor::fake::FakeBackend::default());
+        let runtime = Arc::new(MacroRuntime::new(store.clone(), fake.clone().backends()));
+        dialog.set_recording_preview_runtime_for_test(runtime.clone());
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        let long_preview = || {
+            review_result(
+                target,
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                })],
+            )
+        };
+        let wait_for_state = |wanted, previous_run_id| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let snapshot = runtime.snapshot();
+                if snapshot.run_id > previous_run_id && snapshot.state == wanted {
+                    break snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "preview did not reach {wanted:?}: {snapshot:?}"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let draft_before = dialog.draft.clone();
+        let stored_before = store.snapshot();
+
+        dialog.open_recording_review(long_preview()).unwrap();
+        let previous = runtime.snapshot().run_id;
+        let barrier = runtime.install_test_worker_barrier();
+        let cancel_ticket = dialog.preview_recording_review(false).unwrap();
+        barrier.wait_until_blocked();
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(store.snapshot(), stored_before);
+        dialog.cancel_recording_review();
+        barrier.release();
+        let cancelled = wait_for_state(RuntimeState::Stopped, previous);
+        assert_eq!(
+            cancelled.origin,
+            crate::mkmacro::RuntimeOrigin::RecordingPreview {
+                ticket: cancel_ticket
+            }
+        );
+        assert!(fake.events().is_empty());
+
+        dialog.open_recording_review(long_preview()).unwrap();
+        let previous = cancelled.run_id;
+        let barrier = runtime.install_test_worker_barrier();
+        let apply_ticket = dialog.preview_recording_review(false).unwrap();
+        barrier.wait_until_blocked();
+        dialog.apply_recording_review().unwrap();
+        barrier.release();
+        let applied = wait_for_state(RuntimeState::Stopped, previous);
+        assert_eq!(
+            applied.origin,
+            crate::mkmacro::RuntimeOrigin::RecordingPreview {
+                ticket: apply_ticket
+            }
+        );
+        assert!(fake.events().is_empty());
+
+        dialog.open_recording_review(long_preview()).unwrap();
+        let previous = applied.run_id;
+        let barrier = runtime.install_test_worker_barrier();
+        let close_ticket = dialog.preview_recording_review(false).unwrap();
+        barrier.wait_until_blocked();
+        assert!(dialog.close_with_decision(DirtyDecision::Discard));
+        barrier.release();
+        let closed = wait_for_state(RuntimeState::Stopped, previous);
+        assert_eq!(
+            closed.origin,
+            crate::mkmacro::RuntimeOrigin::RecordingPreview {
+                ticket: close_ticket
+            }
+        );
+        assert!(fake.events().is_empty());
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(macro_id)),
+            crate::mkmacro::CommandResult::Accepted
+        );
+        let later = wait_for_state(RuntimeState::Completed, closed.run_id);
+        assert_eq!(later.origin, crate::mkmacro::RuntimeOrigin::Stored);
+    }
+
+    #[test]
     fn reused_anchor_id_blocks_apply_and_explicit_append_preserves_review() {
         let (_dir, mut dialog) = dialog();
         dialog.create_macro();
@@ -4693,6 +4806,10 @@ impl MkMacroDialog {
             recording_annotation_text: String::new(),
             annotation_pause_owned: false,
             recording_review: None,
+            #[cfg(test)]
+            recording_preview_test_facade: None,
+            #[cfg(test)]
+            next_recording_preview_test_ticket: 1,
             queued_recording_reviews: VecDeque::new(),
             recording_insert_undo: Vec::new(),
             recording_insert_redo: Vec::new(),
@@ -5203,19 +5320,23 @@ impl MkMacroDialog {
         if self.action_editor.draft.is_some() || self.recording_annotation_open {
             anyhow::bail!("Close the active editor before previewing this recording");
         }
-        if crate::mkmacro::runtime::recorder_snapshot()
-            .is_some_and(|snapshot| snapshot.state != crate::mkmacro::RecorderRuntimeState::Idle)
+        if self
+            .recording_preview_recorder_state()
+            .is_some_and(|state| state != crate::mkmacro::RecorderRuntimeState::Idle)
         {
             anyhow::bail!("Stop recording before previewing");
         }
-        if crate::mkmacro::runtime::snapshot().is_some_and(|snapshot| {
-            matches!(
-                snapshot.state,
-                crate::mkmacro::RuntimeState::Running
-                    | crate::mkmacro::RuntimeState::Paused
-                    | crate::mkmacro::RuntimeState::Stopping
-            )
-        }) {
+        if self
+            .recording_preview_runtime_snapshot()
+            .is_some_and(|snapshot| {
+                matches!(
+                    snapshot.state,
+                    crate::mkmacro::RuntimeState::Running
+                        | crate::mkmacro::RuntimeState::Paused
+                        | crate::mkmacro::RuntimeState::Stopping
+                )
+            })
+        {
             anyhow::bail!("Another playback operation is active");
         }
         let (target, plan) = {
@@ -5236,7 +5357,7 @@ impl MkMacroDialog {
             review.message = None;
         }
         let document = build_recording_preview_document(&self.draft, target, &plan)?;
-        let ticket = crate::mkmacro::runtime::preview_document(&document, target.macro_id)?;
+        let ticket = self.submit_recording_preview(&document, target.macro_id)?;
         let review = self.recording_review.as_mut().unwrap();
         review.preview_ticket = Some(ticket);
         review.preview_state = Some(crate::mkmacro::RuntimeState::Running);
@@ -5250,8 +5371,69 @@ impl MkMacroDialog {
             .as_ref()
             .and_then(|review| review.preview_ticket)
         {
-            crate::mkmacro::runtime::stop_recording_preview(ticket);
+            self.stop_recording_preview(ticket);
         }
+    }
+
+    fn submit_recording_preview(
+        &mut self,
+        document: &MkMacroDocument,
+        macro_id: u64,
+    ) -> anyhow::Result<u64> {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            let ticket = self.next_recording_preview_test_ticket;
+            self.next_recording_preview_test_ticket = ticket.wrapping_add(1).max(1);
+            facade.runtime.preview(document, macro_id, ticket)?;
+            return Ok(ticket);
+        }
+        crate::mkmacro::runtime::preview_document(document, macro_id)
+    }
+
+    fn stop_recording_preview(&self, ticket: u64) -> bool {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return facade.runtime.stop_recording_preview(ticket);
+        }
+        crate::mkmacro::runtime::stop_recording_preview(ticket)
+    }
+
+    fn recording_preview_recorder_state(&self) -> Option<crate::mkmacro::RecorderRuntimeState> {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return Some(facade.recorder_state);
+        }
+        crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    fn recording_preview_runtime_snapshot(&self) -> Option<Arc<crate::mkmacro::RuntimeSnapshot>> {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return Some(facade.runtime.snapshot());
+        }
+        crate::mkmacro::runtime::snapshot()
+    }
+
+    fn recording_preview_status(
+        &self,
+        ticket: u64,
+    ) -> (bool, Option<Arc<crate::mkmacro::RuntimeSnapshot>>) {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return facade.runtime.recording_preview_status(ticket);
+        }
+        crate::mkmacro::runtime::recording_preview_status(ticket)
+    }
+
+    #[cfg(test)]
+    fn set_recording_preview_runtime_for_test(
+        &mut self,
+        runtime: Arc<crate::mkmacro::MacroRuntime>,
+    ) {
+        self.recording_preview_test_facade = Some(RecordingPreviewTestFacade {
+            runtime,
+            recorder_state: crate::mkmacro::RecorderRuntimeState::Idle,
+        });
     }
 
     /// Applies the complete reviewed proposal as one atomic document mutation.
