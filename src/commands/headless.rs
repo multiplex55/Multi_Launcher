@@ -241,7 +241,7 @@ fn execute_macro(command: MacroCommand) -> anyhow::Result<()> {
         MacroCommand::MkResume => crate::mkmacro::runtime::resume(),
         MacroCommand::MkStop => crate::mkmacro::runtime::stop(),
         MacroCommand::MkRecord => anyhow::bail!("recording requires a target macro"),
-        MacroCommand::MkRecordStop => crate::mkmacro::runtime::record_stop().map(|_| ()),
+        MacroCommand::MkRecordStop => crate::mkmacro::runtime::record_stop_for_review(),
         MacroCommand::Invalid { raw } => anyhow::bail!("invalid mkmacro action: {raw}"),
     }
 }

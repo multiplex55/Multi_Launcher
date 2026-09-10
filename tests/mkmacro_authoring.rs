@@ -714,9 +714,35 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     recorder.hook_command(HookCommand::Stop);
     assert_eq!(recorder.status.state, RecorderState::Stopped);
     let before = dialog.draft.clone();
-    assert!(dialog.apply_recording(u64::MAX, &recorded).is_err());
+    let recording_result = |macro_id| RecordingResult {
+        target: RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        },
+        literal_steps: recorded.clone(),
+        plan: build_literal_recording_plan(&recorded, false),
+        suggestions: vec![],
+        clipboard_observations: vec![],
+        click_inspections: vec![],
+        window_observations: vec![],
+        notes: vec![],
+        capture_duration: Duration::from_micros(3),
+        raw_event_count: 4,
+        dropped_event_count: 0,
+    };
+    dialog
+        .open_recording_review(recording_result(u64::MAX))
+        .unwrap();
+    assert!(dialog.apply_recording_review().is_err());
     assert_eq!(dialog.draft, before, "recorder failure is atomic");
-    let ids = dialog.apply_recording(id, &recorded).unwrap();
+    assert!(
+        dialog.recording_review.is_some(),
+        "failed Apply preserves Review"
+    );
+    dialog.cancel_recording_review();
+    dialog.open_recording_review(recording_result(id)).unwrap();
+    let ids = dialog.apply_recording_review().unwrap();
     let click = *ids.last().unwrap();
     let original = dialog
         .selected_macro()

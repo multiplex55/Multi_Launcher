@@ -43,8 +43,6 @@ impl Default for RecorderSnapshot {
 #[derive(Debug, Clone)]
 pub struct RecordingResult {
     pub target: RecordingTarget,
-    pub macro_id: u64,
-    pub generated_steps: Vec<super::RecordedStep>,
     pub literal_steps: Vec<super::RecordedStep>,
     pub plan: super::RecordingPlan,
     pub suggestions: Vec<super::RecordingSuggestion>,
@@ -52,6 +50,8 @@ pub struct RecordingResult {
     pub click_inspections: Vec<super::ClickInspection>,
     pub window_observations: Vec<super::WindowObservation>,
     pub notes: Vec<super::RecordingNote>,
+    pub capture_duration: Duration,
+    pub raw_event_count: u64,
     pub dropped_event_count: u64,
 }
 
@@ -194,6 +194,7 @@ impl RecorderRuntime {
             RecordingTarget {
                 macro_id,
                 insertion_anchor_step_id: None,
+                insertion_anchor_generation: None,
             },
             config,
             Vec::new(),
@@ -326,9 +327,21 @@ impl RecorderRuntime {
         if !self.hooks.stop() {
             return Err(anyhow!("failed to stop hook service"));
         }
+        // Capture duration ends with input capture, not after potentially slow
+        // observation/UIA worker finalization.
+        let stopped_us = self.clock.now_us();
         s.mode = RecorderRuntimeState::Stopping;
         self.publish(&s);
         let processed = self.processor.finish(self.hooks.fence(), occurrence);
+        let capture_duration = Duration::from_micros(
+            stopped_us
+                .saturating_sub(s.started_us)
+                .saturating_sub(s.paused_us)
+                .saturating_sub(
+                    s.pause_started_us
+                        .map_or(0, |paused| stopped_us.saturating_sub(paused)),
+                ),
+        );
         let dropped = self
             .hooks
             .dropped_events()
@@ -341,8 +354,6 @@ impl RecorderRuntime {
         let p = processed?;
         Ok(RecordingResult {
             target: p.target,
-            macro_id: p.target.macro_id,
-            generated_steps: p.generated_steps,
             literal_steps: p.literal_steps,
             plan: p.plan,
             suggestions: p.suggestions,
@@ -350,6 +361,8 @@ impl RecorderRuntime {
             click_inspections: p.click_inspections,
             window_observations: p.window_observations,
             notes: p.notes,
+            capture_duration,
+            raw_event_count: p.raw_event_count,
             dropped_event_count: dropped,
         })
     }

@@ -1287,6 +1287,14 @@ pub fn record_stop() -> Result<RecordingResult> {
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
         .stop()
 }
+/// Stops capture and transfers ownership to the GUI's pending Review queue.
+/// Command/headless callers must use this path because they cannot directly
+/// present or safely discard the returned transient recording.
+pub fn record_stop_for_review() -> Result<()> {
+    let result = record_stop()?;
+    PENDING_RECORDINGS.lock().unwrap().push(result);
+    Ok(())
+}
 pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
     RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
 }
@@ -1294,6 +1302,7 @@ pub fn set_recording_target(target: Option<u64>) {
     set_recording_target_with_anchor(target.map(|macro_id| RecordingTarget {
         macro_id,
         insertion_anchor_step_id: None,
+        insertion_anchor_generation: None,
     }));
 }
 pub fn set_recording_target_with_anchor(target: Option<RecordingTarget>) {
@@ -3764,8 +3773,8 @@ mod recording_controller_tests {
         toggle_recording();
         let results = take_pending_recordings();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].macro_id, 2);
-        assert!(results[0].generated_steps.is_empty());
+        assert_eq!(results[0].target.macro_id, 2);
+        assert!(results[0].plan.steps.is_empty());
     }
 }
 

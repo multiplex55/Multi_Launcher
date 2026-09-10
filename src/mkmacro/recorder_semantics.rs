@@ -15,7 +15,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReviewStepId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +42,11 @@ pub struct PlannedStep {
     pub source: RecordingSourceSpan,
     pub provenance: RecordingProvenance,
     pub action: MkAction,
+    pub enabled: bool,
+    pub breakpoint: bool,
     pub delay_after_ms: u64,
     pub repeat: u32,
+    pub on_error: MkErrorPolicy,
     pub metadata: super::MkStepMetadata,
 }
 
@@ -437,8 +440,11 @@ fn make_step(
         source: RecordingSourceSpan { first, last },
         provenance,
         action,
+        enabled: true,
+        breakpoint: false,
         delay_after_ms,
         repeat: repeat.max(1),
+        on_error: MkErrorPolicy::Stop,
         metadata: Default::default(),
     }
 }
@@ -791,11 +797,11 @@ pub fn materialize_plan(plan: &RecordingPlan, mut next_id: u64) -> Vec<MkStep> {
             next_id += 1;
             MkStep {
                 id: next_id,
-                enabled: true,
-                breakpoint: false,
+                enabled: step.enabled,
+                breakpoint: step.breakpoint,
                 repeat: step.repeat,
                 delay_after_ms: step.delay_after_ms,
-                on_error: MkErrorPolicy::Stop,
+                on_error: step.on_error.clone(),
                 metadata: step.metadata.clone(),
                 action: step.action.clone(),
             }

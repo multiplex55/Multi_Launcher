@@ -20,6 +20,9 @@ use std::{
 pub struct RecordingTarget {
     pub macro_id: u64,
     pub insertion_anchor_step_id: Option<u64>,
+    /// Process-local step-instance generation captured by the authoring dialog.
+    /// It distinguishes a surviving row from a delete/recreate that reuses its ID.
+    pub insertion_anchor_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -33,13 +36,12 @@ pub struct ProcessorResult {
     pub target: RecordingTarget,
     pub literal_steps: Vec<RecordedStep>,
     pub plan: RecordingPlan,
-    /// Compatibility input for the pre-review UI. New code should consume `plan`.
-    pub generated_steps: Vec<RecordedStep>,
     pub suggestions: Vec<RecordingSuggestion>,
     pub clipboard_observations: Vec<ClipboardObservation>,
     pub click_inspections: Vec<ClickInspection>,
     pub window_observations: Vec<WindowObservation>,
     pub notes: Vec<RecordingNote>,
+    pub raw_event_count: u64,
 }
 
 enum Command {
@@ -773,7 +775,6 @@ fn worker_loop(
                         publish(&snapshot, None);
                         ProcessorResult {
                             target: s.target,
-                            generated_steps: literal_steps.clone(),
                             literal_steps,
                             plan,
                             suggestions,
@@ -781,6 +782,11 @@ fn worker_loop(
                             click_inspections: s.observations.inspections,
                             window_observations: s.observations.windows,
                             notes,
+                            raw_event_count: s
+                                .raw
+                                .iter()
+                                .filter(|boundary| matches!(boundary, RecordingBoundary::Event(..)))
+                                .count() as u64,
                         }
                     });
                 let _ = reply.send(result);
@@ -893,6 +899,7 @@ mod tests {
             target: RecordingTarget {
                 macro_id: 1,
                 insertion_anchor_step_id: Some(9),
+                insertion_anchor_generation: None,
             },
             config: NormalizationConfig::default(),
             raw: Vec::new(),

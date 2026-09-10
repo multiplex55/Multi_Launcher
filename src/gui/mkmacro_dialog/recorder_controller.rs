@@ -1,7 +1,5 @@
 //! Recorder orchestration and optional floating-controller boundary.
-use crate::mkmacro::{
-    HookCommand, MkMacroDocument, MkStep, RecordedStep, RuntimeSnapshot, to_macro_steps,
-};
+use crate::mkmacro::{HookCommand, RuntimeSnapshot};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,34 +46,10 @@ pub trait RecorderControllerView {
     fn exclude_from_capture(&mut self) {}
 }
 
-#[derive(Debug, Default)]
-pub struct DraftTransaction {
-    pub macro_id: u64,
-    pub inserted: Vec<MkStep>,
-}
-impl DraftTransaction {
-    pub fn apply(self, draft: &mut MkMacroDocument) -> Result<(), String> {
-        let m = draft
-            .macros
-            .iter_mut()
-            .find(|m| m.id == self.macro_id)
-            .ok_or("selected macro no longer exists")?;
-        m.steps.extend(self.inserted);
-        Ok(())
-    }
-    pub fn undo(&self, draft: &mut MkMacroDocument) {
-        if let Some(m) = draft.macros.iter_mut().find(|m| m.id == self.macro_id) {
-            let ids: std::collections::HashSet<_> = self.inserted.iter().map(|s| s.id).collect();
-            m.steps.retain(|s| !ids.contains(&s.id));
-        }
-    }
-}
-
 pub struct RecorderController<V: RecorderControllerView> {
     pub view: V,
     pub status: RecorderStatusSnapshot,
     pub show_floating: bool,
-    pub undo: Vec<DraftTransaction>,
 }
 impl<V: RecorderControllerView> RecorderController<V> {
     pub fn new(view: V) -> Self {
@@ -83,7 +57,6 @@ impl<V: RecorderControllerView> RecorderController<V> {
             view,
             status: Default::default(),
             show_floating: false,
-            undo: vec![],
         }
     }
     pub fn hook_command(&mut self, c: HookCommand) {
@@ -106,40 +79,6 @@ impl<V: RecorderControllerView> RecorderController<V> {
         } else {
             None
         }
-    }
-    /// One in-memory, undoable insertion; persistence remains the dialog's explicit Save operation.
-    pub fn insert_recording(
-        &mut self,
-        draft: &mut MkMacroDocument,
-        macro_id: u64,
-        recorded: &[RecordedStep],
-    ) -> Result<(), String> {
-        let next = draft
-            .macros
-            .iter()
-            .flat_map(|m| m.steps.iter())
-            .map(|s| s.id)
-            .max()
-            .unwrap_or(0);
-        let transaction = DraftTransaction {
-            macro_id,
-            inserted: to_macro_steps(recorded, next, true),
-        };
-        transaction.clone_apply(draft)?;
-        self.status.produced_step_count = transaction.inserted.len();
-        self.undo.push(transaction);
-        Ok(())
-    }
-}
-impl DraftTransaction {
-    fn clone_apply(&self, draft: &mut MkMacroDocument) -> Result<(), String> {
-        let m = draft
-            .macros
-            .iter_mut()
-            .find(|m| m.id == self.macro_id)
-            .ok_or("selected macro no longer exists")?;
-        m.steps.extend(self.inserted.clone());
-        Ok(())
     }
 }
 

@@ -110,7 +110,15 @@ Verification: fake observer/clipboard/UIA and pure suggestion tests in M7.
 
 ## M5 — Recording Review, anchored apply, and local editing
 
-Status: `pending`
+Status: `in_progress`
+
+Implementation checkpoint: the transient Review session, generated/editable modes, cached
+statistics, suggestion controls, selection/trim/delete, local history, typed Action Editor target,
+queued result lifecycle, captured-anchor recovery, and one document insertion transaction with
+staleness-safe undo/redo are integrated. Toolbar, hotkey, and command-dispatch Stop paths publish
+to Review without mutating or saving the draft. `cargo check`, `cargo check --tests`, focused
+Review/anchor/queue/editor/authoring tests, formatting, and diff checks passed after independent
+review. Behavioral completion remains gated on M7.
 
 Depends on: M3-M4.
 

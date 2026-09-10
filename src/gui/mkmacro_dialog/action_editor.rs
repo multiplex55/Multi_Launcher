@@ -218,6 +218,9 @@ pub struct ActionEditorState {
     source_step: Option<MkStep>,
     /// `None` means insert a new row; otherwise replace this stable step id.
     pub editing_id: Option<u64>,
+    /// Typed transient destination used by Recording Review. When present,
+    /// Apply returns the cloned step to the review and must not touch the document.
+    review_editing_id: Option<crate::mkmacro::ReviewStepId>,
     /// Captured when the editor opens, so applying cannot accidentally use a
     /// selection which changed underneath the modal.
     pub insertion: Option<InsertionIntent>,
@@ -558,6 +561,7 @@ impl ActionEditorState {
             owner_macro_id: None,
             source_step: None,
             editing_id: None,
+            review_editing_id: None,
             insertion: None,
             capture_keys: false,
             capture_message: None,
@@ -1343,6 +1347,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = None;
+        self.review_editing_id = None;
         self.owner_macro_id = None;
         self.source_step = None;
         self.draft_changed = false;
@@ -1410,6 +1415,7 @@ impl ActionEditorState {
         self.stop_position_capture();
         self.draft_generation = self.draft_generation.wrapping_add(1);
         self.editing_id = Some(step.id);
+        self.review_editing_id = None;
         self.owner_macro_id = owner_macro_id;
         self.source_step = Some(step.clone());
         self.draft_changed = false;
@@ -1446,6 +1452,38 @@ impl ActionEditorState {
         self.call_target_search.clear();
         self.pending_call_target = None;
     }
+    pub fn begin_review_edit(
+        &mut self,
+        owner_macro_id: u64,
+        review_id: crate::mkmacro::ReviewStepId,
+        step: &MkStep,
+    ) {
+        self.begin_edit_in_macro(Some(owner_macro_id), step);
+        self.review_editing_id = Some(review_id);
+    }
+    pub fn review_editing_id(&self) -> Option<crate::mkmacro::ReviewStepId> {
+        self.review_editing_id
+    }
+    /// Completes an edit into its transient Review destination. This is kept
+    /// separate from `apply`, whose destination is always the macro document.
+    pub fn take_review_edited_step(&mut self) -> Option<(crate::mkmacro::ReviewStepId, MkStep)> {
+        let review_id = self.review_editing_id?;
+        if self.image_authoring.is_importing()
+            || self.pending_image_import.is_some()
+            || !virtual_desktop_number_valid(&self.draft.as_ref()?.action)
+        {
+            return None;
+        }
+        if let Some(message) = ocr_draft_validation_error(self.draft.as_ref().unwrap()) {
+            self.capture_message = Some(message);
+            return None;
+        }
+        self.sync_search_region_to_draft();
+        let mut step = self.draft.take()?;
+        normalize_optional_outputs(&mut step.action);
+        self.cancel();
+        Some((review_id, step))
+    }
     pub fn cancel(&mut self) {
         self.pending_visual_region = None;
         self.image_authoring = Default::default();
@@ -1467,6 +1505,7 @@ impl ActionEditorState {
         self.owner_macro_id = None;
         self.source_step = None;
         self.editing_id = None;
+        self.review_editing_id = None;
         self.insertion = None;
         self.capture_keys = false;
         self.editor = None;
@@ -2019,6 +2058,10 @@ impl ActionEditorState {
         self.capture_message = None;
     }
     pub fn apply(&mut self, dialog: &mut MkMacroDialog) -> Option<u64> {
+        if self.review_editing_id.is_some() {
+            self.capture_message = Some("This action belongs to Recording Review.".into());
+            return None;
+        }
         if self.image_authoring.is_importing() || self.pending_image_import.is_some() {
             return None;
         }
@@ -5966,6 +6009,27 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
         }
         let mut state = d.take_action_editor();
+        if state.review_editing_id().is_some() {
+            match state.take_review_edited_step() {
+                Some((review_id, step)) => {
+                    if let Some(review) = &mut d.recording_review {
+                        if let Err(error) = review.replace_step(review_id, &step) {
+                            review.message = Some(error.to_string());
+                        }
+                    }
+                }
+                None => {
+                    // Validation/import state intentionally keeps the editor open.
+                    d.action_editor = state;
+                    return;
+                }
+            }
+            d.action_editor = state;
+            d.window_picker
+                .cancel("Window picker closed because the review action editor was applied");
+            d.launcher_action_picker.cancel();
+            return;
+        }
         let smooth = state.add_smooth_move;
         let activate = state.add_activate_before;
         let shortcut_payload = state.draft.as_ref().and_then(image_payload).cloned();

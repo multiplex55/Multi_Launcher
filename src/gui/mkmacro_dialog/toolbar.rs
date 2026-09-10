@@ -285,6 +285,26 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         if dialog.dirty {
             ui.label("Unsaved changes");
         }
+        if ui
+            .add_enabled(
+                dialog.can_undo_recording_insert(),
+                eframe::egui::Button::new("Undo Recording Insert"),
+            )
+            .clicked()
+            && let Err(error) = dialog.undo_last_recording_insert()
+        {
+            dialog.command_error = Some(error);
+        }
+        if ui
+            .add_enabled(
+                dialog.can_redo_recording_insert(),
+                eframe::egui::Button::new("Redo Recording Insert"),
+            )
+            .clicked()
+            && let Err(error) = dialog.redo_last_recording_insert()
+        {
+            dialog.command_error = Some(error);
+        }
         if dialog.conflict {
             ui.colored_label(
                 eframe::egui::Color32::YELLOW,
@@ -297,7 +317,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             .is_some_and(|s| s.state != RecorderRuntimeState::Idle);
         if ui
             .add_enabled(
-                !recorder_active && dialog.selected_macro().is_some(),
+                !recorder_active && dialog.selected_macro().is_some() && dialog.recording_review.is_none(),
                 eframe::egui::Button::new("Record"),
             )
             .clicked()
@@ -382,22 +402,40 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         .filter(|s| s.state != RecorderRuntimeState::Idle)
     {
         ui.horizontal(|ui| {
-            let secs=rec.elapsed.as_secs(); ui.label(format!("● Recording {:02}:{:02} — {} raw events — ~{} actions",secs/60,secs%60,rec.raw_event_count,rec.estimated_action_count));
-            if rec.dropped_event_count>0 { ui.colored_label(eframe::egui::Color32::YELLOW,format!("{} events dropped",rec.dropped_event_count)); }
+            let secs = rec.elapsed.as_secs();
+            ui.label(format!(
+                "● Recording {:02}:{:02} — {} raw events — ~{} actions",
+                secs / 60,
+                secs % 60,
+                rec.raw_event_count,
+                rec.estimated_action_count
+            ));
+            if rec.dropped_event_count > 0 {
+                ui.colored_label(
+                    eframe::egui::Color32::YELLOW,
+                    format!("{} events dropped", rec.dropped_event_count),
+                );
+            }
             match rec.state {
-                RecorderRuntimeState::Recording => if ui.button("Pause Recording").clicked(){report(dialog,crate::mkmacro::runtime::record_pause())},
-                RecorderRuntimeState::Paused => if ui.button("Resume Recording").clicked(){report(dialog,crate::mkmacro::runtime::record_resume())},
+                RecorderRuntimeState::Recording => {
+                    if ui.button("Pause Recording").clicked() {
+                        report(dialog, crate::mkmacro::runtime::record_pause())
+                    }
+                }
+                RecorderRuntimeState::Paused => {
+                    if ui.button("Resume Recording").clicked() {
+                        report(dialog, crate::mkmacro::runtime::record_resume())
+                    }
+                }
                 _ => {}
             }
-            if rec.state!=RecorderRuntimeState::Stopping && ui.button("Stop Recording").clicked() {
+            if rec.state != RecorderRuntimeState::Stopping && ui.button("Stop Recording").clicked()
+            {
                 match crate::mkmacro::runtime::record_stop() {
-                    Err(e)=>dialog.command_error=Some(e.to_string()),
-                    Ok(result)=> {
-                        if dialog.apply_recording(result.macro_id, &result.generated_steps).is_ok() {
-                            if result.dropped_event_count>0 { dialog.command_error=Some(format!("Recording completed with {} dropped events",result.dropped_event_count)); }
-                        } else {
-                            dialog.pending_recording=Some((result.macro_id,result.generated_steps));
-                            dialog.command_error=Some("Recording target was deleted; captured actions were preserved for recovery".into());
+                    Err(e) => dialog.command_error = Some(e.to_string()),
+                    Ok(result) => {
+                        if let Err(error) = dialog.open_recording_review(result) {
+                            dialog.command_error = Some(error);
                         }
                     }
                 }

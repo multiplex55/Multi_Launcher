@@ -234,8 +234,11 @@ fn window_suggestions(
                     poll_interval_ms: 50,
                 }),
             }),
+            enabled: true,
+            breakpoint: false,
             delay_after_ms: 0,
             repeat: 1,
+            on_error: crate::mkmacro::MkErrorPolicy::Stop,
             metadata: Default::default(),
         };
         let activate = PlannedStep {
@@ -246,8 +249,11 @@ fn window_suggestions(
                 matcher,
                 wait: None,
             }),
+            enabled: true,
+            breakpoint: false,
             delay_after_ms: 0,
             repeat: 1,
+            on_error: crate::mkmacro::MkErrorPolicy::Stop,
             metadata: Default::default(),
         };
         if existing && !existing_window {
@@ -299,8 +305,11 @@ fn window_suggestions(
                     working_directory: None,
                     wait: false,
                 }),
+                enabled: true,
+                breakpoint: false,
                 delay_after_ms: 0,
                 repeat: 1,
+                on_error: crate::mkmacro::MkErrorPolicy::Stop,
                 metadata: Default::default(),
             };
             out.push(make_suggestion(
@@ -529,7 +538,33 @@ pub fn apply_suggestions(
             .find(|(_, s)| spans_overlap(step.source, s.source_span))
         {
             if emitted.insert(index) {
-                steps.extend(suggestion.replacement.clone());
+                let mut replacement = suggestion.replacement.clone();
+                if let Some(target) = replacement.first_mut() {
+                    let source_metadata: Vec<_> = plan
+                        .steps
+                        .iter()
+                        .filter(|source| spans_overlap(source.source, suggestion.source_span))
+                        .map(|source| &source.metadata)
+                        .collect();
+                    target.metadata.bookmarked |=
+                        source_metadata.iter().any(|metadata| metadata.bookmarked);
+                    let mut existing_consumed = false;
+                    for metadata in source_metadata {
+                        let comment = metadata.comment.trim();
+                        if comment.is_empty() {
+                            continue;
+                        }
+                        if !existing_consumed && target.metadata.comment.trim() == comment {
+                            existing_consumed = true;
+                            continue;
+                        }
+                        if !target.metadata.comment.is_empty() {
+                            target.metadata.comment.push('\n');
+                        }
+                        target.metadata.comment.push_str(comment);
+                    }
+                }
+                steps.extend(replacement);
             }
         } else {
             steps.push(step.clone());
@@ -603,8 +638,11 @@ mod tests {
                 button: MkMouseButton::Left,
                 clicks: 1,
             }),
+            enabled: true,
+            breakpoint: false,
             delay_after_ms: delay,
             repeat: 1,
+            on_error: crate::mkmacro::MkErrorPolicy::Stop,
             metadata: Default::default(),
         }
     }
@@ -612,6 +650,72 @@ mod tests {
         let mut step = click(source, 0);
         step.action = action;
         step
+    }
+
+    #[test]
+    fn replacement_preserves_bookmarks_and_ordered_comments_from_claimed_span() {
+        let mut first = click(0, 100);
+        first.metadata.comment = "first".into();
+        let mut second = click(1, 0);
+        second.metadata.comment = "second".into();
+        second.metadata.bookmarked = true;
+        let plan = RecordingPlan {
+            steps: vec![first, second],
+        };
+        let suggestion = RecordingSuggestion {
+            id: RecordingSuggestionId(77),
+            kind: RecordingSuggestionKind::RepeatedClick,
+            confidence: SuggestionConfidence::High,
+            source_span: RecordingSourceSpan { first: 0, last: 1 },
+            description: "combine".into(),
+            rationale: "test".into(),
+            enabled_by_default: true,
+            replacement: vec![click(0, 0)],
+        };
+        let applied = apply_suggestions(
+            &plan,
+            &[suggestion],
+            &HashSet::from([RecordingSuggestionId(77)]),
+        )
+        .unwrap();
+        assert_eq!(applied.steps.len(), 1);
+        assert!(applied.steps[0].metadata.bookmarked);
+        assert_eq!(applied.steps[0].metadata.comment, "first\nsecond");
+    }
+
+    #[test]
+    fn suggestion_replacement_preserves_markers_and_ordered_annotations() {
+        let mut first = click(0, 100);
+        first.metadata.comment = "first".into();
+        let mut second = click(1, 0);
+        second.metadata.bookmarked = true;
+        second.metadata.comment = "second".into();
+        let plan = RecordingPlan {
+            steps: vec![first, second],
+        };
+        let mut replacement = click(0, 100);
+        replacement.metadata.comment = "generated".into();
+        let suggestion = RecordingSuggestion {
+            id: RecordingSuggestionId(77),
+            kind: RecordingSuggestionKind::RepeatedClick,
+            confidence: SuggestionConfidence::High,
+            source_span: RecordingSourceSpan { first: 0, last: 1 },
+            description: "replace".into(),
+            rationale: "test".into(),
+            enabled_by_default: true,
+            replacement: vec![replacement],
+        };
+        let applied = apply_suggestions(
+            &plan,
+            std::slice::from_ref(&suggestion),
+            &HashSet::from([suggestion.id]),
+        )
+        .unwrap();
+        assert!(applied.steps[0].metadata.bookmarked);
+        assert_eq!(
+            applied.steps[0].metadata.comment,
+            "generated\nfirst\nsecond"
+        );
     }
     struct TextTranslator;
     impl KeyboardTranslator for TextTranslator {
