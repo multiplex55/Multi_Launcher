@@ -172,11 +172,16 @@ F24 hotkey admission, annotation prompt-key release suppression, transient clipb
 redaction, and an existing-application launch false positive. Recorder lifecycle/input safety is also
 green (23 focused and 40 affected-module Nextest cases), including partial Unicode cleanup, queued
 hook-tail fencing, partial hook-install rollback, transactional Pause/Resume failure recovery,
-terminal Stop and Shutdown
-serialization, same-runtime processor recovery, idempotent Stop-for-Review transfer, hotkey refresh
+terminal Stop and Shutdown serialization, same-runtime processor recovery, idempotent
+Stop-for-Review transfer, hotkey refresh
 edges, cached snapshots, and session-scoped callback drops.
-`cargo check --tests`, formatting, and diff checks pass. Remaining semantic matrix, Review, anchor,
-and preview coverage stays pending in later ordered M7 batches.
+Semantic recording, mouse/window authoring, and smart observation/suggestion coverage is green (more than 100
+affected library cases, 7 recorder integration cases, and all 9 authoring integration cases). This
+batch removed the obsolete literal-plan compatibility path and fixed long-held modifier shortcut
+classification, precise Freeze Paste targeting, balanced cross-Pause mouse ownership, per-primary
+window targeting across held modifiers, bounded UIA inspection/finalization, and annotation/marker
+control ownership. `cargo check --tests`, formatting, and diff checks pass. Remaining Review,
+anchor, and preview coverage stays pending in a later ordered M7 batch.
 
 Depends on: M1-M6 production integration.
 

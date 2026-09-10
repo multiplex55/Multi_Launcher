@@ -670,7 +670,12 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                             first.timestamp_us as f64 / 1_000_000.0,
                             last.timestamp_us as f64 / 1_000_000.0
                         ));
-                        if let Some(context) = first.context.as_ref() {
+                        if let Some(context) = review
+                            .literal_steps
+                            .get(step.association_source)
+                            .or_else(|| review.literal_steps.get(step.source.first))
+                            .and_then(|literal| literal.context.as_ref())
+                        {
                             let target = context
                                 .window_under_point
                                 .as_ref()
@@ -1063,8 +1068,9 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
 mod tests {
     use super::*;
     use crate::mkmacro::{
-        MkAction, MkDelayPayload, RecordingProvenance, RecordingSuggestionKind,
-        SuggestionConfidence,
+        ClickInspection, MkAction, MkDelayPayload, MkUiControlType, MkUiSelector, RecordedAction,
+        RecordedStep, RecordingProvenance, RecordingSuggestionKind, SuggestionConfidence,
+        UiElementInfo,
     };
 
     fn planned(id: u64, source: usize) -> PlannedStep {
@@ -1074,6 +1080,7 @@ mod tests {
                 first: source,
                 last: source,
             },
+            association_source: source,
             provenance: RecordingProvenance::Literal,
             action: MkAction::Delay(MkDelayPayload::default()),
             enabled: true,
@@ -1082,6 +1089,19 @@ mod tests {
             repeat: 1,
             on_error: crate::mkmacro::MkErrorPolicy::Stop,
             metadata: Default::default(),
+        }
+    }
+
+    fn click_planned(id: u64, source: usize) -> PlannedStep {
+        PlannedStep {
+            action: MkAction::MouseClick(crate::mkmacro::MkMousePayload {
+                target: crate::mkmacro::MkCoordinateTarget::Screen {
+                    point: crate::mkmacro::MkPoint { x: 4, y: 5 },
+                },
+                button: crate::mkmacro::MkMouseButton::Left,
+                clicks: 1,
+            }),
+            ..planned(id, source)
         }
     }
 
@@ -1118,7 +1138,7 @@ mod tests {
 
     fn result() -> RecordingResult {
         let plan = RecordingPlan {
-            steps: vec![planned(1, 0), planned(2, 1), planned(3, 2)],
+            steps: vec![click_planned(1, 0), click_planned(2, 1), planned(3, 2)],
         };
         RecordingResult {
             target: RecordingTarget {
@@ -1135,7 +1155,7 @@ mod tests {
                 description: "combine".into(),
                 rationale: "test".into(),
                 enabled_by_default: true,
-                replacement: vec![planned(0, 0)].into(),
+                replacement: vec![click_planned(0, 0)].into(),
             }],
             plan,
             clipboard_observations: vec![],
@@ -1193,5 +1213,76 @@ mod tests {
         assert_eq!(review.proposed_steps()[0].repeat, 4);
         assert_eq!(review.literal_steps, literal);
         assert_eq!(review.dropped_event_count, 4);
+    }
+
+    #[test]
+    fn successful_uia_inspection_is_review_metadata_and_never_rewrites_the_click() {
+        let mut recording = result();
+        recording.plan = RecordingPlan {
+            steps: vec![PlannedStep {
+                action: MkAction::MouseClick(crate::mkmacro::MkMousePayload {
+                    target: crate::mkmacro::MkCoordinateTarget::Screen {
+                        point: crate::mkmacro::MkPoint { x: 4, y: 5 },
+                    },
+                    button: crate::mkmacro::MkMouseButton::Left,
+                    clicks: 1,
+                }),
+                ..planned(1, 0)
+            }],
+        };
+        recording.suggestions.clear();
+        recording.literal_steps = vec![RecordedStep {
+            timestamp_us: 10,
+            delay_after_ms: 0,
+            action: RecordedAction::Click {
+                button: crate::mkmacro::MouseButton::Left,
+                x: 4,
+                y: 5,
+                count: 1,
+            },
+            context: None,
+        }];
+        recording.click_inspections = vec![ClickInspection {
+            timestamp_us: 10,
+            info: UiElementInfo {
+                selector: MkUiSelector {
+                    automation_id: Some("save".into()),
+                    name: Some("Save".into()),
+                    control_type: Some(MkUiControlType::Button),
+                    class_name: None,
+                    framework_id: None,
+                    ancestor_path: Vec::new(),
+                },
+                user_facing_name: "Save".into(),
+                target_executable: "app.exe".into(),
+                supported_patterns: Default::default(),
+                bounds: None,
+            },
+        }];
+
+        let review = RecordingReviewSession::new(recording);
+        assert_eq!(review.click_inspections.len(), 1);
+        assert_eq!(
+            review.click_inspections[0]
+                .info
+                .selector
+                .automation_id
+                .as_deref(),
+            Some("save")
+        );
+        assert!(matches!(
+            review.proposed_steps()[0].action,
+            MkAction::MouseClick(_)
+        ));
+        assert!(!review.proposed_steps().iter().any(|step| matches!(
+            step.action,
+            MkAction::UiInvoke(_)
+                | MkAction::UiSetValue { .. }
+                | MkAction::UiReadValue { .. }
+                | MkAction::UiToggle(_)
+                | MkAction::UiSelect(_)
+                | MkAction::UiFocus(_)
+                | MkAction::UiWait(_)
+        )));
     }
 }

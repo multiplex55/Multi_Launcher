@@ -7,6 +7,13 @@ use multi_launcher::{
     mkmacro::{executor::fake::FakeBackend, *},
 };
 
+struct NoTextTranslator;
+impl KeyboardTranslator for NoTextTranslator {
+    fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+        KeyTranslation::None
+    }
+}
+
 #[test]
 fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
     let expected = [
@@ -717,7 +724,16 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
             insertion_anchor_generation: None,
         },
         literal_steps: recorded.clone(),
-        plan: build_literal_recording_plan(&recorded, false),
+        plan: build_recording_plan(
+            &enrich_keyboard(&recorded, &mut NoTextTranslator),
+            &MkRecorderSettings {
+                record_window_context: false,
+                smart_mouse_cleanup: false,
+                minimum_idle_delay_ms: 0,
+                delay_rounding_ms: 1,
+                ..Default::default()
+            },
+        ),
         suggestions: vec![],
         clipboard_observations: vec![],
         click_inspections: vec![],
@@ -739,6 +755,12 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     dialog.cancel_recording_review();
     dialog.open_recording_review(recording_result(id)).unwrap();
     let ids = dialog.apply_recording_review().unwrap();
+    assert!(dialog.selected_macro().unwrap().steps.iter().any(|step| {
+        matches!(
+            step.action,
+            MkAction::KeyPress(MkKey::Character(ref value)) if value == "A"
+        )
+    }));
     let click = *ids.last().unwrap();
     let original = dialog
         .selected_macro()

@@ -128,6 +128,22 @@ pub enum RecordingReviewOpenDisposition {
     Queued,
 }
 
+fn annotation_pause_ownership(state: crate::mkmacro::RecorderRuntimeState) -> anyhow::Result<bool> {
+    match state {
+        crate::mkmacro::RecorderRuntimeState::Recording => Ok(true),
+        crate::mkmacro::RecorderRuntimeState::Paused => Ok(false),
+        crate::mkmacro::RecorderRuntimeState::Stopping
+        | crate::mkmacro::RecorderRuntimeState::Idle => anyhow::bail!("Recorder is not active"),
+    }
+}
+
+fn should_resume_annotation_owned(
+    pause_owned: bool,
+    state: Option<crate::mkmacro::RecorderRuntimeState>,
+) -> bool {
+    pause_owned && state == Some(crate::mkmacro::RecorderRuntimeState::Paused)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderNameError {
     Empty,
@@ -255,6 +271,29 @@ mod tests {
         fs, thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn annotation_pause_ownership_preserves_manual_pause() {
+        use crate::mkmacro::RecorderRuntimeState;
+
+        assert!(annotation_pause_ownership(RecorderRuntimeState::Recording).unwrap());
+        assert!(!annotation_pause_ownership(RecorderRuntimeState::Paused).unwrap());
+        assert!(annotation_pause_ownership(RecorderRuntimeState::Idle).is_err());
+        assert!(annotation_pause_ownership(RecorderRuntimeState::Stopping).is_err());
+        assert!(should_resume_annotation_owned(
+            true,
+            Some(RecorderRuntimeState::Paused)
+        ));
+        assert!(!should_resume_annotation_owned(
+            false,
+            Some(RecorderRuntimeState::Paused)
+        ));
+        assert!(!should_resume_annotation_owned(
+            true,
+            Some(RecorderRuntimeState::Idle)
+        ));
+        assert!(!should_resume_annotation_owned(true, None));
+    }
 
     fn five_macros() -> MkMacroDocument {
         MkMacroDocument {
@@ -3968,6 +4007,7 @@ mod tests {
                     first: index,
                     last: index,
                 },
+                association_source: index,
                 provenance: crate::mkmacro::RecordingProvenance::Literal,
                 action,
                 enabled: true,
@@ -4777,20 +4817,17 @@ impl MkMacroDialog {
         let state = crate::mkmacro::runtime::recorder_snapshot()
             .map(|snapshot| snapshot.state)
             .unwrap_or(crate::mkmacro::RecorderRuntimeState::Idle);
+        let pause_owned = annotation_pause_ownership(state)?;
         crate::mkmacro::runtime::set_recording_annotation_active(true);
-        self.annotation_pause_owned = match state {
-            crate::mkmacro::RecorderRuntimeState::Recording => {
+        self.annotation_pause_owned = match pause_owned {
+            true => {
                 if let Err(error) = crate::mkmacro::runtime::record_pause() {
                     crate::mkmacro::runtime::set_recording_annotation_active(false);
                     return Err(error);
                 }
                 true
             }
-            crate::mkmacro::RecorderRuntimeState::Paused => false,
-            _ => {
-                crate::mkmacro::runtime::set_recording_annotation_active(false);
-                anyhow::bail!("Recorder is not active")
-            }
+            false => false,
         };
         self.recording_annotation_text.clear();
         self.recording_annotation_open = true;
@@ -4799,24 +4836,30 @@ impl MkMacroDialog {
 
     pub fn finish_recording_annotation(&mut self, commit: bool) -> anyhow::Result<()> {
         let text = self.recording_annotation_text.trim().to_owned();
-        if commit {
+        let annotation_result = if commit {
             if text.is_empty() {
                 anyhow::bail!("Annotation cannot be empty");
             }
-            crate::mkmacro::runtime::record_annotation(text)?;
-        }
+            crate::mkmacro::runtime::record_annotation(text)
+        } else {
+            Ok(())
+        };
         self.recording_annotation_open = false;
         self.recording_annotation_text.clear();
         crate::mkmacro::runtime::set_recording_annotation_active(false);
         let resume = std::mem::take(&mut self.annotation_pause_owned);
-        if resume
-            && crate::mkmacro::runtime::recorder_snapshot().is_some_and(|snapshot| {
-                snapshot.state == crate::mkmacro::RecorderRuntimeState::Paused
-            })
-        {
-            crate::mkmacro::runtime::record_resume()?;
+        let resume_result = if should_resume_annotation_owned(
+            resume,
+            crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| snapshot.state),
+        ) {
+            crate::mkmacro::runtime::record_resume()
+        } else {
+            Ok(())
+        };
+        if let Err(error) = annotation_result {
+            return Err(error);
         }
-        Ok(())
+        resume_result
     }
 
     pub fn preview_recording_review(&mut self, selected_range: bool) -> anyhow::Result<u64> {

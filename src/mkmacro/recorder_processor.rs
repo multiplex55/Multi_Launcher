@@ -760,6 +760,7 @@ fn worker_loop(
                     .map(|s| {
                         drain_before(events, s, fence, enricher);
                         suppress_occurrence(s, &occurrence);
+                        s.observations.pause_boundary();
                         s.raw.push(RecordingBoundary::Pause { timestamp_us });
                         s.held_before_pause = std::mem::take(&mut s.pressed);
                         s.live_key_state = [false; 256];
@@ -1420,6 +1421,93 @@ mod tests {
         assert!(!timeline.is_paused(1_100));
         assert_eq!(timeline.normalize(50), 50);
         assert_eq!(timeline.normalize(1_500), 500);
+    }
+
+    #[test]
+    fn markers_and_annotations_keep_order_when_authored_during_pause() {
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(8);
+        let processor = synthetic_processor(physical, receiver);
+        begin_synthetic(&processor);
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: key(0x41, KeyTransition::Down, 10),
+            })
+            .unwrap();
+        events
+            .send(SequencedHookEvent {
+                sequence: 1,
+                event: key(0x41, KeyTransition::Up, 15),
+            })
+            .unwrap();
+        processor.marker(20).unwrap();
+        processor.pause(30, 2, Vec::new()).unwrap();
+        processor
+            .annotation(40, "first paused note".into())
+            .unwrap();
+        processor
+            .annotation(45, "second paused note".into())
+            .unwrap();
+        processor.resume(50, Vec::new()).unwrap();
+        let result = processor.finish(2, Vec::new()).unwrap();
+
+        assert!(matches!(
+            result.notes.as_slice(),
+            [
+                RecordingNote::Marker { timestamp_us: 20 },
+                RecordingNote::Annotation { timestamp_us: 30, text: first },
+                RecordingNote::Annotation { timestamp_us: 30, text: second }
+            ] if first == "first paused note" && second == "second paused note"
+        ));
+        assert!(result.plan.steps[0].metadata.bookmarked);
+        assert_eq!(
+            result.plan.steps[0].metadata.comment,
+            "first paused note\nsecond paused note"
+        );
+    }
+
+    #[test]
+    fn marker_hotkey_occurrence_is_suppressed_before_marker_is_authored() {
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(8);
+        let processor = synthetic_processor(physical, receiver);
+        begin_synthetic(&processor);
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: key(0xa2, KeyTransition::Down, 10),
+            })
+            .unwrap();
+        events
+            .send(SequencedHookEvent {
+                sequence: 1,
+                event: key(0x78, KeyTransition::Down, 20),
+            })
+            .unwrap();
+        processor.control_occurrence(2, vec![0x11, 0x78]).unwrap();
+        processor.marker(25).unwrap();
+        for (sequence, event) in [
+            key(0x78, KeyTransition::Up, 30),
+            key(0xa2, KeyTransition::Up, 40),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            events
+                .send(SequencedHookEvent {
+                    sequence: sequence as u64 + 2,
+                    event,
+                })
+                .unwrap();
+        }
+        let result = processor.finish(4, Vec::new()).unwrap();
+        assert_eq!(result.raw_event_count, 0);
+        assert!(result.plan.steps.is_empty());
+        assert_eq!(
+            result.notes,
+            vec![RecordingNote::Marker { timestamp_us: 25 }]
+        );
     }
     fn push(session: &mut Session, event: HookEvent) {
         track_key(session, &event);

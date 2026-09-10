@@ -736,6 +736,12 @@ impl RecorderObserverSession {
         }
         self.drain();
     }
+    /// Ends any click candidate that began in the preceding active capture
+    /// interval. An Up after Resume must not inspect a click whose Down was
+    /// discarded at the Pause boundary.
+    pub fn pause_boundary(&mut self) {
+        self.mouse_down = None;
+    }
     fn fill_known_start(&mut self, window: &mut WindowContext) {
         if window.process_started_at.is_none()
             && let Some(pid) = window.process_id
@@ -858,7 +864,10 @@ impl RecorderObserverSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     struct FixedClipboard {
         calls: Arc<AtomicUsize>,
@@ -911,6 +920,23 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             thread::sleep(std::time::Duration::from_millis(760));
             anyhow::bail!("provider timed out")
+        }
+    }
+    struct BlockingInspector {
+        calls: Arc<AtomicUsize>,
+        gate: Arc<(Mutex<(bool, bool)>, Condvar)>,
+    }
+    impl ClickInspector for BlockingInspector {
+        fn inspect_at(&self, _: MkPoint) -> anyhow::Result<UiElementInfo> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &*self.gate;
+            let mut state = lock.lock().unwrap();
+            state.0 = true;
+            wake.notify_all();
+            while !state.1 {
+                state = wake.wait(state).unwrap();
+            }
+            Ok(ui_info())
         }
     }
     struct FakeWindowSource(Vec<RawWindowObservation>);
@@ -972,6 +998,42 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_capture_is_scheduled_only_for_plain_control_v_down() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = AuxiliaryObservationWorker::spawn(
+            Some(Arc::new(FixedClipboard {
+                calls: calls.clone(),
+                value: Some("paste"),
+                fail: false,
+            })),
+            None,
+        );
+        let mut session =
+            RecorderObserverSession::with_parts(ObservationBaseline::default(), worker);
+        let key = |timestamp_us, vk| HookEvent::Key {
+            timestamp_us,
+            transition: KeyTransition::Down,
+            vk,
+            scan_code: 0,
+            flags: 0,
+            extra_info: 0,
+        };
+        for (event, control, alt) in [
+            (key(1, 0x43), true, false),
+            (key(2, 0x56), false, false),
+            (key(3, 0x56), true, true),
+            (key(4, 0x56), true, false),
+        ] {
+            session.observe(&event, None, false, false, true, control, alt, 250, 4);
+        }
+        assert!(session.auxiliary.finish(std::time::Duration::from_secs(1)));
+        session.drain();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(session.clipboards.len(), 1);
+        assert_eq!(session.clipboards[0].timestamp_us, 4);
+    }
+
+    #[test]
     fn only_completed_recorded_left_clicks_schedule_uia() {
         let calls = Arc::new(AtomicUsize::new(0));
         let worker = AuxiliaryObservationWorker::spawn(
@@ -1025,6 +1087,9 @@ mod tests {
         session.drain();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(session.inspections.len(), 1);
+        assert_eq!(session.inspections[0].timestamp_us, 3);
+        assert_eq!(session.inspections[0].info, ui_info());
+        assert!(!format!("{:?}", session.inspections[0]).contains("Save"));
     }
 
     #[test]
@@ -1043,6 +1108,116 @@ mod tests {
         assert!(slow.finish(std::time::Duration::from_secs(1)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(slow.drain().is_empty());
+    }
+
+    #[test]
+    fn uia_click_queue_remains_bounded_while_a_provider_is_blocked() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let mut worker = AuxiliaryObservationWorker::spawn(
+            None,
+            Some(Arc::new(BlockingInspector {
+                calls: calls.clone(),
+                gate: gate.clone(),
+            })),
+        );
+        worker.inspect_click(0, MkPoint { x: 0, y: 0 });
+        {
+            let (lock, wake) = &*gate;
+            let state = lock.lock().unwrap();
+            let (mut state, timeout) = wake
+                .wait_timeout_while(state, std::time::Duration::from_secs(1), |state| !state.0)
+                .unwrap();
+            assert!(!timeout.timed_out());
+            for index in 1..100 {
+                worker.inspect_click(
+                    index,
+                    MkPoint {
+                        x: index as i32,
+                        y: 0,
+                    },
+                );
+            }
+            state.1 = true;
+            wake.notify_all();
+        }
+        assert!(worker.finish(std::time::Duration::from_secs(1)));
+        assert!(calls.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[test]
+    fn pause_boundary_discards_an_incomplete_click_without_inspection() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = AuxiliaryObservationWorker::spawn(
+            None,
+            Some(Arc::new(CountingInspector(calls.clone()))),
+        );
+        let mut session =
+            RecorderObserverSession::with_parts(ObservationBaseline::default(), worker);
+        let mouse = |timestamp_us, message| HookEvent::Mouse {
+            timestamp_us,
+            message,
+            x: 4,
+            y: 5,
+            flags: 0,
+            extra_info: 0,
+        };
+        session.observe(
+            &mouse(1, MouseMessage::Down(super::super::MouseButton::Left)),
+            None,
+            true,
+            true,
+            false,
+            false,
+            false,
+            250,
+            4,
+        );
+        session.pause_boundary();
+        session.observe(
+            &mouse(2, MouseMessage::Up(super::super::MouseButton::Left)),
+            None,
+            true,
+            true,
+            false,
+            false,
+            false,
+            250,
+            4,
+        );
+        assert!(session.auxiliary.finish(std::time::Duration::from_secs(1)));
+        session.drain();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(session.inspections.is_empty());
+    }
+
+    #[test]
+    fn finalization_is_bounded_when_the_uia_provider_never_returns() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let mut worker = AuxiliaryObservationWorker::spawn(
+            None,
+            Some(Arc::new(BlockingInspector {
+                calls: calls.clone(),
+                gate: gate.clone(),
+            })),
+        );
+        worker.inspect_click(0, MkPoint { x: 0, y: 0 });
+        {
+            let (lock, wake) = &*gate;
+            let state = lock.lock().unwrap();
+            let (_state, timeout) = wake
+                .wait_timeout_while(state, std::time::Duration::from_secs(1), |state| !state.0)
+                .unwrap();
+            assert!(!timeout.timed_out());
+        }
+        let started = std::time::Instant::now();
+        assert!(!worker.finish(std::time::Duration::from_millis(50)));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (lock, wake) = &*gate;
+        lock.lock().unwrap().1 = true;
+        wake.notify_all();
     }
 
     #[test]

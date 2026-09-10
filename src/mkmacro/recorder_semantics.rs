@@ -40,6 +40,9 @@ pub enum RecordingProvenance {
 pub struct PlannedStep {
     pub review_id: ReviewStepId,
     pub source: RecordingSourceSpan,
+    /// Raw source event that semantically owns this action. This stays narrow
+    /// even when `source` claims a broader modifier/provenance interval.
+    pub association_source: usize,
     pub provenance: RecordingProvenance,
     pub action: MkAction,
     pub enabled: bool,
@@ -172,34 +175,37 @@ pub fn build_recording_plan(
     for (n, interval) in intervals.iter().enumerate() {
         interval_at.insert(interval.down, n);
     }
-    let mut modifier_use: HashMap<usize, usize> = HashMap::new();
-    for interval in &intervals {
-        if is_modifier(&interval.key) {
-            continue;
-        }
-        let held_ms = enriched[interval.up]
-            .literal
-            .timestamp_us
-            .saturating_sub(enriched[interval.down].literal.timestamp_us)
-            / 1000;
-        if held_ms > settings.key_tap_max_ms || interval.repeats != 1 {
-            continue;
-        }
-        for modifier in &intervals {
-            let modifier_ms = enriched[modifier.up]
+    let collapsible_modifiers: HashSet<usize> = intervals
+        .iter()
+        .filter(|modifier| is_modifier(&modifier.key))
+        .filter_map(|modifier| {
+            let nested = intervals
+                .iter()
+                .filter(|interval| {
+                    !is_modifier(&interval.key)
+                        && interval.down > modifier.down
+                        && interval.up < modifier.up
+                        && interval.repeats == 1
+                        && enriched[interval.up]
+                            .literal
+                            .timestamp_us
+                            .saturating_sub(enriched[interval.down].literal.timestamp_us)
+                            / 1000
+                            <= settings.key_tap_max_ms
+                })
+                .collect::<Vec<_>>();
+            let crosses_non_key_action = enriched[modifier.down + 1..modifier.up]
+                .iter()
+                .any(|item| !matches!(item.literal.action, RecordedAction::Key { .. }));
+            let held_ms = enriched[modifier.up]
                 .literal
                 .timestamp_us
                 .saturating_sub(enriched[modifier.down].literal.timestamp_us)
                 / 1000;
-            if is_modifier(&modifier.key)
-                && modifier.down < interval.down
-                && modifier.up > interval.up
-                && modifier_ms <= settings.key_tap_max_ms
-            {
-                *modifier_use.entry(modifier.down).or_default() += 1;
-            }
-        }
-    }
+            (!nested.is_empty() && !crosses_non_key_action && held_ms <= settings.key_tap_max_ms)
+                .then_some(modifier.down)
+        })
+        .collect();
 
     let mut planned = Vec::new();
     for (index, item) in enriched.iter().enumerate() {
@@ -257,18 +263,18 @@ pub fn build_recording_plan(
                         .saturating_sub(enriched[first_down].literal.timestamp_us)
                         / 1000;
                     if chord_ms <= settings.key_tap_max_ms {
+                        let trigger_down = compound
+                            .iter()
+                            .map(|interval| interval.down)
+                            .max()
+                            .unwrap_or(first_down);
                         let modifiers: Vec<_> = intervals
                             .iter()
                             .filter(|m| {
                                 is_modifier(&m.key)
+                                    && collapsible_modifiers.contains(&m.down)
                                     && m.down < first_down
                                     && m.up > last_up
-                                    && enriched[m.up]
-                                        .literal
-                                        .timestamp_us
-                                        .saturating_sub(enriched[m.down].literal.timestamp_us)
-                                        / 1000
-                                        <= settings.key_tap_max_ms
                             })
                             .collect();
                         let mut keys: Vec<_> = modifiers.iter().map(|m| m.key.clone()).collect();
@@ -283,14 +289,16 @@ pub fn build_recording_plan(
                             consumed.insert(modifier.down);
                             consumed.insert(modifier.up);
                         }
-                        planned.push(make_step(
+                        let mut step = make_step(
                             first,
                             last,
                             RecordingProvenance::Chord,
                             MkAction::Hotkey(keys),
                             enriched[last_up].literal.delay_after_ms,
                             1,
-                        ));
+                        );
+                        step.association_source = trigger_down;
+                        planned.push(step);
                         continue;
                     }
                 }
@@ -298,15 +306,10 @@ pub fn build_recording_plan(
             let modifiers: Vec<_> = intervals
                 .iter()
                 .filter(|m| {
-                    let duration = enriched[m.up]
-                        .literal
-                        .timestamp_us
-                        .saturating_sub(enriched[m.down].literal.timestamp_us)
-                        / 1000;
                     is_modifier(&m.key)
+                        && collapsible_modifiers.contains(&m.down)
                         && m.down < interval.down
                         && m.up > interval.up
-                        && duration <= settings.key_tap_max_ms
                 })
                 .collect();
             let held_ms = enriched[interval.up]
@@ -331,31 +334,37 @@ pub fn build_recording_plan(
                     consumed.insert(modifier.down);
                     consumed.insert(modifier.up);
                 }
-                planned.push(make_step(
+                let mut step = make_step(
                     first,
                     last,
                     RecordingProvenance::Chord,
                     MkAction::Hotkey(keys),
                     enriched[interval.up].literal.delay_after_ms,
                     interval.repeats,
-                ));
-            } else if is_modifier(&interval.key) && modifier_use.contains_key(&interval.down) {
+                );
+                step.association_source = interval.down;
+                planned.push(step);
+            } else if is_modifier(&interval.key) && collapsible_modifiers.contains(&interval.down) {
                 consumed.insert(interval.up);
             } else {
-                if held_ms <= settings.key_tap_max_ms {
+                let modifier_encloses_activity =
+                    is_modifier(&interval.key) && interval.up > interval.down.saturating_add(1);
+                if held_ms <= settings.key_tap_max_ms && !modifier_encloses_activity {
                     let provenance = if interval.repeats > 1 {
                         RecordingProvenance::AutoRepeat
                     } else {
                         RecordingProvenance::KeyTap
                     };
-                    planned.push(make_step(
+                    let mut step = make_step(
                         interval.down,
                         interval.up,
                         provenance,
                         MkAction::KeyPress(interval.key.clone()),
                         enriched[interval.up].literal.delay_after_ms,
                         interval.repeats,
-                    ));
+                    );
+                    step.association_source = interval.down;
+                    planned.push(step);
                 } else {
                     planned.push(make_step(
                         interval.down,
@@ -381,7 +390,12 @@ pub fn build_recording_plan(
     }
     planned.sort_by_key(|step| (step.source.first, step.review_id.0));
     if settings.smart_keyboard_cleanup {
-        fold_text_runs(&mut planned, enriched, settings.text_run_gap_ms);
+        fold_text_runs(
+            &mut planned,
+            enriched,
+            settings.text_run_gap_ms,
+            &collapsible_modifiers,
+        );
     }
     cleanup_delays(
         &mut planned,
@@ -438,6 +452,7 @@ fn make_step(
     PlannedStep {
         review_id: ReviewStepId(first as u64 + 1),
         source: RecordingSourceSpan { first, last },
+        association_source: last,
         provenance,
         action,
         enabled: true,
@@ -553,7 +568,12 @@ fn mouse_button(button: super::MouseButton) -> MkMouseButton {
     }
 }
 
-fn fold_text_runs(planned: &mut Vec<PlannedStep>, enriched: &[EnrichedRecordedStep], gap_ms: u64) {
+fn fold_text_runs(
+    planned: &mut Vec<PlannedStep>,
+    enriched: &[EnrichedRecordedStep],
+    gap_ms: u64,
+    collapsible_modifiers: &HashSet<usize>,
+) {
     let intervals = key_intervals(enriched);
     let mut output = Vec::new();
     let mut i = 0;
@@ -562,7 +582,7 @@ fn fold_text_runs(planned: &mut Vec<PlannedStep>, enriched: &[EnrichedRecordedSt
         let mut text = String::new();
         while end < planned.len() {
             let step = &planned[end];
-            let Some(value) = translation_for_step(step, &intervals) else {
+            let Some(value) = translation_for_step(step, &intervals, collapsible_modifiers) else {
                 break;
             };
             let text_capable = match &step.action {
@@ -578,8 +598,11 @@ fn fold_text_runs(planned: &mut Vec<PlannedStep>, enriched: &[EnrichedRecordedSt
             if !text_capable || (end > i && planned[end - 1].delay_after_ms > gap_ms) {
                 break;
             }
-            let same_target =
-                same_text_target(enriched, step.source.first, planned[i].source.first);
+            let same_target = same_text_target(
+                enriched,
+                representative_source(step, enriched),
+                representative_source(&planned[i], enriched),
+            );
             if !same_target {
                 break;
             }
@@ -597,7 +620,7 @@ fn fold_text_runs(planned: &mut Vec<PlannedStep>, enriched: &[EnrichedRecordedSt
                     last_source = last_source.max(interval.up);
                 }
             }
-            output.push(make_step(
+            let mut step = make_step(
                 first,
                 last_source,
                 RecordingProvenance::TextRun,
@@ -607,7 +630,9 @@ fn fold_text_runs(planned: &mut Vec<PlannedStep>, enriched: &[EnrichedRecordedSt
                 }),
                 last.delay_after_ms,
                 1,
-            ));
+            );
+            step.association_source = planned[i].association_source;
+            output.push(step);
             i = end;
         } else {
             output.push(planned[i].clone());
@@ -617,7 +642,19 @@ fn fold_text_runs(planned: &mut Vec<PlannedStep>, enriched: &[EnrichedRecordedSt
     *planned = output;
 }
 
-fn translation_for_step(step: &PlannedStep, intervals: &[KeyInterval]) -> Option<String> {
+fn translation_for_step(
+    step: &PlannedStep,
+    intervals: &[KeyInterval],
+    collapsible_modifiers: &HashSet<usize>,
+) -> Option<String> {
+    if intervals.iter().any(|interval| {
+        is_modifier(&interval.key)
+            && !collapsible_modifiers.contains(&interval.down)
+            && interval.down < step.source.first
+            && interval.up > step.source.last
+    }) {
+        return None;
+    }
     let primary = match &step.action {
         MkAction::KeyPress(key) => key,
         MkAction::Hotkey(keys) => keys.last()?,
@@ -663,6 +700,18 @@ fn same_text_target(enriched: &[EnrichedRecordedStep], a: usize, b: usize) -> bo
     }
 }
 
+/// Chooses the input event that owns an action's window context independently
+/// from the broader provenance span used by review suggestions. Modifier-held
+/// chords deliberately claim the modifier's full interval, but their target is
+/// the window receiving the primary key rather than the window where the
+/// modifier was eventually released.
+fn representative_source(step: &PlannedStep, enriched: &[EnrichedRecordedStep]) -> usize {
+    enriched
+        .get(step.association_source)
+        .map(|_| step.association_source)
+        .unwrap_or(step.source.last)
+}
+
 #[derive(Clone, PartialEq)]
 enum WindowIdentity {
     Native(usize),
@@ -702,6 +751,7 @@ fn cleanup_mouse(steps: &mut Vec<PlannedStep>) {
             {
                 previous.delay_after_ms = step.delay_after_ms;
                 previous.source.last = step.source.last;
+                previous.association_source = step.association_source;
                 previous.provenance = RecordingProvenance::MouseCleanup;
                 continue;
             }
@@ -734,8 +784,9 @@ fn author_window_context(steps: &mut Vec<PlannedStep>, enriched: &[EnrichedRecor
     let mut active: Option<WindowIdentity> = None;
     for step in steps.drain(..) {
         let relevant = !matches!(step.action, MkAction::MouseMove(_));
+        let context_source = representative_source(&step, enriched);
         let window = enriched
-            .get(step.source.last)
+            .get(context_source)
             .and_then(|e| e.literal.context.as_ref())
             .and_then(|c| {
                 if matches!(
@@ -750,14 +801,15 @@ fn author_window_context(steps: &mut Vec<PlannedStep>, enriched: &[EnrichedRecor
                 } else {
                     c.window_under_point.as_ref().or(Some(&c.foreground))
                 }
-            });
+            })
+            .filter(|window| window.process_id != Some(std::process::id()));
         let matcher = window.and_then(WindowContext::matcher);
         let identity = window.and_then(window_identity);
         if relevant && matcher.is_some() && identity != active {
             let matcher = matcher.unwrap();
             output.push(make_step(
-                step.source.last,
-                step.source.last,
+                context_source,
+                context_source,
                 RecordingProvenance::WindowContext,
                 MkAction::WindowActivate(MkWindowPayload {
                     matcher,
@@ -805,33 +857,6 @@ pub fn materialize_plan(plan: &RecordingPlan, mut next_id: u64) -> Vec<MkStep> {
             }
         })
         .collect()
-}
-
-/// Compatibility plan for callers that still request literal key transitions.
-/// Even this path now uses the same visible plan/window-authoring boundary.
-pub fn build_literal_recording_plan(
-    items: &[RecordedStep],
-    record_window_context: bool,
-) -> RecordingPlan {
-    let enriched: Vec<_> = items
-        .iter()
-        .enumerate()
-        .map(|(source_index, literal)| EnrichedRecordedStep {
-            source_index,
-            literal: literal.clone(),
-            key: None,
-            translation: KeyTranslation::None,
-        })
-        .collect();
-    let mut steps = enriched
-        .iter()
-        .flat_map(|item| literal_action(item, record_window_context))
-        .collect();
-    if record_window_context {
-        author_window_context(&mut steps, &enriched);
-    }
-    assign_stable_review_ids(&mut steps);
-    RecordingPlan { steps }
 }
 
 #[cfg(test)]
@@ -882,14 +907,13 @@ mod tests {
 
     #[test]
     fn tap_repeat_and_long_hold_are_distinct() {
-        let input = vec![
+        let mut input = vec![
             key(1, true, 0x41),
             key(2, true, 0x41),
             key(3, false, 0x41),
             key(4, true, 0x42),
             key(11, false, 0x42),
         ];
-        let mut input = input;
         input[3].delay_after_ms = 700;
         let result = plan(input, &[]);
         assert!(matches!(result.steps[0].action, MkAction::KeyDown(_)));
@@ -1100,8 +1124,8 @@ mod tests {
     }
 
     #[test]
-    fn held_sided_modifiers_form_multiple_faithful_chords() {
-        let input = vec![
+    fn short_held_modifier_across_keyboard_taps_becomes_separate_hotkeys() {
+        let mut input = vec![
             key(1, true, 0xA2),
             key(2, true, 0x41),
             key(3, false, 0x41),
@@ -1109,6 +1133,9 @@ mod tests {
             key(5, false, 0x42),
             key(6, false, 0xA2),
         ];
+        for (index, step) in input.iter_mut().enumerate() {
+            step.timestamp_us = index as u64 * 50_000;
+        }
         let result = plan(input, &[]);
         assert_eq!(result.steps.len(), 2);
         assert!(
@@ -1117,6 +1144,182 @@ mod tests {
         assert!(
             matches!(&result.steps[1].action, MkAction::Hotkey(keys) if keys == &vec![MkKey::LeftControl, MkKey::Character("B".into())])
         );
+    }
+
+    #[test]
+    fn long_modifier_hold_preserves_explicit_lead_and_trailing_state() {
+        let mut input = vec![
+            key(0, true, 0xA2),
+            key(7, true, 0x43),
+            key(8, false, 0x43),
+            key(9, true, 0x56),
+            key(10, false, 0x56),
+            key(12, false, 0xA2),
+        ];
+        input[0].timestamp_us = 0;
+        input[1].timestamp_us = 700_000;
+        input[2].timestamp_us = 750_000;
+        input[3].timestamp_us = 800_000;
+        input[4].timestamp_us = 850_000;
+        input[5].timestamp_us = 1_200_000;
+        let result = plan(input, &[]);
+        assert_eq!(result.steps.len(), 4);
+        assert!(matches!(
+            &result.steps[0].action,
+            MkAction::KeyDown(MkKey::LeftControl)
+        ));
+        assert!(matches!(
+            &result.steps[1].action,
+            MkAction::KeyPress(MkKey::Character(value)) if value == "C"
+        ));
+        assert!(matches!(
+            &result.steps[2].action,
+            MkAction::KeyPress(MkKey::Character(value)) if value == "V"
+        ));
+        assert!(matches!(
+            &result.steps[3].action,
+            MkAction::KeyUp(MkKey::LeftControl)
+        ));
+    }
+
+    #[test]
+    fn modifier_spanning_keys_and_mouse_click_remains_explicit() {
+        let mut input = vec![
+            key(0, true, 0xA2),
+            key(1, true, 0x43),
+            key(2, false, 0x43),
+            key(3, true, 0x56),
+            key(4, false, 0x56),
+            RecordedStep {
+                timestamp_us: 500_000,
+                delay_after_ms: 100,
+                action: RecordedAction::Click {
+                    button: super::super::MouseButton::Left,
+                    x: 10,
+                    y: 20,
+                    count: 1,
+                },
+                context: None,
+            },
+            key(6, false, 0xA2),
+        ];
+        for (index, step) in input.iter_mut().enumerate() {
+            step.timestamp_us = index as u64 * 50_000;
+        }
+        let result = plan(input, &[]);
+        assert_eq!(result.steps.len(), 5);
+        assert!(matches!(
+            result.steps[0].action,
+            MkAction::KeyDown(MkKey::LeftControl)
+        ));
+        assert!(matches!(
+            result.steps[1].action,
+            MkAction::KeyPress(MkKey::Character(ref value)) if value == "C"
+        ));
+        assert!(matches!(
+            result.steps[2].action,
+            MkAction::KeyPress(MkKey::Character(ref value)) if value == "V"
+        ));
+        assert!(matches!(result.steps[3].action, MkAction::MouseClick(_)));
+        assert!(matches!(
+            result.steps[4].action,
+            MkAction::KeyUp(MkKey::LeftControl)
+        ));
+    }
+
+    #[test]
+    fn held_modifier_shortcuts_use_each_primary_keys_window_context() {
+        let context = |process: &str, root| EventContext {
+            foreground: WindowContext {
+                executable: process.into(),
+                native_root_id: Some(root),
+                ..Default::default()
+            },
+            window_under_point: None,
+            keyboard_layout: None,
+        };
+        let mut input = vec![
+            key(0, true, 0xA2),
+            key(1, true, 0x43),
+            key(2, false, 0x43),
+            key(3, true, 0x56),
+            key(4, false, 0x56),
+            key(5, false, 0xA2),
+        ];
+        for step in &mut input[..3] {
+            step.context = Some(context("editor-a.exe", 1));
+        }
+        for step in &mut input[3..] {
+            step.context = Some(context("editor-b.exe", 2));
+        }
+
+        let result = plan(input, &[]);
+        assert_eq!(result.steps.len(), 4);
+        let activation_process = |step: &PlannedStep| match &step.action {
+            MkAction::WindowActivate(payload) => payload.matcher.process.clone(),
+            _ => None,
+        };
+        assert_eq!(
+            activation_process(&result.steps[0]).as_deref(),
+            Some("editor-a.exe")
+        );
+        assert!(
+            matches!(&result.steps[1].action, MkAction::Hotkey(keys) if keys.last() == Some(&MkKey::Character("C".into())))
+        );
+        assert_eq!(
+            activation_process(&result.steps[2]).as_deref(),
+            Some("editor-b.exe")
+        );
+        assert!(
+            matches!(&result.steps[3].action, MkAction::Hotkey(keys) if keys.last() == Some(&MkKey::Character("V".into())))
+        );
+    }
+
+    #[test]
+    fn held_shift_text_does_not_fold_across_primary_key_window_contexts() {
+        let context = |process: &str, root| EventContext {
+            foreground: WindowContext {
+                executable: process.into(),
+                native_root_id: Some(root),
+                ..Default::default()
+            },
+            window_under_point: None,
+            keyboard_layout: None,
+        };
+        let mut input = vec![
+            key(0, true, 0xA0),
+            key(1, true, 0x41),
+            key(2, false, 0x41),
+            key(3, true, 0x42),
+            key(4, false, 0x42),
+            key(5, false, 0xA0),
+        ];
+        for step in &mut input[..3] {
+            step.context = Some(context("editor-a.exe", 1));
+        }
+        for step in &mut input[3..] {
+            step.context = Some(context("editor-b.exe", 2));
+        }
+
+        let result = plan(input, &[(0x41, "A"), (0x42, "B")]);
+        let actions = result
+            .steps
+            .iter()
+            .map(|step| &step.action)
+            .collect::<Vec<_>>();
+        assert_eq!(actions.len(), 4);
+        assert!(matches!(
+            actions[0],
+            MkAction::WindowActivate(payload)
+                if payload.matcher.process.as_deref() == Some("editor-a.exe")
+        ));
+        assert!(matches!(actions[1], MkAction::Hotkey(_)));
+        assert!(matches!(
+            actions[2],
+            MkAction::WindowActivate(payload)
+                if payload.matcher.process.as_deref() == Some("editor-b.exe")
+        ));
+        assert!(matches!(actions[3], MkAction::Hotkey(_)));
     }
 
     #[test]
@@ -1136,6 +1339,193 @@ mod tests {
             &[(0x41, "a")],
         );
         assert!(matches!(one.steps[0].action, MkAction::KeyPress(_)));
+    }
+
+    #[test]
+    fn shift_and_altgr_text_fold_while_navigation_splits_runs() {
+        struct StatefulText;
+        impl KeyboardTranslator for StatefulText {
+            fn translate(&mut self, request: &KeyboardTranslationRequest) -> KeyTranslation {
+                match request.vk {
+                    0x41 => KeyTranslation::Text(
+                        if request.key_state[0x10] & 0x80 != 0 {
+                            "A"
+                        } else {
+                            "a"
+                        }
+                        .into(),
+                    ),
+                    0x45 if request.key_state[0xA5] & 0x80 != 0 => KeyTranslation::Text("€".into()),
+                    0x42 => KeyTranslation::Text("b".into()),
+                    0x43 => KeyTranslation::Text("c".into()),
+                    _ => KeyTranslation::None,
+                }
+            }
+        }
+        let input = vec![
+            key(0, true, 0xA0),
+            key(1, true, 0x41),
+            key(2, false, 0x41),
+            key(3, false, 0xA0),
+            key(4, true, 0x42),
+            key(5, false, 0x42),
+            key(6, true, 0x08),
+            key(7, false, 0x08),
+            key(8, true, 0xA2),
+            key(9, true, 0xA5),
+            key(10, true, 0x45),
+            key(11, false, 0x45),
+            key(12, false, 0xA5),
+            key(13, false, 0xA2),
+            key(14, true, 0x43),
+            key(15, false, 0x43),
+        ];
+        let mut translator = StatefulText;
+        let result = build_recording_plan(
+            &enrich_keyboard(&input, &mut translator),
+            &MkRecorderSettings::default(),
+        );
+        assert!(matches!(
+            &result.steps[0].action,
+            MkAction::Text(payload) if payload.text == "Ab"
+        ));
+        assert!(matches!(
+            result.steps[1].action,
+            MkAction::KeyPress(MkKey::Backspace)
+        ));
+        assert!(matches!(
+            &result.steps[2].action,
+            MkAction::Text(payload) if payload.text == "€c"
+        ));
+    }
+
+    #[test]
+    fn text_runs_split_on_gap_and_foreground_identity() {
+        let context = |root| EventContext {
+            foreground: WindowContext {
+                executable: "editor.exe".into(),
+                native_root_id: Some(root),
+                ..Default::default()
+            },
+            window_under_point: None,
+            keyboard_layout: None,
+        };
+        let mut input = vec![
+            key(0, true, 0x41),
+            key(1, false, 0x41),
+            key(2, true, 0x42),
+            key(3, false, 0x42),
+            key(4, true, 0x41),
+            key(5, false, 0x41),
+            key(6, true, 0x42),
+            key(7, false, 0x42),
+        ];
+        for step in &mut input[..4] {
+            step.context = Some(context(1));
+        }
+        for step in &mut input[4..] {
+            step.context = Some(context(2));
+        }
+        input[1].delay_after_ms = 2_000;
+        let result = plan(input, &[(0x41, "a"), (0x42, "b")]);
+        let texts = result
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::Text(payload) => Some(payload.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["ab"]);
+        assert_eq!(
+            result
+                .steps
+                .iter()
+                .filter(|step| matches!(step.action, MkAction::KeyPress(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn own_process_context_never_authors_window_activation() {
+        let mut input = vec![key(0, true, 0x41), key(1, false, 0x41)];
+        for step in &mut input {
+            step.context = Some(EventContext {
+                foreground: WindowContext {
+                    executable: "multi_launcher.exe".into(),
+                    title: "Recorder".into(),
+                    process_id: Some(std::process::id()),
+                    native_root_id: Some(77),
+                    ..Default::default()
+                },
+                window_under_point: None,
+                keyboard_layout: None,
+            });
+        }
+        let result = plan(input, &[]);
+        assert!(
+            !result
+                .steps
+                .iter()
+                .any(|step| matches!(step.action, MkAction::WindowActivate(_)))
+        );
+    }
+
+    #[test]
+    fn mouse_cleanup_removes_only_an_exact_instantaneous_pre_click_move() {
+        let target = MkCoordinateTarget::Screen {
+            point: MkPoint { x: 10, y: 20 },
+        };
+        let move_step = |source, duration_ms, delay_after_ms, target| {
+            make_step(
+                source,
+                source,
+                RecordingProvenance::Literal,
+                MkAction::MouseMove(MkMouseMovePayload {
+                    target,
+                    duration_ms,
+                }),
+                delay_after_ms,
+                1,
+            )
+        };
+        let click_step = |source| {
+            make_step(
+                source,
+                source,
+                RecordingProvenance::Literal,
+                MkAction::MouseClick(MkMousePayload {
+                    target: target.clone(),
+                    button: MkMouseButton::Left,
+                    clicks: 1,
+                }),
+                0,
+                1,
+            )
+        };
+
+        let mut exact = vec![move_step(0, 0, 0, target.clone()), click_step(1)];
+        cleanup_mouse(&mut exact);
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].source, RecordingSourceSpan { first: 0, last: 1 });
+
+        for movement in [
+            move_step(0, 1, 0, target.clone()),
+            move_step(0, 0, 1, target.clone()),
+            move_step(
+                0,
+                0,
+                0,
+                MkCoordinateTarget::Screen {
+                    point: MkPoint { x: 11, y: 20 },
+                },
+            ),
+        ] {
+            let mut plan = vec![movement, click_step(1)];
+            cleanup_mouse(&mut plan);
+            assert_eq!(plan.len(), 2);
+        }
     }
 
     #[test]

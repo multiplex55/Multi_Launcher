@@ -361,9 +361,16 @@ pub fn normalize(
     let mut paused = false;
     let mut pause_at = 0;
     let mut excluded = 0;
+    let mut captured_mouse_down: Vec<(MouseButton, usize)> = Vec::new();
+    let mut suppressed_mouse_buttons = Vec::new();
     for item in input {
         match item {
             RecordingBoundary::Pause { timestamp_us } => {
+                captured_mouse_down.sort_by_key(|(_, raw_index)| std::cmp::Reverse(*raw_index));
+                for (button, raw_index) in captured_mouse_down.drain(..) {
+                    raw.remove(raw_index);
+                    suppressed_mouse_buttons.push(button);
+                }
                 paused = true;
                 pause_at = *timestamp_us;
             }
@@ -373,6 +380,15 @@ pub fn normalize(
                     paused = false;
                 }
             }
+            RecordingBoundary::Event(
+                HookEvent::Mouse {
+                    message: MouseMessage::Up(button),
+                    ..
+                },
+                _,
+            ) if suppressed_mouse_buttons.contains(button) => {
+                suppressed_mouse_buttons.retain(|suppressed| suppressed != button);
+            }
             RecordingBoundary::Event(e, captured_context)
                 if !paused && should_record(e, cfg.record_injected_input) =>
             {
@@ -380,7 +396,24 @@ pub fn normalize(
                     *e,
                     e.timestamp_us().saturating_sub(excluded),
                     captured_context.clone(),
-                ))
+                ));
+                match e {
+                    HookEvent::Mouse {
+                        message: MouseMessage::Down(button),
+                        ..
+                    } => {
+                        // Hooks emit no Up while paused. A later Down is therefore
+                        // authoritative evidence that this is a fresh occurrence.
+                        suppressed_mouse_buttons.retain(|suppressed| suppressed != button);
+                        captured_mouse_down.retain(|(captured, _)| captured != button);
+                        captured_mouse_down.push((*button, raw.len() - 1));
+                    }
+                    HookEvent::Mouse {
+                        message: MouseMessage::Up(button),
+                        ..
+                    } => captured_mouse_down.retain(|(captured, _)| captured != button),
+                    _ => {}
+                }
             }
             _ => {}
         }
@@ -617,23 +650,33 @@ pub fn normalize(
     out
 }
 
-/// Converts literal normalized output through the explicit compatibility plan.
-/// New recorder results expose their semantic `RecordingPlan` directly.
-pub fn to_macro_steps(
-    items: &[RecordedStep],
-    next_id: u64,
-    record_window_context: bool,
-) -> Vec<MkStep> {
-    super::materialize_plan(
-        &super::build_literal_recording_plan(items, record_window_context),
-        next_id,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::recorder_hooks::LLKHF_EXTENDED;
+    use crate::mkmacro::{
+        KeyTranslation, KeyboardTranslationRequest, KeyboardTranslator, build_recording_plan,
+        enrich_keyboard, materialize_plan, recorder_hooks::LLKHF_EXTENDED,
+    };
+    struct NoTextTranslation;
+    impl KeyboardTranslator for NoTextTranslation {
+        fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+            KeyTranslation::None
+        }
+    }
+    fn semantic_steps(
+        items: &[RecordedStep],
+        next_id: u64,
+        record_window_context: bool,
+    ) -> Vec<MkStep> {
+        let mut settings = MkRecorderSettings::default();
+        settings.record_window_context = record_window_context;
+        settings.smart_keyboard_cleanup = false;
+        settings.smart_mouse_cleanup = false;
+        settings.minimum_idle_delay_ms = 0;
+        settings.delay_rounding_ms = 1;
+        let enriched = enrich_keyboard(items, &mut NoTextTranslation);
+        materialize_plan(&build_recording_plan(&enriched, &settings), next_id)
+    }
     fn mouse(t: u64, m: MouseMessage, x: i32, y: i32) -> RecordingBoundary {
         RecordingBoundary::Event(
             HookEvent::Mouse {
@@ -890,7 +933,7 @@ mod tests {
             4,
             "adjacent wheel axes/deltas stay distinct"
         );
-        let actions: Vec<_> = to_macro_steps(&normalized, 0, false)
+        let actions: Vec<_> = semantic_steps(&normalized, 0, false)
             .into_iter()
             .map(|step| step.action)
             .collect();
@@ -977,6 +1020,32 @@ mod tests {
     }
 
     #[test]
+    fn mouse_button_occurrence_crossing_a_pause_is_discarded_as_a_unit() {
+        let input = [
+            mouse(0, MouseMessage::Down(MouseButton::Left), 10, 20),
+            RecordingBoundary::Pause {
+                timestamp_us: 1_000,
+            },
+            RecordingBoundary::Resume {
+                timestamp_us: 3_000,
+            },
+            mouse(4_000, MouseMessage::Down(MouseButton::Left), 30, 40),
+            mouse(5_000, MouseMessage::Up(MouseButton::Left), 30, 40),
+        ];
+        let normalized = normalize(&input, &NormalizationConfig::default(), None);
+        assert_eq!(normalized.len(), 1);
+        assert!(matches!(
+            normalized[0].action,
+            RecordedAction::Click {
+                button: MouseButton::Left,
+                x: 30,
+                y: 40,
+                count: 1,
+            }
+        ));
+    }
+
+    #[test]
     fn normalized_drag_becomes_one_drag_step() {
         let recorded = RecordedStep {
             timestamp_us: 0,
@@ -990,7 +1059,7 @@ mod tests {
             delay_after_ms: 77,
             context: None,
         };
-        let steps = to_macro_steps(&[recorded], 10, false);
+        let steps = semantic_steps(&[recorded], 10, false);
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].delay_after_ms, 77);
         let MkAction::MouseDrag(payload) = &steps[0].action else {
@@ -1026,7 +1095,7 @@ mod tests {
             &c,
             None,
         );
-        let steps = to_macro_steps(&normalized, 40, false);
+        let steps = semantic_steps(&normalized, 40, false);
         let durations: Vec<_> = steps
             .iter()
             .filter_map(|step| match step.action {

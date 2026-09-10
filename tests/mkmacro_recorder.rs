@@ -1,5 +1,26 @@
 use multi_launcher::mkmacro::*;
 
+struct NoTextTranslation;
+impl KeyboardTranslator for NoTextTranslation {
+    fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+        KeyTranslation::None
+    }
+}
+fn semantic_steps(
+    items: &[RecordedStep],
+    next_id: u64,
+    record_window_context: bool,
+) -> Vec<MkStep> {
+    let mut settings = MkRecorderSettings::default();
+    settings.record_window_context = record_window_context;
+    settings.smart_keyboard_cleanup = false;
+    settings.smart_mouse_cleanup = false;
+    settings.minimum_idle_delay_ms = 0;
+    settings.delay_rounding_ms = 1;
+    let enriched = enrich_keyboard(items, &mut NoTextTranslation);
+    materialize_plan(&build_recording_plan(&enriched, &settings), next_id)
+}
+
 fn key(extra_info: usize, flags: u32) -> HookEvent {
     HookEvent::Key {
         transition: KeyTransition::Down,
@@ -78,7 +99,7 @@ fn normalized_timed_move_and_drag_keep_final_row_count_and_stable_ids() {
         &cfg,
         None,
     );
-    let steps = to_macro_steps(&normalized, 100, false);
+    let steps = semantic_steps(&normalized, 100, false);
     assert_eq!(steps.len(), 4, "in-drag hook movement must not create rows");
     assert_eq!(
         steps.iter().map(|step| step.id).collect::<Vec<_>>(),
@@ -187,7 +208,7 @@ fn click(t: u64, x: i32, y: i32, c: Option<EventContext>) -> [RecordingBoundary;
 }
 
 #[test]
-fn contextual_sequence_has_exact_activation_coordinates_and_key_transitions() {
+fn contextual_sequence_has_exact_activation_coordinates_and_semantic_key_presses() {
     let e = context(explorer(), Some(explorer()));
     let n = context(notepad(), Some(notepad()));
     let mut input = Vec::new();
@@ -199,7 +220,7 @@ fn contextual_sequence_has_exact_activation_coordinates_and_key_transitions() {
     input.extend(click(5_000, -450, 100, pointed_notepad));
     input.push(keyboard(7_000, KeyTransition::Down, 66, n.clone()));
     input.push(keyboard(8_000, KeyTransition::Up, 66, n));
-    let rows = to_macro_steps(
+    let rows = semantic_steps(
         &normalize(&input, &NormalizationConfig::default(), None),
         0,
         true,
@@ -219,8 +240,7 @@ fn contextual_sequence_has_exact_activation_coordinates_and_key_transitions() {
                 button: MkMouseButton::Left,
                 clicks: 1
             }),
-            MkAction::KeyDown(MkKey::Character("A".into())),
-            MkAction::KeyUp(MkKey::Character("A".into())),
+            MkAction::KeyPress(MkKey::Character("A".into())),
             MkAction::WindowActivate(MkWindowPayload {
                 matcher: notepad().matcher().unwrap(),
                 wait: None
@@ -233,8 +253,7 @@ fn contextual_sequence_has_exact_activation_coordinates_and_key_transitions() {
                 button: MkMouseButton::Left,
                 clicks: 1
             }),
-            MkAction::KeyDown(MkKey::Character("B".into())),
-            MkAction::KeyUp(MkKey::Character("B".into())),
+            MkAction::KeyPress(MkKey::Character("B".into())),
         ]
     );
     assert_eq!(
@@ -291,7 +310,7 @@ fn context_precedence_drag_signed_coordinates_fallback_and_activation_suppressio
     input.extend(click(12_000, 145, 260, e));
     let mut cfg = NormalizationConfig::default();
     cfg.movement_mode = MovementMode::DetailedMovement;
-    let rows = to_macro_steps(&normalize(&input, &cfg, None), 0, true);
+    let rows = semantic_steps(&normalize(&input, &cfg, None), 0, true);
     let activations = rows
         .iter()
         .filter_map(|s| match &s.action {
@@ -358,7 +377,7 @@ fn context_precedence_drag_signed_coordinates_fallback_and_activation_suppressio
         },
         context: context(no_origin.clone(), None),
     };
-    let fallback_rows = to_macro_steps(&[fallback], 0, true);
+    let fallback_rows = semantic_steps(&[fallback], 0, true);
     let MkAction::MouseClick(p) = &fallback_rows[1].action else {
         panic!()
     };
@@ -407,7 +426,7 @@ fn context_opt_out_preserves_screen_targets_delays_and_matching_primary_keys() {
     cfg.record_window_context = false;
     cfg.movement_mode = MovementMode::DetailedMovement;
     let normalized = normalize(&input, &cfg, None);
-    let rows = to_macro_steps(&normalized, 0, false);
+    let rows = semantic_steps(&normalized, 0, false);
     assert!(
         !rows
             .iter()
@@ -429,7 +448,6 @@ fn context_opt_out_preserves_screen_targets_delays_and_matching_primary_keys() {
             .collect::<Vec<_>>(),
         [
             MkKey::Character("A".into()),
-            MkKey::Function(9),
             MkKey::Function(9),
             MkKey::Function(9),
             MkKey::Character("B".into())

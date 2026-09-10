@@ -160,11 +160,14 @@ fn repeated_click_suggestions(
             if max.saturating_sub(min) <= settings.repeated_click_interval_tolerance_ms {
                 let average = intervals.iter().sum::<u64>() / intervals.len() as u64;
                 let span = RecordingSourceSpan {
+                    first: plan.steps[i].association_source,
+                    last: plan.steps[end - 1].association_source,
+                };
+                let mut replacement = plan.steps[i].clone();
+                replacement.source = RecordingSourceSpan {
                     first: plan.steps[i].source.first,
                     last: plan.steps[end - 1].source.last,
                 };
-                let mut replacement = plan.steps[i].clone();
-                replacement.source = span;
                 replacement.provenance = RecordingProvenance::MouseCleanup;
                 replacement.repeat = count as u32;
                 replacement.delay_after_ms = average;
@@ -269,6 +272,7 @@ fn window_suggestions(
         let wait = PlannedStep {
             review_id: ReviewStepId(0),
             source: span,
+            association_source: source,
             provenance: RecordingProvenance::WindowContext,
             action: MkAction::WindowWait(MkWindowPayload {
                 matcher: matcher.clone(),
@@ -287,6 +291,7 @@ fn window_suggestions(
         let activate = PlannedStep {
             review_id: ReviewStepId(0),
             source: span,
+            association_source: source,
             provenance: RecordingProvenance::WindowContext,
             action: MkAction::WindowActivate(MkWindowPayload {
                 matcher,
@@ -303,7 +308,11 @@ fn window_suggestions(
             let preserved: Vec<_> = plan
                 .steps
                 .iter()
-                .filter(|step| spans_overlap(step.source, span))
+                .filter(|step| {
+                    span.first <= step.association_source
+                        && step.association_source <= span.last
+                        && step.provenance != RecordingProvenance::WindowContext
+                })
                 .cloned()
                 .collect();
             let mut replacement = vec![wait, activate];
@@ -341,6 +350,7 @@ fn window_suggestions(
             let process = PlannedStep {
                 review_id: ReviewStepId(0),
                 source: gesture_span,
+                association_source: source,
                 provenance: RecordingProvenance::WindowContext,
                 action: MkAction::Process(MkProcessPayload {
                     program: shown.window.process_path.clone(),
@@ -379,13 +389,7 @@ fn launch_gesture_span(
         .steps
         .iter()
         .enumerate()
-        .min_by_key(|(_, step)| {
-            if source < step.source.first {
-                step.source.first - source
-            } else {
-                source.saturating_sub(step.source.last)
-            }
-        })?
+        .min_by_key(|(_, step)| step.association_source.abs_diff(source))?
         .0;
     let enter_index = (0..=nearest)
         .rev()
@@ -421,8 +425,8 @@ fn launch_gesture_span(
         _ => false,
     };
     opens_launcher.then_some(RecordingSourceSpan {
-        first: plan.steps[launcher_index].source.first,
-        last: enter.source.last,
+        first: plan.steps[launcher_index].association_source,
+        last: enter.association_source,
     })
 }
 
@@ -438,14 +442,11 @@ fn previous_non_window_step(plan: &RecordingPlan, before: usize) -> Option<usize
 fn source_span_near(plan: &RecordingPlan, source: usize) -> RecordingSourceSpan {
     plan.steps
         .iter()
-        .min_by_key(|s| {
-            if source < s.source.first {
-                s.source.first - source
-            } else {
-                source.saturating_sub(s.source.last)
-            }
+        .min_by_key(|step| step.association_source.abs_diff(source))
+        .map(|step| RecordingSourceSpan {
+            first: step.association_source,
+            last: step.association_source,
         })
-        .map(|s| s.source)
         .unwrap_or(RecordingSourceSpan {
             first: source,
             last: source,
@@ -460,11 +461,15 @@ fn freeze_paste_suggestions(
     let mut seen = HashSet::new();
     observations.iter().filter_map(|snapshot| {
         let source_index = source_times.iter().min_by_key(|(_, time)| time.abs_diff(snapshot.timestamp_us)).map(|(source, _)| *source)?;
-        let step = plan.steps.iter().find(|step| step.source.first <= source_index
-            && step.source.last >= source_index && is_paste(&step.action))?;
+        let step = plan.steps.iter().filter(|step| is_paste(&step.action))
+            .min_by_key(|step| step.association_source.abs_diff(source_index))?;
         if !seen.insert(step.review_id) { return None; }
+        let association_span = RecordingSourceSpan {
+            first: step.association_source,
+            last: step.association_source,
+        };
         let mut suggestion = make_suggestion(
-            RecordingSuggestionKind::FreezePaste, SuggestionConfidence::High, step.source,
+            RecordingSuggestionKind::FreezePaste, SuggestionConfidence::High, association_span,
             "Freeze pasted clipboard text".into(),
             format!("Captured {} clipboard characters near Ctrl+V; playback remains dynamic unless enabled", snapshot.text.len()),
             false, vec![step.clone()],
@@ -548,23 +553,21 @@ pub fn apply_suggestions(
         .filter(|s| enabled.contains(&s.id))
         .collect();
     selected.sort_by_key(|s| (s.source_span.first, s.source_span.last, s.id.0));
-    let mut accepted = Vec::new();
+    let mut accepted: Vec<&RecordingSuggestion> = Vec::new();
     for suggestion in selected {
         if suggestion.source_span.first > suggestion.source_span.last
             || !plan
                 .steps
                 .iter()
-                .any(|step| spans_overlap(step.source, suggestion.source_span))
+                .any(|step| suggestion_claims_step(suggestion, step))
         {
             return Err(SuggestionApplicationError::InvalidSpan(suggestion.id));
         }
-        if let Some(prior) = accepted
-            .iter()
-            .copied()
-            .find(|prior: &&RecordingSuggestion| {
-                spans_overlap(prior.source_span, suggestion.source_span)
+        if let Some(prior) = accepted.iter().find(|prior| {
+            plan.steps.iter().any(|step| {
+                suggestion_claims_step(prior, step) && suggestion_claims_step(suggestion, step)
             })
-        {
+        }) {
             return Err(SuggestionApplicationError::ConflictingSpans(
                 prior.id,
                 suggestion.id,
@@ -578,7 +581,7 @@ pub fn apply_suggestions(
         if let Some((index, suggestion)) = accepted
             .iter()
             .enumerate()
-            .find(|(_, s)| spans_overlap(step.source, s.source_span))
+            .find(|(_, s)| suggestion_claims_step(s, step))
         {
             if emitted.insert(index) {
                 let mut replacement = suggestion.replacement.materialize();
@@ -586,7 +589,7 @@ pub fn apply_suggestions(
                     let source_metadata: Vec<_> = plan
                         .steps
                         .iter()
-                        .filter(|source| spans_overlap(source.source, suggestion.source_span))
+                        .filter(|source| suggestion_claims_step(suggestion, source))
                         .map(|source| &source.metadata)
                         .collect();
                     target.metadata.bookmarked |=
@@ -615,10 +618,24 @@ pub fn apply_suggestions(
     }
     Ok(RecordingPlan { steps })
 }
-fn spans_overlap(a: RecordingSourceSpan, b: RecordingSourceSpan) -> bool {
-    a.first <= b.last && b.first <= a.last
+fn suggestion_claims_step(suggestion: &RecordingSuggestion, step: &PlannedStep) -> bool {
+    if suggestion.kind == RecordingSuggestionKind::FreezePaste
+        && suggestion.replacement.frozen_clipboard_text.is_some()
+    {
+        suggestion
+            .replacement
+            .steps
+            .iter()
+            .any(|target| target.review_id == step.review_id)
+    } else if suggestion.kind == RecordingSuggestionKind::RepeatedClick {
+        suggestion.source_span.first <= step.association_source
+            && step.association_source <= suggestion.source_span.last
+            && matches!(step.action, MkAction::MouseClick(_))
+    } else {
+        suggestion.source_span.first <= step.association_source
+            && step.association_source <= suggestion.source_span.last
+    }
 }
-
 pub fn apply_recording_notes(
     plan: &mut RecordingPlan,
     notes: &[RecordingNote],
@@ -636,13 +653,11 @@ pub fn apply_recording_notes(
         else {
             continue;
         };
-        let Some(step) = plan.steps.iter_mut().min_by_key(|step| {
-            if source < step.source.first {
-                step.source.first - source
-            } else {
-                source.saturating_sub(step.source.last)
-            }
-        }) else {
+        let Some(step) = plan
+            .steps
+            .iter_mut()
+            .min_by_key(|step| step.association_source.abs_diff(source))
+        else {
             continue;
         };
         match note {
@@ -673,6 +688,7 @@ mod tests {
                 first: source,
                 last: source,
             },
+            association_source: source,
             provenance: RecordingProvenance::Literal,
             action: MkAction::MouseClick(MkMousePayload {
                 target: MkCoordinateTarget::Screen {
@@ -810,6 +826,94 @@ mod tests {
         assert_eq!(applied.steps[0].repeat, 4);
         assert_eq!(applied.steps[0].delay_after_ms, 500);
     }
+
+    #[test]
+    fn repeat_inside_explicit_modifier_hold_preserves_modifier_boundaries() {
+        let plan = RecordingPlan {
+            steps: vec![
+                action(0, MkAction::KeyDown(MkKey::LeftControl)),
+                click(1, 500),
+                click(2, 500),
+                click(3, 0),
+                action(4, MkAction::KeyUp(MkKey::LeftControl)),
+            ],
+        };
+        let suggestions = repeated_click_suggestions(&plan, &MkRecorderSettings::default());
+        assert_eq!(suggestions.len(), 1);
+        let applied =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
+        assert_eq!(applied.steps.len(), 3);
+        assert!(matches!(
+            applied.steps[0].action,
+            MkAction::KeyDown(MkKey::LeftControl)
+        ));
+        assert!(matches!(applied.steps[1].action, MkAction::MouseClick(_)));
+        assert_eq!(applied.steps[1].repeat, 3);
+        assert!(matches!(
+            applied.steps[2].action,
+            MkAction::KeyUp(MkKey::LeftControl)
+        ));
+    }
+
+    #[test]
+    fn repeat_preserves_the_window_activation_associated_with_first_click() {
+        let mut activate = action(
+            0,
+            MkAction::WindowActivate(MkWindowPayload {
+                matcher: super::super::MkWindowMatcher {
+                    process: Some("app.exe".into()),
+                    ..Default::default()
+                },
+                wait: None,
+            }),
+        );
+        activate.provenance = RecordingProvenance::WindowContext;
+        let plan = RecordingPlan {
+            steps: vec![activate, click(0, 500), click(1, 500), click(2, 0)],
+        };
+        let suggestions = repeated_click_suggestions(&plan, &MkRecorderSettings::default());
+        assert_eq!(suggestions.len(), 1);
+        let applied =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
+        assert_eq!(applied.steps.len(), 2);
+        assert!(matches!(
+            applied.steps[0].action,
+            MkAction::WindowActivate(_)
+        ));
+        assert!(matches!(applied.steps[1].action, MkAction::MouseClick(_)));
+        assert_eq!(applied.steps[1].repeat, 3);
+    }
+
+    #[test]
+    fn repeat_suggestion_rejects_short_irregular_zero_gap_and_changed_targets() {
+        let settings = MkRecorderSettings::default();
+        let cases = [
+            RecordingPlan {
+                steps: vec![click(0, 500), click(1, 0)],
+            },
+            RecordingPlan {
+                steps: vec![click(0, 500), click(1, 900), click(2, 0)],
+            },
+            RecordingPlan {
+                steps: vec![click(0, 0), click(1, 500), click(2, 0)],
+            },
+            RecordingPlan {
+                steps: {
+                    let mut changed = click(2, 0);
+                    let MkAction::MouseClick(payload) = &mut changed.action else {
+                        unreachable!()
+                    };
+                    payload.target = MkCoordinateTarget::Screen {
+                        point: MkPoint { x: 99, y: 5 },
+                    };
+                    vec![click(0, 500), click(1, 500), changed]
+                },
+            },
+        ];
+        for plan in cases {
+            assert!(repeated_click_suggestions(&plan, &settings).is_empty());
+        }
+    }
     #[test]
     fn overlapping_suggestions_are_reported() {
         let plan = RecordingPlan {
@@ -946,6 +1050,19 @@ mod tests {
             )
             .is_empty()
         );
+        let mut late_window = observations.clone();
+        late_window[0].timestamp_us = 4_000_000;
+        late_window[1].timestamp_us = 4_100_000;
+        assert!(
+            window_suggestions(
+                &plan,
+                &ObservationBaseline::default(),
+                &late_window,
+                &[(0, 100), (1, 200), (2, 300), (3, 400), (4, 500), (5, 600)],
+            )
+            .is_empty(),
+            "a process shown outside the launch gesture window is not inferred as a launch"
+        );
         let mut missing_path = observations.clone();
         for observation in &mut missing_path {
             observation.window.process_path.clear();
@@ -1047,6 +1164,92 @@ mod tests {
     }
 
     #[test]
+    fn dialog_suggestion_claims_only_the_associated_held_modifier_action() {
+        let broad = RecordingSourceSpan { first: 0, last: 5 };
+        let mut copy = action(
+            1,
+            MkAction::Hotkey(vec![MkKey::LeftControl, MkKey::Character("C".into())]),
+        );
+        copy.source = broad;
+        let mut paste = action(
+            3,
+            MkAction::Hotkey(vec![MkKey::LeftControl, MkKey::Character("V".into())]),
+        );
+        paste.source = broad;
+        let mut authored_activation = action(
+            3,
+            MkAction::WindowActivate(MkWindowPayload {
+                matcher: super::super::MkWindowMatcher {
+                    process: Some("note.exe".into()),
+                    ..Default::default()
+                },
+                wait: None,
+            }),
+        );
+        authored_activation.source = broad;
+        authored_activation.provenance = RecordingProvenance::WindowContext;
+        let plan = RecordingPlan {
+            steps: vec![copy, authored_activation, paste],
+        };
+        let process = ProcessIdentity {
+            pid: 44,
+            started_at: 7,
+        };
+        let window = WindowContext {
+            executable: "note.exe".into(),
+            title: "Paste".into(),
+            class: "Dialog".into(),
+            native_root_id: Some(9),
+            process_id: Some(process.pid),
+            process_started_at: Some(process.started_at),
+            ..Default::default()
+        };
+        let observations = vec![
+            WindowObservation {
+                timestamp_us: 300,
+                source_hint: None,
+                kind: WindowObservationKind::Shown,
+                window: window.clone(),
+                visible_top_level: true,
+            },
+            WindowObservation {
+                timestamp_us: 310,
+                source_hint: None,
+                kind: WindowObservationKind::Foreground,
+                window,
+                visible_top_level: true,
+            },
+        ];
+        let baseline = ObservationBaseline {
+            processes: HashSet::from([process]),
+            top_level_windows: HashSet::new(),
+        };
+        let suggestions =
+            window_suggestions(&plan, &baseline, &observations, &[(1, 100), (3, 305)]);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(
+            suggestions[0].source_span,
+            RecordingSourceSpan { first: 3, last: 3 }
+        );
+        let applied =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
+        assert_eq!(applied.steps.len(), 4);
+        assert!(matches!(
+            &applied.steps[0].action,
+            MkAction::Hotkey(keys) if keys.last() == Some(&MkKey::Character("C".into()))
+        ));
+        assert!(matches!(applied.steps[1].action, MkAction::WindowWait(_)));
+        assert!(matches!(
+            applied.steps[2].action,
+            MkAction::WindowActivate(_)
+        ));
+        assert!(matches!(
+            &applied.steps[3].action,
+            MkAction::Hotkey(keys) if keys.last() == Some(&MkKey::Character("V".into()))
+        ));
+    }
+
+    #[test]
     fn reused_handle_epochs_do_not_both_claim_the_later_interaction() {
         let plan = RecordingPlan {
             steps: vec![click(3, 0)],
@@ -1122,6 +1325,133 @@ mod tests {
         assert!(!format!("{:?}", found[0]).contains("top secret"));
         assert!(!format!("{:?}", found[0].replacement).contains("top secret"));
         assert!(matches!(plan.steps[0].action, MkAction::Hotkey(_)));
+    }
+
+    #[test]
+    fn freeze_paste_claims_only_the_paste_when_a_held_modifier_spans_copy_and_paste() {
+        let literal = vec![
+            literal_key(0, 0xA2, true, 1),
+            literal_key(1, 0x43, true, 1),
+            literal_key(2, 0x43, false, 1),
+            literal_key(3, 0x56, true, 1),
+            literal_key(4, 0x56, false, 1),
+            literal_key(5, 0xA2, false, 1),
+        ];
+        let mut settings = MkRecorderSettings::default();
+        settings.record_window_context = false;
+        let plan = build_recording_plan(&enrich_keyboard(&literal, &mut TextTranslator), &settings);
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].source, plan.steps[1].source);
+        let observations = [ClipboardObservation {
+            timestamp_us: 400_000,
+            text: super::super::SensitiveClipboardText::new("frozen value".into()),
+        }];
+        let source_times = literal
+            .iter()
+            .enumerate()
+            .map(|(index, step)| (index, step.timestamp_us))
+            .collect::<Vec<_>>();
+        let suggestions = freeze_paste_suggestions(&plan, &observations, &source_times);
+        assert_eq!(suggestions.len(), 1);
+
+        let dynamic = apply_suggestions(&plan, &suggestions, &HashSet::new()).unwrap();
+        assert_eq!(dynamic, plan);
+        let frozen =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
+        assert_eq!(frozen.steps.len(), 2);
+        assert!(matches!(
+            &frozen.steps[0].action,
+            MkAction::Hotkey(keys)
+                if keys.last() == Some(&MkKey::Character("C".into()))
+        ));
+        assert!(matches!(
+            &frozen.steps[1].action,
+            MkAction::Text(payload)
+                if payload.text == "frozen value" && payload.mode == MkTextMode::Paste
+        ));
+    }
+
+    #[test]
+    fn repeated_pastes_under_one_modifier_have_distinct_suggestions() {
+        let literal = vec![
+            literal_key(0, 0xA2, true, 1),
+            literal_key(1, 0x56, true, 1),
+            literal_key(2, 0x56, false, 1),
+            literal_key(3, 0x56, true, 1),
+            literal_key(4, 0x56, false, 1),
+            literal_key(5, 0xA2, false, 1),
+        ];
+        let mut settings = MkRecorderSettings::default();
+        settings.record_window_context = false;
+        let plan = build_recording_plan(&enrich_keyboard(&literal, &mut TextTranslator), &settings);
+        assert_eq!(plan.steps.len(), 2);
+        assert_ne!(
+            plan.steps[0].association_source,
+            plan.steps[1].association_source
+        );
+        let observations = [
+            ClipboardObservation {
+                timestamp_us: 100_000,
+                text: super::super::SensitiveClipboardText::new("first".into()),
+            },
+            ClipboardObservation {
+                timestamp_us: 300_000,
+                text: super::super::SensitiveClipboardText::new("second".into()),
+            },
+        ];
+        let source_times = literal
+            .iter()
+            .enumerate()
+            .map(|(index, step)| (index, step.timestamp_us))
+            .collect::<Vec<_>>();
+        let suggestions = freeze_paste_suggestions(&plan, &observations, &source_times);
+        assert_eq!(suggestions.len(), 2);
+        assert_ne!(suggestions[0].id, suggestions[1].id);
+
+        let applied =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[1].id])).unwrap();
+        assert!(matches!(applied.steps[0].action, MkAction::Hotkey(_)));
+        assert!(matches!(
+            &applied.steps[1].action,
+            MkAction::Text(payload) if payload.text == "second"
+        ));
+    }
+
+    #[test]
+    fn notes_under_one_held_modifier_follow_action_associations() {
+        let literal = vec![
+            literal_key(0, 0xA2, true, 1),
+            literal_key(1, 0x43, true, 1),
+            literal_key(2, 0x43, false, 1),
+            literal_key(3, 0x56, true, 1),
+            literal_key(4, 0x56, false, 1),
+            literal_key(5, 0xA2, false, 1),
+        ];
+        let mut settings = MkRecorderSettings::default();
+        settings.record_window_context = false;
+        let mut plan =
+            build_recording_plan(&enrich_keyboard(&literal, &mut TextTranslator), &settings);
+        let source_times = literal
+            .iter()
+            .enumerate()
+            .map(|(index, step)| (index, step.timestamp_us))
+            .collect::<Vec<_>>();
+        apply_recording_notes(
+            &mut plan,
+            &[
+                RecordingNote::Marker {
+                    timestamp_us: 100_000,
+                },
+                RecordingNote::Annotation {
+                    timestamp_us: 300_000,
+                    text: "paste here".into(),
+                },
+            ],
+            &source_times,
+        );
+        assert!(plan.steps[0].metadata.bookmarked);
+        assert!(plan.steps[0].metadata.comment.is_empty());
+        assert_eq!(plan.steps[1].metadata.comment, "paste here");
     }
 
     #[test]
