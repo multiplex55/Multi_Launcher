@@ -3938,7 +3938,7 @@ pub struct Executor {
 
 /// Clock and interruptible-sleep boundary used by delays and polling actions. Keeping the
 /// clock and sleep on the same boundary makes deadline tests deterministic.
-trait ExecutorWaiter: Send + Sync {
+pub(crate) trait ExecutorWaiter: Send + Sync {
     fn now(&self) -> Duration;
     fn wait(
         &self,
@@ -3982,7 +3982,7 @@ impl ExecutorWaiter for SystemExecutorWaiter {
 }
 #[cfg(test)]
 #[derive(Default)]
-struct RecordingWaiter {
+pub(crate) struct RecordingWaiter {
     now: Mutex<Duration>,
     sleeps: Mutex<Vec<Duration>>,
     stop_after: Mutex<Option<usize>>,
@@ -3995,7 +3995,7 @@ impl RecordingWaiter {
             ..Self::default()
         }
     }
-    fn sleeps(&self) -> Vec<Duration> {
+    pub(crate) fn sleeps(&self) -> Vec<Duration> {
         self.sleeps.lock().unwrap().clone()
     }
 }
@@ -4178,7 +4178,7 @@ impl Executor {
         }
     }
     #[cfg(test)]
-    fn with_waiter(
+    pub(crate) fn with_waiter(
         backends: Backends,
         control: Arc<RunControl>,
         waiter: Arc<dyn ExecutorWaiter>,

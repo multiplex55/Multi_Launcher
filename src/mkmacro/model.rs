@@ -167,6 +167,9 @@ impl Default for MkMacroSettings {
     }
 }
 
+pub const REPEATED_CLICK_MINIMUM_MIN: u32 = 3;
+pub const REPEATED_CLICK_MINIMUM_MAX: u32 = 100;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MovementMode {
@@ -233,7 +236,7 @@ impl Default for MkRecorderSettings {
             detect_application_launches: true,
             inspect_clicked_controls: true,
             capture_text_paste_for_freeze_suggestion: true,
-            repeated_click_minimum: 3,
+            repeated_click_minimum: REPEATED_CLICK_MINIMUM_MIN,
             repeated_click_interval_tolerance_ms: 100,
             pause_resume_hotkey: None,
             marker_hotkey: None,
@@ -252,9 +255,53 @@ impl MkRecorderSettings {
         self.delay_rounding_ms = self.delay_rounding_ms.clamp(1, 10_000);
         self.key_tap_max_ms = self.key_tap_max_ms.clamp(1, 10_000);
         self.text_run_gap_ms = self.text_run_gap_ms.clamp(1, 60_000);
-        self.repeated_click_minimum = self.repeated_click_minimum.clamp(2, 100);
+        self.repeated_click_minimum = self
+            .repeated_click_minimum
+            .clamp(REPEATED_CLICK_MINIMUM_MIN, REPEATED_CLICK_MINIMUM_MAX);
         self.repeated_click_interval_tolerance_ms =
             self.repeated_click_interval_tolerance_ms.min(10_000);
+    }
+}
+
+#[cfg(test)]
+mod recorder_settings_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_click_minimum_default_and_clamp_share_the_three_click_floor() {
+        assert_eq!(
+            MkRecorderSettings::default().repeated_click_minimum,
+            REPEATED_CLICK_MINIMUM_MIN
+        );
+        for value in [0, 1, 2, 3] {
+            let mut settings = MkRecorderSettings {
+                repeated_click_minimum: value,
+                ..MkRecorderSettings::default()
+            };
+            settings.clamp();
+            assert_eq!(settings.repeated_click_minimum, REPEATED_CLICK_MINIMUM_MIN);
+        }
+    }
+
+    #[test]
+    fn repeated_click_minimum_clamp_preserves_custom_values_in_range() {
+        for value in REPEATED_CLICK_MINIMUM_MIN..=REPEATED_CLICK_MINIMUM_MAX {
+            let mut settings = MkRecorderSettings {
+                repeated_click_minimum: value,
+                ..MkRecorderSettings::default()
+            };
+            settings.clamp();
+            assert_eq!(settings.repeated_click_minimum, value);
+        }
+        let mut above_maximum = MkRecorderSettings {
+            repeated_click_minimum: REPEATED_CLICK_MINIMUM_MAX + 1,
+            ..MkRecorderSettings::default()
+        };
+        above_maximum.clamp();
+        assert_eq!(
+            above_maximum.repeated_click_minimum,
+            REPEATED_CLICK_MINIMUM_MAX
+        );
     }
 }
 

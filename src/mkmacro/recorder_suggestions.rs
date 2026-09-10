@@ -3,8 +3,8 @@
 use super::{
     ClipboardObservation, MkAction, MkKey, MkProcessPayload, MkRecorderSettings, MkTextMode,
     MkTextPayload, MkWaitOptions, MkWindowPayload, ObservationBaseline, PlannedStep,
-    ProcessIdentity, RecordingPlan, RecordingProvenance, RecordingSourceSpan, ReviewStepId,
-    WindowObservation, WindowObservationKind,
+    ProcessIdentity, REPEATED_CLICK_MINIMUM_MIN, RecordingPlan, RecordingProvenance,
+    RecordingSourceSpan, ReviewStepId, WindowObservation, WindowObservationKind,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -158,7 +158,10 @@ fn repeated_click_suggestions(
             end += 1;
         }
         let count = end - i;
-        if count >= settings.repeated_click_minimum as usize && intervals.len() + 1 == count {
+        let minimum = settings
+            .repeated_click_minimum
+            .max(REPEATED_CLICK_MINIMUM_MIN) as usize;
+        if count >= minimum && intervals.len() + 1 == count {
             let min = *intervals.iter().min().unwrap_or(&0);
             let max = *intervals.iter().max().unwrap_or(&0);
             if max.saturating_sub(min) <= settings.repeated_click_interval_tolerance_ms {
@@ -167,14 +170,16 @@ fn repeated_click_suggestions(
                     first: plan.steps[i].association_source,
                     last: plan.steps[end - 1].association_source,
                 };
-                let mut replacement = plan.steps[i].clone();
-                replacement.source = RecordingSourceSpan {
+                let mut repeated = plan.steps[i].clone();
+                repeated.source = RecordingSourceSpan {
                     first: plan.steps[i].source.first,
-                    last: plan.steps[end - 1].source.last,
+                    last: plan.steps[end - 2].source.last,
                 };
-                replacement.provenance = RecordingProvenance::MouseCleanup;
-                replacement.repeat = count as u32;
-                replacement.delay_after_ms = average;
+                repeated.provenance = RecordingProvenance::MouseCleanup;
+                repeated.repeat = count as u32 - 1;
+                repeated.delay_after_ms = average;
+                let mut tail = plan.steps[end - 1].clone();
+                tail.provenance = RecordingProvenance::MouseCleanup;
                 out.push(make_suggestion(
                     RecordingSuggestionKind::RepeatedClick,
                     SuggestionConfidence::Medium,
@@ -182,7 +187,7 @@ fn repeated_click_suggestions(
                     format!("Repeat {count} identical clicks"),
                     format!("{count} clicks at the same target with ~{average} ms spacing"),
                     false,
-                    vec![replacement],
+                    vec![repeated, tail],
                 ));
             }
         }
@@ -589,11 +594,22 @@ pub fn apply_suggestions(
         {
             if emitted.insert(index) {
                 let mut replacement = suggestion.replacement.materialize();
+                let separately_preserved: HashSet<_> =
+                    if suggestion.kind == RecordingSuggestionKind::RepeatedClick {
+                        replacement
+                            .iter()
+                            .skip(1)
+                            .map(|step| step.association_source)
+                            .collect()
+                    } else {
+                        HashSet::new()
+                    };
                 if let Some(target) = replacement.first_mut() {
                     let source_metadata: Vec<_> = plan
                         .steps
                         .iter()
                         .filter(|source| suggestion_claims_step(suggestion, source))
+                        .filter(|source| !separately_preserved.contains(&source.association_source))
                         .map(|source| &source.metadata)
                         .collect();
                     target.metadata.bookmarked |=
@@ -679,12 +695,15 @@ pub fn apply_recording_notes(
 
 #[cfg(test)]
 mod tests {
+    use super::super::executor::{RecordingWaiter, fake::FakeBackend};
     use super::super::{
-        EventContext, KeyTranslation, KeyboardTranslationRequest, KeyboardTranslator,
-        MkCoordinateTarget, MkMouseButton, MkMousePayload, MkPoint, RecordedAction, RecordedStep,
-        WindowContext, build_recording_plan, enrich_keyboard,
+        EventContext, ExecutionOptions, Executor, KeyTranslation, KeyboardTranslationRequest,
+        KeyboardTranslator, MkCoordinateTarget, MkMacro, MkMouseButton, MkMousePayload, MkPlayback,
+        MkPoint, RecordedAction, RecordedStep, RunControl, WindowContext, build_recording_plan,
+        compile, enrich_keyboard, materialize_plan,
     };
     use super::*;
+    use std::sync::Arc;
     fn click(source: usize, delay: u64) -> PlannedStep {
         PlannedStep {
             review_id: ReviewStepId(source as u64 + 1),
@@ -800,7 +819,7 @@ mod tests {
                 down,
                 vk,
                 scan_code: 0,
-                extended: false,
+                extended: matches!(vk, 0x5B | 0x5C),
                 flags: 0,
                 extra_info: 0,
             },
@@ -826,9 +845,69 @@ mod tests {
         let b = repeated_click_suggestions(&plan, &settings);
         assert_eq!(a[0].id, b[0].id);
         let applied = apply_suggestions(&plan, &a, &HashSet::from([a[0].id])).unwrap();
-        assert_eq!(applied.steps.len(), 1);
-        assert_eq!(applied.steps[0].repeat, 4);
+        assert_eq!(applied.steps.len(), 2);
+        assert_eq!(applied.steps[0].repeat, 3);
         assert_eq!(applied.steps[0].delay_after_ms, 500);
+        assert_eq!(applied.steps[1].repeat, 1);
+        assert_eq!(applied.steps[1].delay_after_ms, 0);
+    }
+
+    #[test]
+    fn repeated_click_cleanup_default_contract_requires_three_clicks() {
+        let settings = MkRecorderSettings::default();
+
+        assert!(
+            repeated_click_suggestions(
+                &RecordingPlan {
+                    steps: vec![click(0, 500), click(1, 0)],
+                },
+                &settings,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            repeated_click_suggestions(
+                &RecordingPlan {
+                    steps: vec![click(0, 500), click(1, 500), click(2, 0)],
+                },
+                &settings,
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn repeated_click_metadata_is_preserved_once_at_prefix_and_tail() {
+        let mut first = click(0, 500);
+        first.metadata.comment = "first".into();
+        let mut middle = click(1, 500);
+        middle.metadata.comment = "middle".into();
+        middle.metadata.bookmarked = true;
+        let mut last = click(2, 17);
+        last.metadata.comment = "last".into();
+        last.metadata.bookmarked = true;
+        let plan = RecordingPlan {
+            steps: vec![first, middle, last],
+        };
+        let suggestions = repeated_click_suggestions(&plan, &MkRecorderSettings::default());
+
+        let applied =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
+
+        assert_eq!(applied.steps.len(), 2);
+        assert_eq!(applied.steps[0].metadata.comment, "first\nmiddle");
+        assert!(applied.steps[0].metadata.bookmarked);
+        assert_eq!(applied.steps[1].metadata.comment, "last");
+        assert!(applied.steps[1].metadata.bookmarked);
+        assert_eq!(
+            applied
+                .steps
+                .iter()
+                .flat_map(|step| step.metadata.comment.lines())
+                .collect::<Vec<_>>(),
+            ["first", "middle", "last"]
+        );
     }
 
     #[test]
@@ -846,17 +925,96 @@ mod tests {
         assert_eq!(suggestions.len(), 1);
         let applied =
             apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
-        assert_eq!(applied.steps.len(), 3);
+        assert_eq!(applied.steps.len(), 4);
         assert!(matches!(
             applied.steps[0].action,
             MkAction::KeyDown(MkKey::LeftControl)
         ));
         assert!(matches!(applied.steps[1].action, MkAction::MouseClick(_)));
-        assert_eq!(applied.steps[1].repeat, 3);
+        assert_eq!(applied.steps[1].repeat, 2);
+        assert!(matches!(applied.steps[2].action, MkAction::MouseClick(_)));
+        assert_eq!(applied.steps[2].repeat, 1);
         assert!(matches!(
-            applied.steps[2].action,
+            applied.steps[3].action,
             MkAction::KeyUp(MkKey::LeftControl)
         ));
+    }
+
+    #[test]
+    fn repeated_click_replacement_executes_exact_pacing_while_modifier_is_held() {
+        let plan = RecordingPlan {
+            steps: vec![
+                action(0, MkAction::KeyDown(MkKey::LeftControl)),
+                click(1, 500),
+                click(2, 500),
+                click(3, 37),
+                action(4, MkAction::KeyUp(MkKey::LeftControl)),
+            ],
+        };
+        let suggestions = repeated_click_suggestions(&plan, &MkRecorderSettings::default());
+        let applied =
+            apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
+        let macro_plan = compile(&MkMacro {
+            signature: Default::default(),
+            id: 1,
+            name: "recorded clicks".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: MkPlayback::default(),
+            steps: materialize_plan(&applied, 10),
+        })
+        .unwrap();
+        let fake = Arc::new(FakeBackend::default());
+        let waiter = Arc::new(RecordingWaiter::default());
+        let control = Arc::new(RunControl::default());
+        control.reset();
+
+        Executor::with_waiter(fake.clone().backends(), control, waiter.clone())
+            .execute(&macro_plan, ExecutionOptions::normal(), &|_| {})
+            .unwrap();
+
+        assert_eq!(
+            waiter.sleeps(),
+            [
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_millis(37),
+            ]
+        );
+        let events = fake.events();
+        assert_eq!(
+            events.first().map(String::as_str),
+            Some("key_down:LeftControl")
+        );
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("key_up:LeftControl")
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "button_down:Left")
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "button_up:Left")
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("key_up:"))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["key_up:LeftControl"]
+        );
     }
 
     #[test]
@@ -879,13 +1037,15 @@ mod tests {
         assert_eq!(suggestions.len(), 1);
         let applied =
             apply_suggestions(&plan, &suggestions, &HashSet::from([suggestions[0].id])).unwrap();
-        assert_eq!(applied.steps.len(), 2);
+        assert_eq!(applied.steps.len(), 3);
         assert!(matches!(
             applied.steps[0].action,
             MkAction::WindowActivate(_)
         ));
         assert!(matches!(applied.steps[1].action, MkAction::MouseClick(_)));
-        assert_eq!(applied.steps[1].repeat, 3);
+        assert_eq!(applied.steps[1].repeat, 2);
+        assert!(matches!(applied.steps[2].action, MkAction::MouseClick(_)));
+        assert_eq!(applied.steps[2].repeat, 1);
     }
 
     #[test]

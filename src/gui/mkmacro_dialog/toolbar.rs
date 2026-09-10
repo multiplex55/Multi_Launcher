@@ -1,5 +1,8 @@
 use super::MkMacroDialog;
-use crate::mkmacro::{MovementMode, RecorderRuntimeState, RuntimeState};
+use crate::mkmacro::{
+    MovementMode, REPEATED_CLICK_MINIMUM_MAX, REPEATED_CLICK_MINIMUM_MIN, RecorderRuntimeState,
+    RuntimeState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolbarState {
@@ -28,6 +31,10 @@ pub enum ToolbarCommand {
     DebugRun,
     DebugFrom,
     DebugSelected,
+}
+
+fn repeated_click_minimum_range() -> std::ops::RangeInclusive<u32> {
+    REPEATED_CLICK_MINIMUM_MIN..=REPEATED_CLICK_MINIMUM_MAX
 }
 
 impl ToolbarState {
@@ -686,8 +693,11 @@ fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, ac
                 "Repeated-click cleanup",
             );
             ui.add(
-                eframe::egui::Slider::new(&mut options.repeated_click_minimum, 2..=100)
-                    .text("Repeat minimum"),
+                eframe::egui::Slider::new(
+                    &mut options.repeated_click_minimum,
+                    repeated_click_minimum_range(),
+                )
+                .text("Repeat minimum"),
             );
             ui.add(
                 eframe::egui::Slider::new(
@@ -788,6 +798,15 @@ fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_click_slider_uses_the_domain_range() {
+        let range = repeated_click_minimum_range();
+        assert_eq!(*range.start(), REPEATED_CLICK_MINIMUM_MIN);
+        assert_eq!(*range.end(), REPEATED_CLICK_MINIMUM_MAX);
+        assert_eq!(*range.start(), 3);
+    }
+
     #[test]
     fn idle_controls_follow_eligibility_and_selection() {
         let s = decide(RuntimeState::Idle, None, 1);

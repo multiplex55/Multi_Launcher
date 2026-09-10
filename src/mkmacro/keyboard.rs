@@ -212,6 +212,11 @@ pub fn key_validation_error(key: &MkKey) -> Option<&'static str> {
 }
 
 pub fn mk_key_from_windows_event(vk: u32, scan_code: u32, extended: bool) -> MkKey {
+    let raw = || MkKey::RawVirtualKey {
+        vk: vk as u16,
+        scan_code: scan_code as u16,
+        extended,
+    };
     let named = match vk {
         0x08 => MkKey::Backspace,
         0x09 => MkKey::Tab,
@@ -303,13 +308,16 @@ pub fn mk_key_from_windows_event(vk: u32, scan_code: u32, extended: bool) -> MkK
         value if (0x30..=0x39).contains(&value) || (0x41..=0x5A).contains(&value) => {
             MkKey::Character(char::from_u32(value).unwrap().to_string())
         }
-        _ => MkKey::RawVirtualKey {
-            vk: vk as u16,
-            scan_code: scan_code as u16,
-            extended,
-        },
+        _ => raw(),
     };
-    named
+    // Scan codes are resolved by SendInput for named keys, but the extended
+    // bit distinguishes physically different keys that share a VK (notably
+    // main/numpad Enter and navigation/numpad navigation).
+    if windows_key_metadata(&named).is_some_and(|metadata| metadata.extended == extended) {
+        named
+    } else {
+        raw()
+    }
 }
 
 /// Removes repeated physical keys without changing the first-authored order.
@@ -405,6 +413,11 @@ pub fn key_inventory() -> Vec<MkKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mkmacro::input::{
+        InputSink, KEYEVENTF_EXTENDEDKEY_, KEYEVENTF_KEYUP_, KEYEVENTF_SCANCODE_,
+        MKMACRO_EXTRA_INFO, RawInputEvent, Win32InputBackend,
+    };
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn named_inventory_round_trips_and_every_entry_has_windows_metadata() {
@@ -592,6 +605,95 @@ mod tests {
                 extended: true,
             }
         );
+    }
+
+    #[test]
+    fn canonical_extended_forms_remain_named_keys() {
+        let cases = [
+            (0x0D, 0x1C, false, MkKey::Enter),
+            (0x2D, 0x52, true, MkKey::Insert),
+            (0x2E, 0x53, true, MkKey::Delete),
+            (0x24, 0x47, true, MkKey::Home),
+            (0x23, 0x4F, true, MkKey::End),
+            (0x21, 0x49, true, MkKey::PageUp),
+            (0x22, 0x51, true, MkKey::PageDown),
+            (0x25, 0x4B, true, MkKey::Left),
+            (0x27, 0x4D, true, MkKey::Right),
+            (0x26, 0x48, true, MkKey::Up),
+            (0x28, 0x50, true, MkKey::Down),
+        ];
+        for (vk, scan_code, extended, expected) in cases {
+            assert_eq!(mk_key_from_windows_event(vk, scan_code, extended), expected);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingInputSink(Arc<Mutex<Vec<RawInputEvent>>>);
+    impl InputSink for RecordingInputSink {
+        fn send(&self, events: &[RawInputEvent]) -> Result<usize, String> {
+            self.0.lock().unwrap().extend_from_slice(events);
+            Ok(events.len())
+        }
+    }
+
+    #[test]
+    fn noncanonical_keypad_forms_round_trip_to_exact_send_input_metadata() {
+        let cases = [
+            (0x0D, 0x1C, true),
+            (0x2D, 0x52, false),
+            (0x2E, 0x53, false),
+            (0x24, 0x47, false),
+            (0x23, 0x4F, false),
+            (0x21, 0x49, false),
+            (0x22, 0x51, false),
+            (0x25, 0x4B, false),
+            (0x27, 0x4D, false),
+            (0x26, 0x48, false),
+            (0x28, 0x50, false),
+            (0x0C, 0x4C, false),
+        ];
+        for (vk, scan_code, extended) in cases {
+            let key = mk_key_from_windows_event(vk, scan_code, extended);
+            assert_eq!(
+                key,
+                MkKey::RawVirtualKey {
+                    vk: vk as u16,
+                    scan_code: scan_code as u16,
+                    extended,
+                }
+            );
+            assert_eq!(
+                windows_key_metadata(&key),
+                Some(WindowsKeyMetadata {
+                    virtual_key: vk as u16,
+                    scan_code: scan_code as u16,
+                    extended,
+                })
+            );
+
+            let sink = RecordingInputSink::default();
+            Win32InputBackend::with_sink(sink.clone())
+                .key_press(&key)
+                .unwrap();
+            let extended_flag = if extended { KEYEVENTF_EXTENDEDKEY_ } else { 0 };
+            assert_eq!(
+                *sink.0.lock().unwrap(),
+                [
+                    RawInputEvent::Keyboard {
+                        vk: vk as u16,
+                        scan: scan_code as u16,
+                        flags: KEYEVENTF_SCANCODE_ | extended_flag,
+                        extra: MKMACRO_EXTRA_INFO,
+                    },
+                    RawInputEvent::Keyboard {
+                        vk: vk as u16,
+                        scan: scan_code as u16,
+                        flags: KEYEVENTF_SCANCODE_ | extended_flag | KEYEVENTF_KEYUP_,
+                        extra: MKMACRO_EXTRA_INFO,
+                    },
+                ]
+            );
+        }
     }
 
     #[test]
