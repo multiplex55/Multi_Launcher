@@ -223,6 +223,10 @@ pub(super) fn other_modal_open(d: &MkMacroDialog) -> bool {
         || d.unwrap_confirmation.is_open()
         || d.hotkey_capture
         || d.record_hotkey_capture
+        || d.pause_record_hotkey_capture
+        || d.marker_record_hotkey_capture
+        || d.recording_annotation_open
+        || d.recording_review.is_some()
         || d.action_catalog_visible
         || d.structural_insertion.is_some()
         || d.uia_editor.editor_hidden()

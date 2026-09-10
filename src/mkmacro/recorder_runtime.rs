@@ -106,6 +106,22 @@ struct State {
     paused_us: u64,
     dropped_baseline: u64,
 }
+struct RecorderStopGuard<'a> {
+    runtime: &'a RecorderRuntime,
+    release_operation: bool,
+}
+impl Drop for RecorderStopGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.runtime.state.lock().unwrap();
+        state.mode = RecorderRuntimeState::Idle;
+        state.target = None;
+        state.pause_started_us = None;
+        if self.release_operation {
+            self.runtime.guard.release(Operation::Recording);
+        }
+        self.runtime.publish(&state);
+    }
+}
 pub struct RecorderRuntime {
     hooks: HookService,
     processor: RecorderProcessor,
@@ -116,9 +132,6 @@ pub struct RecorderRuntime {
     snapshot: RwLock<Arc<RecorderSnapshot>>,
 }
 impl RecorderRuntime {
-    pub(crate) fn store_contains(&self, id: u64) -> bool {
-        self.store.snapshot().macros.iter().any(|m| m.id == id)
-    }
     pub(crate) fn document_snapshot(&self) -> Option<Arc<super::MkMacroDocument>> {
         Some(self.store.snapshot())
     }
@@ -206,9 +219,6 @@ impl RecorderRuntime {
         config: NormalizationConfig,
         held_keys: Vec<u32>,
     ) -> Result<()> {
-        if !self.store_contains(target.macro_id) {
-            bail!("macro {} was not found", target.macro_id)
-        }
         let mut s = self.state.lock().unwrap();
         if s.mode != RecorderRuntimeState::Idle {
             bail!("a recorder is already active")
@@ -320,6 +330,22 @@ impl RecorderRuntime {
         self.stop_with_control(Vec::new())
     }
     pub fn stop_with_control(&self, occurrence: Vec<u32>) -> Result<RecordingResult> {
+        self.stop_with_control_inner(occurrence, true)
+    }
+    pub(crate) fn stop_for_review_with_control(
+        &self,
+        occurrence: Vec<u32>,
+    ) -> Result<RecordingResult> {
+        self.stop_with_control_inner(occurrence, false)
+    }
+    pub(crate) fn complete_review_transfer(&self) {
+        self.guard.release(Operation::Recording);
+    }
+    fn stop_with_control_inner(
+        &self,
+        occurrence: Vec<u32>,
+        release_operation: bool,
+    ) -> Result<RecordingResult> {
         let mut s = self.state.lock().unwrap();
         if s.mode == RecorderRuntimeState::Idle {
             bail!("recorder is not active")
@@ -332,25 +358,25 @@ impl RecorderRuntime {
         let stopped_us = self.clock.now_us();
         s.mode = RecorderRuntimeState::Stopping;
         self.publish(&s);
+        let started_us = s.started_us;
+        let paused_us = s.paused_us;
+        let pause_started_us = s.pause_started_us;
+        let dropped_baseline = s.dropped_baseline;
+        drop(s);
+        let _stop_guard = RecorderStopGuard {
+            runtime: self,
+            release_operation,
+        };
         let processed = self.processor.finish(self.hooks.fence(), occurrence);
         let capture_duration = Duration::from_micros(
             stopped_us
-                .saturating_sub(s.started_us)
-                .saturating_sub(s.paused_us)
+                .saturating_sub(started_us)
+                .saturating_sub(paused_us)
                 .saturating_sub(
-                    s.pause_started_us
-                        .map_or(0, |paused| stopped_us.saturating_sub(paused)),
+                    pause_started_us.map_or(0, |paused| stopped_us.saturating_sub(paused)),
                 ),
         );
-        let dropped = self
-            .hooks
-            .dropped_events()
-            .saturating_sub(s.dropped_baseline);
-        s.mode = RecorderRuntimeState::Idle;
-        s.target = None;
-        s.pause_started_us = None;
-        self.guard.release(Operation::Recording);
-        self.publish(&s);
+        let dropped = self.hooks.dropped_events().saturating_sub(dropped_baseline);
         let p = processed?;
         Ok(RecordingResult {
             target: p.target,

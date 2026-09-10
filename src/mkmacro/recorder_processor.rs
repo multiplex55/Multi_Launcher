@@ -94,6 +94,8 @@ struct Session {
     pressed: HashMap<u32, DownRun>,
     suppressed_until_up: HashSet<u32>,
     suppressed: HashSet<usize>,
+    mouse_pressed: HashMap<super::MouseButton, usize>,
+    suppressed_mouse_until_up: HashSet<super::MouseButton>,
     backlog: VecDeque<SequencedHookEvent>,
     floor: u64,
     initial_key_state: [u8; 256],
@@ -254,6 +256,52 @@ fn publish(snapshot: &RwLock<Arc<ProcessorSnapshot>>, session: Option<&Session>)
 fn accept(session: &mut Session, sequenced: SequencedHookEvent, enricher: &mut dyn EventEnricher) {
     if sequenced.sequence < session.floor {
         return;
+    }
+    if enricher.is_own_process_input(&sequenced.event) {
+        if let HookEvent::Key { vk, transition, .. } = sequenced.event {
+            if transition == KeyTransition::Down {
+                update_live_key_state(&mut session.live_key_state, vk, true);
+                session.suppressed_until_up.extend(seed_suppression([vk]));
+            } else {
+                track_key(session, &sequenced.event);
+                session
+                    .raw
+                    .push(RecordingBoundary::Event(sequenced.event, None));
+            }
+        }
+        if let HookEvent::Mouse { message, .. } = sequenced.event {
+            match message {
+                MouseMessage::Down(button) => {
+                    session.suppressed_mouse_until_up.insert(button);
+                }
+                MouseMessage::Up(button) => {
+                    if !session.suppressed_mouse_until_up.remove(&button)
+                        && let Some(index) = session.mouse_pressed.remove(&button)
+                    {
+                        session.suppressed.insert(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+    if let HookEvent::Mouse { message, .. } = sequenced.event {
+        match message {
+            MouseMessage::Down(button) if session.suppressed_mouse_until_up.contains(&button) => {
+                return;
+            }
+            MouseMessage::Down(button) => {
+                session.mouse_pressed.insert(button, session.raw.len());
+            }
+            MouseMessage::Up(button) if session.suppressed_mouse_until_up.remove(&button) => {
+                return;
+            }
+            MouseMessage::Up(button) => {
+                session.mouse_pressed.remove(&button);
+            }
+            _ => {}
+        }
     }
     track_key(session, &sequenced.event);
     let context = if session.config.record_window_context {
@@ -616,6 +664,8 @@ fn worker_loop(
                         pressed: HashMap::new(),
                         suppressed_until_up: seed_suppression(held_keys),
                         suppressed: HashSet::new(),
+                        mouse_pressed: HashMap::new(),
+                        suppressed_mouse_until_up: HashSet::new(),
                         backlog: VecDeque::new(),
                         floor,
                         initial_key_state,
@@ -803,6 +853,18 @@ fn worker_loop(
 mod tests {
     use super::*;
 
+    struct SurfaceEnricher {
+        own: bool,
+    }
+    impl EventEnricher for SurfaceEnricher {
+        fn enrich(&mut self, _event: &HookEvent) -> Option<super::super::EventContext> {
+            None
+        }
+        fn is_own_process_input(&self, _event: &HookEvent) -> bool {
+            self.own
+        }
+    }
+
     fn key(vk: u32, transition: KeyTransition, timestamp_us: u64) -> HookEvent {
         HookEvent::Key {
             timestamp_us,
@@ -812,6 +874,121 @@ mod tests {
             flags: 0,
             extra_info: 0,
         }
+    }
+
+    fn mouse(button: super::super::MouseButton, down: bool, timestamp_us: u64) -> HookEvent {
+        HookEvent::Mouse {
+            timestamp_us,
+            message: if down {
+                MouseMessage::Down(button)
+            } else {
+                MouseMessage::Up(button)
+            },
+            x: 10,
+            y: 20,
+            flags: 0,
+            extra_info: 0,
+        }
+    }
+
+    #[test]
+    fn own_process_key_boundaries_preserve_balance_without_recording_ui_input() {
+        let mut s = session();
+        let mut external = SurfaceEnricher { own: false };
+        let mut own = SurfaceEnricher { own: true };
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 0,
+                event: key(0xa2, KeyTransition::Down, 1),
+            },
+            &mut external,
+        );
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 1,
+                event: key(0xa2, KeyTransition::Up, 2),
+            },
+            &mut own,
+        );
+        assert_eq!(retained_vks(&s), vec![0xa2, 0xa2]);
+        assert!(!s.live_key_state[0xa2]);
+
+        let mut s = session();
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 0,
+                event: key(0x11, KeyTransition::Down, 1),
+            },
+            &mut own,
+        );
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 1,
+                event: key(0xa2, KeyTransition::Up, 2),
+            },
+            &mut external,
+        );
+        assert!(retained_vks(&s).is_empty());
+        assert!(!s.live_key_state[0xa2]);
+    }
+
+    #[test]
+    fn own_process_mouse_boundaries_never_leave_an_unmatched_button() {
+        let button = super::super::MouseButton::Left;
+        let mut external = SurfaceEnricher { own: false };
+        let mut own = SurfaceEnricher { own: true };
+        let mut s = session();
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 0,
+                event: mouse(button, true, 1),
+            },
+            &mut external,
+        );
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 1,
+                event: mouse(button, false, 2),
+            },
+            &mut own,
+        );
+        assert!(s.mouse_pressed.is_empty());
+        assert!(
+            s.raw
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !s.suppressed.contains(index))
+                .all(|(_, boundary)| !matches!(
+                    boundary,
+                    RecordingBoundary::Event(HookEvent::Mouse { .. }, _)
+                ))
+        );
+
+        let mut s = session();
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 0,
+                event: mouse(button, true, 1),
+            },
+            &mut own,
+        );
+        accept(
+            &mut s,
+            SequencedHookEvent {
+                sequence: 1,
+                event: mouse(button, false, 2),
+            },
+            &mut external,
+        );
+        assert!(s.mouse_pressed.is_empty());
+        assert!(s.raw.is_empty());
     }
     #[test]
     fn paste_modifiers_include_preheld_control_and_reject_altgr() {
@@ -906,6 +1083,8 @@ mod tests {
             pressed: HashMap::new(),
             suppressed_until_up: HashSet::new(),
             suppressed: HashSet::new(),
+            mouse_pressed: HashMap::new(),
+            suppressed_mouse_until_up: HashSet::new(),
             backlog: VecDeque::new(),
             floor: 0,
             initial_key_state: [0; 256],

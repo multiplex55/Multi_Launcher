@@ -145,6 +145,11 @@ pub struct EventContext {
 }
 pub trait EventEnricher: Send {
     fn enrich(&mut self, event: &HookEvent) -> Option<EventContext>;
+    /// Cheap input-surface exclusion used even when persisted window context is
+    /// disabled. Production excludes this process's own recorder controls.
+    fn is_own_process_input(&self, _event: &HookEvent) -> bool {
+        false
+    }
     /// Lightweight keyboard-only path used when window-context authoring is disabled.
     fn enrich_keyboard_layout(&mut self) -> Option<EventContext> {
         None

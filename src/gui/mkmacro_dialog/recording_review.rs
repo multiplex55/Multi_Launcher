@@ -100,6 +100,11 @@ pub struct RecordingReviewSession {
     pub notes: Vec<crate::mkmacro::RecordingNote>,
     pub reconfigure_confirmation: bool,
     pub message: Option<String>,
+    /// Ticket of the last preview submitted from this review. It is used only
+    /// to stop/label that exact run and is never persisted.
+    pub preview_ticket: Option<u64>,
+    pub preview_state: Option<crate::mkmacro::RuntimeState>,
+    pub preview_diagnostic: Option<crate::mkmacro::ExecutionDiagnostic>,
 }
 
 impl RecordingReviewSession {
@@ -161,6 +166,9 @@ impl RecordingReviewSession {
             notes,
             reconfigure_confirmation: false,
             message: None,
+            preview_ticket: None,
+            preview_state: None,
+            preview_diagnostic: None,
         }
     }
 
@@ -195,6 +203,35 @@ impl RecordingReviewSession {
     pub fn proposal_plan(&self) -> RecordingPlan {
         RecordingPlan {
             steps: self.proposed_steps().to_vec(),
+        }
+    }
+
+    /// Preview selection is a contiguous timeline slice from the first to the
+    /// last selected row. Disjoint selections therefore retain intervening
+    /// delays/actions instead of silently changing recorded timing.
+    pub fn preview_plan(
+        &self,
+        selected_range: bool,
+    ) -> Result<RecordingPlan, RecordingReviewError> {
+        if !selected_range {
+            return Ok(self.proposal_plan());
+        }
+        let (first, last) = self.selected_bounds()?;
+        Ok(RecordingPlan {
+            steps: self.proposed_steps()[first..=last].to_vec(),
+        })
+    }
+
+    pub fn observe_preview(&mut self, snapshot: &crate::mkmacro::RuntimeSnapshot) {
+        let Some(ticket) = self.preview_ticket else {
+            return;
+        };
+        if snapshot.origin != (crate::mkmacro::RuntimeOrigin::RecordingPreview { ticket }) {
+            return;
+        }
+        self.preview_state = Some(snapshot.state);
+        if snapshot.state == crate::mkmacro::RuntimeState::Failed {
+            self.preview_diagnostic = snapshot.latest_failure.clone();
         }
     }
 
@@ -498,8 +535,38 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     let mut edit = None;
     let mut append_recovery = false;
     let mut retarget = None;
+    let mut preview_all = false;
+    let mut preview_selected = false;
+    let mut stop_preview = false;
     let review_editor_open = dialog.action_editor.review_editing_id().is_some();
     let apply_blocker = dialog.recording_review_apply_blocker();
+    let runtime = crate::mkmacro::runtime::snapshot();
+    let preview_ticket = dialog
+        .recording_review
+        .as_ref()
+        .and_then(|review| review.preview_ticket);
+    let (preview_active, preview_snapshot) = preview_ticket.map_or((false, None), |ticket| {
+        crate::mkmacro::runtime::recording_preview_status(ticket)
+    });
+    if let (Some(review), Some(snapshot)) = (
+        dialog.recording_review.as_mut(),
+        preview_snapshot.as_deref(),
+    ) {
+        review.observe_preview(snapshot);
+    } else if preview_ticket.is_some() && !preview_active {
+        // A runtime replacement invalidates an accepted ticket. Do not leave
+        // Review permanently displaying the optimistic Previewing state.
+        dialog.recording_review.as_mut().unwrap().preview_state =
+            Some(crate::mkmacro::RuntimeState::Stopped);
+    }
+    let playback_active = runtime.as_deref().is_some_and(|snapshot| {
+        matches!(
+            snapshot.state,
+            crate::mkmacro::RuntimeState::Running
+                | crate::mkmacro::RuntimeState::Paused
+                | crate::mkmacro::RuntimeState::Stopping
+        )
+    });
     eframe::egui::Window::new("Recording Review")
         .id(eframe::egui::Id::new("mkmacro_recording_review"))
         .open(&mut open)
@@ -835,6 +902,27 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             if let Some(message) = &review.message {
                 ui.colored_label(eframe::egui::Color32::YELLOW, message);
             }
+            if let Some(diagnostic) = &review.preview_diagnostic {
+                ui.colored_label(
+                    eframe::egui::Color32::YELLOW,
+                    format!("Preview failed: {}", diagnostic.message),
+                );
+                for (key, value) in &diagnostic.context {
+                    ui.small(format!("{key}: {value}"));
+                }
+            }
+            if let Some(state) = review.preview_state {
+                let label = match state {
+                    crate::mkmacro::RuntimeState::Running => "Previewing",
+                    crate::mkmacro::RuntimeState::Paused => "Preview Paused",
+                    crate::mkmacro::RuntimeState::Stopping => "Preview Stopping",
+                    crate::mkmacro::RuntimeState::Completed => "Preview Completed",
+                    crate::mkmacro::RuntimeState::Stopped => "Preview Stopped",
+                    crate::mkmacro::RuntimeState::Failed => "Preview Failed",
+                    crate::mkmacro::RuntimeState::Idle => "Preview Idle",
+                };
+                ui.label(label);
+            }
             if let Some(blocker) = &apply_blocker {
                 if review.message.as_deref() != Some(blocker) {
                     ui.colored_label(eframe::egui::Color32::YELLOW, blocker);
@@ -872,7 +960,31 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 }
             }
             ui.horizontal(|ui| {
-                ui.add_enabled(false, eframe::egui::Button::new("Preview (next milestone)"));
+                if preview_active {
+                    if ui.button("Stop Preview").clicked() {
+                        stop_preview = true;
+                    }
+                } else {
+                    if ui
+                        .add_enabled(
+                            !review_editor_open && !playback_active && !review.proposed_steps().is_empty(),
+                            eframe::egui::Button::new("Play All"),
+                        )
+                        .clicked()
+                    {
+                        preview_all = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            !review_editor_open && !playback_active && !review.selection.is_empty(),
+                            eframe::egui::Button::new("Play Selected Range"),
+                        )
+                        .on_hover_text("Plays from the first through the last selected action, including intervening rows")
+                        .clicked()
+                    {
+                        preview_selected = true;
+                    }
+                }
                 if ui
                     .add_enabled(
                         !review_editor_open && apply_blocker.is_none(),
@@ -923,6 +1035,15 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             .unwrap()
             .retarget_append(macro_id);
     }
+    if stop_preview {
+        dialog.stop_owned_recording_preview();
+    }
+    if preview_all && let Err(error) = dialog.preview_recording_review(false) {
+        dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
+    }
+    if preview_selected && let Err(error) = dialog.preview_recording_review(true) {
+        dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
+    }
     if apply {
         if let Err(error) = dialog.apply_recording_review() {
             if let Some(review) = &mut dialog.recording_review {
@@ -962,6 +1083,37 @@ mod tests {
             on_error: crate::mkmacro::MkErrorPolicy::Stop,
             metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn selected_preview_spans_first_through_last_selected_row() {
+        let mut recording = result();
+        recording.plan.steps.extend([planned(4, 3), planned(5, 4)]);
+        recording.suggestions.clear();
+        let mut review = RecordingReviewSession::new(recording);
+        let ids: Vec<_> = review
+            .proposed_steps()
+            .iter()
+            .map(|step| step.review_id)
+            .collect();
+        let all_sources: Vec<_> = review
+            .proposed_steps()
+            .iter()
+            .map(|step| step.source.first)
+            .collect();
+        review.select(ids[1], false, false);
+        review.select(ids[3], true, false);
+        let preview = review.preview_plan(true).unwrap();
+        assert_eq!(preview.steps.len(), 3);
+        assert_eq!(
+            preview
+                .steps
+                .iter()
+                .map(|step| step.source.first)
+                .collect::<Vec<_>>(),
+            all_sources[1..=3]
+        );
+        assert_eq!(review.preview_plan(false).unwrap().steps.len(), 5);
     }
 
     fn result() -> RecordingResult {

@@ -1,12 +1,8 @@
 use multi_launcher::{
     actions::Action,
     gui::mkmacro_dialog::{
-        MkMacroAuthoringContext, MkMacroDialog, action_catalog,
-        action_editor::ActionEditorState,
-        launcher_action_picker::PickerPurpose,
-        recorder_controller::{
-            RecorderController, RecorderControllerView, RecorderState, RecorderStatusSnapshot,
-        },
+        MkMacroAuthoringContext, MkMacroDialog, action_catalog, action_editor::ActionEditorState,
+        launcher_action_picker::PickerPurpose, recorder_controller::decide_recording_controls,
     },
     mkmacro::{executor::fake::FakeBackend, *},
 };
@@ -513,19 +509,6 @@ fn wait_for_successful_step(runtime: &MacroRuntime) -> RuntimeSnapshot {
     }
 }
 
-#[derive(Default)]
-struct FakeRecorderView;
-impl RecorderControllerView for FakeRecorderView {
-    fn set_visible(&mut self, _: bool) {}
-    fn show(
-        &mut self,
-        _: &RecorderStatusSnapshot,
-        _: Option<&RuntimeSnapshot>,
-    ) -> Option<multi_launcher::gui::mkmacro_dialog::recorder_controller::ControllerAction> {
-        None
-    }
-}
-
 fn insert(dialog: &mut MkMacroDialog, action: MkAction) -> u64 {
     let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
     editor.begin_new(action);
@@ -655,9 +638,14 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     let stopped = wait_for(&runtime, RuntimeState::Stopped);
     assert!(stopped.steps.values().any(|s| *s == StepState::Success));
 
-    let mut recorder = RecorderController::new(FakeRecorderView);
-    recorder.hook_command(HookCommand::Start);
-    assert_eq!(recorder.status.state, RecorderState::Recording);
+    let recording_controls = decide_recording_controls(
+        RuntimeState::Idle,
+        RecorderRuntimeState::Recording,
+        true,
+        false,
+        false,
+    );
+    assert!(recording_controls.pause && recording_controls.stop);
     let recorded = normalize(
         &[
             RecordingBoundary::Event(
@@ -711,8 +699,16 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
         },
         None,
     );
-    recorder.hook_command(HookCommand::Stop);
-    assert_eq!(recorder.status.state, RecorderState::Stopped);
+    assert!(
+        decide_recording_controls(
+            RuntimeState::Idle,
+            RecorderRuntimeState::Idle,
+            true,
+            false,
+            false,
+        )
+        .record
+    );
     let before = dialog.draft.clone();
     let recording_result = |macro_id| RecordingResult {
         target: RecordingTarget {

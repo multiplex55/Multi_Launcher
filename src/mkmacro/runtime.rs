@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -36,6 +36,13 @@ pub enum RuntimeCommand {
     DebugRun(u64),
     DebugRunFrom(u64, u64),
     DebugRunSelection(u64, Vec<u64>),
+    /// Executes an already-compiled, process-local recording proposal. The
+    /// ticket associates transient Review UI with this run without publishing
+    /// the proposal through the store.
+    RecordingPreview {
+        macro_id: u64,
+        ticket: u64,
+    },
     Pause,
     Resume,
     Stop,
@@ -45,6 +52,11 @@ pub enum RuntimeCommand {
 pub enum RuntimeRunMode {
     Normal,
     Debug,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeOrigin {
+    Stored,
+    RecordingPreview { ticket: u64 },
 }
 #[derive(Debug, Clone, Copy)]
 struct RunRequest<'a> {
@@ -106,6 +118,9 @@ fn run_request(command: &RuntimeCommand) -> Option<RunRequest<'_>> {
         }
         RuntimeCommand::DebugRunSelection(id, selection) => {
             (*id, None, Some(selection.as_slice()), RuntimeRunMode::Debug)
+        }
+        RuntimeCommand::RecordingPreview { macro_id, .. } => {
+            (*macro_id, None, None, RuntimeRunMode::Normal)
         }
         _ => return None,
     };
@@ -199,6 +214,7 @@ pub struct RuntimeSnapshot {
     pub state: RuntimeState,
     pub run_mode: RuntimeRunMode,
     pub run_id: u64,
+    pub origin: RuntimeOrigin,
     /// Root invocation identity, preserved for compatibility.
     pub macro_id: Option<u64>,
     pub root_macro_name: Option<Arc<str>>,
@@ -245,6 +261,7 @@ impl Default for RuntimeSnapshot {
             state: RuntimeState::Idle,
             run_mode: RuntimeRunMode::Normal,
             run_id: 0,
+            origin: RuntimeOrigin::Stored,
             macro_id: None,
             root_macro_name: None,
             step_id: None,
@@ -313,18 +330,29 @@ pub enum InvocationDisposition {
 
 struct Shared {
     snapshot: RwLock<Arc<RuntimeSnapshot>>,
+    // Retain the most recently published preview independently from the
+    // process-wide presentation snapshot. A later stored run must not erase a
+    // Review window's terminal outcome before its next frame observes it.
+    last_preview_snapshot: RwLock<Option<Arc<RuntimeSnapshot>>>,
     control: Arc<RunControl>,
-    admission: Mutex<Option<u64>>,
+    admission: Mutex<Option<ActiveAdmission>>,
     next_run_id: AtomicU64,
     operations: Arc<SharedOperationGuard>,
     #[cfg(test)]
     test_events: Mutex<Vec<ExecutionEvent>>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveAdmission {
+    macro_id: u64,
+    origin: RuntimeOrigin,
+}
 struct WorkerMessage {
     command: RuntimeCommand,
     program: Option<super::MkCompiledProgram>,
+    origin: RuntimeOrigin,
 }
 static RUNTIME_GENERATIONS: AtomicU64 = AtomicU64::new(1);
+static NEXT_PREVIEW_TICKET: AtomicU64 = AtomicU64::new(1);
 pub struct MacroRuntime {
     tx: mpsc::Sender<WorkerMessage>,
     store: Arc<MkMacroStore>,
@@ -344,10 +372,10 @@ impl MacroRuntime {
                 "The macro runtime was replaced or closed",
             ));
         }
-        if let Some(id) = *admission {
+        if let Some(active) = *admission {
             return Err(ExecutionDiagnostic::new(
                 DiagnosticKind::RuntimeUnavailable,
-                format!("Macro {id} is already running"),
+                format!("Macro {} is already running", active.macro_id),
             ));
         }
         if self.shared.operations.active(Operation::Recording) {
@@ -467,6 +495,7 @@ impl MacroRuntime {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             snapshot: RwLock::new(Arc::new(RuntimeSnapshot::default())),
+            last_preview_snapshot: RwLock::new(None),
             control: Arc::new(RunControl::default()),
             admission: Mutex::new(None),
             next_run_id: AtomicU64::new(1),
@@ -494,6 +523,26 @@ impl MacroRuntime {
     pub fn command(&self, c: RuntimeCommand) -> CommandResult {
         self.submit_command(c, None)
     }
+    pub fn preview(
+        &self,
+        document: &super::MkMacroDocument,
+        macro_id: u64,
+        ticket: u64,
+    ) -> ExecResult {
+        self.ensure_available()?;
+        let program = super::compile_program(document, macro_id).map_err(|diagnostics| {
+            let message = diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            ExecutionDiagnostic::new(DiagnosticKind::InvalidPlan, message)
+        })?;
+        command_result(self.submit_command(
+            RuntimeCommand::RecordingPreview { macro_id, ticket },
+            Some(program),
+        ))
+    }
     fn submit_command(
         &self,
         c: RuntimeCommand,
@@ -502,6 +551,12 @@ impl MacroRuntime {
         #[cfg(test)]
         self.test_commands.lock().unwrap().push(c.clone());
         let request = run_request(&c);
+        if matches!(&c, RuntimeCommand::RecordingPreview { .. }) && program.is_none() {
+            return CommandResult::Rejected(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidPlan,
+                "recording preview requires an ephemeral compiled program",
+            ));
+        }
         if request.is_some_and(|request| request.selection.is_some_and(<[u64]>::is_empty)) {
             return CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidSelection,
@@ -533,8 +588,10 @@ impl MacroRuntime {
             ));
         }
         if let Some(request) = request {
-            if let Some(a) = *admission {
-                return CommandResult::AlreadyRunning { active_macro_id: a };
+            if let Some(active) = *admission {
+                return CommandResult::AlreadyRunning {
+                    active_macro_id: active.macro_id,
+                };
             }
             if !self.shared.operations.claim(Operation::Playback) {
                 return CommandResult::Rejected(ExecutionDiagnostic::new(
@@ -543,7 +600,16 @@ impl MacroRuntime {
                 ));
             }
             self.shared.control.reset();
-            *admission = Some(request.macro_id);
+            let origin = match &c {
+                RuntimeCommand::RecordingPreview { ticket, .. } => {
+                    RuntimeOrigin::RecordingPreview { ticket: *ticket }
+                }
+                _ => RuntimeOrigin::Stored,
+            };
+            *admission = Some(ActiveAdmission {
+                macro_id: request.macro_id,
+                origin,
+            });
         }
         match c {
             RuntimeCommand::Pause => {
@@ -575,6 +641,12 @@ impl MacroRuntime {
         if self
             .tx
             .send(WorkerMessage {
+                origin: match &c {
+                    RuntimeCommand::RecordingPreview { ticket, .. } => {
+                        RuntimeOrigin::RecordingPreview { ticket: *ticket }
+                    }
+                    _ => RuntimeOrigin::Stored,
+                },
                 command: c,
                 program,
             })
@@ -590,8 +662,49 @@ impl MacroRuntime {
         }
         CommandResult::Accepted
     }
+    /// Idempotently cancel one admitted recording preview. The comparison and
+    /// Stop latch share the admission lock, so a stale Review can neither miss
+    /// an accepted-but-unpublished preview nor stop a later stored run.
+    pub fn stop_recording_preview(&self, ticket: u64) -> bool {
+        let admission = self.shared.admission.lock().unwrap();
+        if !admission
+            .is_some_and(|active| active.origin == RuntimeOrigin::RecordingPreview { ticket })
+        {
+            return false;
+        }
+        self.shared.control.stop();
+        let snapshot = self.snapshot();
+        if snapshot.origin == (RuntimeOrigin::RecordingPreview { ticket })
+            && matches!(snapshot.state, RuntimeState::Running | RuntimeState::Paused)
+        {
+            publish(&self.shared, |snapshot| {
+                snapshot.state = RuntimeState::Stopping;
+                snapshot.pause_reason = None;
+            });
+        }
+        true
+    }
     pub fn snapshot(&self) -> Arc<RuntimeSnapshot> {
         self.shared.snapshot.read().unwrap().clone()
+    }
+    pub fn recording_preview_status(&self, ticket: u64) -> (bool, Option<Arc<RuntimeSnapshot>>) {
+        let active = self
+            .shared
+            .admission
+            .lock()
+            .unwrap()
+            .is_some_and(|admission| {
+                admission.origin == RuntimeOrigin::RecordingPreview { ticket }
+            });
+        let snapshot = self
+            .shared
+            .last_preview_snapshot
+            .read()
+            .unwrap()
+            .as_ref()
+            .filter(|snapshot| snapshot.origin == RuntimeOrigin::RecordingPreview { ticket })
+            .cloned();
+        (active, snapshot)
     }
     #[cfg(test)]
     pub(crate) fn take_test_commands(&self) -> Vec<RuntimeCommand> {
@@ -609,6 +722,7 @@ impl MacroRuntime {
             let _ = self.tx.send(WorkerMessage {
                 command: RuntimeCommand::Shutdown,
                 program: None,
+                origin: RuntimeOrigin::Stored,
             });
         }
         if let Some(h) = self.worker.lock().unwrap().take() {
@@ -629,6 +743,9 @@ fn publish(shared: &Shared, f: impl FnOnce(&mut RuntimeSnapshot)) {
     let next = Arc::make_mut(&mut current);
     f(next);
     next.revision += 1;
+    if matches!(next.origin, RuntimeOrigin::RecordingPreview { .. }) {
+        *shared.last_preview_snapshot.write().unwrap() = Some(current.clone());
+    }
 }
 
 fn controlled_state(control: &RunControl) -> RuntimeState {
@@ -917,7 +1034,12 @@ fn worker_loop(
     rx: mpsc::Receiver<WorkerMessage>,
     shared: Arc<Shared>,
 ) {
-    while let Ok(WorkerMessage { command, program }) = rx.recv() {
+    while let Ok(WorkerMessage {
+        command,
+        program,
+        origin,
+    }) = rx.recv()
+    {
         match command {
             RuntimeCommand::Shutdown => {
                 clear_pause_reason(&shared);
@@ -928,7 +1050,7 @@ fn worker_loop(
             RuntimeCommand::Pause | RuntimeCommand::Resume | RuntimeCommand::Stop => {}
             command => {
                 let request = run_request(&command).expect("run commands are classified");
-                run_one(&store, &backends, &shared, request, program)
+                run_one(&store, &backends, &shared, request, program, origin)
             }
         }
     }
@@ -970,6 +1092,7 @@ fn run_one(
     shared: &Shared,
     request: RunRequest<'_>,
     prepared_program: Option<super::MkCompiledProgram>,
+    origin: RuntimeOrigin,
 ) {
     let RunRequest {
         macro_id: mid,
@@ -1005,6 +1128,7 @@ fn run_one(
                 state,
                 run_mode: mode,
                 run_id,
+                origin,
                 macro_id: Some(mid),
                 pause_reason: (state == RuntimeState::Paused).then_some(RuntimePauseReason::User),
                 total_steps: plan.instructions.iter().filter(|x| x.step.enabled).count(),
@@ -1069,6 +1193,7 @@ fn run_one(
             if s.run_id != run_id {
                 *s = RuntimeSnapshot {
                     run_id,
+                    origin,
                     macro_id: Some(mid),
                     run_mode: mode,
                     revision: s.revision,
@@ -1116,11 +1241,62 @@ static HOTKEYS: Lazy<RwLock<Option<Arc<super::hotkeys::MkMacroHotkeyService>>>> 
     Lazy::new(|| RwLock::new(None));
 static RECORDER_HOTKEYS: Lazy<RwLock<Option<Arc<super::recorder_hotkeys::RecorderHotkeyService>>>> =
     Lazy::new(|| RwLock::new(None));
-static RECORDING_TARGET: Lazy<RwLock<Option<RecordingTarget>>> = Lazy::new(|| RwLock::new(None));
-static RECORDING_OPTIONS: Lazy<RwLock<NormalizationConfig>> =
-    Lazy::new(|| RwLock::new(NormalizationConfig::default()));
+#[derive(Clone)]
+struct RecordingArm {
+    target: Option<RecordingTarget>,
+    config: NormalizationConfig,
+}
+static RECORDING_ARM: Lazy<RwLock<RecordingArm>> = Lazy::new(|| {
+    RwLock::new(RecordingArm {
+        target: None,
+        config: NormalizationConfig::default(),
+    })
+});
 static RECORDING_STATUS: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+static RECORDING_ANNOTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PENDING_RECORDINGS: Lazy<Mutex<Vec<RecordingResult>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static RECORD_STOP_COORDINATOR: Lazy<(Mutex<bool>, Condvar)> =
+    Lazy::new(|| (Mutex::new(false), Condvar::new()));
+struct RecordStopJob {
+    recorder: Arc<RecorderRuntime>,
+    occurrence: Vec<u32>,
+}
+struct RecordStopCompletion;
+impl Drop for RecordStopCompletion {
+    fn drop(&mut self) {
+        let mut pending = RECORD_STOP_COORDINATOR.0.lock().unwrap();
+        *pending = false;
+        RECORD_STOP_COORDINATOR.1.notify_all();
+    }
+}
+static RECORD_STOP_WORKER: Lazy<mpsc::Sender<RecordStopJob>> = Lazy::new(|| {
+    let (tx, rx) = mpsc::channel::<RecordStopJob>();
+    thread::Builder::new()
+        .name("mkmacro-record-stop".into())
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                let _completion = RecordStopCompletion;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job.recorder.stop_for_review_with_control(job.occurrence)
+                }))
+                .unwrap_or_else(|_| Err(anyhow!("recording finalization panicked")));
+                match result {
+                    Ok(result) => {
+                        PENDING_RECORDINGS.lock().unwrap().push(result);
+                        *RECORDING_STATUS.write().unwrap() = None;
+                    }
+                    Err(error) => {
+                        *RECORDING_STATUS.write().unwrap() = Some(error.to_string());
+                    }
+                }
+                if job.recorder.snapshot().state == super::RecorderRuntimeState::Idle {
+                    job.recorder.complete_review_transfer();
+                }
+            }
+        })
+        .expect("spawn recorder stop worker");
+    tx
+});
 pub fn set_shared_store(store: Arc<MkMacroStore>) {
     set_shared_store_with_backends_and_reserved(
         store.clone(),
@@ -1145,12 +1321,35 @@ pub fn set_shared_store_with_backends_and_reserved(
     backends: Backends,
     reserved: &[(&str, &str)],
 ) {
-    // Stop the old poller before replacing the runtime it dispatches into.
+    set_shared_store_components(
+        store,
+        backends,
+        reserved,
+        production_hook_service(8192),
+        true,
+    )
+}
+fn set_shared_store_components(
+    store: Arc<MkMacroStore>,
+    backends: Backends,
+    reserved: &[(&str, &str)],
+    recorder_hooks: super::HookService,
+    start_hotkey_services: bool,
+) {
+    // Stop pollers before taking stop coordination; a poller callback may be
+    // in the process of enqueuing the current recording's Stop occurrence.
     if let Some(old) = HOTKEYS.write().unwrap().take() {
         old.shutdown()
     }
     if let Some(old) = RECORDER_HOTKEYS.write().unwrap().take() {
         old.shutdown()
+    }
+    // Runtime replacement cannot discard an accepted stop/review transfer.
+    // Serialize enqueue against replacement and wait for the exact captured
+    // recorder instance to finish before shutting it down.
+    let mut stop_coordination = RECORD_STOP_COORDINATOR.0.lock().unwrap();
+    while *stop_coordination {
+        stop_coordination = RECORD_STOP_COORDINATOR.1.wait(stop_coordination).unwrap();
     }
     if let Some(old) = RUNTIME.write().unwrap().take() {
         old.shutdown()
@@ -1166,16 +1365,18 @@ pub fn set_shared_store_with_backends_and_reserved(
     )));
     *RECORDER.write().unwrap() = Some(Arc::new(RecorderRuntime::with_guard(
         store.clone(),
-        production_hook_service(8192),
+        recorder_hooks,
         Arc::new(SystemRecorderClock::default()),
         guard,
     )));
-    *HOTKEYS.write().unwrap() = Some(Arc::new(
-        super::hotkeys::MkMacroHotkeyService::new_with_reserved(store.clone(), reserved),
-    ));
-    *RECORDER_HOTKEYS.write().unwrap() = Some(Arc::new(
-        super::recorder_hotkeys::RecorderHotkeyService::system(store),
-    ));
+    if start_hotkey_services {
+        *HOTKEYS.write().unwrap() = Some(Arc::new(
+            super::hotkeys::MkMacroHotkeyService::new_with_reserved(store.clone(), reserved),
+        ));
+        *RECORDER_HOTKEYS.write().unwrap() = Some(Arc::new(
+            super::recorder_hotkeys::RecorderHotkeyService::system(store),
+        ));
+    }
 }
 fn global() -> Result<Arc<MacroRuntime>> {
     RUNTIME
@@ -1230,6 +1431,21 @@ pub fn debug_run_from(macro_id: u64, step_id: u64) -> Result<()> {
 pub fn debug_run_selection(macro_id: u64, ids: Vec<u64>) -> Result<()> {
     prepare_direct(RuntimeCommand::DebugRunSelection(macro_id, ids))
 }
+/// Compile and submit an ephemeral document snapshot without publishing it to
+/// the store. It shares the normal worker, admission, controls, diagnostics,
+/// and executor cleanup path.
+pub fn preview_document(document: &super::MkMacroDocument, macro_id: u64) -> Result<u64> {
+    let ticket = NEXT_PREVIEW_TICKET.fetch_add(1, Ordering::Relaxed);
+    global()?.preview(document, macro_id, ticket)?;
+    Ok(ticket)
+}
+pub fn stop_recording_preview(ticket: u64) -> bool {
+    RUNTIME
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|runtime| runtime.stop_recording_preview(ticket))
+}
 pub fn pause() -> Result<()> {
     accepted(global()?.command(RuntimeCommand::Pause))
 }
@@ -1243,19 +1459,25 @@ pub fn stop() -> Result<()> {
 pub fn snapshot() -> Option<Arc<RuntimeSnapshot>> {
     RUNTIME.read().unwrap().as_ref().map(|r| r.snapshot())
 }
+/// Returns admission and the last retained snapshot for one preview ticket.
+/// The retained snapshot survives later stored playback snapshots.
+pub fn recording_preview_status(ticket: u64) -> (bool, Option<Arc<RuntimeSnapshot>>) {
+    RUNTIME
+        .read()
+        .unwrap()
+        .as_ref()
+        .map_or((false, None), |runtime| {
+            runtime.recording_preview_status(ticket)
+        })
+}
 #[cfg(test)]
 pub(crate) fn test_runtime() -> Option<Arc<MacroRuntime>> {
     RUNTIME.read().unwrap().clone()
 }
-pub fn record(macro_id: u64, config: NormalizationConfig) -> Result<()> {
-    RECORDER
-        .read()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
-        .start(macro_id, config)
-}
 pub fn record_target(target: RecordingTarget, config: NormalizationConfig) -> Result<()> {
+    if record_stop_pending() {
+        return Err(anyhow!("recording is stopping for review"));
+    }
     RECORDER
         .read()
         .unwrap()
@@ -1279,43 +1501,96 @@ pub fn record_resume() -> Result<()> {
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
         .resume()
 }
-pub fn record_stop() -> Result<RecordingResult> {
+/// Stops capture and transfers ownership to the GUI's pending Review queue.
+/// Command/headless callers must use this path because they cannot directly
+/// present or safely discard the returned transient recording.
+pub fn record_stop_for_review() -> Result<()> {
+    request_record_stop_for_review().map(|_| ())
+}
+/// Requests capture finalization on one owned worker so egui can render the
+/// Stopping state while observation/UIA lanes flush. Duplicate clicks are
+/// idempotent and every successful result reaches the same Review queue.
+pub fn request_record_stop_for_review() -> Result<bool> {
+    let mut pending = RECORD_STOP_COORDINATOR.0.lock().unwrap();
+    let recorder = RECORDER
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?;
+    enqueue_record_stop_for_review(&mut pending, recorder, Vec::new())
+}
+pub fn record_stop_pending() -> bool {
+    *RECORD_STOP_COORDINATOR.0.lock().unwrap()
+}
+
+fn request_record_stop_for_review_on(
+    recorder: Arc<RecorderRuntime>,
+    occurrence: Vec<u32>,
+) -> Result<bool> {
+    let mut pending = RECORD_STOP_COORDINATOR.0.lock().unwrap();
+    enqueue_record_stop_for_review(&mut pending, recorder, occurrence)
+}
+
+fn enqueue_record_stop_for_review(
+    pending: &mut bool,
+    recorder: Arc<RecorderRuntime>,
+    occurrence: Vec<u32>,
+) -> Result<bool> {
+    if *pending {
+        return Ok(false);
+    }
+    match recorder.snapshot().state {
+        super::RecorderRuntimeState::Recording | super::RecorderRuntimeState::Paused => {}
+        super::RecorderRuntimeState::Stopping => return Ok(false),
+        super::RecorderRuntimeState::Idle => return Err(anyhow!("recorder is not active")),
+    }
+    *pending = true;
+    RECORDING_ANNOTATION_ACTIVE.store(false, Ordering::Release);
+    if RECORD_STOP_WORKER
+        .send(RecordStopJob {
+            recorder,
+            occurrence,
+        })
+        .is_err()
+    {
+        *pending = false;
+        return Err(anyhow!("recording stop worker is unavailable"));
+    }
+    Ok(true)
+}
+pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
+    RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
+}
+pub fn record_marker() -> Result<()> {
     RECORDER
         .read()
         .unwrap()
         .clone()
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
-        .stop()
+        .marker()
 }
-/// Stops capture and transfers ownership to the GUI's pending Review queue.
-/// Command/headless callers must use this path because they cannot directly
-/// present or safely discard the returned transient recording.
-pub fn record_stop_for_review() -> Result<()> {
-    let result = record_stop()?;
-    PENDING_RECORDINGS.lock().unwrap().push(result);
-    Ok(())
+pub fn record_annotation(text: String) -> Result<()> {
+    RECORDER
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("macro runtime is not initialized"))?
+        .annotation(text)
 }
-pub fn recorder_snapshot() -> Option<Arc<RecorderSnapshot>> {
-    RECORDER.read().unwrap().as_ref().map(|r| r.snapshot())
+pub fn set_recording_annotation_active(active: bool) {
+    RECORDING_ANNOTATION_ACTIVE.store(active, Ordering::Release);
 }
-pub fn set_recording_target(target: Option<u64>) {
-    set_recording_target_with_anchor(target.map(|macro_id| RecordingTarget {
-        macro_id,
-        insertion_anchor_step_id: None,
-        insertion_anchor_generation: None,
-    }));
-}
-pub fn set_recording_target_with_anchor(target: Option<RecordingTarget>) {
-    *RECORDING_TARGET.write().unwrap() = target;
+pub fn arm_recording(target: Option<RecordingTarget>, options: NormalizationConfig) {
+    *RECORDING_ARM.write().unwrap() = RecordingArm {
+        target,
+        config: options,
+    };
     if target.is_some()
         && RECORDING_STATUS.read().unwrap().as_deref()
             == Some("Select a macro before starting recording")
     {
         *RECORDING_STATUS.write().unwrap() = None;
     }
-}
-pub fn set_recording_options(options: NormalizationConfig) {
-    *RECORDING_OPTIONS.write().unwrap() = options;
 }
 pub fn recording_status() -> Option<String> {
     RECORDING_STATUS.read().unwrap().clone()
@@ -1355,6 +1630,11 @@ fn control_hotkey(
     }
 }
 pub(crate) fn recorder_control(action: super::recorder_hotkeys::RecorderControlAction) {
+    if RECORDING_ANNOTATION_ACTIVE.load(Ordering::Acquire)
+        && action != super::recorder_hotkeys::RecorderControlAction::Toggle
+    {
+        return;
+    }
     let Some(recorder) = RECORDER.read().unwrap().clone() else {
         return;
     };
@@ -1369,22 +1649,22 @@ pub(crate) fn recorder_control(action: super::recorder_hotkeys::RecorderControlA
             super::recorder_hotkeys::RecorderControlAction::Toggle,
             super::RecorderRuntimeState::Idle,
         ) => {
-            let target = *RECORDING_TARGET.read().unwrap();
-            let Some(target) = target.filter(|target| recorder.store_contains(target.macro_id))
-            else {
+            if record_stop_pending() {
+                return;
+            }
+            let arm = RECORDING_ARM.read().unwrap().clone();
+            let target = arm.target;
+            let Some(target) = target else {
                 *RECORDING_STATUS.write().unwrap() =
                     Some("Select a macro before starting recording".into());
                 return;
             };
-            let config = RECORDING_OPTIONS.read().unwrap().clone();
-            recorder.start_target(target, config, occurrence)
+            recorder.start_target(target, arm.config, occurrence)
         }
         (
             super::recorder_hotkeys::RecorderControlAction::Toggle,
             super::RecorderRuntimeState::Recording | super::RecorderRuntimeState::Paused,
-        ) => recorder.stop_with_control(occurrence).map(|result| {
-            PENDING_RECORDINGS.lock().unwrap().push(result);
-        }),
+        ) => request_record_stop_for_review_on(recorder.clone(), occurrence).map(|_| ()),
         (
             super::recorder_hotkeys::RecorderControlAction::PauseResume,
             super::RecorderRuntimeState::Recording,
@@ -3602,6 +3882,74 @@ mod run_mode_tests {
             thread::sleep(Duration::from_millis(2));
         }
     }
+
+    #[test]
+    fn preview_terminal_snapshot_survives_a_later_stored_run() {
+        let target = test_macro(1, true, vec![step(1, MkAction::Delay(Default::default()))]);
+        let document = MkMacroDocument {
+            macros: vec![target.clone()],
+            ..Default::default()
+        };
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+
+        runtime.preview(&document, 1, 77).unwrap();
+        let preview = wait_for_terminal(&runtime);
+        assert_eq!(
+            preview.origin,
+            RuntimeOrigin::RecordingPreview { ticket: 77 }
+        );
+        wait_for_admission_release(&runtime);
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(1)),
+            CommandResult::Accepted
+        );
+        let stored = wait_for_terminal_after(&runtime, preview.run_id);
+        assert_eq!(stored.origin, RuntimeOrigin::Stored);
+        let (active, retained) = runtime.recording_preview_status(77);
+        assert!(!active);
+        assert_eq!(retained.unwrap().run_id, preview.run_id);
+    }
+
+    #[test]
+    fn preview_requires_a_prepared_program_and_stops_only_its_exact_ticket() {
+        let target = test_macro(
+            1,
+            true,
+            vec![step(
+                1,
+                MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 1_000,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let document = MkMacroDocument {
+            macros: vec![target.clone()],
+            ..Default::default()
+        };
+        let (_dir, runtime, _guard) = runtime_with(vec![target]);
+        assert!(matches!(
+            runtime.command(RuntimeCommand::RecordingPreview {
+                macro_id: 1,
+                ticket: 41,
+            }),
+            CommandResult::Rejected(ExecutionDiagnostic {
+                kind: DiagnosticKind::InvalidPlan,
+                ..
+            })
+        ));
+
+        runtime.preview(&document, 1, 42).unwrap();
+        assert!(!runtime.stop_recording_preview(41));
+        assert!(runtime.stop_recording_preview(42));
+        let stopped = wait_for_terminal(&runtime);
+        assert_eq!(
+            stopped.origin,
+            RuntimeOrigin::RecordingPreview { ticket: 42 }
+        );
+        assert_eq!(stopped.state, RuntimeState::Stopped);
+    }
 }
 
 #[cfg(test)]
@@ -3720,8 +4068,22 @@ mod facade_tests {
 mod recording_controller_tests {
     use super::*;
     use crate::mkmacro::{
-        MkMacro, MkMacroDocument, MkPlayback, SCHEMA_VERSION, executor::fake::FakeBackend,
+        CallbackSender, HookCommand, HookCommandRequest, HookLoopAdapter, HookService, MkMacro,
+        MkMacroDocument, MkPlayback, SCHEMA_VERSION, executor::fake::FakeBackend,
     };
+
+    struct FakeHookLoop;
+    impl HookLoopAdapter for FakeHookLoop {
+        fn run(self, commands: mpsc::Receiver<HookCommandRequest>, _callback: CallbackSender) {
+            while let Ok(request) = commands.recv() {
+                let shutdown = request.command == HookCommand::Shutdown;
+                request.acknowledge(true);
+                if shutdown {
+                    break;
+                }
+            }
+        }
+    }
 
     #[test]
     #[serial_test::serial]
@@ -3752,10 +4114,16 @@ mod recording_controller_tests {
             .unwrap();
         let store = Arc::new(store);
         let fake = Arc::new(FakeBackend::default());
-        set_shared_store_with_backends(store, fake.backends());
+        set_shared_store_components(
+            store,
+            fake.backends(),
+            &[],
+            HookService::with_adapter(FakeHookLoop, 16),
+            false,
+        );
         take_pending_recordings();
 
-        set_recording_target(None);
+        arm_recording(None, NormalizationConfig::default());
         toggle_recording();
         assert_eq!(
             recorder_snapshot().unwrap().state,
@@ -3766,11 +4134,34 @@ mod recording_controller_tests {
             Some("Select a macro before starting recording")
         );
 
-        set_recording_target(Some(2));
+        arm_recording(
+            Some(RecordingTarget {
+                macro_id: 2,
+                insertion_anchor_step_id: None,
+                insertion_anchor_generation: None,
+            }),
+            NormalizationConfig::default(),
+        );
         assert_eq!(recording_status(), None);
         toggle_recording();
         assert_eq!(recorder_snapshot().unwrap().macro_id, Some(2));
         toggle_recording();
+        let (pending_lock, pending_wake) = &*RECORD_STOP_COORDINATOR;
+        let pending = pending_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (pending, timeout) = pending_wake
+            .wait_timeout_while(pending, std::time::Duration::from_secs(2), |pending| {
+                *pending
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(!timeout.timed_out(), "recording stop did not complete");
+        assert!(!*pending);
+        drop(pending);
+        assert_eq!(
+            recorder_snapshot().unwrap().state,
+            super::super::RecorderRuntimeState::Idle
+        );
         let results = take_pending_recordings();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].target.macro_id, 2);

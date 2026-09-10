@@ -70,7 +70,7 @@ pub use recorder_suggestions::*;
 pub use recorder_windows::*;
 pub use runtime::{
     BreakpointOccurrence, CommandResult, CompletedStep, CompletedStepOutcome, DebugSnapshot,
-    DiagnosticKey, MacroDiagnosticKey, MacroRuntime, MacroStepKey, RuntimeCommand,
+    DiagnosticKey, MacroDiagnosticKey, MacroRuntime, MacroStepKey, RuntimeCommand, RuntimeOrigin,
     RuntimePauseReason, RuntimeRunMode, RuntimeSnapshot, RuntimeState, StepState,
 };
 pub use screen::*;

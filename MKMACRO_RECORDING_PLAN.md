@@ -138,7 +138,13 @@ Verification: review session and authoring integration tests in M7.
 
 ## M6 — Ephemeral preview and complete UI integration
 
-Status: `pending`
+Status: `in_progress`
+
+Implementation checkpoint: M6 production integration is implemented and passes formatting,
+all-target compilation, and focused preview/Review/controller/hotkey/recorder tests. Preview
+tickets retain exact terminal state across later runs, Stop finalizes asynchronously through one
+owned Review queue, and Record Options are draft-owned. M7 remains the owner of broad behavioral
+suite consolidation, so M6 stays `in_progress` until that downstream acceptance pass.
 
 Depends on: M2-M5.
 

@@ -369,6 +369,30 @@ fn analyze_document_with_context(
     let asset_root = context.asset_root;
     let graph = super::call_graph::CallGraph::build(doc);
     let mut out = graph.identity_diagnostics().to_vec();
+    let controls = [
+        ("Record Toggle", Some(&doc.settings.record_toggle_hotkey)),
+        (
+            "Pause/Resume",
+            doc.settings.recorder.pause_resume_hotkey.as_ref(),
+        ),
+        ("Marker", doc.settings.recorder.marker_hotkey.as_ref()),
+    ];
+    for (index, (left_name, left)) in controls.iter().enumerate() {
+        let Some(left) = left else { continue };
+        let left = super::hotkeys::canonical_hotkey(left);
+        for (right_name, right) in &controls[index + 1..] {
+            if right.is_some_and(|right| super::hotkeys::canonical_hotkey(right) == left) {
+                let mut diagnostic = MkDiagnostic::fatal(
+                    0,
+                    None,
+                    "duplicate_recorder_control_hotkey",
+                    format!("{left_name} hotkey conflicts with {right_name}"),
+                );
+                diagnostic.scope = DiagnosticScope::Document;
+                out.push(diagnostic);
+            }
+        }
+    }
     out.extend(graph.cycle_diagnostics(super::call_graph::DependencyPolicy::EnabledCalls));
     let mut invalid_signatures = HashSet::new();
     for m in &doc.macros {

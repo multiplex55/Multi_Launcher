@@ -232,6 +232,23 @@ fn normalize_reserved_chords(
             .by_chord
             .insert(chord, "the recording toggle".into());
     }
+    for (hotkey, name) in [
+        (
+            doc.settings.recorder.pause_resume_hotkey.as_ref(),
+            "the recorder pause/resume control",
+        ),
+        (
+            doc.settings.recorder.marker_hotkey.as_ref(),
+            "the recorder marker control",
+        ),
+    ] {
+        if let Some(chord) = hotkey.and_then(compiled_canonical_hotkey) {
+            normalized
+                .by_chord
+                .entry(chord)
+                .or_insert_with(|| name.into());
+        }
+    }
 
     for (name, chord) in reserved {
         let Some(chord) = canonical_reserved_chord(&chord) else {

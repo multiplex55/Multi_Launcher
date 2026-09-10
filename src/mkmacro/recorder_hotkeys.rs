@@ -105,17 +105,32 @@ impl Drop for RecorderHotkeyService {
     }
 }
 fn compile_bindings(doc: &MkMacroDocument, backend: &dyn KeyStateBackend) -> [Option<Binding>; 3] {
+    let toggle_name = super::hotkeys::canonical_hotkey(&doc.settings.record_toggle_hotkey);
+    let pause_name = doc
+        .settings
+        .recorder
+        .pause_resume_hotkey
+        .as_ref()
+        .map(super::hotkeys::canonical_hotkey);
+    let marker_name = doc
+        .settings
+        .recorder
+        .marker_hotkey
+        .as_ref()
+        .map(super::hotkeys::canonical_hotkey);
+    let pause_conflict = pause_name.as_ref().is_some_and(|name| *name == toggle_name);
+    let marker_conflict = marker_name.as_ref().is_some_and(|name| {
+        *name == toggle_name || pause_name.as_ref().is_some_and(|pause| pause == name)
+    });
     [
         Binding::compile(&doc.settings.record_toggle_hotkey, backend),
-        doc.settings
-            .recorder
-            .pause_resume_hotkey
-            .as_ref()
+        (!pause_conflict)
+            .then_some(doc.settings.recorder.pause_resume_hotkey.as_ref())
+            .flatten()
             .and_then(|h| Binding::compile(h, backend)),
-        doc.settings
-            .recorder
-            .marker_hotkey
-            .as_ref()
+        (!marker_conflict)
+            .then_some(doc.settings.recorder.marker_hotkey.as_ref())
+            .flatten()
             .and_then(|h| Binding::compile(h, backend)),
     ]
 }
@@ -209,6 +224,23 @@ mod tests {
                 RecorderControlAction::Toggle,
                 RecorderControlAction::PauseResume
             ]
+        );
+    }
+
+    #[test]
+    fn duplicate_recorder_controls_are_not_armed_twice() {
+        let mut doc = MkMacroDocument::default();
+        doc.settings.recorder.pause_resume_hotkey = Some(doc.settings.record_toggle_hotkey.clone());
+        doc.settings.recorder.marker_hotkey = Some(doc.settings.record_toggle_hotkey.clone());
+        let fake = Fake(RwLock::new(vec![MkKey::Function(9)]));
+        let bindings = compile_bindings(&doc, &fake);
+        assert!(bindings[0].is_some());
+        assert!(bindings[1].is_none());
+        assert!(bindings[2].is_none());
+        assert!(
+            crate::mkmacro::validate_document(&doc, None)
+                .iter()
+                .any(|diagnostic| diagnostic.code == "duplicate_recorder_control_hotkey")
         );
     }
 }

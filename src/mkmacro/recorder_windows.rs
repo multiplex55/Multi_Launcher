@@ -42,6 +42,15 @@ impl<M> WindowsEventEnricher<M> {
     }
 }
 impl<M: WindowMetadata> EventEnricher for WindowsEventEnricher<M> {
+    fn is_own_process_input(&self, event: &HookEvent) -> bool {
+        let root = match *event {
+            HookEvent::Mouse { x, y, .. } => self.metadata.root_under_point(MkPoint { x, y }),
+            HookEvent::Key { .. } => self.metadata.foreground_root(),
+        };
+        root.and_then(|root| self.metadata.process_thread(root))
+            .is_some_and(|(pid, _)| pid == std::process::id())
+    }
+
     fn enrich(&mut self, event: &HookEvent) -> Option<EventContext> {
         let foreground_root = self.metadata.foreground_root();
         // Layout capture is event-correlated and best effort: hook transport

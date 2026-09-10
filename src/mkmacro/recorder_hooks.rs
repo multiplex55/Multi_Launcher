@@ -38,7 +38,7 @@ pub enum MouseMessage {
     Wheel(i32),
     HorizontalWheel(i32),
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,
