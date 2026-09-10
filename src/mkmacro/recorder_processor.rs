@@ -92,6 +92,10 @@ struct Session {
     config: NormalizationConfig,
     raw: Vec<RecordingBoundary>,
     pressed: HashMap<u32, DownRun>,
+    /// Keys whose down transition was already recorded when capture paused.
+    /// A matching up after resume belongs to the recording, unlike keys first
+    /// pressed by a pause-owned annotation prompt.
+    held_before_pause: HashSet<u32>,
     suppressed_until_up: HashSet<u32>,
     suppressed: HashSet<usize>,
     mouse_pressed: HashMap<super::MouseButton, usize>,
@@ -370,6 +374,21 @@ fn seed_resumed_modifiers(session: &mut Session, state: &[u8; 256], timestamp_us
         track_key(session, &event);
         session.raw.push(RecordingBoundary::Event(event, None));
     }
+}
+
+fn suppress_newly_held_non_modifiers(session: &mut Session, state: &[u8; 256]) {
+    session.suppressed_until_up.extend(
+        state
+            .iter()
+            .enumerate()
+            .filter(|(vk, value)| {
+                **value & 0x80 != 0
+                    && !is_modifier_vk(*vk as u32)
+                    && !session.held_before_pause.contains(&(*vk as u32))
+            })
+            .map(|(vk, _)| vk as u32),
+    );
+    session.held_before_pause.clear();
 }
 
 fn is_modifier_vk(vk: u32) -> bool {
@@ -662,6 +681,7 @@ fn worker_loop(
                         config,
                         raw: Vec::new(),
                         pressed: HashMap::new(),
+                        held_before_pause: HashSet::new(),
                         suppressed_until_up: seed_suppression(held_keys),
                         suppressed: HashSet::new(),
                         mouse_pressed: HashMap::new(),
@@ -690,6 +710,7 @@ fn worker_loop(
                         drain_before(&events, s, fence, &mut enricher);
                         suppress_occurrence(s, &occurrence);
                         s.raw.push(RecordingBoundary::Pause { timestamp_us });
+                        s.held_before_pause = s.pressed.keys().copied().collect();
                         s.pressed.clear();
                         s.live_key_state = [false; 256];
                         publish(&snapshot, Some(s));
@@ -711,6 +732,7 @@ fn worker_loop(
                             &mut s.suppressed_until_up,
                             &physical_state,
                         );
+                        suppress_newly_held_non_modifiers(s, &physical_state);
                         s.suppressed_until_up
                             .extend(seed_suppression(held_keys.iter().copied()));
                         let resumed_state = cleared_control_state(physical_state, &held_keys);
@@ -851,7 +873,9 @@ fn worker_loop(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{KeyTranslation, KeyboardTranslationRequest, RecordedAction};
     use super::*;
+    use std::sync::Mutex;
 
     struct SurfaceEnricher {
         own: bool,
@@ -1031,6 +1055,91 @@ mod tests {
     }
 
     #[test]
+    fn pause_resume_excludes_prompt_key_and_balances_pre_pause_held_key() {
+        struct StatefulTranslator(Arc<Mutex<[u8; 256]>>);
+        impl KeyboardTranslator for StatefulTranslator {
+            fn initial_key_state(&mut self) -> [u8; 256] {
+                *self.0.lock().unwrap()
+            }
+            fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+                KeyTranslation::None
+            }
+        }
+
+        let physical = Arc::new(Mutex::new([0u8; 256]));
+        let (events, receiver) = mpsc::sync_channel(8);
+        let processor = RecorderProcessor::with_components(
+            receiver,
+            Box::new(StatefulTranslator(physical.clone())),
+            Arc::new(|| {
+                RecorderObserverSession::with_parts(
+                    ObservationBaseline::default(),
+                    super::super::AuxiliaryObservationWorker::spawn(None, None),
+                )
+            }),
+        );
+        let mut config = NormalizationConfig::default();
+        config.record_window_context = false;
+        processor
+            .begin(
+                RecordingTarget {
+                    macro_id: 1,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                config,
+                0,
+                Vec::new(),
+            )
+            .unwrap();
+
+        events
+            .send(SequencedHookEvent {
+                sequence: 0,
+                event: key(0x57, KeyTransition::Down, 10),
+            })
+            .unwrap();
+        processor.pause(100, 1, Vec::new()).unwrap();
+        let mut resumed = [0u8; 256];
+        resumed[0x57] = 0x80; // W belongs to the recording from before Pause.
+        resumed[0x0d] = 0x80; // Enter was first pressed by the paused annotation prompt.
+        *physical.lock().unwrap() = resumed;
+        processor.resume(200, Vec::new()).unwrap();
+        events
+            .send(SequencedHookEvent {
+                sequence: 1,
+                event: key(0x57, KeyTransition::Up, 300),
+            })
+            .unwrap();
+        events
+            .send(SequencedHookEvent {
+                sequence: 2,
+                event: key(0x0d, KeyTransition::Up, 310),
+            })
+            .unwrap();
+
+        let result = processor.finish(3, Vec::new()).unwrap();
+        assert_eq!(result.raw_event_count, 2);
+        assert_eq!(result.literal_steps.len(), 2);
+        assert!(matches!(
+            result.literal_steps[0].action,
+            RecordedAction::Key {
+                down: true,
+                vk: 0x57,
+                ..
+            }
+        ));
+        assert!(matches!(
+            result.literal_steps[1].action,
+            RecordedAction::Key {
+                down: false,
+                vk: 0x57,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn resume_discards_stale_suppression_for_keys_released_while_paused() {
         let mut suppressed = seed_suppression([0x11, 0x78]);
         let mut physical = [0u8; 256];
@@ -1081,6 +1190,7 @@ mod tests {
             config: NormalizationConfig::default(),
             raw: Vec::new(),
             pressed: HashMap::new(),
+            held_before_pause: HashSet::new(),
             suppressed_until_up: HashSet::new(),
             suppressed: HashSet::new(),
             mouse_pressed: HashMap::new(),

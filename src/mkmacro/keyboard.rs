@@ -401,3 +401,212 @@ pub fn key_inventory() -> Vec<MkKey> {
     ]);
     keys
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_inventory_round_trips_and_every_entry_has_windows_metadata() {
+        let inventory = key_inventory();
+        assert!(!inventory.is_empty());
+        assert_eq!(
+            inventory
+                .iter()
+                .filter(|key| **key == MkKey::Insert)
+                .count(),
+            1
+        );
+        assert!(inventory.contains(&MkKey::Function(1)));
+        assert!(inventory.contains(&MkKey::Function(24)));
+        assert!(!inventory.contains(&MkKey::Function(25)));
+
+        for key in inventory {
+            let json = serde_json::to_string(&key).unwrap();
+            assert_eq!(serde_json::from_str::<MkKey>(&json).unwrap(), key, "{json}");
+            assert!(
+                windows_key_metadata(&key).is_some(),
+                "missing metadata for {key:?}"
+            );
+            assert!(
+                key_validation_error(&key).is_none(),
+                "invalid inventory key {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_key_and_ordered_hotkey_serde_preserve_physical_identity() {
+        let raw = MkKey::RawVirtualKey {
+            vk: 0xE8,
+            scan_code: 0x56,
+            extended: true,
+        };
+        let keys = vec![
+            MkKey::LeftControl,
+            MkKey::RightShift,
+            MkKey::Character("S".into()),
+            raw.clone(),
+        ];
+        let json = serde_json::to_string(&keys).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<MkKey>>(&json).unwrap(), keys);
+        let action = super::super::MkAction::Hotkey(keys.clone());
+        let action_json = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            serde_json::from_str::<super::super::MkAction>(&action_json).unwrap(),
+            action
+        );
+        assert_eq!(
+            windows_key_metadata(&raw),
+            Some(WindowsKeyMetadata {
+                virtual_key: 0xE8,
+                scan_code: 0x56,
+                extended: true,
+            })
+        );
+    }
+
+    #[test]
+    fn every_named_key_has_the_exact_windows_mapping() {
+        for value in b'A'..=b'Z' {
+            assert_eq!(
+                virtual_key(&MkKey::Character(char::from(value).to_string())),
+                Some(u16::from(value))
+            );
+        }
+        for value in b'0'..=b'9' {
+            assert_eq!(
+                virtual_key(&MkKey::Character(char::from(value).to_string())),
+                Some(u16::from(value))
+            );
+        }
+        for number in 1..=24 {
+            assert_eq!(
+                virtual_key(&MkKey::Function(number)),
+                Some(0x6F + u16::from(number))
+            );
+        }
+        for number in 0..=9 {
+            assert_eq!(
+                virtual_key(&MkKey::Numpad(number)),
+                Some(0x60 + u16::from(number))
+            );
+        }
+        let cases = [
+            (MkKey::Control, 0x11, false),
+            (MkKey::LeftControl, 0xA2, false),
+            (MkKey::RightControl, 0xA3, true),
+            (MkKey::Shift, 0x10, false),
+            (MkKey::LeftShift, 0xA0, false),
+            (MkKey::RightShift, 0xA1, false),
+            (MkKey::Alt, 0x12, false),
+            (MkKey::LeftAlt, 0xA4, false),
+            (MkKey::RightAlt, 0xA5, true),
+            (MkKey::Meta, 0x5B, true),
+            (MkKey::LeftMeta, 0x5B, true),
+            (MkKey::RightMeta, 0x5C, true),
+            (MkKey::Enter, 0x0D, false),
+            (MkKey::Tab, 0x09, false),
+            (MkKey::Escape, 0x1B, false),
+            (MkKey::Space, 0x20, false),
+            (MkKey::Backspace, 0x08, false),
+            (MkKey::Insert, 0x2D, true),
+            (MkKey::Delete, 0x2E, true),
+            (MkKey::Up, 0x26, true),
+            (MkKey::Down, 0x28, true),
+            (MkKey::Left, 0x25, true),
+            (MkKey::Right, 0x27, true),
+            (MkKey::Home, 0x24, true),
+            (MkKey::End, 0x23, true),
+            (MkKey::PageUp, 0x21, true),
+            (MkKey::PageDown, 0x22, true),
+            (MkKey::PrintScreen, 0x2C, true),
+            (MkKey::PauseBreak, 0x13, false),
+            (MkKey::CapsLock, 0x14, false),
+            (MkKey::NumLock, 0x90, true),
+            (MkKey::ScrollLock, 0x91, false),
+            (MkKey::NumpadMultiply, 0x6A, false),
+            (MkKey::NumpadAdd, 0x6B, false),
+            (MkKey::NumpadSeparator, 0x6C, false),
+            (MkKey::NumpadSubtract, 0x6D, false),
+            (MkKey::NumpadDecimal, 0x6E, false),
+            (MkKey::NumpadDivide, 0x6F, true),
+            (MkKey::OemSemicolon, 0xBA, false),
+            (MkKey::OemEquals, 0xBB, false),
+            (MkKey::OemComma, 0xBC, false),
+            (MkKey::OemMinus, 0xBD, false),
+            (MkKey::OemPeriod, 0xBE, false),
+            (MkKey::OemSlash, 0xBF, false),
+            (MkKey::OemBacktick, 0xC0, false),
+            (MkKey::OemLeftBracket, 0xDB, false),
+            (MkKey::OemBackslash, 0xDC, false),
+            (MkKey::OemRightBracket, 0xDD, false),
+            (MkKey::OemQuote, 0xDE, false),
+            (MkKey::Oem102, 0xE2, false),
+            (MkKey::BrowserBack, 0xA6, true),
+            (MkKey::BrowserForward, 0xA7, true),
+            (MkKey::BrowserRefresh, 0xA8, true),
+            (MkKey::BrowserStop, 0xA9, true),
+            (MkKey::BrowserSearch, 0xAA, true),
+            (MkKey::BrowserFavorites, 0xAB, true),
+            (MkKey::BrowserHome, 0xAC, true),
+            (MkKey::VolumeMute, 0xAD, true),
+            (MkKey::VolumeDown, 0xAE, true),
+            (MkKey::VolumeUp, 0xAF, true),
+            (MkKey::MediaNext, 0xB0, true),
+            (MkKey::MediaPrevious, 0xB1, true),
+            (MkKey::MediaStop, 0xB2, true),
+            (MkKey::MediaPlayPause, 0xB3, true),
+            (MkKey::LaunchMail, 0xB4, true),
+            (MkKey::LaunchMediaSelect, 0xB5, true),
+            (MkKey::LaunchApp1, 0xB6, true),
+            (MkKey::LaunchApp2, 0xB7, true),
+        ];
+        for (key, virtual_key, extended) in cases {
+            let metadata = windows_key_metadata(&key).unwrap();
+            assert_eq!(metadata.virtual_key, virtual_key, "{key:?}");
+            assert_eq!(metadata.extended, extended, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn event_conversion_preserves_sided_modifiers_and_unknown_scan_metadata() {
+        assert_eq!(
+            mk_key_from_windows_event(0x10, 0x2A, false),
+            MkKey::LeftShift
+        );
+        assert_eq!(
+            mk_key_from_windows_event(0x10, 0x36, false),
+            MkKey::RightShift
+        );
+        assert_eq!(
+            mk_key_from_windows_event(0x11, 0x1D, true),
+            MkKey::RightControl
+        );
+        assert_eq!(mk_key_from_windows_event(0x12, 0x38, true), MkKey::RightAlt);
+        assert_eq!(
+            mk_key_from_windows_event(0xE8, 0x56, true),
+            MkKey::RawVirtualKey {
+                vk: 0xE8,
+                scan_code: 0x56,
+                extended: true,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_physical_keys_are_rejected_instead_of_becoming_text() {
+        assert!(key_validation_error(&MkKey::Character("é".into())).is_some());
+        assert!(key_validation_error(&MkKey::Character("AB".into())).is_some());
+        assert!(key_validation_error(&MkKey::Function(25)).is_some());
+        assert!(key_validation_error(&MkKey::Numpad(10)).is_some());
+        assert!(
+            key_validation_error(&MkKey::RawVirtualKey {
+                vk: 0,
+                scan_code: 0,
+                extended: false,
+            })
+            .is_some()
+        );
+    }
+}

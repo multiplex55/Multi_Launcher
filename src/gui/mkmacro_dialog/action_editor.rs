@@ -10277,31 +10277,51 @@ mod tests {
         );
     }
     #[test]
-    fn capture_chooses_press_hotkey_down_and_up() {
+    fn capture_supports_modifier_only_actions_and_rejects_multi_key_down_or_up() {
         let mut e = test_editor();
         e.begin_edit(&step(MkAction::KeyPress(MkKey::Enter)));
-        assert!(e.set_captured_keys(vec![MkKey::Character("A".into())]));
-        assert!(matches!(
+        assert!(e.set_captured_keys(vec![MkKey::Control]));
+        assert_eq!(
             e.draft.as_ref().unwrap().action,
-            MkAction::KeyPress(_)
-        ));
-        e.set_captured_keys(vec![MkKey::Control, MkKey::Character("K".into())]);
-        assert!(matches!(
+            MkAction::KeyPress(MkKey::Control)
+        );
+
+        e.begin_edit(&step(MkAction::KeyPress(MkKey::Enter)));
+        assert!(e.set_captured_keys(vec![MkKey::Control, MkKey::Character("K".into())]));
+        assert_eq!(
             e.draft.as_ref().unwrap().action,
-            MkAction::Hotkey(_)
-        ));
+            MkAction::Hotkey(vec![MkKey::Control, MkKey::Character("K".into())])
+        );
+
         e.begin_edit(&step(MkAction::KeyDown(MkKey::Enter)));
-        e.set_captured_keys(vec![MkKey::Control, MkKey::Character("Q".into())]);
-        assert!(matches!(
+        assert!(e.set_captured_keys(vec![MkKey::LeftControl]));
+        assert_eq!(
             e.draft.as_ref().unwrap().action,
-            MkAction::KeyDown(MkKey::Character(_))
-        ));
+            MkAction::KeyDown(MkKey::LeftControl)
+        );
+        assert!(!e.set_captured_keys(vec![MkKey::Control, MkKey::Character("Q".into())]));
+        assert_eq!(
+            e.draft.as_ref().unwrap().action,
+            MkAction::KeyDown(MkKey::LeftControl)
+        );
+        assert!(
+            e.capture_message
+                .as_deref()
+                .unwrap()
+                .contains("exactly one key")
+        );
+
         e.begin_edit(&step(MkAction::KeyUp(MkKey::Enter)));
-        e.set_captured_keys(vec![MkKey::Character("Q".into())]);
-        assert!(matches!(
+        assert!(e.set_captured_keys(vec![MkKey::RightAlt]));
+        assert_eq!(
             e.draft.as_ref().unwrap().action,
-            MkAction::KeyUp(_)
-        ));
+            MkAction::KeyUp(MkKey::RightAlt)
+        );
+        assert!(!e.set_captured_keys(Vec::new()));
+        assert_eq!(
+            e.draft.as_ref().unwrap().action,
+            MkAction::KeyUp(MkKey::RightAlt)
+        );
     }
     #[test]
     fn cancel_does_not_touch_source() {

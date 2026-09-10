@@ -1135,7 +1135,7 @@ mod tests {
                 description: "combine".into(),
                 rationale: "test".into(),
                 enabled_by_default: true,
-                replacement: vec![planned(0, 0)],
+                replacement: vec![planned(0, 0)].into(),
             }],
             plan,
             clipboard_observations: vec![],

@@ -369,7 +369,7 @@ fn schema_eight_migrates_through_store_and_persists_canonical_current_schema() {
     assert!(matches!(disposition, LoadDisposition::Loaded));
     let first = (*store.snapshot()).clone();
     assert_eq!(first.schema_version, SCHEMA_VERSION);
-    assert_eq!(first.schema_version, 13);
+    assert_eq!(first.schema_version, SCHEMA_VERSION);
     assert!(first.folders.is_empty());
     for mac in &first.macros {
         assert_eq!(mac.hotkey_scope, MkHotkeyScope::AnyWindow);
@@ -770,6 +770,219 @@ fn schema_newer_than_current_is_rejected() {
 }
 
 #[test]
+fn schema_thirteen_recorder_defaults_migrate_canonically_without_macro_changes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let toggle = MkHotkey {
+        key: MkKey::Function(7),
+        modifiers: vec![MkKey::LeftControl],
+    };
+    let mut document = MkMacroDocument::default();
+    document.settings.record_toggle_hotkey = toggle.clone();
+    document.folders.push(MkMacroFolder {
+        id: 40,
+        name: "preserved folder".into(),
+    });
+    document.macros.push(MkMacro {
+        signature: Default::default(),
+        id: 41,
+        name: "preserved macro".into(),
+        description: "schema 13 payload".into(),
+        enabled: false,
+        hotkey: None,
+        hotkey_scope: Default::default(),
+        folder_id: Some(40),
+        playback: MkPlayback {
+            speed_percent: 135,
+            random_delay_ms: 9,
+            random_offset_px: 4,
+        },
+        steps: vec![MkStep {
+            metadata: MkStepMetadata {
+                comment: "unchanged".into(),
+                ..Default::default()
+            },
+            id: 42,
+            enabled: true,
+            breakpoint: false,
+            repeat: 2,
+            delay_after_ms: 37,
+            on_error: MkErrorPolicy::Continue,
+            action: MkAction::Text(MkTextPayload {
+                text: "literal content".into(),
+                mode: MkTextMode::Paste,
+            }),
+        }],
+    });
+    let mut legacy = serde_json::to_value(&document).unwrap();
+    legacy["schema_version"] = serde_json::json!(13);
+    legacy["settings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("recorder");
+    let legacy_macros = legacy["macros"].clone();
+    let legacy_folders = legacy["folders"].clone();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.schema_version, SCHEMA_VERSION);
+    assert_eq!(snapshot.settings.record_toggle_hotkey, toggle);
+    assert_eq!(snapshot.settings.recorder, MkRecorderSettings::default());
+    assert_eq!(
+        serde_json::to_value(&snapshot.macros).unwrap(),
+        legacy_macros
+    );
+    assert_eq!(
+        serde_json::to_value(&snapshot.folders).unwrap(),
+        legacy_folders
+    );
+    let canonical = fs::read(&path).unwrap();
+    let persisted: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+    assert_eq!(persisted["schema_version"], SCHEMA_VERSION);
+    assert_eq!(
+        persisted["settings"]["recorder"],
+        serde_json::to_value(MkRecorderSettings::default()).unwrap()
+    );
+    drop(snapshot);
+    drop(store);
+
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(fs::read(path).unwrap(), canonical);
+    assert_eq!(reopened.snapshot().settings.record_toggle_hotkey, toggle);
+}
+
+#[test]
+fn schema_thirteen_preserves_an_existing_recorder_object() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(MKMACROS_FILE);
+    let mut expected = MkRecorderSettings::default();
+    expected.record_keyboard = false;
+    expected.minimum_idle_delay_ms = 432;
+    expected.marker_hotkey = Some(MkHotkey {
+        key: MkKey::Insert,
+        modifiers: vec![MkKey::Control],
+    });
+    let mut document = MkMacroDocument::default();
+    document.settings.recorder = expected.clone();
+    let mut value = serde_json::to_value(document).unwrap();
+    value["schema_version"] = serde_json::json!(13);
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(store.snapshot().settings.recorder, expected);
+}
+
+#[test]
+fn recorder_settings_round_trip_and_clamp_at_public_store_boundary() {
+    let dir = tempdir().unwrap();
+    let mut document = MkMacroDocument::default();
+    let settings = &mut document.settings.recorder;
+    settings.record_keyboard = false;
+    settings.movement_mode = MovementMode::DetailedMovement;
+    settings.movement_distance_px = -9;
+    settings.movement_interval_ms = 99_999;
+    settings.click_max_ms = 0;
+    settings.click_distance_px = 999;
+    settings.multi_click_ms = 99_999;
+    settings.minimum_idle_delay_ms = 99_999;
+    settings.delay_rounding_ms = 0;
+    settings.key_tap_max_ms = 0;
+    settings.text_run_gap_ms = 99_999;
+    settings.repeated_click_minimum = 1;
+    settings.repeated_click_interval_tolerance_ms = 99_999;
+    settings.pause_resume_hotkey = Some(MkHotkey {
+        key: MkKey::Function(8),
+        modifiers: vec![MkKey::Control],
+    });
+    settings.marker_hotkey = Some(MkHotkey {
+        key: MkKey::Function(6),
+        modifiers: vec![MkKey::Alt],
+    });
+
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store.save(document).unwrap();
+    drop(store);
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    let actual = &reopened.snapshot().settings.recorder;
+    assert!(!actual.record_keyboard);
+    assert_eq!(actual.movement_mode, MovementMode::DetailedMovement);
+    assert_eq!(actual.movement_distance_px, 1);
+    assert_eq!(actual.movement_interval_ms, 5_000);
+    assert_eq!(actual.click_max_ms, 1);
+    assert_eq!(actual.click_distance_px, 100);
+    assert_eq!(actual.multi_click_ms, 5_000);
+    assert_eq!(actual.minimum_idle_delay_ms, 60_000);
+    assert_eq!(actual.delay_rounding_ms, 1);
+    assert_eq!(actual.key_tap_max_ms, 1);
+    assert_eq!(actual.text_run_gap_ms, 60_000);
+    assert_eq!(actual.repeated_click_minimum, 2);
+    assert_eq!(actual.repeated_click_interval_tolerance_ms, 10_000);
+    assert_eq!(
+        actual.pause_resume_hotkey.as_ref().unwrap().key,
+        MkKey::Function(8)
+    );
+    assert_eq!(
+        actual.marker_hotkey.as_ref().unwrap().modifiers,
+        vec![MkKey::Alt]
+    );
+    let canonical = fs::read(dir.path().join(MKMACROS_FILE)).unwrap();
+    reopened.save((*reopened.snapshot()).clone()).unwrap();
+    assert_eq!(fs::read(dir.path().join(MKMACROS_FILE)).unwrap(), canonical);
+}
+
+#[test]
+fn every_recorder_option_round_trips_with_non_default_values() {
+    let dir = tempdir().unwrap();
+    let expected = MkRecorderSettings {
+        record_keyboard: false,
+        record_mouse_buttons: false,
+        record_mouse_wheel: false,
+        movement_mode: MovementMode::ClicksOnly,
+        movement_distance_px: 27,
+        movement_interval_ms: 123,
+        click_max_ms: 777,
+        click_distance_px: 19,
+        multi_click_ms: 888,
+        record_injected_input: true,
+        record_window_context: false,
+        minimum_idle_delay_ms: 321,
+        delay_rounding_ms: 25,
+        key_tap_max_ms: 654,
+        text_run_gap_ms: 987,
+        smart_keyboard_cleanup: false,
+        smart_mouse_cleanup: false,
+        smart_window_cleanup: false,
+        smart_repeated_click_cleanup: false,
+        detect_application_launches: false,
+        inspect_clicked_controls: false,
+        capture_text_paste_for_freeze_suggestion: false,
+        repeated_click_minimum: 6,
+        repeated_click_interval_tolerance_ms: 222,
+        pause_resume_hotkey: Some(MkHotkey {
+            key: MkKey::Function(24),
+            modifiers: vec![MkKey::LeftControl],
+        }),
+        marker_hotkey: Some(MkHotkey {
+            key: MkKey::Insert,
+            modifiers: vec![MkKey::RightAlt],
+        }),
+    };
+    let mut document = MkMacroDocument::default();
+    document.settings.recorder = expected.clone();
+    let (store, _) = MkMacroStore::open(dir.path()).unwrap();
+    store.save(document).unwrap();
+    drop(store);
+    let (reopened, disposition) = MkMacroStore::open(dir.path()).unwrap();
+    assert!(matches!(disposition, LoadDisposition::Loaded));
+    assert_eq!(reopened.snapshot().settings.recorder, expected);
+}
+
+#[test]
 fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round_trips() {
     let dir = tempdir().unwrap();
     let path = dir.path().join(MKMACROS_FILE);
@@ -802,7 +1015,7 @@ fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round
     assert!(matches!(disposition, LoadDisposition::Loaded));
     let migrated = store.snapshot();
     let owner = &migrated.macros[0];
-    assert_eq!(migrated.schema_version, 13);
+    assert_eq!(migrated.schema_version, SCHEMA_VERSION);
     assert_eq!(owner.signature, MkMacroSignature::default());
     assert_eq!(owner.description, "preserved");
     assert!(!owner.enabled);
@@ -879,7 +1092,7 @@ fn schema_eleven_defaults_and_current_reusable_fields_survive_public_store_round
     assert!(matches!(disposition, LoadDisposition::Loaded));
     assert_eq!(reopened.snapshot().as_ref(), &current);
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(persisted["schema_version"], 13);
+    assert_eq!(persisted["schema_version"], SCHEMA_VERSION);
     assert_eq!(
         persisted["macros"][0]["steps"][0]["action"]["type"],
         "call_macro"

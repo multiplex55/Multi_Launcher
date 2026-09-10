@@ -685,11 +685,9 @@ fn cleanup_delays(steps: &mut [PlannedStep], threshold: u64, quantum: u64) {
         {
             continue;
         }
-        step.delay_after_ms = if step.delay_after_ms < threshold {
-            0
-        } else {
-            (step.delay_after_ms.saturating_add(quantum / 2) / quantum).saturating_mul(quantum)
-        };
+        let rounded =
+            (step.delay_after_ms.saturating_add(quantum / 2) / quantum).saturating_mul(quantum);
+        step.delay_after_ms = if rounded < threshold { 0 } else { rounded };
     }
 }
 
@@ -996,6 +994,43 @@ mod tests {
         cleanup_delays(&mut steps, 1, 10);
         assert_eq!(steps[0].delay_after_ms, (u64::MAX / 10) * 10);
         cleanup_delays(&mut steps, 1, 0);
+    }
+
+    #[test]
+    fn delay_cleanup_rounds_before_applying_the_noise_threshold() {
+        let mut steps = [37, 42, 96, 104, 147]
+            .into_iter()
+            .enumerate()
+            .map(|(index, delay)| {
+                make_step(
+                    index,
+                    index,
+                    RecordingProvenance::Literal,
+                    MkAction::KeyPress(MkKey::Enter),
+                    delay,
+                    1,
+                )
+            })
+            .collect::<Vec<_>>();
+        cleanup_delays(&mut steps, 100, 10);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.delay_after_ms)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 100, 100, 150]
+        );
+
+        let mut zero_threshold = vec![make_step(
+            0,
+            0,
+            RecordingProvenance::Literal,
+            MkAction::KeyPress(MkKey::Enter),
+            4,
+            1,
+        )];
+        cleanup_delays(&mut zero_threshold, 0, 10);
+        assert_eq!(zero_threshold[0].delay_after_ms, 0);
     }
 
     #[test]

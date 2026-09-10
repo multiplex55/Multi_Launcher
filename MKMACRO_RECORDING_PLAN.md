@@ -164,7 +164,14 @@ Verification: fake-runtime and toolbar/controller tests in M7.
 
 ## M7 — Consolidated behavioral test authoring and migration
 
-Status: `pending`
+Status: `in_progress`
+
+Implementation checkpoint: keyboard/input/action-editor and schema/settings coverage is migrated
+and green (29 focused Nextest cases). The batch also fixed round-before-threshold delay cleanup,
+F24 hotkey admission, annotation prompt-key release suppression, transient clipboard replacement
+redaction, and an existing-application launch false positive. `cargo check --tests`, formatting,
+and diff checks pass. Remaining recorder lifecycle, semantic matrix, Review, anchor, and preview
+coverage stays pending in later ordered M7 batches.
 
 Depends on: M1-M6 production integration.
 

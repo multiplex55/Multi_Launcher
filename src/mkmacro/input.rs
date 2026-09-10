@@ -409,6 +409,23 @@ mod tests {
             Ok(e.len())
         }
     }
+    struct FailingSink {
+        events: Mutex<Vec<RawInputEvent>>,
+        fail_call: usize,
+        calls: Mutex<usize>,
+    }
+    impl InputSink for &FailingSink {
+        fn send(&self, events: &[RawInputEvent]) -> Result<usize, String> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            self.events.lock().unwrap().extend_from_slice(events);
+            if *calls == self.fail_call {
+                Err("synthetic rejection".into())
+            } else {
+                Ok(events.len())
+            }
+        }
+    }
     #[test]
     fn unicode_surrogates_have_down_up() {
         let s = Sink::default();
@@ -452,5 +469,110 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ordered_chord_presses_in_order_and_releases_in_reverse() {
+        let sink = Sink::default();
+        Win32InputBackend::with_sink(&sink)
+            .chord(&[MkKey::Control, MkKey::Shift, MkKey::Character("S".into())])
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        let compact = events
+            .iter()
+            .map(|event| match event {
+                RawInputEvent::Keyboard { vk, flags, .. } => (*vk, flags & KEYEVENTF_KEYUP_ != 0),
+                _ => panic!("unexpected mouse event"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compact,
+            vec![
+                (0x11, false),
+                (0x10, false),
+                (u16::from(b'S'), false),
+                (u16::from(b'S'), true),
+                (0x10, true),
+                (0x11, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_chord_failure_attempts_reverse_cleanup_of_owned_keys() {
+        let sink = FailingSink {
+            events: Mutex::new(Vec::new()),
+            fail_call: 3,
+            calls: Mutex::new(0),
+        };
+        let error = Win32InputBackend::with_sink(&sink)
+            .chord(&[MkKey::Control, MkKey::Shift, MkKey::Character("S".into())])
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InputRejected);
+        let events = sink.events.lock().unwrap();
+        let compact = events
+            .iter()
+            .map(|event| match event {
+                RawInputEvent::Keyboard { vk, flags, .. } => (*vk, flags & KEYEVENTF_KEYUP_ != 0),
+                _ => panic!("unexpected mouse event"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compact,
+            vec![
+                (0x11, false),
+                (0x10, false),
+                (u16::from(b'S'), false),
+                (0x10, true),
+                (0x11, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn modifier_only_press_emits_a_balanced_fake_input_pair() {
+        let sink = Sink::default();
+        Win32InputBackend::with_sink(&sink)
+            .key_press(&MkKey::RightControl)
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        assert!(matches!(events.as_slice(), [
+            RawInputEvent::Keyboard { vk: 0xA3, flags, .. },
+            RawInputEvent::Keyboard { vk: 0xA3, flags: up_flags, .. },
+        ] if flags & KEYEVENTF_EXTENDEDKEY_ != 0
+            && flags & KEYEVENTF_KEYUP_ == 0
+            && up_flags & KEYEVENTF_EXTENDEDKEY_ != 0
+            && up_flags & KEYEVENTF_KEYUP_ != 0));
+    }
+
+    #[test]
+    fn raw_virtual_key_preserves_scan_extended_and_marker_through_fake_sink() {
+        let sink = Sink::default();
+        let backend = Win32InputBackend::with_sink(&sink);
+        let key = MkKey::RawVirtualKey {
+            vk: 0xE8,
+            scan_code: 0x56,
+            extended: true,
+        };
+        backend.key_down(&key).unwrap();
+        backend.key_up(&key).unwrap();
+        let events = sink.0.lock().unwrap();
+        assert_eq!(
+            events.as_slice(),
+            [
+                RawInputEvent::Keyboard {
+                    vk: 0xE8,
+                    scan: 0x56,
+                    flags: KEYEVENTF_SCANCODE_ | KEYEVENTF_EXTENDEDKEY_,
+                    extra: MKMACRO_EXTRA_INFO,
+                },
+                RawInputEvent::Keyboard {
+                    vk: 0xE8,
+                    scan: 0x56,
+                    flags: KEYEVENTF_SCANCODE_ | KEYEVENTF_EXTENDEDKEY_ | KEYEVENTF_KEYUP_,
+                    extra: MKMACRO_EXTRA_INFO,
+                },
+            ]
+        );
     }
 }

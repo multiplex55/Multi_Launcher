@@ -2376,7 +2376,7 @@ mod tests {
         );
     }
     #[test]
-    fn schema_twelve_migrates_additively_to_thirteen_without_assets() {
+    fn schema_twelve_migrates_additively_to_current_without_assets() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(MKMACROS_FILE);
         let mut value = serde_json::to_value(document()).unwrap();
@@ -2384,10 +2384,10 @@ mod tests {
         fs::write(&p, serde_json::to_vec(&value).unwrap()).unwrap();
         let (store, disposition) = MkMacroStore::open(d.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
-        assert_eq!(store.snapshot().schema_version, 13);
+        assert_eq!(store.snapshot().schema_version, SCHEMA_VERSION);
         assert!(store.image_refs().unwrap().is_empty());
         let persisted: MkMacroDocument = serde_json::from_slice(&fs::read(p).unwrap()).unwrap();
-        assert_eq!(persisted.schema_version, 13);
+        assert_eq!(persisted.schema_version, SCHEMA_VERSION);
     }
     #[test]
     fn version_one_mouse_move_migrates_once_to_payload() {

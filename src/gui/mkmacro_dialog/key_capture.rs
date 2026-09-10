@@ -212,7 +212,7 @@ mod tests {
         }
         let functions = [
             F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18, F19,
-            F20, F21, F22, F23, F24, F25, F26, F27, F28, F29, F30, F31, F32, F33, F34, F35,
+            F20, F21, F22, F23, F24,
         ];
         for (number, key) in functions.into_iter().enumerate() {
             assert_eq!(
@@ -220,7 +220,10 @@ mod tests {
                 Some(MkKey::Function(number as u8 + 1))
             );
         }
-        assert_eq!(mk_key_from_egui(Insert), None);
+        for unsupported in [F25, F26, F27, F28, F29, F30, F31, F32, F33, F34, F35] {
+            assert_eq!(mk_key_from_egui(unsupported), None);
+        }
+        assert_eq!(mk_key_from_egui(Insert), Some(MkKey::Insert));
     }
 
     fn capture(key: egui::Key, modifiers: egui::Modifiers) -> CapturedChord {

@@ -1710,7 +1710,7 @@ mod launcher_command_payload_tests {
     }
 
     #[test]
-    fn current_document_round_trips_as_schema_13_with_query_payload() {
+    fn current_document_round_trips_as_current_schema_with_query_payload() {
         let document = MkMacroDocument {
             macros: vec![MkMacro {
                 signature: Default::default(),
@@ -1740,7 +1740,7 @@ mod launcher_command_payload_tests {
         };
 
         let json = serde_json::to_string(&document).unwrap();
-        assert!(json.contains("\"schema_version\":13"));
+        assert!(json.contains(&format!("\"schema_version\":{SCHEMA_VERSION}")));
         assert!(json.contains(r#""data":{"query":"note list"}"#));
         assert_eq!(
             serde_json::from_str::<MkMacroDocument>(&json).unwrap(),

@@ -2,7 +2,8 @@
 use super::validation::{MatcherValidationError, validate_window_matcher};
 use super::{
     ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore,
-    MkWindowMatcher, WindowCandidate, candidate_matches, display_name, is_modifier, virtual_key,
+    MkWindowMatcher, WindowCandidate, candidate_matches, display_name, is_modifier,
+    key_validation_error, virtual_key, windows_key_metadata,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -143,13 +144,9 @@ fn normalize_primary(key: &MkKey) -> Option<MkKey> {
     }
 }
 fn usable_primary(key: &MkKey) -> bool {
-    match key {
-        MkKey::Character(s) => {
-            s.chars().count() == 1 && s.is_ascii() && s.as_bytes()[0].is_ascii_alphanumeric()
-        }
-        MkKey::Function(n) => (1..=12).contains(n),
-        _ => modifier(key).is_none(),
-    }
+    modifier(key).is_none()
+        && key_validation_error(key).is_none()
+        && windows_key_metadata(key).is_some_and(|metadata| metadata.virtual_key != 0)
 }
 
 fn compiled_canonical_hotkey(h: &MkHotkey) -> Option<String> {
@@ -1595,6 +1592,24 @@ mod tests {
         );
         assert_eq!(primary_virtual_key(&MkKey::Character("é".into())), None);
         assert_eq!(primary_virtual_key(&MkKey::Character("AB".into())), None);
+    }
+    #[test]
+    fn f24_is_a_valid_macro_primary_and_recorder_control() {
+        let f24 = MkHotkey {
+            key: MkKey::Function(24),
+            modifiers: vec![MkKey::Control],
+        };
+        assert!(compile_hotkey(&f24).is_some());
+        assert_eq!(primary_virtual_key(&f24.key), Some(0x87));
+
+        let mut owner = mac(15, true);
+        owner.hotkey = Some(f24.clone());
+        let mut document = MkMacroDocument::default();
+        document.settings.recorder.pause_resume_hotkey = Some(f24);
+        document.macros = vec![owner];
+        let diagnostics = validate_hotkeys(&document, &[]);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("pause/resume"));
     }
     #[derive(Default)]
     struct FakeKeyStateBackend(RwLock<Vec<MkKey>>);

@@ -27,6 +27,49 @@ pub enum RecordingSuggestionKind {
     FreezePaste,
 }
 
+/// Opaque transient suggestion payload. Its `Debug` representation never exposes
+/// action contents because freeze-paste replacements may contain clipboard text.
+#[derive(Clone, PartialEq)]
+pub struct SuggestionReplacement {
+    steps: Vec<PlannedStep>,
+    frozen_clipboard_text: Option<super::SensitiveClipboardText>,
+}
+impl From<Vec<PlannedStep>> for SuggestionReplacement {
+    fn from(value: Vec<PlannedStep>) -> Self {
+        Self {
+            steps: value,
+            frozen_clipboard_text: None,
+        }
+    }
+}
+impl SuggestionReplacement {
+    fn freeze_paste(step: PlannedStep, text: super::SensitiveClipboardText) -> Self {
+        Self {
+            steps: vec![step],
+            frozen_clipboard_text: Some(text),
+        }
+    }
+
+    fn materialize(&self) -> Vec<PlannedStep> {
+        let mut steps = self.steps.clone();
+        if let (Some(step), Some(text)) = (steps.first_mut(), &self.frozen_clipboard_text) {
+            step.action = MkAction::Text(MkTextPayload {
+                text: text.expose().into(),
+                mode: MkTextMode::Paste,
+            });
+        }
+        steps
+    }
+}
+impl fmt::Debug for SuggestionReplacement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SuggestionReplacement")
+            .field("step_count", &self.steps.len())
+            .field("steps", &"<redacted transient actions>")
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct RecordingSuggestion {
     pub id: RecordingSuggestionId,
@@ -36,7 +79,7 @@ pub struct RecordingSuggestion {
     pub description: String,
     pub rationale: String,
     pub enabled_by_default: bool,
-    pub replacement: Vec<PlannedStep>,
+    pub replacement: SuggestionReplacement,
 }
 impl fmt::Debug for RecordingSuggestion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -275,7 +318,7 @@ fn window_suggestions(
                 false,
                 replacement,
             ));
-        } else if !shown.window.process_path.trim().is_empty() {
+        } else if !existing && !shown.window.process_path.trim().is_empty() {
             let Some(gesture_span) = launch_gesture_span(plan, source, &shown.window) else {
                 continue;
             };
@@ -420,14 +463,14 @@ fn freeze_paste_suggestions(
         let step = plan.steps.iter().find(|step| step.source.first <= source_index
             && step.source.last >= source_index && is_paste(&step.action))?;
         if !seen.insert(step.review_id) { return None; }
-        let mut replacement = step.clone();
-        replacement.action = MkAction::Text(MkTextPayload { text: snapshot.text.expose().into(), mode: MkTextMode::Paste });
-        Some(make_suggestion(
+        let mut suggestion = make_suggestion(
             RecordingSuggestionKind::FreezePaste, SuggestionConfidence::High, step.source,
             "Freeze pasted clipboard text".into(),
             format!("Captured {} clipboard characters near Ctrl+V; playback remains dynamic unless enabled", snapshot.text.len()),
-            false, vec![replacement],
-        ))
+            false, vec![step.clone()],
+        );
+        suggestion.replacement = SuggestionReplacement::freeze_paste(step.clone(), snapshot.text.clone());
+        Some(suggestion)
     }).collect()
 }
 
@@ -465,7 +508,7 @@ fn make_suggestion(
         description,
         rationale,
         enabled_by_default,
-        replacement,
+        replacement: replacement.into(),
     }
 }
 
@@ -538,7 +581,7 @@ pub fn apply_suggestions(
             .find(|(_, s)| spans_overlap(step.source, s.source_span))
         {
             if emitted.insert(index) {
-                let mut replacement = suggestion.replacement.clone();
+                let mut replacement = suggestion.replacement.materialize();
                 if let Some(target) = replacement.first_mut() {
                     let source_metadata: Vec<_> = plan
                         .steps
@@ -670,7 +713,7 @@ mod tests {
             description: "combine".into(),
             rationale: "test".into(),
             enabled_by_default: true,
-            replacement: vec![click(0, 0)],
+            replacement: vec![click(0, 0)].into(),
         };
         let applied = apply_suggestions(
             &plan,
@@ -703,7 +746,7 @@ mod tests {
             description: "replace".into(),
             rationale: "test".into(),
             enabled_by_default: true,
-            replacement: vec![replacement],
+            replacement: vec![replacement].into(),
         };
         let applied = apply_suggestions(
             &plan,
@@ -869,14 +912,31 @@ mod tests {
             found[0].source_span,
             RecordingSourceSpan { first: 1, last: 5 }
         );
-        let MkAction::Process(process) = &found[0].replacement[0].action else {
+        let MkAction::Process(process) = &found[0].replacement.steps[0].action else {
             panic!()
         };
         assert!(process.arguments.is_empty());
-        let MkAction::WindowWait(wait) = &found[0].replacement[1].action else {
+        let MkAction::WindowWait(wait) = &found[0].replacement.steps[1].action else {
             panic!()
         };
         assert_eq!(wait.wait.as_ref().unwrap().timeout_ms, 10_000);
+        let identity = ProcessIdentity {
+            pid: 44,
+            started_at: 7,
+        };
+        let existing = ObservationBaseline {
+            processes: HashSet::from([identity]),
+            top_level_windows: HashSet::from([(9, identity)]),
+        };
+        assert!(
+            window_suggestions(
+                &plan,
+                &existing,
+                &observations,
+                &[(0, 100), (1, 200), (2, 300), (3, 400), (4, 500), (5, 600)],
+            )
+            .is_empty()
+        );
         assert!(
             window_suggestions(
                 &plan,
@@ -973,15 +1033,15 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, RecordingSuggestionKind::NewDialog);
         assert!(matches!(
-            found[0].replacement[0].action,
+            found[0].replacement.steps[0].action,
             MkAction::WindowWait(_)
         ));
         assert!(matches!(
-            found[0].replacement[1].action,
+            found[0].replacement.steps[1].action,
             MkAction::WindowActivate(_)
         ));
         assert!(matches!(
-            found[0].replacement[2].action,
+            found[0].replacement.steps[2].action,
             MkAction::MouseClick(_)
         ));
     }
@@ -1041,7 +1101,7 @@ mod tests {
         };
         let found = window_suggestions(&plan, &baseline, &observations, &[(3, 10_050_000)]);
         assert_eq!(found.len(), 1);
-        let MkAction::WindowWait(wait) = &found[0].replacement[0].action else {
+        let MkAction::WindowWait(wait) = &found[0].replacement.steps[0].action else {
             panic!()
         };
         assert_eq!(wait.matcher.title.as_deref(), Some("New"));
@@ -1060,6 +1120,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert!(!found[0].enabled_by_default);
         assert!(!format!("{:?}", found[0]).contains("top secret"));
+        assert!(!format!("{:?}", found[0].replacement).contains("top secret"));
         assert!(matches!(plan.steps[0].action, MkAction::Hotkey(_)));
     }
 

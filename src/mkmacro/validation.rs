@@ -1203,6 +1203,37 @@ mod reusable_tests {
     fn diagnostics(doc: &MkMacroDocument) -> Vec<MkDiagnostic> {
         analyze_document(doc).diagnostics
     }
+    #[test]
+    fn keyboard_validation_reports_empty_chords_and_invalid_physical_keys() {
+        let document = document(vec![owner(
+            1,
+            vec![
+                MkAction::Hotkey(Vec::new()),
+                MkAction::KeyPress(MkKey::Function(25)),
+                MkAction::Hotkey(vec![MkKey::RawVirtualKey {
+                    vk: 0,
+                    scan_code: 0,
+                    extended: false,
+                }]),
+            ],
+        )]);
+        let diagnostics = diagnostics(&document);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "empty_keyboard_chord" && d.step_id == Some(1))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "invalid_keyboard_key" && d.step_id == Some(2))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "invalid_keyboard_key" && d.step_id == Some(3))
+        );
+    }
     fn parameter(
         id: u64,
         name: &str,
